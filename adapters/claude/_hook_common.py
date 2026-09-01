@@ -1,0 +1,134 @@
+import sys; sys.dont_write_bytecode = True; [getattr(stream, "reconfigure", lambda **_: None)(encoding="utf-8", errors="replace") for stream in (sys.stdout, sys.stderr)]  # cp950 consoles must not break hook entrypoints.
+"""Shared fail-open mechanics for Claude hook adapters."""
+
+import json
+import os
+from pathlib import Path
+import subprocess
+
+from epitype import memspec
+
+
+def expired(started_at):
+    import time
+
+    return time.monotonic() - started_at >= memspec.HOOK_TIMEOUT_SECONDS
+
+
+def read_event(stream):
+    value = json.load(stream)
+    if not isinstance(value, dict):
+        raise ValueError("hook input must be a JSON object")
+    return value
+
+
+def load_config(started_at):
+    if expired(started_at):
+        return None
+    configured = os.environ.get(memspec.EPITYPE_CONFIG_ENV)
+    path = (
+        Path(configured).expanduser()
+        if configured
+        else Path.home() / ".epitype" / "config.json"
+    )
+    raw = path.read_text(encoding="utf-8")
+    value = json.loads(raw)
+    if not isinstance(value, dict):
+        raise ValueError("config must be an object")
+
+    raw_vaults = value.get(memspec.CONFIG_VAULTS_FIELD)
+    if not isinstance(raw_vaults, list) or not raw_vaults:
+        raise ValueError("config vaults must be a non-empty list")
+    vaults = []
+    for item in raw_vaults:
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError("vault paths must be non-empty strings")
+        vault = Path(item).expanduser().resolve()
+        if not vault.is_dir():
+            raise NotADirectoryError(str(vault))
+        vaults.append(vault)
+
+    raw_budget = value.get(
+        memspec.CONFIG_BUDGET_BYTES_FIELD,
+        memspec.HOOK_DEFAULT_BUDGET_BYTES,
+    )
+    if isinstance(raw_budget, bool) or not isinstance(raw_budget, int):
+        raise ValueError("budget_bytes must be a positive integer")
+    budget = raw_budget
+    if budget <= 0:
+        raise ValueError("budget_bytes must be a positive integer")
+    return {
+        memspec.CONFIG_VAULTS_FIELD: vaults,
+        memspec.CONFIG_BUDGET_BYTES_FIELD: min(
+            budget,
+            memspec.HOOK_DEFAULT_BUDGET_BYTES,
+        ),
+    }
+
+
+def payload(event_name, context):
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": event_name,
+            "additionalContext": context,
+        }
+    }
+
+
+def encode_payload(value):
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def payload_fits(event_name, context, context_budget):
+    if len(context.encode("utf-8")) > context_budget:
+        return False
+    encoded = encode_payload(payload(event_name, context)).encode("utf-8")
+    return len(encoded) <= memspec.HOOK_MAX_OUTPUT_BYTES
+
+
+def bounded_context(event_name, pieces, context_budget, required_first=False):
+    selected = []
+    for piece in pieces:
+        if not isinstance(piece, str) or not piece:
+            continue
+        candidate = "\n".join(selected + [piece])
+        if payload_fits(event_name, candidate, context_budget):
+            selected.append(piece)
+        elif required_first and not selected:
+            return None
+    return "\n".join(selected) if selected else None
+
+
+def emit(value):
+    encoded = encode_payload(value)
+    if len(encoded.encode("utf-8")) > memspec.HOOK_MAX_OUTPUT_BYTES:
+        raise ValueError("hook output exceeds the hard byte limit")
+    print(encoded)
+
+
+def run_synthetic(script, event, config_path):
+    environment = os.environ.copy()
+    environment[memspec.EPITYPE_CONFIG_ENV] = os.fspath(config_path)
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    return subprocess.run(
+        [sys.executable, os.fspath(script)],
+        input=json.dumps(event, ensure_ascii=False),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=environment,
+        timeout=10,
+        check=False,
+    )
+
+
+def write_config(path, vaults, budget=memspec.HOOK_DEFAULT_BUDGET_BYTES):
+    value = {
+        memspec.CONFIG_VAULTS_FIELD: [os.fspath(item) for item in vaults],
+        memspec.CONFIG_BUDGET_BYTES_FIELD: budget,
+    }
+    path.write_text(
+        json.dumps(value, ensure_ascii=False),
+        encoding="utf-8",
+    )

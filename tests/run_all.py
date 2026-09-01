@@ -1,19 +1,23 @@
 import sys; sys.dont_write_bytecode = True; [getattr(stream, "reconfigure", lambda **_: None)(encoding="utf-8", errors="replace") for stream in (sys.stdout, sys.stderr)]  # cp950 主控台先轉 UTF-8，避免繁中輸出中斷。
-"""依序執行 Epitype 七個核心工具的內建合成測試。"""
+"""依序執行 Epitype 核心工具與轉接器的內建合成測試。"""
 
 import os
 from pathlib import Path
 import subprocess
 
 
-TOOLS = (
-    "memspec.py",
-    "memsearch.py",
-    "decision_lint.py",
-    "ledger_gate.py",
-    "compact_map.py",
-    "scar_census.py",
-    "token_meter.py",
+SELFTESTS = (
+    Path("epitype") / "memspec.py",
+    Path("epitype") / "memsearch.py",
+    Path("epitype") / "decision_lint.py",
+    Path("epitype") / "ledger_gate.py",
+    Path("epitype") / "compact_map.py",
+    Path("epitype") / "scar_census.py",
+    Path("epitype") / "token_meter.py",
+    Path("adapters") / "claude" / "recall_hook.py",
+    Path("adapters") / "claude" / "sessionstart_hook.py",
+    Path("adapters") / "claude" / "precompact_hook.py",
+    Path("adapters") / "claude" / "pretooluse_gate.py",
 )
 
 
@@ -24,13 +28,13 @@ def _emit(text, stream):
 
 def main():
     repo_root = Path(__file__).resolve().parents[1]
-    tool_root = repo_root / "epitype"
     environment = os.environ.copy()
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
     passed = 0
 
-    for name in TOOLS:
-        tool = tool_root / name
+    for relative_path in SELFTESTS:
+        tool = repo_root / relative_path
+        name = relative_path.as_posix()
         print(f"=== {name} ===")
         if not tool.is_file():
             print(f"RESULT FAIL {name}: missing tool", file=sys.stderr)
@@ -58,8 +62,8 @@ def main():
         else:
             print(f"RESULT FAIL {name}: exit {result.returncode}", file=sys.stderr)
 
-    print(f"TOTAL PASS {passed}/{len(TOOLS)}")
-    return 0 if passed == len(TOOLS) else 1
+    print(f"TOTAL PASS {passed}/{len(SELFTESTS)}")
+    return 0 if passed == len(SELFTESTS) else 1
 
 
 if __name__ == "__main__":

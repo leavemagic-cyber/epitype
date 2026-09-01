@@ -1,0 +1,387 @@
+import sys, time; sys.dont_write_bytecode = True; _STARTED_AT = time.monotonic(); [getattr(stream, "reconfigure", lambda **_: None)(encoding="utf-8", errors="replace") for stream in (sys.stdout, sys.stderr)]  # cp950 consoles must not break hook entrypoints.
+"""Claude PreToolUse adapter for fail-open, card-driven safety advice."""
+
+from datetime import datetime, timezone
+import json
+import os
+from pathlib import Path
+import re
+import tempfile
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from epitype import memspec
+from _hook_common import (
+    emit,
+    encode_payload,
+    expired,
+    load_config,
+    read_event,
+    run_synthetic,
+    write_config,
+)
+
+
+def _scalar(raw):
+    value = raw.strip()
+    if len(value) >= 2 and value[0] == value[-1] == '"':
+        decoded = json.loads(value)
+        if not isinstance(decoded, str):
+            raise ValueError("frontmatter scalar must be text")
+        return decoded
+    if len(value) >= 2 and value[0] == value[-1] == "'":
+        return value[1:-1].replace("''", "'")
+    return value
+
+
+def _inline_items(body):
+    items = []
+    current = []
+    quote = None
+    escaped = False
+    for character in body:
+        if quote is not None:
+            current.append(character)
+            if escaped:
+                escaped = False
+            elif character == "\\" and quote == '"':
+                escaped = True
+            elif character == quote:
+                quote = None
+            continue
+        if character in ('"', "'"):
+            quote = character
+            current.append(character)
+        elif character == ",":
+            items.append("".join(current).strip())
+            current = []
+        else:
+            current.append(character)
+    if quote is not None:
+        raise ValueError("unterminated quoted trigger value")
+    items.append("".join(current).strip())
+    return [item for item in items if item]
+
+
+def _inline_mapping(raw):
+    value = raw.strip()
+    if not (value.startswith("{") and value.endswith("}")):
+        raise ValueError("trigger must be a mapping")
+    result = {}
+    for item in _inline_items(value[1:-1]):
+        if ":" not in item:
+            raise ValueError("malformed trigger mapping")
+        key, raw_value = item.split(":", 1)
+        key = key.strip()
+        if key not in (memspec.TRIGGER_TOOL_FIELD, memspec.TRIGGER_INPUT_FIELD):
+            raise ValueError("unknown trigger field")
+        if key in result:
+            raise ValueError("duplicate trigger field")
+        result[key] = _scalar(raw_value)
+    return result
+
+
+def _frontmatter(path):
+    text = path.read_text(encoding="utf-8")
+    lines = text.lstrip("\ufeff").splitlines()
+    if not lines or lines[0].strip() != "---":
+        return None
+    for index, line in enumerate(lines[1:], start=1):
+        if line.strip() == "---":
+            return lines[1:index]
+    raise ValueError("unterminated frontmatter")
+
+
+def _parse_trigger_card(path):
+    lines = _frontmatter(path)
+    if lines is None:
+        return None
+
+    fields = {}
+    trigger = {}
+    trigger_seen = False
+    current = None
+    advice_style = None
+    advice_lines = []
+    problems = []
+
+    def finish_advice():
+        nonlocal advice_style, advice_lines
+        if advice_style is not None:
+            separator = "\n" if advice_style.startswith("|") else " "
+            fields[memspec.ADVICE_FIELD] = separator.join(advice_lines).strip()
+        advice_style = None
+        advice_lines = []
+
+    for raw_line in lines:
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#"):
+            if advice_style is not None and not stripped:
+                advice_lines.append("")
+            continue
+        indent = len(raw_line) - len(raw_line.lstrip(" \t"))
+        if indent == 0:
+            finish_advice()
+            current = None
+            if ":" not in raw_line:
+                problems.append("malformed top-level frontmatter")
+                continue
+            key, raw_value = raw_line.split(":", 1)
+            key = key.strip()
+            value = raw_value.strip()
+            if key == memspec.TRIGGER_FIELD:
+                if trigger_seen:
+                    problems.append("duplicate trigger field")
+                    continue
+                trigger_seen = True
+                current = memspec.TRIGGER_FIELD
+                if value:
+                    try:
+                        trigger.update(_inline_mapping(value))
+                    except ValueError as exc:
+                        problems.append(str(exc))
+            elif key == memspec.ADVICE_FIELD:
+                if value in ("|", ">", "|-", ">-", "|+", ">+"):
+                    advice_style = value
+                    current = memspec.ADVICE_FIELD
+                else:
+                    try:
+                        fields[key] = _scalar(raw_value)
+                    except (ValueError, json.JSONDecodeError) as exc:
+                        problems.append(str(exc))
+            elif key == "name":
+                try:
+                    fields[key] = _scalar(raw_value)
+                except (ValueError, json.JSONDecodeError) as exc:
+                    problems.append(str(exc))
+            continue
+
+        if current == memspec.TRIGGER_FIELD:
+            if ":" not in stripped:
+                problems.append("malformed nested trigger field")
+                continue
+            key, raw_value = stripped.split(":", 1)
+            key = key.strip()
+            if key not in (memspec.TRIGGER_TOOL_FIELD, memspec.TRIGGER_INPUT_FIELD):
+                problems.append("unknown trigger field")
+                continue
+            if key in trigger:
+                problems.append("duplicate trigger field")
+                continue
+            try:
+                trigger[key] = _scalar(raw_value)
+            except (ValueError, json.JSONDecodeError) as exc:
+                problems.append(str(exc))
+        elif current == memspec.ADVICE_FIELD and advice_style is not None:
+            advice_lines.append(stripped)
+
+    finish_advice()
+    if not trigger_seen:
+        return None
+    if problems:
+        raise ValueError(problems[0])
+
+    tool_pattern = trigger.get(memspec.TRIGGER_TOOL_FIELD, "")
+    input_pattern = trigger.get(memspec.TRIGGER_INPUT_FIELD, "")
+    advice = fields.get(memspec.ADVICE_FIELD, "").strip()
+    if not tool_pattern or not input_pattern or not advice:
+        raise ValueError("trigger cards require tool, input, and advice")
+    tool_regex = re.compile(tool_pattern)
+    input_regex = re.compile(input_pattern)
+    return {
+        "path": path.resolve(),
+        "name": fields.get("name", "").strip() or path.stem,
+        "advice": advice,
+        "tool_regex": tool_regex,
+        "input_regex": input_regex,
+    }
+
+
+def _append_audit(vault, tool_name, card_name, started_at):
+    target = vault / memspec.GATE_LOG_FILENAME
+    remaining = memspec.HOOK_TIMEOUT_SECONDS - (time.monotonic() - started_at)
+    if remaining <= 0:
+        raise TimeoutError("hook deadline reached")
+    row = {
+        "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "tool": tool_name,
+        "card": card_name,
+    }
+    with memspec.file_lock(target, min(0.25, remaining)) as acquired:
+        if not acquired:
+            raise OSError("gate audit lock unavailable")
+        with target.open("a", encoding="utf-8", newline="\n") as stream:
+            stream.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+
+
+def _handle(event, started_at):
+    tool_name = event.get("tool_name")
+    if not isinstance(tool_name, str) or not tool_name:
+        return None
+    tool_input_text = json.dumps(
+        event.get("tool_input"),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    config = load_config(started_at)
+    if config is None:
+        return None
+
+    cards = []
+    for vault in config[memspec.CONFIG_VAULTS_FIELD]:
+        for path in sorted(vault.rglob("*.md"), key=lambda item: str(item).casefold()):
+            if expired(started_at):
+                return None
+            card = _parse_trigger_card(path)
+            if card is not None:
+                cards.append((vault, card))
+
+    match = None
+    for vault, card in cards:
+        if card["tool_regex"].search(tool_name) and card["input_regex"].search(
+            tool_input_text
+        ):
+            match = (vault, card)
+            break
+    if match is None or expired(started_at):
+        return None
+
+    vault, card = match
+    _append_audit(vault, tool_name, card["name"], started_at)
+    if expired(started_at):
+        return None
+    reason = f"{card['advice']} [{card['path']}]"
+    value = {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        }
+    }
+    if len(encode_payload(value).encode("utf-8")) > memspec.HOOK_MAX_OUTPUT_BYTES:
+        return None
+    return value
+
+
+def _selftest():
+    checks = []
+    try:
+        with tempfile.TemporaryDirectory(prefix="epitype-gate-") as temp_dir:
+            root = Path(temp_dir)
+            vault = root / "vault"
+            vault.mkdir()
+            card = vault / "safe-alternative.md"
+            card.write_text(
+                "---\n"
+                "name: synthetic-safety\n"
+                "trigger:\n"
+                "  tool: ^Bash$\n"
+                "  input: remove target\n"
+                "advice: Use the read-only alternative.\n"
+                "---\n"
+                "Synthetic card body.\n",
+                encoding="utf-8",
+            )
+            config = root / "config.json"
+            write_config(config, [vault])
+
+            hit = run_synthetic(
+                Path(__file__),
+                {"tool_name": "Bash", "tool_input": {"command": "remove target"}},
+                config,
+            )
+            value = json.loads(hit.stdout) if hit.stdout.strip() else {}
+            output = value.get("hookSpecificOutput", {})
+            reason = output.get("permissionDecisionReason", "")
+            checks.append(
+                (
+                    "matching card denies with advice",
+                    hit.returncode == 0
+                    and output.get("permissionDecision") == "deny"
+                    and "Use the read-only alternative." in reason
+                    and str(card.resolve()) in reason,
+                )
+            )
+
+            log_path = vault / memspec.GATE_LOG_FILENAME
+            log_rows = [
+                json.loads(line)
+                for line in log_path.read_text(encoding="utf-8").splitlines()
+                if line
+            ] if log_path.is_file() else []
+            checks.append(
+                (
+                    "audit row persisted",
+                    len(log_rows) == 1
+                    and log_rows[0].get("tool") == "Bash"
+                    and log_rows[0].get("card") == "synthetic-safety",
+                )
+            )
+
+            miss = run_synthetic(
+                Path(__file__),
+                {"tool_name": "Read", "tool_input": {"path": "synthetic.txt"}},
+                config,
+            )
+            checks.append(
+                (
+                    "no match allows silently",
+                    miss.returncode == 0 and not miss.stdout and not miss.stderr,
+                )
+            )
+
+            (vault / "broken.md").write_text(
+                "---\n"
+                "name: broken-synthetic\n"
+                "trigger:\n"
+                "  tool: [\n"
+                "  input: remove\n"
+                "advice: Alternative.\n"
+                "---\n",
+                encoding="utf-8",
+            )
+            broken = run_synthetic(
+                Path(__file__),
+                {"tool_name": "Bash", "tool_input": {"command": "remove target"}},
+                config,
+            )
+            checks.append(
+                (
+                    "bad card fail-open",
+                    broken.returncode == 0 and not broken.stdout and not broken.stderr,
+                )
+            )
+    except Exception as exc:
+        print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
+
+    passed = sum(bool(ok) for _, ok in checks)
+    total = 4
+    status = "PASS" if passed == total and len(checks) == total else "FAIL"
+    print(f"SELFTEST {status} {passed}/{total}")
+    if status != "PASS":
+        for name, ok in checks:
+            if not ok:
+                print(f"FAILED: {name}", file=sys.stderr)
+    return 0 if status == "PASS" else 1
+
+
+def main():
+    if "--selftest" in sys.argv[1:]:
+        return _selftest()
+    try:
+        event = read_event(sys.stdin)
+        value = _handle(event, _STARTED_AT)
+        if value is not None and not expired(_STARTED_AT):
+            emit(value)
+    except Exception:
+        pass
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

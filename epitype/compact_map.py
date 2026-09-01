@@ -7,13 +7,22 @@ import os
 from pathlib import Path
 import tempfile
 
-from memspec import (
-    COMPACT_MAP_ASSISTANT_MAX_CHARS,
-    COMPACT_MAP_DEFAULT_BUDGET_BYTES,
-    COMPACT_MAP_MAX_LINE_BYTES,
-    COMPACT_MAP_TAIL_BYTES,
-    COMPACT_MAP_USER_MAX_CHARS,
-)
+try:
+    from .memspec import (
+        COMPACT_MAP_ASSISTANT_MAX_CHARS,
+        COMPACT_MAP_DEFAULT_BUDGET_BYTES,
+        COMPACT_MAP_MAX_LINE_BYTES,
+        COMPACT_MAP_TAIL_BYTES,
+        COMPACT_MAP_USER_MAX_CHARS,
+    )
+except ImportError:  # Direct script execution keeps the U1 CLI contract.
+    from memspec import (
+        COMPACT_MAP_ASSISTANT_MAX_CHARS,
+        COMPACT_MAP_DEFAULT_BUDGET_BYTES,
+        COMPACT_MAP_MAX_LINE_BYTES,
+        COMPACT_MAP_TAIL_BYTES,
+        COMPACT_MAP_USER_MAX_CHARS,
+    )
 
 
 # 2026-09-01 實測事故：對話壓縮時未落檔的結論會遺失，導致後續無法可靠續接；

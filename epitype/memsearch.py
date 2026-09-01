@@ -12,7 +12,10 @@ import tempfile
 import threading
 import time
 
-import memspec
+try:
+    from . import memspec
+except ImportError:  # Direct script execution keeps the U1 CLI contract.
+    import memspec
 
 
 # 2026-09-01 實測事故：雙語卡別名未進索引，導致同義詞檢索三連空手；規則：
