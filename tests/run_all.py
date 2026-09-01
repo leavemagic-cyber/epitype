@@ -18,6 +18,7 @@ SELFTESTS = (
     Path("adapters") / "claude" / "sessionstart_hook.py",
     Path("adapters") / "claude" / "precompact_hook.py",
     Path("adapters") / "claude" / "pretooluse_gate.py",
+    Path("adapters") / "codex" / "config_guard.py",
 )
 
 

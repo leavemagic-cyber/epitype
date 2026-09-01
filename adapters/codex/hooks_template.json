@@ -1,0 +1,50 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"{{EPITYPE_REPO_ROOT}}/adapters/claude/sessionstart_hook.py\"",
+            "timeout": 3,
+            "additionalContextLimit": 1800
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"{{EPITYPE_REPO_ROOT}}/adapters/claude/recall_hook.py\"",
+            "timeout": 3,
+            "additionalContextLimit": 1800
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"{{EPITYPE_REPO_ROOT}}/adapters/claude/precompact_hook.py\" --codex",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"{{EPITYPE_REPO_ROOT}}/adapters/claude/pretooluse_gate.py\"",
+            "timeout": 3
+          }
+        ]
+      }
+    ]
+  }
+}

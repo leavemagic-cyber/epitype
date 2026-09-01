@@ -106,12 +106,12 @@ def emit(value):
     print(encoded)
 
 
-def run_synthetic(script, event, config_path):
+def run_synthetic(script, event, config_path, arguments=()):
     environment = os.environ.copy()
     environment[memspec.EPITYPE_CONFIG_ENV] = os.fspath(config_path)
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
     return subprocess.run(
-        [sys.executable, os.fspath(script)],
+        [sys.executable, os.fspath(script), *arguments],
         input=json.dumps(event, ensure_ascii=False),
         capture_output=True,
         text=True,

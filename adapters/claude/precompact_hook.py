@@ -99,11 +99,27 @@ def _selftest():
                     == "PreCompact",
                 )
             )
+            destination.unlink()
+            codex_result = run_synthetic(
+                Path(__file__),
+                {"transcript_path": str(transcript)},
+                config,
+                ("--codex",),
+            )
+            checks.append(
+                (
+                    "Codex mode persists map without incompatible output",
+                    codex_result.returncode == 0
+                    and destination.is_file()
+                    and not codex_result.stdout
+                    and not codex_result.stderr,
+                )
+            )
     except Exception as exc:
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 2
+    total = 3
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
@@ -114,12 +130,13 @@ def _selftest():
 
 
 def main():
-    if "--selftest" in sys.argv[1:]:
+    arguments = sys.argv[1:]
+    if "--selftest" in arguments:
         return _selftest()
     try:
         event = read_event(sys.stdin)
         value = _handle(event, _STARTED_AT)
-        if value is not None and not expired(_STARTED_AT):
+        if value is not None and not expired(_STARTED_AT) and "--codex" not in arguments:
             emit(value)
     except Exception:
         pass
