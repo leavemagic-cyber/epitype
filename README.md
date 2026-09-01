@@ -82,5 +82,5 @@ Epitype separates stable habits, incident-born scars, and pending work; exposes 
 
 1. Installation cannot be easier than native memory that is already enabled by default. Epitype's value proposition is governance, not zero setup.
 2. Hook injection is bounded by host output and timing limits. Epitype uses a 10 KiB output ceiling and a three-second fail-open deadline, so it must select context rather than inject everything.
-3. Behavior-level measurement is early. Current selftests are synthetic, and the v1.0 exam runner is not yet present in this pre-1.0 build.
+3. Behavior-level measurement is early. Current selftests are synthetic. The exam engine ships in `exam/` with a small synthetic sample corpus; the full release exam has not yet been run and passed, which is exactly what gates v1.0.
 4. The shipped current-decision guarantee covers Epitype's default `query` and `recall` paths and hook consumers that keep those defaults. Direct file reads remain outside that filter, and `--include-superseded` intentionally exposes retained historical cards for archaeology.
