@@ -65,7 +65,7 @@ def _handle(event, started_at):
     for vault in config[memspec.CONFIG_VAULTS_FIELD]:
         if expired(started_at):
             return None
-        result = memsearch.query_index(vault, prompt)
+        result = memsearch.recall_index(vault, prompt)
         if expired(started_at):
             return None
         for hit in result.get("results", ())[: memspec.FTS_TOP_K]:
@@ -125,7 +125,7 @@ def _selftest():
                 / memspec.RECALL_MARKER_DIRECTORY
                 / _session_component(session_id)
             )
-            event = {"prompt": "portable recall", "session_id": session_id}
+            event = {"prompt": "how do I use portable recall from the command line", "session_id": session_id}
 
             first = run_synthetic(Path(__file__), event, config)
             first_value = json.loads(first.stdout) if first.stdout.strip() else {}
@@ -154,7 +154,7 @@ def _selftest():
             hard_budget = 400
             write_config(config, [vault], budget=hard_budget)
             budget_event = {
-                "prompt": "portable recall",
+                "prompt": "how can I retrieve portable recall from a local CLI",
                 "session_id": "budget-" + uuid.uuid4().hex,
             }
             budget_result = run_synthetic(Path(__file__), budget_event, config)
@@ -174,7 +174,7 @@ def _selftest():
             config.write_text("{broken", encoding="utf-8")
             broken = run_synthetic(
                 Path(__file__),
-                {"prompt": "portable recall", "session_id": uuid.uuid4().hex},
+                {"prompt": "how do I recover portable recall with broken settings", "session_id": uuid.uuid4().hex},
                 config,
             )
             checks.append(

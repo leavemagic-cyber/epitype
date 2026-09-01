@@ -6,6 +6,7 @@ import csv
 import json
 import os
 from pathlib import Path
+import re
 import sqlite3
 import subprocess
 import tempfile
@@ -30,6 +31,15 @@ _DB_FIELDS = {
     memspec.SCOPE_FIELD: "fm_scope",
     "body": "body",
 }
+_CJK_RANGE = "\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\U00020000-\U0002fa1f"
+_CJK_RUN = re.compile(f"[{_CJK_RANGE}]+")
+_RECALL_PART = re.compile(f"[{_CJK_RANGE}]+|[^\\s{_CJK_RANGE}]+")
+_RECALL_MAX_TERMS = 12
+# Trigram FTS cannot match two-codepoint terms. A private-use prefix makes CJK
+# bigrams indexable while the cards table and returned hit fields stay raw.
+_CJK_BIGRAM_PREFIX = "\ue000"
+_FTS_FORMAT_KEY = "fts_format"
+_FTS_FORMAT_VERSION = "2"
 
 
 def _db_path(vault):
@@ -146,6 +156,10 @@ def _markdown_files(vault):
 def _ensure_schema(connection):
     connection.executescript(
         """
+        CREATE TABLE IF NOT EXISTS search_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS cards (
             id INTEGER PRIMARY KEY,
             card_path TEXT NOT NULL UNIQUE,
@@ -162,6 +176,44 @@ def _ensure_schema(connection):
             tokenize='trigram'
         );
         """
+    )
+    row = connection.execute(
+        "SELECT value FROM search_meta WHERE key = ?", (_FTS_FORMAT_KEY,)
+    ).fetchone()
+    return row is None or row[0] != _FTS_FORMAT_VERSION
+
+
+def _cjk_bigrams(text):
+    seen = set()
+    for match in _CJK_RUN.finditer(text or ""):
+        run = match.group(0)
+        for index in range(len(run) - 1):
+            term = run[index : index + 2]
+            if term not in seen:
+                seen.add(term)
+                yield term
+
+
+def _fts_document(text):
+    value = text or ""
+    encoded = " ".join(_CJK_BIGRAM_PREFIX + term for term in _cjk_bigrams(value))
+    return value if not encoded else value + "\n" + encoded
+
+
+def _replace_fts_row(connection, row_id, card_path, fields):
+    connection.execute("DELETE FROM cards_fts WHERE rowid = ?", (row_id,))
+    connection.execute(
+        "INSERT INTO cards_fts(rowid, card_path, name, description, fm_aliases, fm_scope, body) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (
+            row_id,
+            card_path,
+            _fts_document(fields["name"]),
+            _fts_document(fields["description"]),
+            _fts_document(fields[memspec.ALIASES_FIELD]),
+            _fts_document(fields[memspec.SCOPE_FIELD]),
+            _fts_document(fields["body"]),
+        ),
     )
 
 
@@ -191,7 +243,7 @@ def build_index(vault, lock_timeout=0.0):
         files = _markdown_files(vault)
         connection = sqlite3.connect(str(db_path), timeout=5.0)
         try:
-            _ensure_schema(connection)
+            rebuild_fts = _ensure_schema(connection)
             known = {
                 row[0]: (row[1], row[2])
                 for row in connection.execute("SELECT card_path, mtime_ns, size FROM cards")
@@ -247,21 +299,33 @@ def build_index(vault, lock_timeout=0.0):
                     row_id = connection.execute(
                         "SELECT id FROM cards WHERE card_path = ?", (card_path,)
                     ).fetchone()[0]
-                    connection.execute("DELETE FROM cards_fts WHERE rowid = ?", (row_id,))
-                    connection.execute(
-                        "INSERT INTO cards_fts(rowid, card_path, name, description, fm_aliases, fm_scope, body) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                        (
-                            row_id,
-                            card_path,
-                            fields["name"],
-                            fields["description"],
-                            fields[memspec.ALIASES_FIELD],
-                            fields[memspec.SCOPE_FIELD],
-                            fields["body"],
-                        ),
-                    )
+                    if not rebuild_fts:
+                        _replace_fts_row(connection, row_id, card_path, fields)
                     scanned += 1
+                if rebuild_fts:
+                    connection.execute("DELETE FROM cards_fts")
+                    rows = connection.execute(
+                        "SELECT id, card_path, name, description, fm_aliases, fm_scope, body "
+                        "FROM cards ORDER BY id"
+                    ).fetchall()
+                    for row in rows:
+                        _replace_fts_row(
+                            connection,
+                            row[0],
+                            row[1],
+                            {
+                                "name": row[2],
+                                "description": row[3],
+                                memspec.ALIASES_FIELD: row[4],
+                                memspec.SCOPE_FIELD: row[5],
+                                "body": row[6],
+                            },
+                        )
+                    connection.execute(
+                        "INSERT INTO search_meta(key, value) VALUES (?, ?) "
+                        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                        (_FTS_FORMAT_KEY, _FTS_FORMAT_VERSION),
+                    )
             card_count = connection.execute("SELECT count(*) FROM cards").fetchone()[0]
         finally:
             connection.close()
@@ -276,6 +340,18 @@ def build_index(vault, lock_timeout=0.0):
 
 def _is_stale(vault, db_path):
     if not db_path.exists():
+        return True
+    try:
+        connection = sqlite3.connect(str(db_path), timeout=5.0)
+        try:
+            row = connection.execute(
+                "SELECT value FROM search_meta WHERE key = ?", (_FTS_FORMAT_KEY,)
+            ).fetchone()
+        finally:
+            connection.close()
+        if row is None or row[0] != _FTS_FORMAT_VERSION:
+            return True
+    except sqlite3.Error:
         return True
     latest = None
     for path in _markdown_files(vault):
@@ -301,8 +377,12 @@ def _hit_fields(row, term):
     ]
 
 
+def _fts_phrase(term):
+    return '"' + term.replace('"', '""') + '"'
+
+
 def _rows_for_term(connection, term):
-    quoted = '"' + term.replace('"', '""') + '"'
+    quoted = _fts_phrase(term)
     if len(term) >= 3:
         try:
             rows = connection.execute(
@@ -322,6 +402,68 @@ def _rows_for_term(connection, term):
     return connection.execute(
         "SELECT card_path, name, description, fm_aliases, fm_scope, body, 0.0 AS relevance FROM cards"
     ).fetchall()
+
+
+def _recall_terms(prompt):
+    terms = []
+    seen = set()
+    for match in _RECALL_PART.finditer(prompt):
+        part = match.group(0)
+        if _CJK_RUN.fullmatch(part):
+            candidates = (part[index : index + 2] for index in range(len(part) - 1))
+        else:
+            candidates = (part,)
+        for term in candidates:
+            if len(term) < 2:
+                continue
+            key = term.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            terms.append(term)
+            if len(terms) == _RECALL_MAX_TERMS:
+                return terms
+    return terms
+
+
+def _recall_fts_term(term):
+    if len(term) == 2 and _CJK_RUN.fullmatch(term):
+        return _CJK_BIGRAM_PREFIX + term
+    return term
+
+
+def _rows_for_recall(connection, terms):
+    if not terms:
+        return []
+    expression = " OR ".join(_fts_phrase(_recall_fts_term(term)) for term in terms)
+    try:
+        return connection.execute(
+            """
+            SELECT c.card_path, c.name, c.description, c.fm_aliases, c.fm_scope, c.body,
+                   bm25(cards_fts, 0.0, 12.0, 8.0, 12.0, 6.0, 1.0) AS relevance
+            FROM cards_fts JOIN cards AS c ON c.id = cards_fts.rowid
+            WHERE cards_fts MATCH ?
+            """,
+            (expression,),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return []
+
+
+def _recall_hits(row, terms):
+    hit_fields = []
+    matched_terms = set()
+    for field in _ALL_FIELDS:
+        value = (row[_DB_FIELDS[field]] or "").casefold()
+        field_hit = False
+        for term in terms:
+            key = term.casefold()
+            if key in value:
+                field_hit = True
+                matched_terms.add(key)
+        if field_hit:
+            hit_fields.append(field)
+    return hit_fields, len(matched_terms)
 
 
 def query_index(vault, term):
@@ -365,6 +507,52 @@ def query_index(vault, term):
     return {"query": term, "count": len(results), "results": results}
 
 
+def recall_index(vault, prompt):
+    vault = Path(vault).resolve()
+    if not vault.is_dir():
+        raise NotADirectoryError(str(vault))
+    prompt = str(prompt).strip()
+    terms = _recall_terms(prompt)
+    if not terms:
+        return {"query": prompt, "terms": [], "count": 0, "results": []}
+    db_path = _db_path(vault)
+    if _is_stale(vault, db_path):
+        build_index(vault, lock_timeout=0.0)
+
+    connection = sqlite3.connect(str(db_path), timeout=5.0)
+    connection.row_factory = sqlite3.Row
+    try:
+        candidates = []
+        for row in _rows_for_recall(connection, terms):
+            hits, matched_count = _recall_hits(row, terms)
+            if not hits:
+                continue
+            front_hit = any(field in _FRONT_FIELDS for field in hits)
+            field_rank = min(_ALL_FIELDS.index(field) for field in hits)
+            candidates.append(
+                (
+                    (
+                        float(row["relevance"]),
+                        -matched_count,
+                        0 if front_hit else 1,
+                        field_rank,
+                        row["card_path"],
+                    ),
+                    {
+                        "path": str((vault / row["card_path"]).resolve()),
+                        "name": row["name"],
+                        "description": row["description"],
+                        "hit_fields": hits,
+                    },
+                )
+            )
+    finally:
+        connection.close()
+    candidates.sort(key=lambda item: item[0])
+    results = [item[1] for item in candidates[:memspec.FTS_TOP_K]]
+    return {"query": prompt, "terms": terms, "count": len(results), "results": results}
+
+
 def _write_card(path, frontmatter, body):
     path.write_text(f"---\n{frontmatter}\n---\n{body}\n", encoding="utf-8")
 
@@ -387,12 +575,12 @@ def _selftest():
             )
             _write_card(
                 english,
-                "name: Failure Ledger\ndescription: resilient recovery evidence\naliases: [ledger]\nscope: infra",
+                "name: Failure Ledger\ndescription: resilient gemini recovery evidence\naliases: [ledger]\nscope: infra",
                 "A deterministic English memory card.",
             )
             _write_card(
                 mixed,
-                "name: 混合 Memory Bridge\ndescription: 中英 mixed lookup\nscope: governance-core",
+                "name: 星橋 Memory Bridge\ndescription: 中英 mixed lookup\nscope: governance-core",
                 "Cross-language bridge content.",
             )
             _write_card(
@@ -427,6 +615,65 @@ def _selftest():
                     and len(alias_results) == 1
                     and alias_results[0]["path"] == str(bilingual.resolve())
                     and memspec.ALIASES_FIELD in alias_results[0]["hit_fields"],
+                )
+            )
+            cli_recall = subprocess.run(
+                [sys.executable, str(Path(__file__).resolve()), "recall",
+                 "how do I drive gemini from a terminal", "--vault", str(vault)],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+            recall_payload = json.loads(cli_recall.stdout)
+            checks.append(
+                (
+                    "English natural-sentence recall",
+                    cli_recall.returncode == 0
+                    and recall_payload["results"][0]["path"] == str(english.resolve()),
+                )
+            )
+            chinese_recall = recall_index(vault, "怎麼用星橋處理未知噪音")
+            checks.append(
+                (
+                    "Chinese natural-sentence bigram recall",
+                    chinese_recall["results"][0]["path"] == str(mixed.resolve())
+                    and "星橋" in chinese_recall["terms"],
+                )
+            )
+            checks.append(
+                (
+                    "All-noise recall is empty",
+                    recall_index(vault, "quartz zebras frolic beyond nebula")["count"] == 0,
+                )
+            )
+            empty_recall = recall_index(vault, "I a x \t")
+            checks.append(
+                ("Empty recall term set", empty_recall["count"] == 0 and empty_recall["terms"] == [])
+            )
+            special_recall = recall_index(vault, 'gemini (OR) "noise" + wildcard*')
+            checks.append(
+                (
+                    "FTS-special tokens are escaped",
+                    special_recall["results"][0]["path"] == str(english.resolve()),
+                )
+            )
+            connection = sqlite3.connect(str(_db_path(vault)))
+            try:
+                with connection:
+                    connection.execute(
+                        "UPDATE search_meta SET value = ? WHERE key = ?",
+                        ("1", _FTS_FORMAT_KEY),
+                    )
+                    connection.execute("DELETE FROM cards_fts")
+            finally:
+                connection.close()
+            migrated_recall = recall_index(vault, "怎麼用星橋處理未知噪音")
+            checks.append(
+                (
+                    "Legacy FTS format auto-rebuild",
+                    migrated_recall["results"][0]["path"] == str(mixed.resolve()),
                 )
             )
             checks.append(("Frontmatter first", query_index(vault, "priorityneedle")["results"][0]["path"] == str(front.resolve())))
@@ -481,7 +728,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 6
+    total = 12
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
@@ -506,6 +753,9 @@ def _parser():
     query = subparsers.add_parser("query")
     query.add_argument("term")
     query.add_argument("--vault", default=".")
+    recall = subparsers.add_parser("recall")
+    recall.add_argument("prompt")
+    recall.add_argument("--vault", default=".")
     return parser
 
 
@@ -520,8 +770,11 @@ def main(argv=None):
         elif args.command == "query":
             payload = query_index(args.vault, args.term)
             exit_code = 0
+        elif args.command == "recall":
+            payload = recall_index(args.vault, args.prompt)
+            exit_code = 0
         else:
-            payload = {"error": "command required", "commands": ["build", "query"]}
+            payload = {"error": "command required", "commands": ["build", "query", "recall"]}
             exit_code = 2
     except (OSError, sqlite3.Error, ValueError) as exc:
         payload = {"error": type(exc).__name__, "message": str(exc)}
