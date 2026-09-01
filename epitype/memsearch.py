@@ -46,7 +46,7 @@ _RECALL_MAX_TERMS = 12
 # bigrams indexable while the cards table and returned hit fields stay raw.
 _CJK_BIGRAM_PREFIX = "\ue000"
 _FTS_FORMAT_KEY = "fts_format"
-_FTS_FORMAT_VERSION = "4"
+_FTS_FORMAT_VERSION = "5"
 _CURRENT_DECISION_GUIDANCE = "此題現行決定="
 
 
@@ -133,7 +133,8 @@ def _read_card(path):
         if first.startswith(b"\xef\xbb\xbf"):
             first = first[3:]
         frontmatter = b""
-        if first.strip() == b"---":
+        has_frontmatter = first.strip() == b"---"
+        if has_frontmatter:
             chunks = []
             for line in stream:
                 if line.strip() == b"---":
@@ -147,18 +148,24 @@ def _read_card(path):
             ]
     fields = _parse_frontmatter(frontmatter.decode("utf-8", errors="replace"))
     fields["body"] = body.decode("utf-8", errors="replace")
+    fields["is_card"] = has_frontmatter and bool(
+        fields["name"].strip() or fields["description"].strip()
+    )
     return fields
 
 
 def _markdown_files(vault):
     files = []
+    # Keep the recursive vault scan, but no private path segment may leak into
+    # the generated index merely because only its directory starts with "_".
     for path in vault.rglob("*"):
         try:
+            relative = path.relative_to(vault)
             if (
                 path.is_file()
                 and path.suffix.lower() == ".md"
                 and path.name != memspec.MEMORY_INDEX_FILENAME
-                and not path.name.startswith("_")
+                and not any(part.startswith("_") for part in relative.parts)
             ):
                 files.append(path)
         except OSError:
@@ -186,6 +193,7 @@ def _ensure_schema(connection):
         "card_path",
         "mtime_ns",
         "size",
+        "is_card",
         "name",
         "description",
         "fm_aliases",
@@ -207,6 +215,7 @@ def _ensure_schema(connection):
             card_path TEXT NOT NULL UNIQUE,
             mtime_ns INTEGER NOT NULL,
             size INTEGER NOT NULL,
+            is_card INTEGER NOT NULL,
             name TEXT NOT NULL,
             description TEXT NOT NULL,
             fm_aliases TEXT NOT NULL,
@@ -320,12 +329,13 @@ def build_index(vault, lock_timeout=0.0):
                     connection.execute(
                         """
                         INSERT INTO cards(
-                            card_path, mtime_ns, size, name, description, fm_aliases, fm_scope,
-                            status, superseded_by, body
+                            card_path, mtime_ns, size, is_card, name, description, fm_aliases,
+                            fm_scope, status, superseded_by, body
                         )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT(card_path) DO UPDATE SET
-                            mtime_ns=excluded.mtime_ns, size=excluded.size, name=excluded.name,
+                            mtime_ns=excluded.mtime_ns, size=excluded.size,
+                            is_card=excluded.is_card, name=excluded.name,
                             description=excluded.description, fm_aliases=excluded.fm_aliases,
                             fm_scope=excluded.fm_scope, status=excluded.status,
                             superseded_by=excluded.superseded_by, body=excluded.body
@@ -334,6 +344,7 @@ def build_index(vault, lock_timeout=0.0):
                             card_path,
                             stat.st_mtime_ns,
                             stat.st_size,
+                            int(fields["is_card"]),
                             fields["name"],
                             fields["description"],
                             fields[memspec.ALIASES_FIELD],
@@ -434,7 +445,7 @@ def _rows_for_term(connection, term):
         try:
             rows = connection.execute(
                 """
-                SELECT c.card_path, c.name, c.description, c.fm_aliases, c.fm_scope,
+                SELECT c.card_path, c.is_card, c.name, c.description, c.fm_aliases, c.fm_scope,
                        c.status, c.superseded_by, c.body,
                        bm25(cards_fts, 0.0, 12.0, 8.0, 12.0, 6.0, 1.0) AS relevance
                 FROM cards_fts JOIN cards AS c ON c.id = cards_fts.rowid
@@ -448,7 +459,7 @@ def _rows_for_term(connection, term):
             pass
     # trigram 不收少於三碼的 token；短中英文仍須符合「任何詞都能搜」，故只掃已受限的索引內容。
     return connection.execute(
-        "SELECT card_path, name, description, fm_aliases, fm_scope, status, "
+        "SELECT card_path, is_card, name, description, fm_aliases, fm_scope, status, "
         "superseded_by, body, 0.0 AS relevance FROM cards"
     ).fetchall()
 
@@ -488,7 +499,7 @@ def _rows_for_recall(connection, terms):
     try:
         return connection.execute(
             """
-            SELECT c.card_path, c.name, c.description, c.fm_aliases, c.fm_scope,
+            SELECT c.card_path, c.is_card, c.name, c.description, c.fm_aliases, c.fm_scope,
                    c.status, c.superseded_by, c.body,
                    bm25(cards_fts, 0.0, 12.0, 8.0, 12.0, 6.0, 1.0) AS relevance
             FROM cards_fts JOIN cards AS c ON c.id = cards_fts.rowid
@@ -591,6 +602,7 @@ def _guidance_lines(vault, excluded_links, results, indexed_paths):
 def _result(vault, row, hits):
     return {
         "path": str((vault / row["card_path"]).resolve()),
+        "is_card": bool(row["is_card"]),
         "name": row["name"],
         "description": row["description"],
         memspec.DECISION_STATUS_FIELD: row[memspec.DECISION_STATUS_FIELD],
@@ -599,7 +611,7 @@ def _result(vault, row, hits):
     }
 
 
-def query_index(vault, term, include_superseded=False):
+def query_index(vault, term, include_superseded=False, include_noncard=False):
     vault = Path(vault).resolve()
     if not vault.is_dir():
         raise NotADirectoryError(str(vault))
@@ -620,6 +632,8 @@ def query_index(vault, term, include_superseded=False):
         for row in _rows_for_term(connection, term):
             hits = _hit_fields(row, term)
             if not hits:
+                continue
+            if not include_noncard and not row["is_card"]:
                 continue
             if not include_superseded and _is_superseded(row):
                 excluded_links.append(
@@ -651,7 +665,7 @@ def query_index(vault, term, include_superseded=False):
     }
 
 
-def recall_index(vault, prompt, include_superseded=False):
+def recall_index(vault, prompt, include_superseded=False, include_noncard=False):
     vault = Path(vault).resolve()
     if not vault.is_dir():
         raise NotADirectoryError(str(vault))
@@ -671,6 +685,8 @@ def recall_index(vault, prompt, include_superseded=False):
         for row in _rows_for_recall(connection, terms):
             hits, matched_count = _recall_hits(row, terms)
             if not hits:
+                continue
+            if not include_noncard and not row["is_card"]:
                 continue
             if not include_superseded and _is_superseded(row):
                 excluded_links.append(
@@ -728,6 +744,10 @@ def _selftest():
             current_decision = vault / "current-decision.md"
             memory_index = vault / memspec.MEMORY_INDEX_FILENAME
             private_view = vault / "_VIEW.md"
+            private_directory = vault / "_compact_notes"
+            private_nested = private_directory / "machine-note.md"
+            nonfrontmatter = vault / "plain-note.md"
+            blank_metadata = vault / "blank-metadata.md"
             _write_card(
                 bilingual,
                 "name: 雙語路由卡\ndescription: bilingual CLI routing fixture\naliases: [routealias, relayalias]\nscope: infra",
@@ -791,6 +811,21 @@ def _selftest():
                 "# Generated View\nprivateviewonlyneedle\n",
                 encoding="utf-8",
             )
+            private_directory.mkdir()
+            _write_card(
+                private_nested,
+                "name: Hidden Machine Note\ndescription: path exclusion fixture",
+                "nestedprivateonlyneedle",
+            )
+            nonfrontmatter.write_text(
+                "# Machine note\nplainnoncardneedle\n",
+                encoding="utf-8",
+            )
+            _write_card(
+                blank_metadata,
+                "scope: archaeology",
+                "blankmetadataneedle",
+            )
 
             initial = build_index(vault)
             connection = sqlite3.connect(str(_db_path(vault)))
@@ -799,8 +834,88 @@ def _selftest():
                     "SELECT status, superseded_by FROM cards WHERE card_path = ?",
                     (old_decision.name,),
                 ).fetchone()
+                indexed_markers = dict(
+                    connection.execute("SELECT card_path, is_card FROM cards")
+                )
             finally:
                 connection.close()
+            checks.append(
+                (
+                    "Underscore path segment excluded",
+                    private_nested.relative_to(vault).as_posix() not in indexed_markers
+                    and query_index(
+                        vault, "nestedprivateonlyneedle", include_noncard=True
+                    )["count"]
+                    == 0
+                    and recall_index(
+                        vault, "find nestedprivateonlyneedle", include_noncard=True
+                    )["count"]
+                    == 0,
+                )
+            )
+            cli_noncard_query = subprocess.run(
+                [
+                    sys.executable,
+                    str(Path(__file__).resolve()),
+                    "query",
+                    "plainnoncardneedle",
+                    "--vault",
+                    str(vault),
+                    "--include-noncard",
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+            cli_noncard_recall = subprocess.run(
+                [
+                    sys.executable,
+                    str(Path(__file__).resolve()),
+                    "recall",
+                    "find blankmetadataneedle",
+                    "--vault",
+                    str(vault),
+                    "--include-noncard",
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+            noncard_query_results = json.loads(cli_noncard_query.stdout)["results"]
+            noncard_recall_results = json.loads(cli_noncard_recall.stdout)["results"]
+            checks.append(
+                (
+                    "Non-card default exclusion and archaeology opt-in",
+                    indexed_markers[nonfrontmatter.name] == 0
+                    and indexed_markers[blank_metadata.name] == 0
+                    and query_index(vault, "plainnoncardneedle")["count"] == 0
+                    and recall_index(vault, "find blankmetadataneedle")["count"] == 0
+                    and cli_noncard_query.returncode == 0
+                    and cli_noncard_recall.returncode == 0
+                    and len(noncard_query_results) == 1
+                    and noncard_query_results[0]["path"] == str(nonfrontmatter.resolve())
+                    and noncard_query_results[0]["is_card"] is False
+                    and len(noncard_recall_results) == 1
+                    and noncard_recall_results[0]["path"] == str(blank_metadata.resolve())
+                    and noncard_recall_results[0]["is_card"] is False,
+                )
+            )
+            normal_query = query_index(vault, "resilient")
+            normal_recall = recall_index(vault, "recover resilient evidence")
+            checks.append(
+                (
+                    "Normal card unaffected by non-card filter",
+                    indexed_markers[english.name] == 1
+                    and normal_query["results"][0]["path"] == str(english.resolve())
+                    and normal_query["results"][0]["is_card"] is True
+                    and normal_recall["results"][0]["path"] == str(english.resolve())
+                    and normal_recall["results"][0]["is_card"] is True,
+                )
+            )
             default_query = query_index(vault, "supersessionfixture")
             default_recall = recall_index(vault, "load supersessionfixture decision")
             checks.append(
@@ -1019,7 +1134,7 @@ def _selftest():
                         )
                     connection.execute(
                         "UPDATE search_meta SET value = ? WHERE key = ?",
-                        ("3", _FTS_FORMAT_KEY),
+                        ("4", _FTS_FORMAT_KEY),
                     )
             finally:
                 connection.close()
@@ -1076,8 +1191,8 @@ def _selftest():
                 and all(isinstance(outcome, dict) for outcome in outcomes)
                 and any(outcome["status"] == "built" for outcome in outcomes)
                 and integrity == "ok"
-                and card_count == 8
-                and fts_count == 8
+                and card_count == 10
+                and fts_count == 10
                 and query_index(vault, "concurrentwriteproof")["results"][0]["path"]
                 == str(other.resolve())
             )
@@ -1086,7 +1201,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 17
+    total = 20
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
@@ -1112,10 +1227,12 @@ def _parser():
     query.add_argument("term")
     query.add_argument("--vault", default=".")
     query.add_argument("--include-superseded", action="store_true")
+    query.add_argument("--include-noncard", action="store_true")
     recall = subparsers.add_parser("recall")
     recall.add_argument("prompt")
     recall.add_argument("--vault", default=".")
     recall.add_argument("--include-superseded", action="store_true")
+    recall.add_argument("--include-noncard", action="store_true")
     return parser
 
 
@@ -1132,6 +1249,7 @@ def main(argv=None):
                 args.vault,
                 args.term,
                 include_superseded=args.include_superseded,
+                include_noncard=args.include_noncard,
             )
             exit_code = 0
         elif args.command == "recall":
@@ -1139,6 +1257,7 @@ def main(argv=None):
                 args.vault,
                 args.prompt,
                 include_superseded=args.include_superseded,
+                include_noncard=args.include_noncard,
             )
             exit_code = 0
         else:
