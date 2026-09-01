@@ -137,6 +137,8 @@ FTS_STALE_SECONDS = 300
 # 2026-09-01 實測事故：查詢端另寫不同 top-k 會讓驗收口徑漂移；規則：檢索門檻
 # 統一使用 top-5 recall。
 FTS_TOP_K = 5
+# Recall 的 OR 查詢維持有界；CJK 首尾取樣與高訊號詞共用此上限。
+RECALL_MAX_TERMS = 20
 # 2026-09-01 實測事故：95KB 檔案證明無界全文掃描會放大成本；規則：單檔本文
 # 先限 256KiB。
 FTS_BODY_SCAN_BYTES = 256 * 1024

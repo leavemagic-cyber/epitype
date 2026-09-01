@@ -41,7 +41,6 @@ _DB_FIELDS = {
 _CJK_RANGE = "\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\U00020000-\U0002fa1f"
 _CJK_RUN = re.compile(f"[{_CJK_RANGE}]+")
 _RECALL_PART = re.compile(f"[{_CJK_RANGE}]+|[^\\s{_CJK_RANGE}]+")
-_RECALL_MAX_TERMS = 12
 # Trigram FTS cannot match two-codepoint terms. A private-use prefix makes CJK
 # bigrams indexable while the cards table and returned hit fields stay raw.
 _CJK_BIGRAM_PREFIX = "\ue000"
@@ -465,24 +464,41 @@ def _rows_for_term(connection, term):
 
 
 def _recall_terms(prompt):
-    terms = []
-    seen = set()
+    priority_terms = []
+    priority_seen = set()
+    cjk_terms = []
     for match in _RECALL_PART.finditer(prompt):
         part = match.group(0)
         if _CJK_RUN.fullmatch(part):
-            candidates = (part[index : index + 2] for index in range(len(part) - 1))
+            cjk_terms.extend(
+                part[index : index + 2] for index in range(len(part) - 1)
+            )
+            continue
+        if len(part) < 2:
+            continue
+        key = part.casefold()
+        if key not in priority_seen:
+            priority_seen.add(key)
+            priority_terms.append(part)
+
+    terms = priority_terms[: memspec.RECALL_MAX_TERMS]
+    seen = {term.casefold() for term in terms}
+    head = 0
+    tail = len(cjk_terms) - 1
+    take_head = True
+    while len(terms) < memspec.RECALL_MAX_TERMS and head <= tail:
+        if take_head:
+            term = cjk_terms[head]
+            head += 1
         else:
-            candidates = (part,)
-        for term in candidates:
-            if len(term) < 2:
-                continue
-            key = term.casefold()
-            if key in seen:
-                continue
-            seen.add(key)
-            terms.append(term)
-            if len(terms) == _RECALL_MAX_TERMS:
-                return terms
+            term = cjk_terms[tail]
+            tail -= 1
+        key = term.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        terms.append(term)
+        take_head = not take_head
     return terms
 
 
@@ -1066,6 +1082,28 @@ def _selftest():
                     and "星橋" in chinese_recall["terms"],
                 )
             )
+            long_chinese_noise = (
+                "這是一段刻意放在前方而且完全不相關的中文噪音內容"
+                "用來模擬使用者描述背景脈絡最後才說"
+            )
+            latin_tail_recall = recall_index(vault, long_chinese_noise + " gemini")
+            checks.append(
+                (
+                    "Long Chinese prompt retains trailing Latin keyword",
+                    latin_tail_recall["results"][0]["path"] == str(english.resolve())
+                    and "gemini" in latin_tail_recall["terms"]
+                    and len(latin_tail_recall["terms"]) == memspec.RECALL_MAX_TERMS,
+                )
+            )
+            chinese_tail_recall = recall_index(vault, long_chinese_noise + "星橋")
+            checks.append(
+                (
+                    "Long Chinese prompt samples trailing Chinese keyword",
+                    chinese_tail_recall["results"][0]["path"] == str(mixed.resolve())
+                    and "星橋" in chinese_tail_recall["terms"]
+                    and len(chinese_tail_recall["terms"]) == memspec.RECALL_MAX_TERMS,
+                )
+            )
             checks.append(
                 (
                     "All-noise recall is empty",
@@ -1201,7 +1239,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 20
+    total = 22
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
