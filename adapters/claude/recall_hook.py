@@ -1,11 +1,13 @@
-import sys, time; sys.dont_write_bytecode = True; _STARTED_AT = time.monotonic(); [getattr(stream, "reconfigure", lambda **_: None)(encoding="utf-8", errors="replace") for stream in (sys.stdout, sys.stderr)]  # cp950 consoles must not break hook entrypoints.
+import sys, time; sys.dont_write_bytecode = True; _STARTED_AT = time.monotonic(); [getattr(stream, "reconfigure", lambda **_: None)(encoding="utf-8", errors="replace") for stream in (sys.stdin, sys.stdout, sys.stderr)]  # cp950 consoles must not break hook entrypoints.
 """Claude UserPromptSubmit adapter for bounded, deduplicated local recall."""
 
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import shutil
+import subprocess
 import tempfile
 import uuid
 
@@ -117,6 +119,11 @@ def _selftest():
                 + "\n---\nportable recall\n",
                 encoding="utf-8",
             )
+            chinese_card = vault / "c-chinese.md"
+            chinese_card.write_text(
+                "---\nname: 中文喚回卡\ndescription: 真機編碼測試\n---\n中文事件測試\n",
+                encoding="utf-8",
+            )
             config = root / "config.json"
             write_config(config, [vault])
             session_id = "synthetic-" + uuid.uuid4().hex
@@ -171,6 +178,31 @@ def _selftest():
                 )
             )
 
+            write_config(config, [vault])
+            cp950_environment = os.environ.copy()
+            cp950_environment[memspec.EPITYPE_CONFIG_ENV] = os.fspath(config)
+            cp950_environment["PYTHONDONTWRITEBYTECODE"] = "1"
+            cp950_environment["PYTHONUTF8"] = "0"
+            cp950_environment["PYTHONIOENCODING"] = "cp950"
+            chinese_event = {"prompt": "請喚回中文真機編碼測試"}
+            cp950_result = subprocess.run(
+                [sys.executable, os.fspath(Path(__file__))],
+                input=json.dumps(chinese_event, ensure_ascii=False).encode("utf-8"),
+                capture_output=True,
+                env=cp950_environment,
+                timeout=10,
+                check=False,
+            )
+            cp950_stdout = cp950_result.stdout.decode("utf-8", errors="replace")
+            checks.append(
+                (
+                    "UTF-8 Chinese event under cp950 stdin",
+                    cp950_result.returncode == 0
+                    and bool(cp950_stdout.strip())
+                    and "中文喚回卡" in cp950_stdout,
+                )
+            )
+
             config.write_text("{broken", encoding="utf-8")
             broken = run_synthetic(
                 Path(__file__),
@@ -190,7 +222,7 @@ def _selftest():
             shutil.rmtree(marker_directory, ignore_errors=True)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 4
+    total = 5
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

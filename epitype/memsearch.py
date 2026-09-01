@@ -39,7 +39,7 @@ _RECALL_MAX_TERMS = 12
 # bigrams indexable while the cards table and returned hit fields stay raw.
 _CJK_BIGRAM_PREFIX = "\ue000"
 _FTS_FORMAT_KEY = "fts_format"
-_FTS_FORMAT_VERSION = "2"
+_FTS_FORMAT_VERSION = "3"
 
 
 def _db_path(vault):
@@ -146,7 +146,12 @@ def _markdown_files(vault):
     files = []
     for path in vault.rglob("*"):
         try:
-            if path.is_file() and path.suffix.lower() == ".md":
+            if (
+                path.is_file()
+                and path.suffix.lower() == ".md"
+                and path.name != memspec.MEMORY_INDEX_FILENAME
+                and not path.name.startswith("_")
+            ):
                 files.append(path)
         except OSError:
             continue
@@ -568,6 +573,8 @@ def _selftest():
             front = vault / "front.md"
             body = vault / "body.md"
             other = vault / "other.md"
+            memory_index = vault / memspec.MEMORY_INDEX_FILENAME
+            private_view = vault / "_VIEW.md"
             _write_card(
                 bilingual,
                 "name: 雙語路由卡\ndescription: bilingual CLI routing fixture\naliases: [routealias, relayalias]\nscope: infra",
@@ -594,10 +601,25 @@ def _selftest():
                 "priorityneedle priorityneedle priorityneedle in body only.",
             )
             _write_card(other, "name: Spare Card\ntags:\n  - sparetag", "Unrelated control content.")
+            memory_index.write_text(
+                "# Memory Index\nmemoryindexonlyneedle\n",
+                encoding="utf-8",
+            )
+            private_view.write_text(
+                "# Generated View\nprivateviewonlyneedle\n",
+                encoding="utf-8",
+            )
 
             initial = build_index(vault)
             checks.append(("English term", query_index(vault, "resilient")["results"][0]["path"] == str(english.resolve())))
             checks.append(("Chinese trigram", query_index(vault, "中文無空格")["results"][0]["path"] == str(bilingual.resolve())))
+            checks.append(
+                (
+                    "Index and underscore views excluded",
+                    query_index(vault, "memoryindexonlyneedle")["count"] == 0
+                    and query_index(vault, "privateviewonlyneedle")["count"] == 0,
+                )
+            )
             cli_query = subprocess.run(
                 [sys.executable, str(Path(__file__).resolve()), "query", "routealias", "--vault", str(vault)],
                 capture_output=True,
@@ -662,18 +684,44 @@ def _selftest():
             connection = sqlite3.connect(str(_db_path(vault)))
             try:
                 with connection:
+                    for legacy_path in (memory_index, private_view):
+                        legacy_stat = legacy_path.stat()
+                        legacy_fields = _read_card(legacy_path)
+                        cursor = connection.execute(
+                            """
+                            INSERT INTO cards(card_path, mtime_ns, size, name, description, fm_aliases, fm_scope, body)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                legacy_path.name,
+                                legacy_stat.st_mtime_ns,
+                                legacy_stat.st_size,
+                                legacy_fields["name"],
+                                legacy_fields["description"],
+                                legacy_fields[memspec.ALIASES_FIELD],
+                                legacy_fields[memspec.SCOPE_FIELD],
+                                legacy_fields["body"],
+                            ),
+                        )
+                        _replace_fts_row(
+                            connection,
+                            cursor.lastrowid,
+                            legacy_path.name,
+                            legacy_fields,
+                        )
                     connection.execute(
                         "UPDATE search_meta SET value = ? WHERE key = ?",
-                        ("1", _FTS_FORMAT_KEY),
+                        ("2", _FTS_FORMAT_KEY),
                     )
-                    connection.execute("DELETE FROM cards_fts")
             finally:
                 connection.close()
             migrated_recall = recall_index(vault, "怎麼用星橋處理未知噪音")
             checks.append(
                 (
-                    "Legacy FTS format auto-rebuild",
-                    migrated_recall["results"][0]["path"] == str(mixed.resolve()),
+                    "Legacy index format auto-rebuild",
+                    migrated_recall["results"][0]["path"] == str(mixed.resolve())
+                    and query_index(vault, "memoryindexonlyneedle")["count"] == 0
+                    and query_index(vault, "privateviewonlyneedle")["count"] == 0,
                 )
             )
             checks.append(("Frontmatter first", query_index(vault, "priorityneedle")["results"][0]["path"] == str(front.resolve())))
@@ -728,7 +776,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 12
+    total = 13
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
