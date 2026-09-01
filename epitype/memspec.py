@@ -92,6 +92,20 @@ COMPACT_MAP_MAX_LINE_BYTES = 2 * 1024 * 1024
 COMPACT_MAP_USER_MAX_CHARS = 200
 COMPACT_MAP_ASSISTANT_MAX_CHARS = 300
 
+# Personal transcript scar proposals share one bilingual correction-pattern
+# table. Consumers cluster by the stable key and never write matches to a vault.
+SCAR_CORRECTION_PATTERNS = (
+    ("zh-you", "又", r"又"),
+    ("zh-again", "再次", r"再次"),
+    ("zh-told", "我說過", r"我說過"),
+    ("zh-wrong", "錯了", r"錯了"),
+    ("zh-not-like-this", "不是這樣", r"不是這樣"),
+    ("en-again", "again", r"\bagain\b"),
+    ("en-told", "I told you", r"\bI\s+told\s+you\b"),
+    ("en-wrong", "wrong", r"\bwrong\b"),
+    ("en-stop-doing", "stop doing", r"\bstop\s+doing\b"),
+)
+
 # Claude hook adapters share protocol, budget, and field names through this
 # module so installed entrypoints cannot silently drift from one another.
 HOOK_TIMEOUT_SECONDS = 3.0
@@ -356,11 +370,26 @@ def _selftest():
                 and en.group("line") == "34"
             )
             checks.append(("Chinese and English citation quotes", citation_ok))
+            checks.append((
+                "bilingual correction patterns stay centralized",
+                tuple(label for _, label, _ in SCAR_CORRECTION_PATTERNS)
+                == (
+                    "又",
+                    "再次",
+                    "我說過",
+                    "錯了",
+                    "不是這樣",
+                    "again",
+                    "I told you",
+                    "wrong",
+                    "stop doing",
+                ),
+            ))
     except Exception as exc:  # selftest 要輸出可診斷失敗；file_lock 本身仍維持不拋例外。
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 5
+    total = 6
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

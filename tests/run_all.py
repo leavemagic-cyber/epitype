@@ -19,6 +19,8 @@ SELFTESTS = (
     Path("adapters") / "claude" / "precompact_hook.py",
     Path("adapters") / "claude" / "pretooluse_gate.py",
     Path("adapters") / "codex" / "config_guard.py",
+    Path("install") / "graft.py",
+    Path("install") / "scar_scan.py",
 )
 
 

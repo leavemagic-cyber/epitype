@@ -1,0 +1,1141 @@
+import sys; sys.dont_write_bytecode = True; [getattr(stream, "reconfigure", lambda **_: None)(encoding="utf-8", errors="replace") for stream in (sys.stdin, sys.stdout, sys.stderr)]  # Keep cp950 consoles deterministic.
+"""Install, inspect, or precisely remove Epitype hook registrations."""
+
+import argparse
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+import difflib
+import hashlib
+import io
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import tempfile
+import tomllib
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+MARKER_VALUE = "epitype"
+MARKER_FIELDS = ("id", "comment")
+EVENTS = ("SessionStart", "UserPromptSubmit", "PreCompact", "PreToolUse")
+STATE_VERSION = 1
+CONFIG_DIRECTORY = ".epitype"
+CONFIG_FILENAME = "config.json"
+STATE_FILENAME = "install_state.json"
+FALLBACK_VAULT = ".epitype-vault"
+NATIVE_DISABLE_PATTERN = re.compile(
+    r"(?:disable(?:d)?[^\r\n]{0,64}(?:memory|recall|history)|"
+    r"(?:memory|recall|history)[^\r\n]{0,64}disable(?:d)?)",
+    re.IGNORECASE,
+)
+
+
+class InstallError(RuntimeError):
+    pass
+
+
+@dataclass
+class JsonMember:
+    key: str
+    start: int
+    end: int
+    value: "JsonNode"
+
+
+@dataclass
+class JsonNode:
+    kind: str
+    start: int
+    end: int
+    value: object = None
+    members: list = field(default_factory=list)
+    items: list = field(default_factory=list)
+
+
+class JsonSpanParser:
+    """Small JSON parser that keeps source spans for byte-preserving surgery."""
+
+    def __init__(self, text):
+        self.text = text
+        self.length = len(text)
+        self.decoder = json.JSONDecoder()
+
+    def _space(self, position):
+        while position < self.length and self.text[position] in " \t\r\n":
+            position += 1
+        return position
+
+    def parse(self):
+        position = self._space(0)
+        node, position = self._value(position)
+        if self._space(position) != self.length:
+            raise ValueError("trailing JSON content")
+        return node
+
+    def _value(self, position):
+        if position >= self.length:
+            raise ValueError("unexpected end of JSON")
+        marker = self.text[position]
+        if marker == "{":
+            return self._object(position)
+        if marker == "[":
+            return self._array(position)
+        try:
+            value, end = self.decoder.raw_decode(self.text, position)
+        except json.JSONDecodeError as exc:
+            raise ValueError(str(exc)) from exc
+        kind = "string" if isinstance(value, str) else "scalar"
+        return JsonNode(kind, position, end, value=value), end
+
+    def _object(self, position):
+        start = position
+        position = self._space(position + 1)
+        members = []
+        if position < self.length and self.text[position] == "}":
+            return JsonNode("object", start, position + 1, members=members), position + 1
+        while True:
+            member_start = position
+            key_node, position = self._value(position)
+            if key_node.kind != "string":
+                raise ValueError("JSON object key must be a string")
+            position = self._space(position)
+            if position >= self.length or self.text[position] != ":":
+                raise ValueError("missing JSON object colon")
+            position = self._space(position + 1)
+            value, position = self._value(position)
+            members.append(JsonMember(key_node.value, member_start, value.end, value))
+            position = self._space(position)
+            if position >= self.length:
+                raise ValueError("unterminated JSON object")
+            if self.text[position] == "}":
+                return JsonNode(
+                    "object",
+                    start,
+                    position + 1,
+                    members=members,
+                ), position + 1
+            if self.text[position] != ",":
+                raise ValueError("missing JSON object comma")
+            position = self._space(position + 1)
+
+    def _array(self, position):
+        start = position
+        position = self._space(position + 1)
+        items = []
+        if position < self.length and self.text[position] == "]":
+            return JsonNode("array", start, position + 1, items=items), position + 1
+        while True:
+            item, position = self._value(position)
+            items.append(item)
+            position = self._space(position)
+            if position >= self.length:
+                raise ValueError("unterminated JSON array")
+            if self.text[position] == "]":
+                return JsonNode("array", start, position + 1, items=items), position + 1
+            if self.text[position] != ",":
+                raise ValueError("missing JSON array comma")
+            position = self._space(position + 1)
+
+
+def _parse_json(text):
+    node = JsonSpanParser(text).parse()
+    if node.kind != "object":
+        raise InstallError("JSON root must be an object")
+    return node
+
+
+def _member(node, key):
+    matches = [item for item in node.members if item.key == key]
+    if len(matches) > 1:
+        raise InstallError(f"duplicate JSON key is unsafe to edit: {key}")
+    return matches[0] if matches else None
+
+
+def _line_indent(text, position):
+    newline = max(text.rfind("\n", 0, position), text.rfind("\r", 0, position))
+    prefix = text[newline + 1 : position]
+    return prefix if prefix.strip() == "" else ""
+
+
+def _newline(text):
+    if "\r\n" in text:
+        return "\r\n"
+    if "\n" in text:
+        return "\n"
+    if "\r" in text:
+        return "\r"
+    return os.linesep
+
+
+def _render_json(value, pretty, indent, newline):
+    if not pretty:
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    rendered = json.dumps(value, ensure_ascii=False, indent=2)
+    return rendered.replace("\n", newline + indent)
+
+
+def _append_object_member(text, node, key, value):
+    if node.kind != "object":
+        raise InstallError("target JSON value is not an object")
+    pretty = "\n" in text or "\r" in text
+    newline = _newline(text)
+    close_position = node.end - 1
+    close_indent = _line_indent(text, close_position)
+    if node.members:
+        member_indent = _line_indent(text, node.members[0].start) or close_indent + "  "
+        position = node.members[-1].value.end
+        prefix = "," + (newline + member_indent if pretty else "")
+    else:
+        member_indent = close_indent + "  "
+        position = close_position
+        prefix = ""
+    rendered = _render_json(value, pretty, member_indent, newline)
+    payload = json.dumps(key, ensure_ascii=False) + (": " if pretty else ":") + rendered
+    return text[:position] + prefix + payload + text[position:]
+
+
+def _append_array_item(text, node, value):
+    if node.kind != "array":
+        raise InstallError("hook event value must be an array")
+    pretty = "\n" in text[node.start : node.end] or "\r" in text[node.start : node.end]
+    newline = _newline(text)
+    close_position = node.end - 1
+    close_indent = _line_indent(text, close_position)
+    if node.items:
+        item_indent = _line_indent(text, node.items[0].start) or close_indent + "  "
+        position = node.items[-1].end
+        prefix = "," + (newline + item_indent if pretty else "")
+    else:
+        item_indent = close_indent + "  "
+        position = close_position
+        prefix = ""
+    rendered = _render_json(value, pretty, item_indent, newline)
+    return text[:position] + prefix + rendered + text[position:]
+
+
+def _remove_ranges(text, ranges):
+    for start, end in sorted(ranges, reverse=True):
+        text = text[:start] + text[end:]
+    return text
+
+
+def _grouped_indices(indices):
+    groups = []
+    for index in sorted(indices):
+        if groups and index == groups[-1][1] + 1:
+            groups[-1] = (groups[-1][0], index)
+        else:
+            groups.append((index, index))
+    return groups
+
+
+def _remove_array_items(text, node, indices):
+    ranges = []
+    count = len(node.items)
+    for first, last in _grouped_indices(indices):
+        if first == 0 and last == count - 1:
+            ranges.append((node.items[first].start, node.items[last].end))
+        elif last < count - 1:
+            ranges.append((node.items[first].start, node.items[last + 1].start))
+        else:
+            ranges.append((node.items[first - 1].end, node.items[last].end))
+    return _remove_ranges(text, ranges)
+
+
+def _remove_object_member(text, node, index):
+    count = len(node.members)
+    if count == 1:
+        start = node.members[index].start
+        end = node.members[index].end
+    elif index < count - 1:
+        start = node.members[index].start
+        end = node.members[index + 1].start
+    else:
+        start = node.members[index - 1].value.end
+        end = node.members[index].end
+    return text[:start] + text[end:]
+
+
+def _marked(value):
+    return isinstance(value, dict) and any(
+        value.get(field_name) == MARKER_VALUE for field_name in MARKER_FIELDS
+    )
+
+
+def _hook_template(codex):
+    path = REPO_ROOT / "adapters" / "codex" / "hooks_template.json"
+    value = json.loads(path.read_text(encoding="utf-8"))
+    hooks = value.get("hooks")
+    if not isinstance(hooks, dict):
+        raise InstallError("Codex hook template has no hooks object")
+    repo_text = REPO_ROOT.as_posix()
+    result = {}
+    for event in EVENTS:
+        entries = hooks.get(event)
+        if not isinstance(entries, list) or len(entries) != 1:
+            raise InstallError(f"Codex hook template must contain one {event} entry")
+        entry = json.loads(json.dumps(entries[0]))
+        entry["id"] = MARKER_VALUE
+        commands = entry.get("hooks")
+        if not isinstance(commands, list):
+            raise InstallError(f"Codex hook template {event} entry is malformed")
+        for command in commands:
+            raw = command.get("command")
+            if not isinstance(raw, str):
+                raise InstallError(f"Codex hook template {event} command is malformed")
+            raw = raw.replace("{{EPITYPE_REPO_ROOT}}", repo_text)
+            if not codex:
+                raw = raw.replace(" --codex", "")
+            command["command"] = raw
+        result[event] = entry
+    return result
+
+
+def _merge_hooks(raw, entries):
+    bom = raw.startswith(b"\xef\xbb\xbf")
+    text = raw.decode("utf-8-sig")
+    json.loads(text)
+    root = _parse_json(text)
+    hooks_member = _member(root, "hooks")
+    created_hooks = hooks_member is None
+    created_events = []
+    locations = []
+
+    if hooks_member is None:
+        text = _append_object_member(
+            text,
+            root,
+            "hooks",
+            {event: [entries[event]] for event in EVENTS},
+        )
+        created_events.extend(EVENTS)
+        locations.extend(f"hooks.{event}[id=epitype]" for event in EVENTS)
+    else:
+        if hooks_member.value.kind != "object":
+            raise InstallError("hooks must be a JSON object")
+        for event in EVENTS:
+            root = _parse_json(text)
+            hooks_node = _member(root, "hooks").value
+            event_member = _member(hooks_node, event)
+            if event_member is None:
+                text = _append_object_member(text, hooks_node, event, [entries[event]])
+                created_events.append(event)
+                locations.append(f"hooks.{event}[id=epitype]")
+                continue
+            if event_member.value.kind != "array":
+                raise InstallError(f"hooks.{event} must be an array")
+            values = [json.loads(text[item.start : item.end]) for item in event_member.value.items]
+            if any(_marked(value) for value in values):
+                continue
+            text = _append_array_item(text, event_member.value, entries[event])
+            locations.append(f"hooks.{event}[id=epitype]")
+
+    encoded = text.encode("utf-8")
+    if bom:
+        encoded = b"\xef\xbb\xbf" + encoded
+    return encoded, created_hooks, created_events, locations
+
+
+def _unmerge_hooks(raw, target_state):
+    bom = raw.startswith(b"\xef\xbb\xbf")
+    text = raw.decode("utf-8-sig")
+    json.loads(text)
+    removed = []
+
+    for event in EVENTS:
+        root = _parse_json(text)
+        hooks_member = _member(root, "hooks")
+        if hooks_member is None or hooks_member.value.kind != "object":
+            continue
+        event_member = _member(hooks_member.value, event)
+        if event_member is None or event_member.value.kind != "array":
+            continue
+        values = [json.loads(text[item.start : item.end]) for item in event_member.value.items]
+        indices = [index for index, value in enumerate(values) if _marked(value)]
+        if indices:
+            text = _remove_array_items(text, event_member.value, indices)
+            removed.append(f"hooks.{event}[id=epitype]")
+
+    for event in target_state.get("created_events", ()):
+        root = _parse_json(text)
+        hooks_member = _member(root, "hooks")
+        if hooks_member is None or hooks_member.value.kind != "object":
+            continue
+        event_members = hooks_member.value.members
+        for index, member in enumerate(event_members):
+            if member.key != event:
+                continue
+            value = json.loads(text[member.value.start : member.value.end])
+            if value == []:
+                text = _remove_object_member(text, hooks_member.value, index)
+            break
+
+    if target_state.get("created_hooks"):
+        root = _parse_json(text)
+        hooks_members = root.members
+        for index, member in enumerate(hooks_members):
+            if member.key != "hooks":
+                continue
+            value = json.loads(text[member.value.start : member.value.end])
+            if value == {}:
+                text = _remove_object_member(text, root, index)
+            break
+
+    encoded = text.encode("utf-8")
+    if bom:
+        encoded = b"\xef\xbb\xbf" + encoded
+    return encoded, removed
+
+
+def _backup_name(path, timestamp):
+    base = path.with_name(path.name + ".bak_epitype_" + timestamp)
+    candidate = base
+    counter = 2
+    while candidate.exists():
+        candidate = path.with_name(base.name + f"_{counter}")
+        counter += 1
+    return candidate
+
+
+def _atomic_write(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=path.name + ".",
+        suffix=".epitype_tmp",
+        dir=path.parent,
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if path.exists():
+            shutil.copymode(path, temporary)
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+class Transaction:
+    def __init__(self):
+        self.timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        self.originals = {}
+        self.created_directories = []
+        self.backups = []
+        self.changed = []
+
+    def mkdir(self, path):
+        missing = []
+        cursor = path
+        while not cursor.exists():
+            missing.append(cursor)
+            cursor = cursor.parent
+        for directory in reversed(missing):
+            directory.mkdir()
+            self.created_directories.append(directory)
+
+    def prepare(self, path):
+        if path in self.originals:
+            return
+        self.originals[path] = path.read_bytes() if path.exists() else None
+        if path.exists():
+            backup = _backup_name(path, self.timestamp)
+            shutil.copy2(path, backup)
+            self.backups.append((path, backup))
+
+    def write(self, path, data):
+        current = path.read_bytes() if path.exists() else None
+        if current == data:
+            return False
+        self.prepare(path)
+        self.mkdir(path.parent)
+        _atomic_write(path, data)
+        if path not in self.changed:
+            self.changed.append(path)
+        return True
+
+    def rollback(self):
+        for path, original in reversed(tuple(self.originals.items())):
+            if original is None:
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    pass
+            else:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                _atomic_write(path, original)
+        for directory in reversed(self.created_directories):
+            try:
+                directory.rmdir()
+            except OSError:
+                pass
+
+
+def _host_paths(home):
+    return {
+        "claude": home / ".claude" / "settings.json",
+        "codex": home / ".codex" / "config.toml",
+    }
+
+
+def _detect_hosts(home):
+    paths = _host_paths(home)
+    return tuple(name for name, path in paths.items() if path.is_file())
+
+
+def _detect_native_vaults(home, hosts):
+    candidates = []
+    if "claude" in hosts:
+        candidates.extend((home / ".claude" / "memory", home / ".claude" / "memories"))
+        projects = home / ".claude" / "projects"
+        if projects.is_dir():
+            candidates.extend(path / "memory" for path in projects.iterdir() if path.is_dir())
+    if "codex" in hosts:
+        candidates.append(home / ".codex" / "memories")
+    result = []
+    seen = set()
+    for candidate in candidates:
+        if not candidate.is_dir():
+            continue
+        resolved = candidate.resolve()
+        key = os.path.normcase(os.fspath(resolved))
+        if key not in seen:
+            seen.add(key)
+            result.append(resolved)
+    return sorted(result, key=lambda item: os.path.normcase(os.fspath(item)))
+
+
+def _config_bytes(path, vaults):
+    if path.is_file():
+        value = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(value, dict):
+            raise InstallError("Epitype config root must be an object")
+    else:
+        value = {}
+    value["vaults"] = [os.fspath(path) for path in vaults]
+    value.setdefault("budget_bytes", 10 * 1024)
+    return (json.dumps(value, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+
+
+def _load_state(path):
+    if not path.is_file():
+        return {"version": STATE_VERSION, "targets": {}}
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict) or value.get("version") != STATE_VERSION:
+        raise InstallError("unsupported Epitype install state")
+    if not isinstance(value.get("targets"), dict):
+        raise InstallError("malformed Epitype install state")
+    return value
+
+
+def _state_bytes(value):
+    return (json.dumps(value, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+
+
+def _merge_target_state(state, name, path, created_hooks, created_events):
+    targets = state.setdefault("targets", {})
+    previous = targets.get(name, {})
+    previous_events = previous.get("created_events", ())
+    targets[name] = {
+        "path": os.fspath(path),
+        "created_hooks": bool(previous.get("created_hooks")) or created_hooks,
+        "created_events": sorted(set(previous_events) | set(created_events)),
+    }
+
+
+def _protected_diff(before, after):
+    violations = []
+    for path in sorted(set(before) | set(after), key=lambda item: os.fspath(item)):
+        old_raw = before.get(path, b"")
+        new_raw = after.get(path, b"")
+        try:
+            if path.suffix.casefold() == ".json":
+                old_value = json.loads(old_raw.decode("utf-8-sig")) if old_raw else {}
+                new_value = json.loads(new_raw.decode("utf-8-sig")) if new_raw else {}
+            elif path.suffix.casefold() == ".toml":
+                old_value = tomllib.loads(old_raw.decode("utf-8-sig")) if old_raw else {}
+                new_value = tomllib.loads(new_raw.decode("utf-8-sig")) if new_raw else {}
+            else:
+                raise ValueError("unsupported protected config format")
+
+            def protected_values(value, prefix=()):
+                found = {}
+                if not isinstance(value, dict):
+                    return found
+                for key, item in value.items():
+                    path_parts = prefix + (str(key),)
+                    if NATIVE_DISABLE_PATTERN.search(str(key)):
+                        found[".".join(path_parts)] = item
+                    found.update(protected_values(item, path_parts))
+                return found
+
+            old_values = protected_values(old_value)
+            new_values = protected_values(new_value)
+            for key in sorted(set(old_values) | set(new_values)):
+                if old_values.get(key, object()) != new_values.get(key, object()):
+                    violations.append(f"{path}: native-disable key changed: {key}")
+        except (UnicodeDecodeError, json.JSONDecodeError, tomllib.TOMLDecodeError, ValueError):
+            old = old_raw.decode("utf-8", errors="replace").splitlines()
+            new = new_raw.decode("utf-8", errors="replace").splitlines()
+            for line in difflib.unified_diff(old, new, lineterm=""):
+                if not line.startswith(("+", "-")) or line.startswith(("+++", "---")):
+                    continue
+                if NATIVE_DISABLE_PATTERN.search(line[1:]):
+                    violations.append(f"{path}: {line}")
+    return violations
+
+
+def _assert_native_protection(before, after):
+    violations = _protected_diff(before, after)
+    if violations:
+        raise InstallError("native-memory protection rejected diff: " + " | ".join(violations))
+
+
+def _run_billing_guard(home, apply_changes, dry_run, transaction, output):
+    config = home / ".codex" / "config.toml"
+    tool = REPO_ROOT / "adapters" / "codex" / "config_guard.py"
+    environment = os.environ.copy()
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    check_result = subprocess.run(
+        [sys.executable, os.fspath(tool), "check", "--config", os.fspath(config)],
+        cwd=REPO_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    print("BILLING GUARD " + ("APPLY" if apply_changes else "CHECK"), file=output)
+    if check_result.stdout:
+        print(check_result.stdout.rstrip(), file=output)
+    if check_result.stderr:
+        print(check_result.stderr.rstrip(), file=output)
+    if check_result.returncode != 0:
+        raise InstallError(f"billing guard exited {check_result.returncode}")
+    if apply_changes and dry_run:
+        print(f"DRY-RUN apply target: {config}", file=output)
+        return
+    if not apply_changes:
+        return
+
+    # Apply against a temporary copy first. This keeps config_guard as the
+    # source-driven implementation while graft owns the one required UTC backup.
+    with tempfile.TemporaryDirectory(prefix="epitype-billing-") as temp_dir:
+        temporary_config = Path(temp_dir) / "config.toml"
+        temporary_config.write_bytes(config.read_bytes())
+        apply_result = subprocess.run(
+            [
+                sys.executable,
+                os.fspath(tool),
+                "check",
+                "--config",
+                os.fspath(temporary_config),
+                "--apply",
+            ],
+            cwd=REPO_ROOT,
+            env=environment,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+        if apply_result.returncode != 0:
+            if apply_result.stderr:
+                print(apply_result.stderr.rstrip(), file=output)
+            raise InstallError(f"billing guard apply exited {apply_result.returncode}")
+        transaction.write(config, temporary_config.read_bytes())
+        print(f"APPLY TARGET: {config}", file=output)
+
+
+def _marker_count(path):
+    value = json.loads(path.read_text(encoding="utf-8"))
+    hooks = value.get("hooks", {}) if isinstance(value, dict) else {}
+    counts = {}
+    for event in EVENTS:
+        entries = hooks.get(event, []) if isinstance(hooks, dict) else []
+        counts[event] = sum(1 for entry in entries if _marked(entry)) if isinstance(entries, list) else 0
+    return counts
+
+
+def _synthetic_health(output):
+    scripts = (
+        ("SessionStart", REPO_ROOT / "adapters" / "claude" / "sessionstart_hook.py", {"source": "epitype-doctor"}, ()),
+        ("UserPromptSubmit", REPO_ROOT / "adapters" / "claude" / "recall_hook.py", {"prompt": "synthetic doctor probe"}, ()),
+        ("PreCompact", REPO_ROOT / "adapters" / "claude" / "precompact_hook.py", {"transcript_path": ""}, ("--codex",)),
+        ("PreToolUse", REPO_ROOT / "adapters" / "claude" / "pretooluse_gate.py", {"tool_name": "SyntheticRead", "tool_input": {"path": "synthetic.txt"}}, ()),
+    )
+    passed = 0
+    with tempfile.TemporaryDirectory(prefix="epitype-doctor-") as temp_dir:
+        root = Path(temp_dir)
+        vault = root / "vault"
+        vault.mkdir()
+        config = root / "config.json"
+        config.write_text(json.dumps({"vaults": [os.fspath(vault)]}), encoding="utf-8")
+        environment = os.environ.copy()
+        environment["EPITYPE_CONFIG"] = os.fspath(config)
+        environment["PYTHONDONTWRITEBYTECODE"] = "1"
+        for name, script, event, arguments in scripts:
+            result = subprocess.run(
+                [sys.executable, os.fspath(script), *arguments],
+                input=json.dumps(event, ensure_ascii=False),
+                cwd=REPO_ROOT,
+                env=environment,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=10,
+                check=False,
+            )
+            ok = result.returncode == 0
+            passed += int(ok)
+            print(f"HOOK {name}: {'PASS' if ok else 'FAIL'} exit={result.returncode}", file=output)
+    print(f"HEALTH {'PASS' if passed == len(scripts) else 'FAIL'} {passed}/{len(scripts)}", file=output)
+    return passed == len(scripts)
+
+
+def _doctor(home, dry_run=False, output=sys.stdout):
+    hosts = _detect_hosts(home)
+    print("HOSTS: " + (", ".join(hosts) if hosts else "none"), file=output)
+    if dry_run:
+        print("DRY-RUN hooks: SessionStart, UserPromptSubmit, PreCompact, PreToolUse", file=output)
+        return 0
+    config_path = home / CONFIG_DIRECTORY / CONFIG_FILENAME
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        vaults = config.get("vaults") if isinstance(config, dict) else None
+        if not isinstance(vaults, list) or not vaults or not all(Path(item).is_dir() for item in vaults):
+            raise ValueError("config vaults must be existing directories")
+        for name in hosts:
+            hook_path = (
+                home / ".claude" / "settings.json"
+                if name == "claude"
+                else home / ".codex" / "hooks.json"
+            )
+            counts = _marker_count(hook_path)
+            if any(counts[event] != 1 for event in EVENTS):
+                raise ValueError(f"{name} registration count is not exactly one: {counts}")
+            print(f"REGISTRATION {name}: PASS 4/4", file=output)
+        if not hosts:
+            raise ValueError("no supported host detected")
+        return 0 if _synthetic_health(output) else 1
+    except Exception as exc:
+        print(f"DOCTOR FAIL {type(exc).__name__}: {exc}", file=output)
+        return 1
+
+
+def _planned_backup(path):
+    return path.with_name(path.name + ".bak_epitype_<UTC>")
+
+
+def _install(home, dry_run=False, apply_billing_guard=False, output=sys.stdout):
+    hosts = _detect_hosts(home)
+    if not hosts:
+        raise InstallError("no supported host detected under --home")
+    print("HOSTS: " + ", ".join(hosts), file=output)
+    config_dir = home / CONFIG_DIRECTORY
+    config_path = config_dir / CONFIG_FILENAME
+    state_path = config_dir / STATE_FILENAME
+    state = _load_state(state_path)
+    native_vaults = _detect_native_vaults(home, hosts)
+    fallback = home / FALLBACK_VAULT
+    vaults = native_vaults or [fallback.resolve()]
+    transaction = Transaction()
+    protected_paths = [home / ".claude" / "settings.json", home / ".codex" / "config.toml"]
+    protected_before = {path: path.read_bytes() for path in protected_paths if path.is_file()}
+
+    try:
+        if not native_vaults:
+            print(f"{'DRY-RUN create' if dry_run else 'CREATE'} empty vault: {fallback}", file=output)
+            if not dry_run:
+                transaction.mkdir(fallback)
+        else:
+            for vault in native_vaults:
+                print(f"NATIVE VAULT: {vault}", file=output)
+
+        config_data = _config_bytes(config_path, vaults)
+        if not config_path.exists() or config_path.read_bytes() != config_data:
+            print(f"{'DRY-RUN write' if dry_run else 'WRITE'} {config_path}: vaults", file=output)
+            if config_path.exists():
+                print(f"BACKUP: {_planned_backup(config_path) if dry_run else 'pending'}", file=output)
+            if not dry_run:
+                transaction.write(config_path, config_data)
+
+        targets = []
+        if "claude" in hosts:
+            targets.append(("claude", home / ".claude" / "settings.json", _hook_template(False)))
+        if "codex" in hosts:
+            targets.append(("codex", home / ".codex" / "hooks.json", _hook_template(True)))
+
+        for name, path, entries in targets:
+            source = path.read_bytes() if path.is_file() else b"{}\n"
+            merged, created_hooks, created_events, locations = _merge_hooks(source, entries)
+            _merge_target_state(state, name, path, created_hooks, created_events)
+            for location in locations:
+                print(f"{'DRY-RUN merge' if dry_run else 'MERGE'} {path}: {location}", file=output)
+            if merged != source:
+                if path.exists():
+                    print(f"BACKUP: {_planned_backup(path) if dry_run else 'pending'}", file=output)
+                if not dry_run:
+                    transaction.write(path, merged)
+
+        if "codex" in hosts:
+            _run_billing_guard(home, apply_billing_guard, dry_run, transaction, output)
+
+        if dry_run:
+            print(f"DRY-RUN write {state_path}: install ownership metadata", file=output)
+            print("DRY-RUN health: feed synthetic stdin to four hooks", file=output)
+            print("DRY-RUN complete; no files changed.", file=output)
+            return 0
+
+        transaction.write(state_path, _state_bytes(state))
+        protected_after = {path: path.read_bytes() for path in protected_paths if path.is_file()}
+        _assert_native_protection(protected_before, protected_after)
+        if _doctor(home, output=output) != 0:
+            raise InstallError("post-install doctor failed")
+
+        print("INSTALL REPORT", file=output)
+        for path in transaction.changed:
+            print(f"CHANGED: {path}", file=output)
+        for source, backup in transaction.backups:
+            print(f"BACKUP: {source} -> {backup}", file=output)
+        print(
+            f"REMOVE: {sys.executable} {REPO_ROOT / 'install' / 'graft.py'} uninstall --home {home}",
+            file=output,
+        )
+        return 0
+    except Exception:
+        if not dry_run:
+            transaction.rollback()
+        raise
+
+
+def _uninstall(home, dry_run=False, output=sys.stdout):
+    config_dir = home / CONFIG_DIRECTORY
+    state_path = config_dir / STATE_FILENAME
+    state = _load_state(state_path) if state_path.is_file() else {"version": STATE_VERSION, "targets": {}}
+    config_path = config_dir / CONFIG_FILENAME
+    if config_path.is_file():
+        config_value = json.loads(config_path.read_text(encoding="utf-8"))
+        configured_vaults = config_value.get("vaults", ()) if isinstance(config_value, dict) else ()
+        for raw_vault in configured_vaults if isinstance(configured_vaults, list) else ():
+            if not isinstance(raw_vault, str):
+                continue
+            vault = Path(raw_vault).expanduser().resolve()
+            try:
+                vault.relative_to(config_dir.resolve())
+            except ValueError:
+                continue
+            raise InstallError(
+                f"refusing to remove {config_dir}: configured vault would be deleted: {vault}"
+            )
+    transaction = Transaction()
+    targets = {
+        "claude": home / ".claude" / "settings.json",
+        "codex": home / ".codex" / "hooks.json",
+    }
+    try:
+        for name, path in targets.items():
+            if not path.is_file():
+                continue
+            target_state = state.get("targets", {}).get(name, {})
+            updated, removed = _unmerge_hooks(path.read_bytes(), target_state)
+            for location in removed:
+                print(f"{'DRY-RUN remove' if dry_run else 'REMOVE'} {path}: {location}", file=output)
+            if updated != path.read_bytes():
+                if dry_run:
+                    print(f"BACKUP: {_planned_backup(path)}", file=output)
+                else:
+                    transaction.write(path, updated)
+
+        if config_dir.exists():
+            print(f"{'DRY-RUN remove' if dry_run else 'REMOVE'} config directory: {config_dir}", file=output)
+        if dry_run:
+            print("DRY-RUN complete; no files changed.", file=output)
+            return 0
+        if config_dir.exists():
+            shutil.rmtree(config_dir)
+        print("UNINSTALL REPORT", file=output)
+        for path in transaction.changed:
+            print(f"CHANGED: {path}", file=output)
+        for source, backup in transaction.backups:
+            print(f"BACKUP: {source} -> {backup}", file=output)
+        print("VAULTS PRESERVED: native vaults and ~/.epitype-vault were not removed.", file=output)
+        return 0
+    except Exception:
+        if not dry_run:
+            transaction.rollback()
+        raise
+
+
+def _tree_digest(root):
+    rows = []
+    for path in sorted(root.rglob("*"), key=lambda item: os.fspath(item)):
+        relative = path.relative_to(root).as_posix()
+        if path.is_file():
+            rows.append((relative, hashlib.sha256(path.read_bytes()).hexdigest()))
+        else:
+            rows.append((relative + "/", "directory"))
+    return rows
+
+
+def _selftest():
+    checks = []
+    try:
+        with tempfile.TemporaryDirectory(prefix="epitype-graft-") as temp_dir:
+            root = Path(temp_dir)
+            home = root / "home"
+            (home / ".claude").mkdir(parents=True)
+            (home / ".codex").mkdir(parents=True)
+            claude = home / ".claude" / "settings.json"
+            codex_config = home / ".codex" / "config.toml"
+            codex_hooks = home / ".codex" / "hooks.json"
+            claude_source = (
+                b'{\r\n  "permissions": {"deny": ["SyntheticDanger"]},\r\n'
+                b'  "hooks": {"SessionStart": [{"id":"existing","hooks":[]}]},\r\n'
+                b'  "sentinel": "preserve bytes"\r\n}\r\n'
+            )
+            codex_source = b'{"hooks":{"PreToolUse":[{"comment":"existing","hooks":[]}]},"keep":true}\n'
+            config_source = b'model = "synthetic-unknown"\nmodel_context_window = 999999\n'
+            claude.write_bytes(claude_source)
+            codex_hooks.write_bytes(codex_source)
+            codex_config.write_bytes(config_source)
+
+            first_output = io.StringIO()
+            first_code = _install(home, output=first_output)
+            fallback = home / FALLBACK_VAULT
+            config_value = json.loads((home / CONFIG_DIRECTORY / CONFIG_FILENAME).read_text(encoding="utf-8"))
+            checks.append((
+                "both hosts, empty fallback, and doctor",
+                first_code == 0
+                and fallback.is_dir()
+                and not list(fallback.iterdir())
+                and config_value.get("vaults") == [os.fspath(fallback.resolve())]
+                and "HEALTH PASS 4/4" in first_output.getvalue(),
+            ))
+            claude_value = json.loads(claude.read_text(encoding="utf-8"))
+            codex_value = json.loads(codex_hooks.read_text(encoding="utf-8"))
+            checks.append((
+                "merge preserves permissions and existing hooks",
+                claude_value["permissions"]["deny"] == ["SyntheticDanger"]
+                and claude_value["hooks"]["SessionStart"][0]["id"] == "existing"
+                and codex_value["hooks"]["PreToolUse"][0]["comment"] == "existing"
+                and all(_marker_count(claude)[event] == 1 for event in EVENTS)
+                and all(_marker_count(codex_hooks)[event] == 1 for event in EVENTS),
+            ))
+            backups = list((home / ".claude").glob("settings.json.bak_epitype_*"))
+            backups += list((home / ".codex").glob("hooks.json.bak_epitype_*"))
+            checks.append((
+                "UTC backups contain original bytes",
+                len(backups) == 2
+                and any(path.read_bytes() == claude_source for path in backups)
+                and any(path.read_bytes() == codex_source for path in backups),
+            ))
+
+            before_uninstall_dry = _tree_digest(home)
+            uninstall_dry_output = io.StringIO()
+            uninstall_dry_code = _uninstall(home, dry_run=True, output=uninstall_dry_output)
+            checks.append((
+                "uninstall dry-run reports without writes",
+                uninstall_dry_code == 0
+                and before_uninstall_dry == _tree_digest(home)
+                and "DRY-RUN remove" in uninstall_dry_output.getvalue()
+                and "no files changed" in uninstall_dry_output.getvalue(),
+            ))
+
+            installed_claude = claude.read_bytes()
+            installed_codex = codex_hooks.read_bytes()
+            second_code = _install(home, output=io.StringIO())
+            checks.append((
+                "repeat install is idempotent",
+                second_code == 0
+                and claude.read_bytes() == installed_claude
+                and codex_hooks.read_bytes() == installed_codex
+                and all(_marker_count(claude)[event] == 1 for event in EVENTS)
+                and all(_marker_count(codex_hooks)[event] == 1 for event in EVENTS),
+            ))
+
+            card = fallback / "synthetic-card.md"
+            card.write_text("synthetic card\n", encoding="utf-8")
+            uninstall_code = _uninstall(home, output=io.StringIO())
+            checks.append((
+                "uninstall restores hook files byte-for-byte",
+                uninstall_code == 0
+                and claude.read_bytes() == claude_source
+                and codex_hooks.read_bytes() == codex_source
+                and codex_config.read_bytes() == config_source,
+            ))
+            checks.append((
+                "uninstall removes config but preserves vault cards",
+                not (home / CONFIG_DIRECTORY).exists()
+                and card.read_text(encoding="utf-8") == "synthetic card\n",
+            ))
+
+            dry_home = root / "dry-home"
+            (dry_home / ".claude").mkdir(parents=True)
+            dry_settings = dry_home / ".claude" / "settings.json"
+            dry_settings.write_text("{\"hooks\":{}}\n", encoding="utf-8")
+            before_dry = _tree_digest(dry_home)
+            dry_output = io.StringIO()
+            dry_code = _install(dry_home, dry_run=True, output=dry_output)
+            checks.append((
+                "dry-run reports every location without writes",
+                dry_code == 0
+                and before_dry == _tree_digest(dry_home)
+                and all(f"hooks.{event}[id=epitype]" in dry_output.getvalue() for event in EVENTS)
+                and "no files changed" in dry_output.getvalue(),
+            ))
+
+            later_home = root / "later-home"
+            (later_home / ".claude").mkdir(parents=True)
+            later_settings = later_home / ".claude" / "settings.json"
+            later_settings.write_text('{"sentinel":"keep","hooks":{"SessionStart":[]}}\n', encoding="utf-8")
+            _install(later_home, output=io.StringIO())
+            later_value = json.loads(later_settings.read_text(encoding="utf-8"))
+            later_entry = {"id": "later-user", "hooks": [{"type": "command", "command": "synthetic"}]}
+            later_value["hooks"]["SessionStart"].append(later_entry)
+            later_settings.write_text(
+                json.dumps(later_value, ensure_ascii=False, separators=(",", ":")) + "\n",
+                encoding="utf-8",
+            )
+            later_entry_bytes = json.dumps(later_entry, separators=(",", ":")).encode("utf-8")
+            _uninstall(later_home, output=io.StringIO())
+            later_after = later_settings.read_bytes()
+            later_after_value = json.loads(later_after)
+            checks.append((
+                "uninstall preserves hooks added after installation",
+                later_entry_bytes in later_after
+                and later_after_value["sentinel"] == "keep"
+                and later_after_value["hooks"]["SessionStart"] == [later_entry]
+                and not any(
+                    _marked(entry)
+                    for entries in later_after_value["hooks"].values()
+                    for entry in entries
+                ),
+            ))
+
+            guard_file = root / "guard-settings.json"
+            guard_source = b'{"hooks":{}}\n'
+            guard_file.write_bytes(guard_source)
+            guard_transaction = Transaction()
+            guard_transaction.write(guard_file, b'{"hooks":{},"DISABLE_AUTO_MEMORY":true}\n')
+            rejected = False
+            try:
+                _assert_native_protection(
+                    {guard_file: guard_source},
+                    {guard_file: guard_file.read_bytes()},
+                )
+            except InstallError:
+                rejected = True
+                guard_transaction.rollback()
+            unchanged_allowed = True
+            try:
+                _assert_native_protection(
+                    {guard_file: b'{"DISABLE_AUTO_MEMORY":true}\n'},
+                    {guard_file: b'{"DISABLE_AUTO_MEMORY":true,"hooks":{}}\n'},
+                )
+            except InstallError:
+                unchanged_allowed = False
+            checks.append((
+                "native-memory disable diff aborts and rolls back",
+                rejected and unchanged_allowed and guard_file.read_bytes() == guard_source,
+            ))
+
+            nested_home = root / "nested-vault-home"
+            nested_config_dir = nested_home / CONFIG_DIRECTORY
+            nested_vault = nested_config_dir / "vault"
+            nested_vault.mkdir(parents=True)
+            nested_card = nested_vault / "synthetic-card.md"
+            nested_card.write_text("preserve\n", encoding="utf-8")
+            (nested_config_dir / CONFIG_FILENAME).write_text(
+                json.dumps({"vaults": [os.fspath(nested_vault.resolve())]}),
+                encoding="utf-8",
+            )
+            nested_rejected = False
+            try:
+                _uninstall(nested_home, output=io.StringIO())
+            except InstallError:
+                nested_rejected = True
+            checks.append((
+                "uninstall refuses a vault nested under config removal",
+                nested_rejected and nested_card.read_text(encoding="utf-8") == "preserve\n",
+            ))
+
+            native_home = root / "native-home"
+            (native_home / ".codex" / "memories").mkdir(parents=True)
+            native_config = native_home / ".codex" / "config.toml"
+            native_hooks = native_home / ".codex" / "hooks.json"
+            native_config.write_text(
+                'model = "gpt-5.6-sol"\nmodel_context_window = 300000\nmodel_auto_compact_token_limit = 260000\n',
+                encoding="utf-8",
+            )
+            native_hooks.write_text("{}\n", encoding="utf-8")
+            apply_code = _install(native_home, apply_billing_guard=True, output=io.StringIO())
+            applied_text = native_config.read_text(encoding="utf-8")
+            checks.append((
+                "native vault detection and explicit billing apply",
+                apply_code == 0
+                and not (native_home / FALLBACK_VAULT).exists()
+                and "model_context_window = 240000" in applied_text
+                and "model_auto_compact_token_limit = 210000" in applied_text,
+            ))
+    except Exception as exc:
+        print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
+
+    passed = sum(bool(ok) for _, ok in checks)
+    total = 12
+    status = "PASS" if passed == total and len(checks) == total else "FAIL"
+    print(f"SELFTEST {status} {passed}/{total}")
+    if status != "PASS":
+        for name, ok in checks:
+            if not ok:
+                print(f"FAILED: {name}", file=sys.stderr)
+    return 0 if status == "PASS" else 1
+
+
+def _common_options(parser):
+    parser.add_argument("--home", type=Path, default=argparse.SUPPRESS, help="override the user home directory")
+    parser.add_argument("--dry-run", action="store_true", default=argparse.SUPPRESS, help="report every planned edit without writing")
+
+
+def _parser():
+    common = argparse.ArgumentParser(add_help=False)
+    _common_options(common)
+    parser = argparse.ArgumentParser(description=__doc__, parents=[common])
+    commands = parser.add_subparsers(dest="command", required=True)
+    install = commands.add_parser("install", parents=[common], help="merge and verify Epitype hooks")
+    install.add_argument("--apply-billing-guard", action="store_true", help="apply, rather than only report, Codex billing guard settings")
+    commands.add_parser("uninstall", parents=[common], help="remove only Epitype-owned registrations")
+    commands.add_parser("doctor", parents=[common], help="inspect registrations and exercise synthetic hook stdin")
+    return parser
+
+
+def main(argv=None):
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments == ["--selftest"]:
+        return _selftest()
+    parsed = _parser().parse_args(arguments)
+    home = getattr(parsed, "home", Path.home()).expanduser().resolve()
+    dry_run = getattr(parsed, "dry_run", False)
+    try:
+        if parsed.command == "install":
+            return _install(home, dry_run, parsed.apply_billing_guard)
+        if parsed.command == "uninstall":
+            return _uninstall(home, dry_run)
+        return _doctor(home, dry_run)
+    except Exception as exc:
+        print(f"ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
