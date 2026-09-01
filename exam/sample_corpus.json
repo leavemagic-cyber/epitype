@@ -1,0 +1,249 @@
+{
+  "questions": [
+    {
+      "id": "recall-en-hit",
+      "category": "recall",
+      "setup": {
+        "vault_cards": [
+          {
+            "path": "notes/harbor.md",
+            "content": "---\nname: Harbor Practice\ndescription: Blue token boarding exercise\naliases: [dock rehearsal]\nscope: data\n---\nIn this synthetic exercise, the blue token marks the boarding step.\n"
+          },
+          {
+            "path": "notes/garden.md",
+            "content": "---\nname: Garden Practice\ndescription: Neutral planting exercise\nscope: data\n---\nThe sample garden uses three paper labels.\n"
+          }
+        ]
+      },
+      "input": "Which synthetic note explains the blue boarding token?",
+      "expect": {
+        "top_k_contains": ["notes/harbor.md"]
+      }
+    },
+    {
+      "id": "recall-zh-hit",
+      "category": "recall",
+      "setup": {
+        "vault_cards": [
+          {
+            "path": "cards/tea.md",
+            "content": "---\nname: 茶杯練習卡\ndescription: 合成茶杯標籤流程\nscope: data\n---\n中立示例使用綠色標籤標示已清洗的茶杯。\n"
+          },
+          {
+            "path": "cards/pencil.md",
+            "content": "---\nname: 鉛筆練習卡\ndescription: 合成文具排序\nscope: data\n---\n把鉛筆依長度排列。\n"
+          }
+        ]
+      },
+      "input": "哪張合成卡說明綠色標籤與茶杯？",
+      "expect": {
+        "top_k_contains": ["cards/tea.md"]
+      }
+    },
+    {
+      "id": "recall-en-exclude",
+      "category": "recall",
+      "setup": {
+        "vault_cards": [
+          {
+            "path": "notes/orange.md",
+            "content": "---\nname: Orange Sample\ndescription: Citrus sorting note\nscope: data\n---\nA neutral card about arranging orange paper circles.\n"
+          }
+        ]
+      },
+      "input": "Locate violet telescope calibration",
+      "expect": {
+        "top_k_excludes": ["notes/orange.md"]
+      }
+    },
+    {
+      "id": "gate-en-deny",
+      "category": "gate",
+      "setup": {
+        "vault_cards": [
+          {
+            "path": "gates/copy-first.md",
+            "content": "---\nname: Copy First Sample\ntrigger:\n  tool: ^Write$\n  input: overwrite draft\nadvice: Review a copy first.\n---\nSynthetic safety example.\n"
+          }
+        ]
+      },
+      "input": {
+        "tool_name": "Write",
+        "tool_input": {
+          "action": "overwrite draft"
+        }
+      },
+      "expect": {
+        "decision": "deny",
+        "advice_contains": "Review a copy first."
+      }
+    },
+    {
+      "id": "gate-zh-deny",
+      "category": "gate",
+      "setup": {
+        "vault_cards": [
+          {
+            "path": "gates/list-first.md",
+            "content": "---\nname: 先列出合成目錄\ntrigger:\n  tool: ^Bash$\n  input: 移除合成目錄\nadvice: 請先列出目錄並核對範圍。\n---\n中立的安全示例。\n"
+          }
+        ]
+      },
+      "input": {
+        "tool_name": "Bash",
+        "tool_input": {
+          "command": "移除合成目錄"
+        }
+      },
+      "expect": {
+        "decision": "deny",
+        "advice_contains": "先列出目錄"
+      }
+    },
+    {
+      "id": "gate-en-allow",
+      "category": "gate",
+      "setup": {
+        "vault_cards": [
+          {
+            "path": "gates/write-only.md",
+            "content": "---\nname: Write Event Sample\ntrigger:\n  tool: ^Write$\n  input: replace sample\nadvice: Keep the prior sample available.\n---\nSynthetic gate card.\n"
+          }
+        ]
+      },
+      "input": {
+        "tool_name": "Read",
+        "tool_input": {
+          "path": "synthetic-note.txt"
+        }
+      },
+      "expect": {
+        "decision": "allow"
+      }
+    },
+    {
+      "id": "lint-en-clean",
+      "category": "lint",
+      "setup": {
+        "vault_cards": [
+          {
+            "path": "decisions/format.md",
+            "content": "---\ndecision_key: synthetic-format\nstatus: active\ncurrent_decision_at: 2026-01-15\ndecided_by: ai-autonomous\n---\nThe sample format uses round labels.\n"
+          }
+        ]
+      },
+      "input": ["decisions/format.md"],
+      "expect": {
+        "exit_code": 0,
+        "violations": []
+      }
+    },
+    {
+      "id": "lint-zh-duplicate",
+      "category": "lint",
+      "setup": {
+        "vault_cards": [
+          {
+            "path": "decisions/layout-a.md",
+            "content": "---\ndecision_key: layout-choice\nstatus: active\ncurrent_decision_at: 2026-02-01\ndecided_by: ai-autonomous\n---\n合成版面甲。\n"
+          },
+          {
+            "path": "decisions/layout-b.md",
+            "content": "---\ndecision_key: layout-choice\nstatus: active\ncurrent_decision_at: 2026-02-02\ndecided_by: ai-autonomous\n---\n合成版面乙。\n"
+          }
+        ]
+      },
+      "input": ["decisions/layout-a.md", "decisions/layout-b.md"],
+      "expect": {
+        "exit_code": 1,
+        "violations": ["decision_key=layout-choice 有 2 張現行卡"]
+      }
+    },
+    {
+      "id": "lint-en-date",
+      "category": "lint",
+      "setup": {
+        "vault_cards": [
+          {
+            "path": "decisions/date.md",
+            "content": "---\ndecision_key: sample-date\nstatus: active\ncurrent_decision_at: next-week\ndecided_by: ai-autonomous\n---\nSynthetic date fixture.\n"
+          }
+        ]
+      },
+      "input": ["decisions/date.md"],
+      "expect": {
+        "exit_code": 1,
+        "violations": ["current_decision_at 不是可解析 ISO 日期：next-week"]
+      }
+    },
+    {
+      "id": "supersession-en-current",
+      "category": "supersession",
+      "setup": {
+        "vault_cards": [
+          {
+            "path": "decisions/color-old.md",
+            "content": "---\nname: Earlier Color Sample\ndescription: colorprotocolmarker earlier form\ndecision_key: color-sample\nstatus: superseded\ncurrent_decision_at: 2026-03-01\ndecided_by: ai-autonomous\nsuperseded_by: color-current.md\n---\nRetained synthetic provenance.\n"
+          },
+          {
+            "path": "decisions/color-current.md",
+            "content": "---\nname: Current Color Sample\ndescription: colorprotocolmarker current form\ndecision_key: color-sample\nstatus: active\ncurrent_decision_at: 2026-03-02\ndecided_by: ai-autonomous\n---\nThe current sample uses blue circles.\n"
+          }
+        ]
+      },
+      "input": {
+        "cards": ["decisions/color-old.md", "decisions/color-current.md"],
+        "query": "load the colorprotocolmarker decision"
+      },
+      "expect": {
+        "current_only": ["decisions/color-current.md"]
+      }
+    },
+    {
+      "id": "supersession-zh-current",
+      "category": "supersession",
+      "setup": {
+        "vault_cards": [
+          {
+            "path": "decisions/ticket-old.md",
+            "content": "---\nname: 舊票券示例\ndescription: 合成票券規則的舊版\ndecision_key: ticket-sample\nstatus: superseded\ncurrent_decision_at: 2026-04-01\ndecided_by: ai-autonomous\nsuperseded_by: ticket-current.md\n---\n保留中立沿革。\n"
+          },
+          {
+            "path": "decisions/ticket-current.md",
+            "content": "---\nname: 現行票券示例\ndescription: 合成票券規則的現行版\ndecision_key: ticket-sample\nstatus: active\ncurrent_decision_at: 2026-04-02\ndecided_by: ai-autonomous\n---\n現行示例使用方形記號。\n"
+          }
+        ]
+      },
+      "input": {
+        "cards": ["decisions/ticket-old.md", "decisions/ticket-current.md"],
+        "query": "請找出合成票券規則"
+      },
+      "expect": {
+        "current_only": ["decisions/ticket-current.md"]
+      }
+    },
+    {
+      "id": "supersession-mixed-current",
+      "category": "supersession",
+      "setup": {
+        "vault_cards": [
+          {
+            "path": "decisions/channel-old.md",
+            "content": "---\nname: Earlier Channel Card\ndescription: archivechannelmarker 舊示例\ndecision_key: channel-sample\nstatus: superseded\ncurrent_decision_at: 2026-05-01\ndecided_by: ai-autonomous\nsuperseded_by: channel-current.md\n---\nHistorical synthetic card.\n"
+          },
+          {
+            "path": "decisions/channel-current.md",
+            "content": "---\nname: Current Channel Card\ndescription: archivechannelmarker 現行示例\ndecision_key: channel-sample\nstatus: active\ncurrent_decision_at: 2026-05-02\ndecided_by: ai-autonomous\n---\nCurrent neutral card.\n"
+          }
+        ]
+      },
+      "input": {
+        "cards": ["decisions/channel-old.md", "decisions/channel-current.md"],
+        "query": "Which archivechannelmarker card is 現行?"
+      },
+      "expect": {
+        "current_only": ["decisions/channel-current.md"]
+      }
+    }
+  ]
+}

@@ -21,6 +21,8 @@ SELFTESTS = (
     Path("adapters") / "codex" / "config_guard.py",
     Path("install") / "graft.py",
     Path("install") / "scar_scan.py",
+    Path("exam") / "exam_runner.py",
+    Path("tests") / "privacy_lint.py",
 )
 
 
