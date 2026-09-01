@@ -124,6 +124,29 @@ def _selftest():
                 "---\nname: 中文喚回卡\ndescription: 真機編碼測試\n---\n中文事件測試\n",
                 encoding="utf-8",
             )
+            old_decision = vault / "d-old-decision.md"
+            old_decision.write_text(
+                "---\n"
+                "name: Retired Hook Decision\n"
+                "description: hookdecisionneedle historical rule\n"
+                "decision_key: hook-read-contract\n"
+                f"{memspec.DECISION_STATUS_FIELD}: {memspec.SUPERSEDED_DECISION_STATUS}\n"
+                f"{memspec.SUPERSEDED_BY_FIELD}: e-current-decision.md\n"
+                "---\n"
+                "hookdecisionneedle old provenance\n",
+                encoding="utf-8",
+            )
+            current_decision = vault / "e-current-decision.md"
+            current_decision.write_text(
+                "---\n"
+                "name: Current Hook Decision\n"
+                "description: hookdecisionneedle current rule\n"
+                "decision_key: hook-read-contract\n"
+                f"{memspec.DECISION_STATUS_FIELD}: {memspec.ACTIVE_DECISION_STATUS}\n"
+                "---\n"
+                "hookdecisionneedle governs injection\n",
+                encoding="utf-8",
+            )
             config = root / "config.json"
             write_config(config, [vault])
             session_id = "synthetic-" + uuid.uuid4().hex
@@ -147,6 +170,34 @@ def _selftest():
                     and "Portable Recall" in context
                     and "Synthetic card" in context
                     and str(short_card.resolve()) in context,
+                )
+            )
+
+            supersession_result = run_synthetic(
+                Path(__file__),
+                {"prompt": "load hookdecisionneedle"},
+                config,
+            )
+            supersession_value = (
+                json.loads(supersession_result.stdout)
+                if supersession_result.stdout.strip()
+                else {}
+            )
+            supersession_context = supersession_value.get(
+                "hookSpecificOutput", {}
+            ).get("additionalContext", "")
+            injected_cards = [
+                line for line in supersession_context.splitlines() if line.startswith("- ")
+            ]
+            checks.append(
+                (
+                    "default supersession filtering reaches injection",
+                    supersession_result.returncode == 0
+                    and len(injected_cards) == 1
+                    and "Current Hook Decision" in supersession_context
+                    and str(current_decision.resolve()) in supersession_context
+                    and "Retired Hook Decision" not in supersession_context
+                    and str(old_decision.resolve()) not in supersession_context,
                 )
             )
 
@@ -222,7 +273,7 @@ def _selftest():
             shutil.rmtree(marker_directory, ignore_errors=True)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 5
+    total = 6
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

@@ -6,6 +6,7 @@ import csv
 import json
 import os
 from pathlib import Path
+import posixpath
 import re
 import sqlite3
 import subprocess
@@ -22,13 +23,19 @@ except ImportError:  # Direct script execution keeps the U1 CLI contract.
 # 2026-09-01 實測事故：雙語卡別名未進索引，導致同義詞檢索三連空手；規則：
 # name/description/aliases/scope 必須和本文一起成為可搜尋欄，且別名欄名只認
 # memspec 正本。
-_FRONT_FIELDS = ("name", "description", memspec.ALIASES_FIELD, memspec.SCOPE_FIELD)
-_ALL_FIELDS = _FRONT_FIELDS + ("body",)
+_SEARCH_FRONT_FIELDS = ("name", "description", memspec.ALIASES_FIELD, memspec.SCOPE_FIELD)
+_FRONT_FIELDS = _SEARCH_FRONT_FIELDS + (
+    memspec.DECISION_STATUS_FIELD,
+    memspec.SUPERSEDED_BY_FIELD,
+)
+_ALL_FIELDS = _SEARCH_FRONT_FIELDS + ("body",)
 _DB_FIELDS = {
     "name": "name",
     "description": "description",
     memspec.ALIASES_FIELD: "fm_aliases",
     memspec.SCOPE_FIELD: "fm_scope",
+    memspec.DECISION_STATUS_FIELD: memspec.DECISION_STATUS_FIELD,
+    memspec.SUPERSEDED_BY_FIELD: memspec.SUPERSEDED_BY_FIELD,
     "body": "body",
 }
 _CJK_RANGE = "\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\U00020000-\U0002fa1f"
@@ -39,7 +46,8 @@ _RECALL_MAX_TERMS = 12
 # bigrams indexable while the cards table and returned hit fields stay raw.
 _CJK_BIGRAM_PREFIX = "\ue000"
 _FTS_FORMAT_KEY = "fts_format"
-_FTS_FORMAT_VERSION = "3"
+_FTS_FORMAT_VERSION = "4"
+_CURRENT_DECISION_GUIDANCE = "此題現行決定="
 
 
 def _db_path(vault):
@@ -159,12 +167,41 @@ def _markdown_files(vault):
 
 
 def _ensure_schema(connection):
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS search_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+    )
+    row = connection.execute(
+        "SELECT value FROM search_meta WHERE key = ?", (_FTS_FORMAT_KEY,)
+    ).fetchone()
+    cards_exists = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'cards'"
+    ).fetchone()
+    columns = (
+        {item[1] for item in connection.execute("PRAGMA table_info(cards)")}
+        if cards_exists
+        else set()
+    )
+    expected_columns = {
+        "id",
+        "card_path",
+        "mtime_ns",
+        "size",
+        "name",
+        "description",
+        "fm_aliases",
+        "fm_scope",
+        memspec.DECISION_STATUS_FIELD,
+        memspec.SUPERSEDED_BY_FIELD,
+        "body",
+    }
+    rebuild = row is None or row[0] != _FTS_FORMAT_VERSION or not expected_columns.issubset(columns)
+    if rebuild:
+        # The SQLite database is a generated index. A format change rebuilds it
+        # from retained Markdown cards so old rows cannot keep blank metadata.
+        connection.execute("DROP TABLE IF EXISTS cards_fts")
+        connection.execute("DROP TABLE IF EXISTS cards")
     connection.executescript(
         """
-        CREATE TABLE IF NOT EXISTS search_meta (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL
-        );
         CREATE TABLE IF NOT EXISTS cards (
             id INTEGER PRIMARY KEY,
             card_path TEXT NOT NULL UNIQUE,
@@ -174,6 +211,8 @@ def _ensure_schema(connection):
             description TEXT NOT NULL,
             fm_aliases TEXT NOT NULL,
             fm_scope TEXT NOT NULL,
+            status TEXT NOT NULL,
+            superseded_by TEXT NOT NULL,
             body TEXT NOT NULL
         );
         CREATE VIRTUAL TABLE IF NOT EXISTS cards_fts USING fts5(
@@ -182,10 +221,7 @@ def _ensure_schema(connection):
         );
         """
     )
-    row = connection.execute(
-        "SELECT value FROM search_meta WHERE key = ?", (_FTS_FORMAT_KEY,)
-    ).fetchone()
-    return row is None or row[0] != _FTS_FORMAT_VERSION
+    return rebuild
 
 
 def _cjk_bigrams(text):
@@ -283,12 +319,16 @@ def build_index(vault, lock_timeout=0.0):
                     stat, fields = stable
                     connection.execute(
                         """
-                        INSERT INTO cards(card_path, mtime_ns, size, name, description, fm_aliases, fm_scope, body)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        INSERT INTO cards(
+                            card_path, mtime_ns, size, name, description, fm_aliases, fm_scope,
+                            status, superseded_by, body
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT(card_path) DO UPDATE SET
                             mtime_ns=excluded.mtime_ns, size=excluded.size, name=excluded.name,
                             description=excluded.description, fm_aliases=excluded.fm_aliases,
-                            fm_scope=excluded.fm_scope, body=excluded.body
+                            fm_scope=excluded.fm_scope, status=excluded.status,
+                            superseded_by=excluded.superseded_by, body=excluded.body
                         """,
                         (
                             card_path,
@@ -298,6 +338,8 @@ def build_index(vault, lock_timeout=0.0):
                             fields["description"],
                             fields[memspec.ALIASES_FIELD],
                             fields[memspec.SCOPE_FIELD],
+                            fields[memspec.DECISION_STATUS_FIELD],
+                            fields[memspec.SUPERSEDED_BY_FIELD],
                             fields["body"],
                         ),
                     )
@@ -392,7 +434,8 @@ def _rows_for_term(connection, term):
         try:
             rows = connection.execute(
                 """
-                SELECT c.card_path, c.name, c.description, c.fm_aliases, c.fm_scope, c.body,
+                SELECT c.card_path, c.name, c.description, c.fm_aliases, c.fm_scope,
+                       c.status, c.superseded_by, c.body,
                        bm25(cards_fts, 0.0, 12.0, 8.0, 12.0, 6.0, 1.0) AS relevance
                 FROM cards_fts JOIN cards AS c ON c.id = cards_fts.rowid
                 WHERE cards_fts MATCH ?
@@ -405,7 +448,8 @@ def _rows_for_term(connection, term):
             pass
     # trigram 不收少於三碼的 token；短中英文仍須符合「任何詞都能搜」，故只掃已受限的索引內容。
     return connection.execute(
-        "SELECT card_path, name, description, fm_aliases, fm_scope, body, 0.0 AS relevance FROM cards"
+        "SELECT card_path, name, description, fm_aliases, fm_scope, status, "
+        "superseded_by, body, 0.0 AS relevance FROM cards"
     ).fetchall()
 
 
@@ -444,7 +488,8 @@ def _rows_for_recall(connection, terms):
     try:
         return connection.execute(
             """
-            SELECT c.card_path, c.name, c.description, c.fm_aliases, c.fm_scope, c.body,
+            SELECT c.card_path, c.name, c.description, c.fm_aliases, c.fm_scope,
+                   c.status, c.superseded_by, c.body,
                    bm25(cards_fts, 0.0, 12.0, 8.0, 12.0, 6.0, 1.0) AS relevance
             FROM cards_fts JOIN cards AS c ON c.id = cards_fts.rowid
             WHERE cards_fts MATCH ?
@@ -471,7 +516,90 @@ def _recall_hits(row, terms):
     return hit_fields, len(matched_terms)
 
 
-def query_index(vault, term):
+def _is_superseded(row):
+    return (
+        (row[memspec.DECISION_STATUS_FIELD] or "").strip()
+        == memspec.SUPERSEDED_DECISION_STATUS
+    )
+
+
+def _successor_path(vault, source_card_path, raw_target, indexed_paths):
+    target = posixpath.normpath(str(raw_target or "").strip().replace("\\", "/"))
+    if (
+        not target
+        or target in (".", "..")
+        or target.startswith("../")
+        or posixpath.isabs(target)
+    ):
+        return None
+
+    variants = [target]
+    if Path(target).suffix.casefold() != ".md":
+        variants.append(target + ".md")
+    parent = posixpath.dirname(source_card_path)
+    relative_candidates = []
+    if parent:
+        relative_candidates.extend(posixpath.normpath(f"{parent}/{item}") for item in variants)
+    relative_candidates.extend(variants)
+
+    indexed = {item.casefold(): item for item in indexed_paths}
+    for candidate in relative_candidates:
+        matched = indexed.get(candidate.casefold())
+        if matched is not None:
+            return str((vault / matched).resolve())
+        path = (vault / candidate).resolve()
+        try:
+            path.relative_to(vault)
+        except ValueError:
+            continue
+        if path.is_file():
+            return str(path)
+
+    if "/" not in target:
+        loose = []
+        target_names = {
+            Path(item).name.casefold() for item in variants
+        } | {
+            Path(item).stem.casefold() for item in variants
+        }
+        for card_path in indexed_paths:
+            if (
+                Path(card_path).name.casefold() in target_names
+                or Path(card_path).stem.casefold() in target_names
+            ):
+                loose.append(card_path)
+        if len(set(loose)) == 1:
+            return str((vault / loose[0]).resolve())
+    return None
+
+
+def _guidance_lines(vault, excluded_links, results, indexed_paths):
+    result_paths = {item["path"] for item in results}
+    lines = []
+    seen = set()
+    for source_card_path, target in excluded_links:
+        successor = _successor_path(vault, source_card_path, target, indexed_paths)
+        if successor is None or successor in result_paths:
+            continue
+        line = _CURRENT_DECISION_GUIDANCE + successor
+        if line not in seen:
+            seen.add(line)
+            lines.append(line)
+    return lines
+
+
+def _result(vault, row, hits):
+    return {
+        "path": str((vault / row["card_path"]).resolve()),
+        "name": row["name"],
+        "description": row["description"],
+        memspec.DECISION_STATUS_FIELD: row[memspec.DECISION_STATUS_FIELD],
+        memspec.SUPERSEDED_BY_FIELD: row[memspec.SUPERSEDED_BY_FIELD],
+        "hit_fields": hits,
+    }
+
+
+def query_index(vault, term, include_superseded=False):
     vault = Path(vault).resolve()
     if not vault.is_dir():
         raise NotADirectoryError(str(vault))
@@ -488,38 +616,49 @@ def query_index(vault, term):
     connection.row_factory = sqlite3.Row
     try:
         candidates = []
+        excluded_links = []
         for row in _rows_for_term(connection, term):
             hits = _hit_fields(row, term)
             if not hits:
                 continue
-            front_hit = any(field in _FRONT_FIELDS for field in hits)
+            if not include_superseded and _is_superseded(row):
+                excluded_links.append(
+                    (row["card_path"], row[memspec.SUPERSEDED_BY_FIELD])
+                )
+                continue
+            front_hit = any(field in _SEARCH_FRONT_FIELDS for field in hits)
             field_rank = min(_ALL_FIELDS.index(field) for field in hits)
             candidates.append(
                 (
                     (0 if front_hit else 1, field_rank, float(row["relevance"]), row["card_path"]),
-                    {
-                        "path": str((vault / row["card_path"]).resolve()),
-                        "name": row["name"],
-                        "description": row["description"],
-                        "hit_fields": hits,
-                    },
+                    _result(vault, row, hits),
                 )
             )
+        indexed_paths = (
+            [item[0] for item in connection.execute("SELECT card_path FROM cards")]
+            if excluded_links
+            else []
+        )
     finally:
         connection.close()
     candidates.sort(key=lambda item: item[0])
     results = [item[1] for item in candidates[:memspec.FTS_TOP_K]]
-    return {"query": term, "count": len(results), "results": results}
+    return {
+        "query": term,
+        "count": len(results),
+        "results": results,
+        "guidance": _guidance_lines(vault, excluded_links, results, indexed_paths),
+    }
 
 
-def recall_index(vault, prompt):
+def recall_index(vault, prompt, include_superseded=False):
     vault = Path(vault).resolve()
     if not vault.is_dir():
         raise NotADirectoryError(str(vault))
     prompt = str(prompt).strip()
     terms = _recall_terms(prompt)
     if not terms:
-        return {"query": prompt, "terms": [], "count": 0, "results": []}
+        return {"query": prompt, "terms": [], "count": 0, "results": [], "guidance": []}
     db_path = _db_path(vault)
     if _is_stale(vault, db_path):
         build_index(vault, lock_timeout=0.0)
@@ -528,11 +667,17 @@ def recall_index(vault, prompt):
     connection.row_factory = sqlite3.Row
     try:
         candidates = []
+        excluded_links = []
         for row in _rows_for_recall(connection, terms):
             hits, matched_count = _recall_hits(row, terms)
             if not hits:
                 continue
-            front_hit = any(field in _FRONT_FIELDS for field in hits)
+            if not include_superseded and _is_superseded(row):
+                excluded_links.append(
+                    (row["card_path"], row[memspec.SUPERSEDED_BY_FIELD])
+                )
+                continue
+            front_hit = any(field in _SEARCH_FRONT_FIELDS for field in hits)
             field_rank = min(_ALL_FIELDS.index(field) for field in hits)
             candidates.append(
                 (
@@ -543,19 +688,25 @@ def recall_index(vault, prompt):
                         field_rank,
                         row["card_path"],
                     ),
-                    {
-                        "path": str((vault / row["card_path"]).resolve()),
-                        "name": row["name"],
-                        "description": row["description"],
-                        "hit_fields": hits,
-                    },
+                    _result(vault, row, hits),
                 )
             )
+        indexed_paths = (
+            [item[0] for item in connection.execute("SELECT card_path FROM cards")]
+            if excluded_links
+            else []
+        )
     finally:
         connection.close()
     candidates.sort(key=lambda item: item[0])
     results = [item[1] for item in candidates[:memspec.FTS_TOP_K]]
-    return {"query": prompt, "terms": terms, "count": len(results), "results": results}
+    return {
+        "query": prompt,
+        "terms": terms,
+        "count": len(results),
+        "results": results,
+        "guidance": _guidance_lines(vault, excluded_links, results, indexed_paths),
+    }
 
 
 def _write_card(path, frontmatter, body):
@@ -573,6 +724,8 @@ def _selftest():
             front = vault / "front.md"
             body = vault / "body.md"
             other = vault / "other.md"
+            old_decision = vault / "old-decision.md"
+            current_decision = vault / "current-decision.md"
             memory_index = vault / memspec.MEMORY_INDEX_FILENAME
             private_view = vault / "_VIEW.md"
             _write_card(
@@ -600,7 +753,36 @@ def _selftest():
                 "name: Body-only Card\ndescription: ranking control\nscope: data",
                 "priorityneedle priorityneedle priorityneedle in body only.",
             )
-            _write_card(other, "name: Spare Card\ntags:\n  - sparetag", "Unrelated control content.")
+            _write_card(
+                other,
+                "name: Spare Card\ntags:\n  - sparetag",
+                "Unrelated control content with ordinarynostatusneedle.",
+            )
+            _write_card(
+                old_decision,
+                "\n".join(
+                    (
+                        "name: Retired Supersession Fixture",
+                        "description: supersessionfixture historical decision",
+                        "decision_key: search-contract",
+                        f"{memspec.DECISION_STATUS_FIELD}: {memspec.SUPERSEDED_DECISION_STATUS}",
+                        f"{memspec.SUPERSEDED_BY_FIELD}: {current_decision.name}",
+                    )
+                ),
+                "supersessionfixture legacydirectionneedle provenance remains retained.",
+            )
+            _write_card(
+                current_decision,
+                "\n".join(
+                    (
+                        "name: Current Supersession Fixture",
+                        "description: supersessionfixture current decision",
+                        "decision_key: search-contract",
+                        f"{memspec.DECISION_STATUS_FIELD}: {memspec.ACTIVE_DECISION_STATUS}",
+                    )
+                ),
+                "supersessionfixture governs the present read path.",
+            )
             memory_index.write_text(
                 "# Memory Index\nmemoryindexonlyneedle\n",
                 encoding="utf-8",
@@ -611,6 +793,111 @@ def _selftest():
             )
 
             initial = build_index(vault)
+            connection = sqlite3.connect(str(_db_path(vault)))
+            try:
+                indexed_metadata = connection.execute(
+                    "SELECT status, superseded_by FROM cards WHERE card_path = ?",
+                    (old_decision.name,),
+                ).fetchone()
+            finally:
+                connection.close()
+            default_query = query_index(vault, "supersessionfixture")
+            default_recall = recall_index(vault, "load supersessionfixture decision")
+            checks.append(
+                (
+                    "Default query and recall exclude superseded",
+                    indexed_metadata
+                    == (
+                        memspec.SUPERSEDED_DECISION_STATUS,
+                        current_decision.name,
+                    )
+                    and {item["path"] for item in default_query["results"]}
+                    == {str(current_decision.resolve())}
+                    and {item["path"] for item in default_recall["results"]}
+                    == {str(current_decision.resolve())}
+                    and default_query["guidance"] == []
+                    and default_recall["guidance"] == [],
+                )
+            )
+            cli_query_all = subprocess.run(
+                [
+                    sys.executable,
+                    str(Path(__file__).resolve()),
+                    "query",
+                    "supersessionfixture",
+                    "--vault",
+                    str(vault),
+                    "--include-superseded",
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+            cli_recall_all = subprocess.run(
+                [
+                    sys.executable,
+                    str(Path(__file__).resolve()),
+                    "recall",
+                    "load supersessionfixture decision",
+                    "--vault",
+                    str(vault),
+                    "--include-superseded",
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+            all_query_results = json.loads(cli_query_all.stdout)["results"]
+            all_recall_results = json.loads(cli_recall_all.stdout)["results"]
+            expected_decisions = {
+                str(old_decision.resolve()),
+                str(current_decision.resolve()),
+            }
+            checks.append(
+                (
+                    "Include-superseded archaeology returns both cards",
+                    cli_query_all.returncode == 0
+                    and cli_recall_all.returncode == 0
+                    and {item["path"] for item in all_query_results} == expected_decisions
+                    and {item["path"] for item in all_recall_results} == expected_decisions
+                    and json.loads(cli_query_all.stdout)["guidance"] == []
+                    and json.loads(cli_recall_all.stdout)["guidance"] == []
+                    and any(
+                        item["path"] == str(old_decision.resolve())
+                        and item[memspec.DECISION_STATUS_FIELD]
+                        == memspec.SUPERSEDED_DECISION_STATUS
+                        and item[memspec.SUPERSEDED_BY_FIELD] == current_decision.name
+                        for item in all_query_results
+                    ),
+                )
+            )
+            expected_guidance = [
+                _CURRENT_DECISION_GUIDANCE + str(current_decision.resolve())
+            ]
+            guidance_query = query_index(vault, "legacydirectionneedle")
+            guidance_recall = recall_index(vault, "recall legacydirectionneedle")
+            checks.append(
+                (
+                    "Superseded result points to current decision",
+                    guidance_query["count"] == 0
+                    and guidance_query["guidance"] == expected_guidance
+                    and guidance_recall["count"] == 0
+                    and guidance_recall["guidance"] == expected_guidance,
+                )
+            )
+            ordinary_query = query_index(vault, "ordinarynostatusneedle")
+            ordinary_recall = recall_index(vault, "find ordinarynostatusneedle")
+            checks.append(
+                (
+                    "Card without status remains eligible",
+                    ordinary_query["results"][0]["path"] == str(other.resolve())
+                    and ordinary_recall["results"][0]["path"] == str(other.resolve()),
+                )
+            )
             checks.append(("English term", query_index(vault, "resilient")["results"][0]["path"] == str(english.resolve())))
             checks.append(("Chinese trigram", query_index(vault, "中文無空格")["results"][0]["path"] == str(bilingual.resolve())))
             checks.append(
@@ -684,7 +971,28 @@ def _selftest():
             connection = sqlite3.connect(str(_db_path(vault)))
             try:
                 with connection:
-                    for legacy_path in (memory_index, private_view):
+                    connection.executescript(
+                        """
+                        DROP TABLE cards_fts;
+                        DROP TABLE cards;
+                        CREATE TABLE cards (
+                            id INTEGER PRIMARY KEY,
+                            card_path TEXT NOT NULL UNIQUE,
+                            mtime_ns INTEGER NOT NULL,
+                            size INTEGER NOT NULL,
+                            name TEXT NOT NULL,
+                            description TEXT NOT NULL,
+                            fm_aliases TEXT NOT NULL,
+                            fm_scope TEXT NOT NULL,
+                            body TEXT NOT NULL
+                        );
+                        CREATE VIRTUAL TABLE cards_fts USING fts5(
+                            card_path UNINDEXED, name, description, fm_aliases, fm_scope, body,
+                            tokenize='trigram'
+                        );
+                        """
+                    )
+                    for legacy_path in _markdown_files(vault) + [memory_index, private_view]:
                         legacy_stat = legacy_path.stat()
                         legacy_fields = _read_card(legacy_path)
                         cursor = connection.execute(
@@ -711,7 +1019,7 @@ def _selftest():
                         )
                     connection.execute(
                         "UPDATE search_meta SET value = ? WHERE key = ?",
-                        ("2", _FTS_FORMAT_KEY),
+                        ("3", _FTS_FORMAT_KEY),
                     )
             finally:
                 connection.close()
@@ -721,7 +1029,9 @@ def _selftest():
                     "Legacy index format auto-rebuild",
                     migrated_recall["results"][0]["path"] == str(mixed.resolve())
                     and query_index(vault, "memoryindexonlyneedle")["count"] == 0
-                    and query_index(vault, "privateviewonlyneedle")["count"] == 0,
+                    and query_index(vault, "privateviewonlyneedle")["count"] == 0
+                    and query_index(vault, "legacydirectionneedle")["guidance"]
+                    == [_CURRENT_DECISION_GUIDANCE + str(current_decision.resolve())],
                 )
             )
             checks.append(("Frontmatter first", query_index(vault, "priorityneedle")["results"][0]["path"] == str(front.resolve())))
@@ -766,8 +1076,8 @@ def _selftest():
                 and all(isinstance(outcome, dict) for outcome in outcomes)
                 and any(outcome["status"] == "built" for outcome in outcomes)
                 and integrity == "ok"
-                and card_count == 6
-                and fts_count == 6
+                and card_count == 8
+                and fts_count == 8
                 and query_index(vault, "concurrentwriteproof")["results"][0]["path"]
                 == str(other.resolve())
             )
@@ -776,7 +1086,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 13
+    total = 17
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
@@ -801,9 +1111,11 @@ def _parser():
     query = subparsers.add_parser("query")
     query.add_argument("term")
     query.add_argument("--vault", default=".")
+    query.add_argument("--include-superseded", action="store_true")
     recall = subparsers.add_parser("recall")
     recall.add_argument("prompt")
     recall.add_argument("--vault", default=".")
+    recall.add_argument("--include-superseded", action="store_true")
     return parser
 
 
@@ -816,10 +1128,18 @@ def main(argv=None):
             payload = build_index(args.vault)
             exit_code = 0 if payload["status"] == "built" else 3
         elif args.command == "query":
-            payload = query_index(args.vault, args.term)
+            payload = query_index(
+                args.vault,
+                args.term,
+                include_superseded=args.include_superseded,
+            )
             exit_code = 0
         elif args.command == "recall":
-            payload = recall_index(args.vault, args.prompt)
+            payload = recall_index(
+                args.vault,
+                args.prompt,
+                include_superseded=args.include_superseded,
+            )
             exit_code = 0
         else:
             payload = {"error": "command required", "commands": ["build", "query", "recall"]}

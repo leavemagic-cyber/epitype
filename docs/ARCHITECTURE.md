@@ -38,7 +38,7 @@ A decision card has four required fields:
 
 For every `decision_key`, exactly one card should be `active`. A superseded card is retained for provenance and carries `superseded_by` pointing to its replacement. `owner-explicit` cards also carry the required source quote.
 
-The normative read rule is simple: only the active card is eligible to govern the next decision. `decision_lint.py` currently validates the fields and supersession links, rejects multiple active cards for one key, and warns when a key has no active card. The pre-1.0 `memsearch.py` schema does not yet index or filter `status`, so the read rule is not yet enforced end to end. Until that changes and gains a behavioral regression test, consumers must not claim that search can only return the current decision.
+The normative read rule is simple: only the active card is eligible to govern the next decision. `decision_lint.py` validates the fields and supersession links, rejects multiple active cards for one key, and warns when a key has no active card. `memsearch.py` indexes `status` and `superseded_by`, excludes superseded cards from `query` and `recall` by default, and preserves an explicit `--include-superseded` archaeology path. Its result payload also identifies the current replacement when a filtered predecessor matched but its successor did not.
 
 Run the implemented contract checks with:
 

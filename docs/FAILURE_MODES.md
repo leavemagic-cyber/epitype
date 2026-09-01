@@ -37,11 +37,13 @@ Systems often model creation or invalidation metadata without making current-sta
 
 ### Epitype countermeasure
 
-Decision cards use `decision_key`, `status`, `current_decision_at`, and `decided_by`. The lint gate rejects multiple `active` cards for one key, warns when a key has none, and validates `superseded_by` links. This is only a partial countermeasure today: the pre-1.0 search index does not yet filter out `superseded` cards. The missing read filter must be implemented and behavior-tested before Epitype can claim that an agent sees only the current decision.
+Decision cards use `decision_key`, `status`, `current_decision_at`, and `decided_by`. The lint gate rejects multiple `active` cards for one key, warns when a key has none, and validates `superseded_by` links. The search index retains `status` and `superseded_by`; `query` and `recall` exclude superseded cards by default, emit a replacement guidance line when needed, and expose retained history only through `--include-superseded`. Claude prompt recall consumes the filtered default.
 
 ### Self-verification
 
 ```powershell
+python epitype/memsearch.py --selftest
+python adapters/claude/recall_hook.py --selftest
 python epitype/decision_lint.py --selftest
 ```
 

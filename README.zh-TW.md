@@ -4,7 +4,7 @@ Epitype 是蓋在 CLI agent 原生記憶之上的治理層：它不追求存得�
 
 它沿用原生記憶，不另造一套記憶服務，也不取代或停用 host 原有機制。
 
-> 發布狀態：尚未到 v1.0。現階段可用合成資料自驗，但發布筆試，以及「讀取時排除已取代決策」這項限制，仍未完成。
+> 發布狀態：尚未到 v1.0。現階段可用合成資料自驗，且已交付讀取時預設排除已取代決策；發布筆試仍未完成。
 
 ## 問題不只在記不記得
 
@@ -16,7 +16,7 @@ Epitype 是蓋在 CLI agent 原生記憶之上的治理層：它不追求存得�
 ## Epitype 做什麼
 
 1. **逐動作、依情境強制喚回。** 每個受涵蓋的工具動作發生前，hook 會用當下工具與輸入比對傷疤 trigger；prompt 階段則另做相關卡片檢索。這是動作面上的情境選擇，不是只在 session 開頭灌一次記憶。
-2. **決策取代契約。** 決策卡有穩定鍵、狀態、生效時間與裁定來源；現行 lint 會拒絕同一鍵出現多張 active 卡，若一張都沒有則提出警告。設計目標是讀取時只讓 AI 看到現行決定，但目前 pre-1.0 的搜尋路徑尚未排除 superseded 卡，因此這裡不把端到端效果寫成已交付。
+2. **決策取代契約。** 決策卡有穩定鍵、狀態、生效時間與裁定來源；lint 會拒絕同一鍵出現多張 active 卡，若一張都沒有則提出警告。`query` 與 `recall` 預設排除 `status=superseded` 的卡、保留索引中的 provenance；若繼任卡不在結果中，另回傳現行決定導向行。`--include-superseded` 才會為考古刻意取回新舊兩版，prompt 階段的 hook 喚回則直接繼承安全預設。
 3. **由傷疤驅動的攔截。** deny 條件來自帶有明確 trigger 的累積教訓卡，而不只是「有一個 hook」。命中後會給出有界拒絕、較安全的替代路與稽核紀錄。Epitype 的差異是把記憶接上攔截閘，不是宣稱發明 hook 或 deny。
 4. **量行為，不只量想不想得起來。** 現有元件都附合成行為 selftest；v1.0 則以隨箱筆試引擎為發布閘。只有 recall 分數，不能當成發布證據。
 5. **原生優先。** 安裝只 merge 有 Epitype 標記的 hook，不會故意停用原生記憶。合成的「安裝後 host 檔未再變動」往返測試可把註冊檔恢復成原始 bytes，vault 保留；若安裝後另有合法變更，解除安裝會保留新變更，而不是拿舊備份硬蓋回去。
@@ -29,7 +29,7 @@ Epitype 是蓋在 CLI agent 原生記憶之上的治理層：它不追求存得�
 | 失敗模式 | Epitype 的對治 | 自己跑證據 |
 |---|---|---|
 | 喚回靠 AI 自覺，或只在 session 開頭做一次 | prompt 情境檢索，加上逐工具 trigger 比對 | `python adapters/claude/recall_hook.py --selftest`<br>`python adapters/claude/pretooluse_gate.py --selftest` |
-| 寫入端知道決策已失效，讀取端仍可能端出舊版 | 結構化決策狀態、多張 active 拒絕、零張 active 警告；讀取端排除仍是已揭露的 pre-1.0 缺口 | `python epitype/decision_lint.py --selftest` |
+| 寫入端知道決策已失效，讀取端仍可能端出舊版 | 結構化決策狀態、讀取端預設排除、保留 provenance，以及明示的考古覆寫 | `python epitype/memsearch.py --selftest`<br>`python adapters/claude/recall_hook.py --selftest`<br>`python epitype/decision_lint.py --selftest` |
 | 規則存了卻攔不住動作 | 帶 trigger 的傷疤卡驅動有界 deny、替代路與稽核列 | `python adapters/claude/pretooluse_gate.py --selftest` |
 | 評測只量召回，不量行為 | 元件 selftest 驗輸出、邊界、失敗模式與往返；v1.0 再加發布筆試 | `python tests/run_all.py` |
 | 自動萃取把猜測與糾正變成無人負責的髒記憶 | transcript 掃描只產提案；結構化決策必須先通過 lint 才算現行 | `python install/scar_scan.py --selftest`<br>`python epitype/decision_lint.py --selftest` |
@@ -82,5 +82,5 @@ Epitype 把穩定習慣、事故傷疤與待辦分開；提供四條檢索路；
 
 1. 需要安裝的方案，不可能比「原生預設已開」更省事。Epitype 的價值是治理，不是零設定。
 2. hook 注入受 host 的輸出量與時間上限約束。Epitype 把輸出封頂在 10 KiB，並採三秒 fail-open；所以必須選內容，不能全塞。
-3. 行為層量測仍在早期。現有 selftest 使用合成資料，v1.0 的筆試引擎尚未出現在本次 U5 build。
-4. 決策卡、多張 active 拒絕與零張 active 警告已存在，但 `memsearch.py` 尚未濾除 superseded 卡。完成接線與測試前，「AI 只看到現行決定」是設計目標，不是已交付保證。
+3. 行為層量測仍在早期。現有 selftest 使用合成資料，v1.0 的筆試引擎尚未出現在目前的 pre-1.0 build。
+4. 已交付的現行決定保證涵蓋 Epitype 預設的 `query`、`recall` 路徑，以及沿用預設的 hook 消費端。直接讀檔不在這層過濾範圍；`--include-superseded` 則會為考古刻意顯示保留的歷史卡。
