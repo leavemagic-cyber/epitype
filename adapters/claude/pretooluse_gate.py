@@ -27,7 +27,10 @@ from _hook_common import (
 def _scalar(raw):
     value = raw.strip()
     if len(value) >= 2 and value[0] == value[-1] == '"':
-        decoded = json.loads(value)
+        try:
+            decoded = json.loads(value)
+        except json.JSONDecodeError:
+            return value[1:-1]
         if not isinstance(decoded, str):
             raise ValueError("frontmatter scalar must be text")
         return decoded
@@ -199,23 +202,42 @@ def _parse_trigger_card(path):
     }
 
 
-def _append_audit(vault, tool_name, card_name, started_at):
+def _append_gate_log(vault, row, started_at):
     target = vault / memspec.GATE_LOG_FILENAME
     remaining = memspec.HOOK_TIMEOUT_SECONDS - (time.monotonic() - started_at)
     if remaining <= 0:
         raise TimeoutError("hook deadline reached")
-    row = {
+    value = {
         "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "tool": tool_name,
-        "card": card_name,
+        **row,
     }
     with memspec.file_lock(target, min(0.25, remaining)) as acquired:
         if not acquired:
             raise OSError("gate audit lock unavailable")
         with target.open("a", encoding="utf-8", newline="\n") as stream:
-            stream.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
+            stream.write(json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n")
             stream.flush()
             os.fsync(stream.fileno())
+
+
+def _append_audit(vault, tool_name, card_name, started_at):
+    _append_gate_log(
+        vault,
+        {"tool": tool_name, "card": card_name},
+        started_at,
+    )
+
+
+def _append_parse_defect(vault, path, error, started_at):
+    _append_gate_log(
+        vault,
+        {
+            "kind": "parse_defect",
+            "filename": path.name,
+            "reason": f"{type(error).__name__}: {error}",
+        },
+        started_at,
+    )
 
 
 def _handle(event, started_at):
@@ -237,7 +259,11 @@ def _handle(event, started_at):
         for path in sorted(vault.rglob("*.md"), key=lambda item: str(item).casefold()):
             if expired(started_at):
                 return None
-            card = _parse_trigger_card(path)
+            try:
+                card = _parse_trigger_card(path)
+            except Exception as exc:
+                _append_parse_defect(vault, path, exc, started_at)
+                continue
             if card is not None:
                 cards.append((vault, card))
 
@@ -350,17 +376,88 @@ def _selftest():
                 {"tool_name": "Bash", "tool_input": {"command": "remove target"}},
                 config,
             )
+            broken_value = json.loads(broken.stdout) if broken.stdout.strip() else {}
+            broken_output = broken_value.get("hookSpecificOutput", {})
             checks.append(
                 (
-                    "bad card fail-open",
-                    broken.returncode == 0 and not broken.stdout and not broken.stderr,
+                    "bad card is isolated from matching good card",
+                    broken.returncode == 0
+                    and broken_output.get("permissionDecision") == "deny"
+                    and "Use the read-only alternative."
+                    in broken_output.get("permissionDecisionReason", ""),
+                )
+            )
+
+            log_rows = [
+                json.loads(line)
+                for line in log_path.read_text(encoding="utf-8").splitlines()
+                if line
+            ]
+            checks.append(
+                (
+                    "bad card records parse defect",
+                    any(
+                        row.get("kind") == "parse_defect"
+                        and row.get("filename") == "broken.md"
+                        and row.get("reason")
+                        for row in log_rows
+                    ),
+                )
+            )
+
+            regex_vault = root / "regex-vault"
+            regex_vault.mkdir()
+            regex_card = regex_vault / "regex-synthetic.md"
+            regex_card.write_text(
+                "---\n"
+                "name: regex-synthetic\n"
+                "trigger:\n"
+                "  tool: ^Read$\n"
+                '  input: "auth\\.json"\n'
+                "advice: Keep credential material unread.\n"
+                "---\n",
+                encoding="utf-8",
+            )
+            regex_config = root / "regex-config.json"
+            write_config(regex_config, [regex_vault])
+            regex_hit = run_synthetic(
+                Path(__file__),
+                {"tool_name": "Read", "tool_input": {"path": "auth.json"}},
+                regex_config,
+            )
+            regex_value = (
+                json.loads(regex_hit.stdout) if regex_hit.stdout.strip() else {}
+            )
+            regex_output = regex_value.get("hookSpecificOutput", {})
+            checks.append(
+                (
+                    "quoted regex scalar participates in matching",
+                    regex_hit.returncode == 0
+                    and regex_output.get("permissionDecision") == "deny"
+                    and "Keep credential material unread."
+                    in regex_output.get("permissionDecisionReason", ""),
+                )
+            )
+
+            missing_config = root / "missing-config.json"
+            missing = run_synthetic(
+                Path(__file__),
+                {"tool_name": "Bash", "tool_input": {"command": "remove target"}},
+                missing_config,
+            )
+            checks.append(
+                (
+                    "missing config infra failure allows silently",
+                    missing.returncode == 0
+                    and not missing.stdout
+                    and not missing.stderr,
                 )
             )
     except Exception as exc:
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 4
+    total = 7
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
