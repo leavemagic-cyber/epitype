@@ -1,0 +1,21 @@
+{
+  "layers": [
+    {
+      "name": "resident scars",
+      "path": "vault/SCARS.md",
+      "mode": "sections"
+    },
+    {
+      "name": "scar cards",
+      "path": "vault/scars",
+      "mode": "cards",
+      "type": "scar"
+    },
+    {
+      "name": "indexed scar markers",
+      "path": "vault/MEMORY.md",
+      "mode": "marked_lines",
+      "marker": "[SCAR]"
+    }
+  ]
+}
