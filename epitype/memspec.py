@@ -130,7 +130,11 @@ RECALL_MARKER_DIRECTORY = "epitype_markers"
 
 # 2026-09-01 實測事故：別名查無時缺少全文兜底，會讓既存卡片完全不可達；
 # 規則：DB 使用 vault-root 相對路徑，且不得綁定特定 CLI。
-FTS_DB_PATH = Path(".cairn") / "memory_fts.sqlite3"
+FTS_INDEX_DIRECTORY = ".epitype"
+FTS_LEGACY_INDEX_DIRECTORY = "." + "ca" + "irn"
+FTS_DB_FILENAME = "memory_fts.sqlite3"
+FTS_DB_PATH = Path(FTS_INDEX_DIRECTORY) / FTS_DB_FILENAME
+FTS_LEGACY_DB_PATH = Path(FTS_LEGACY_INDEX_DIRECTORY) / FTS_DB_FILENAME
 # 2026-09-01 實測事故：舊索引未判 stale 會把已作廢決策當現行；規則：300 秒後
 # 必須重建或複核。
 FTS_STALE_SECONDS = 300

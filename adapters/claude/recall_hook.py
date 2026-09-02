@@ -211,6 +211,7 @@ def _selftest():
                 "hookdecisionneedle governs injection\n",
                 encoding="utf-8",
             )
+            memsearch.build_index(vault)
             config = root / "config.json"
             write_config(config, [vault])
             session_id = "synthetic-" + uuid.uuid4().hex
@@ -379,6 +380,7 @@ def _selftest():
                 "---\nname: Native Project Card\ndescription: nativeneedle lives in the cwd vault\n---\nnativeneedle\n",
                 encoding="utf-8",
             )
+            memsearch.build_index(native)
             empty_slug = re.sub(r"[^A-Za-z0-9]", "-", str(project.parent))
             (home / ".claude" / "projects" / empty_slug / "memory").mkdir(parents=True)
             home_environment = {"HOME": os.fspath(home), "USERPROFILE": os.fspath(home)}

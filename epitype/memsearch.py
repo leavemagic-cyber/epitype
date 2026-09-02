@@ -54,6 +54,71 @@ def _db_path(vault):
     return vault / memspec.FTS_DB_PATH
 
 
+def _legacy_db_path(vault):
+    return vault / memspec.FTS_LEGACY_DB_PATH
+
+
+def _resolve_vault(vault):
+    resolved = Path(vault).resolve()
+    if not resolved.exists():
+        raise FileNotFoundError(f"vault path does not exist: {resolved}")
+    if not resolved.is_dir():
+        raise NotADirectoryError(f"vault path is not a directory: {resolved}")
+    return resolved
+
+
+def _read_connection(db_path):
+    return sqlite3.connect(
+        db_path.resolve().as_uri() + "?mode=ro",
+        uri=True,
+        timeout=5.0,
+    )
+
+
+def _index_warnings(vault):
+    current_directory = _db_path(vault).parent
+    legacy_directory = _legacy_db_path(vault).parent
+    if current_directory.exists() and legacy_directory.exists():
+        return [
+            f"Epitype used {current_directory}; legacy index directory "
+            f"{legacy_directory} can be deleted after verification."
+        ]
+    return []
+
+
+def _migrate_legacy_index(vault):
+    current_directory = _db_path(vault).parent
+    legacy_directory = _legacy_db_path(vault).parent
+    migrated_from = None
+    if legacy_directory.is_dir() and not current_directory.exists():
+        try:
+            legacy_directory.rename(current_directory)
+            migrated_from = str(legacy_directory)
+        except FileNotFoundError:
+            # Another builder may have completed the same atomic directory move.
+            pass
+    return migrated_from
+
+
+def _no_index_result(vault):
+    guidance = (
+        "This directory has no Epitype index. Run "
+        "`python epitype/memsearch.py build <vault>` first."
+    )
+    if _legacy_db_path(vault).is_file() and not _db_path(vault).exists():
+        guidance += " Build will migrate and reuse the detected legacy index."
+    payload = {
+        "error": "no-index",
+        "message": "This directory has no Epitype index.",
+        "vault": str(vault),
+        "guidance": guidance,
+    }
+    warnings = _index_warnings(vault)
+    if warnings:
+        payload["warnings"] = warnings
+    return payload
+
+
 def _scalar(raw):
     value = raw.strip()
     if len(value) >= 2 and value[0] == value[-1] == '"':
@@ -278,9 +343,8 @@ def _stable_card(path):
 
 
 def build_index(vault, lock_timeout=0.0):
-    vault = Path(vault).resolve()
-    if not vault.is_dir():
-        raise NotADirectoryError(str(vault))
+    vault = _resolve_vault(vault)
+    migrated_from = _migrate_legacy_index(vault)
     db_path = _db_path(vault)
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -288,7 +352,13 @@ def build_index(vault, lock_timeout=0.0):
     # 與卡列異動均包在 memspec 統一鎖內。
     with memspec.file_lock(db_path, lock_timeout) as acquired:
         if not acquired:
-            return {"status": "lock-busy", "index": str(db_path)}
+            payload = {"status": "lock-busy", "index": str(db_path)}
+            if migrated_from:
+                payload["index_migrated_from"] = migrated_from
+            warnings = _index_warnings(vault)
+            if warnings:
+                payload["warnings"] = warnings
+            return payload
 
         files = _markdown_files(vault)
         connection = sqlite3.connect(str(db_path), timeout=5.0)
@@ -387,20 +457,26 @@ def build_index(vault, lock_timeout=0.0):
             card_count = connection.execute("SELECT count(*) FROM cards").fetchone()[0]
         finally:
             connection.close()
-        return {
+        payload = {
             "status": "built",
             "index": str(db_path),
             "cards": card_count,
             "scanned": scanned,
             "removed": removed,
         }
+        if migrated_from:
+            payload["index_migrated_from"] = migrated_from
+        warnings = _index_warnings(vault)
+        if warnings:
+            payload["warnings"] = warnings
+        return payload
 
 
 def _is_stale(vault, db_path):
     if not db_path.exists():
         return True
     try:
-        connection = sqlite3.connect(str(db_path), timeout=5.0)
+        connection = _read_connection(db_path)
         try:
             row = connection.execute(
                 "SELECT value FROM search_meta WHERE key = ?", (_FTS_FORMAT_KEY,)
@@ -633,19 +709,20 @@ def _result(vault, row, hits):
 
 
 def query_index(vault, term, include_superseded=False, include_noncard=False):
-    vault = Path(vault).resolve()
-    if not vault.is_dir():
-        raise NotADirectoryError(str(vault))
+    vault = _resolve_vault(vault)
     term = str(term).strip()
     if not term:
         raise ValueError("query term must not be empty")
     db_path = _db_path(vault)
+    if not db_path.is_file():
+        return _no_index_result(vault)
+    index_updated = False
     if _is_stale(vault, db_path):
         # 2026-09-01 實測事故：重建競爭若阻斷查詢會讓喚回不可用；規則：拿不到鎖
         # 即讀既有 SQLite 快照。
-        build_index(vault, lock_timeout=0.0)
+        index_updated = build_index(vault, lock_timeout=0.0)["status"] == "built"
 
-    connection = sqlite3.connect(str(db_path), timeout=5.0)
+    connection = _read_connection(db_path)
     connection.row_factory = sqlite3.Row
     try:
         candidates = []
@@ -678,27 +755,34 @@ def query_index(vault, term, include_superseded=False, include_noncard=False):
         connection.close()
     candidates.sort(key=lambda item: item[0])
     results = [item[1] for item in candidates[:memspec.FTS_TOP_K]]
-    return {
+    payload = {
         "query": term,
         "count": len(results),
         "results": results,
         "guidance": _guidance_lines(vault, excluded_links, results, indexed_paths),
     }
+    if index_updated:
+        payload["index_updated"] = True
+    warnings = _index_warnings(vault)
+    if warnings:
+        payload["warnings"] = warnings
+    return payload
 
 
 def recall_index(vault, prompt, include_superseded=False, include_noncard=False):
-    vault = Path(vault).resolve()
-    if not vault.is_dir():
-        raise NotADirectoryError(str(vault))
+    vault = _resolve_vault(vault)
+    db_path = _db_path(vault)
+    if not db_path.is_file():
+        return _no_index_result(vault)
     prompt = str(prompt).strip()
     terms = _recall_terms(prompt)
     if not terms:
         return {"query": prompt, "terms": [], "count": 0, "results": [], "guidance": []}
-    db_path = _db_path(vault)
+    index_updated = False
     if _is_stale(vault, db_path):
-        build_index(vault, lock_timeout=0.0)
+        index_updated = build_index(vault, lock_timeout=0.0)["status"] == "built"
 
-    connection = sqlite3.connect(str(db_path), timeout=5.0)
+    connection = _read_connection(db_path)
     connection.row_factory = sqlite3.Row
     try:
         candidates = []
@@ -737,13 +821,19 @@ def recall_index(vault, prompt, include_superseded=False, include_noncard=False)
         connection.close()
     candidates.sort(key=lambda item: item[0])
     results = [item[1] for item in candidates[:memspec.FTS_TOP_K]]
-    return {
+    payload = {
         "query": prompt,
         "terms": terms,
         "count": len(results),
         "results": results,
         "guidance": _guidance_lines(vault, excluded_links, results, indexed_paths),
     }
+    if index_updated:
+        payload["index_updated"] = True
+    warnings = _index_warnings(vault)
+    if warnings:
+        payload["warnings"] = warnings
+    return payload
 
 
 def _write_card(path, frontmatter, body):
@@ -752,9 +842,61 @@ def _write_card(path, frontmatter, body):
 
 def _selftest():
     checks = []
+
+    def run_cli(*arguments):
+        return subprocess.run(
+            [sys.executable, str(Path(__file__).resolve()), *map(str, arguments)],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+
     try:
         with tempfile.TemporaryDirectory(prefix="memsearch-") as temp_dir:
             vault = Path(temp_dir)
+            no_index_vault = vault / "empty-vault"
+            no_index_vault.mkdir()
+            no_index_before = list(no_index_vault.rglob("*"))
+            no_index_query = run_cli(
+                "query", "missing-index-fixture", "--vault", no_index_vault
+            )
+            no_index_recall = run_cli(
+                "recall", "find missing index fixture", "--vault", no_index_vault
+            )
+            no_index_query_payload = json.loads(no_index_query.stdout)
+            no_index_recall_payload = json.loads(no_index_recall.stdout)
+            checks.append(
+                (
+                    "No-index query and recall stay read-only and explicit",
+                    no_index_query.returncode == 1
+                    and no_index_recall.returncode == 1
+                    and no_index_query_payload.get("error") == "no-index"
+                    and no_index_recall_payload.get("error") == "no-index"
+                    and "guidance" in no_index_query_payload
+                    and "guidance" in no_index_recall_payload
+                    and "count" not in no_index_query_payload
+                    and "count" not in no_index_recall_payload
+                    and list(no_index_vault.rglob("*")) == no_index_before,
+                )
+            )
+
+            missing_vault = vault / "path-does-not-exist"
+            missing_query = run_cli(
+                "query", "missing-path-fixture", "--vault", missing_vault
+            )
+            missing_payload = json.loads(missing_query.stdout)
+            checks.append(
+                (
+                    "Missing vault path is an explicit error",
+                    missing_query.returncode == 1
+                    and missing_payload.get("error") == "FileNotFoundError"
+                    and "does not exist" in missing_payload.get("message", "")
+                    and not missing_vault.exists(),
+                )
+            )
+
             bilingual = vault / "bilingual.md"
             english = vault / "english.md"
             mixed = vault / "mixed.md"
@@ -849,6 +991,38 @@ def _selftest():
             )
 
             initial = build_index(vault)
+            fresh_index_before = sorted(
+                (
+                    path.relative_to(vault).as_posix(),
+                    path.stat().st_size,
+                    path.stat().st_mtime_ns,
+                )
+                for path in _db_path(vault).parent.rglob("*")
+                if path.is_file()
+            )
+            zero_query = query_index(vault, "definitelyabsentqueryfixture")
+            fresh_index_after = sorted(
+                (
+                    path.relative_to(vault).as_posix(),
+                    path.stat().st_size,
+                    path.stat().st_mtime_ns,
+                )
+                for path in _db_path(vault).parent.rglob("*")
+                if path.is_file()
+            )
+            checks.append(
+                (
+                    "Indexed zero-hit query keeps the established empty-result shape",
+                    zero_query
+                    == {
+                        "query": "definitelyabsentqueryfixture",
+                        "count": 0,
+                        "results": [],
+                        "guidance": [],
+                    }
+                    and fresh_index_after == fresh_index_before,
+                )
+            )
             connection = sqlite3.connect(str(_db_path(vault)))
             try:
                 indexed_metadata = connection.execute(
@@ -1200,8 +1374,15 @@ def _selftest():
             os.utime(mixed, (future, future))
             old_db = time.time() - memspec.FTS_STALE_SECONDS - 2.0
             os.utime(_db_path(vault), (old_db, old_db))
-            stale_results = query_index(vault, "自動重建證據")["results"]
+            stale_payload = query_index(vault, "自動重建證據")
+            stale_results = stale_payload["results"]
             checks.append(("Stale incremental rebuild", bool(stale_results) and stale_results[0]["path"] == str(mixed.resolve())))
+            checks.append(
+                (
+                    "Stale incremental update is declared",
+                    stale_payload.get("index_updated") is True,
+                )
+            )
 
             grace_vault = Path(tempfile.mkdtemp(prefix="epitype-grace-"))
             grace_old = grace_vault / "old.md"
@@ -1262,11 +1443,60 @@ def _selftest():
                 == str(other.resolve())
             )
             checks.append(("Concurrent build without tears", concurrent_ok))
+
+        with tempfile.TemporaryDirectory(prefix="epitype-legacy-index-") as temp_dir:
+            legacy_vault = Path(temp_dir)
+            legacy_card = legacy_vault / "retained.md"
+            _write_card(
+                legacy_card,
+                "name: Retained Index Card\ndescription: retainedlegacyfixture\nscope: infra",
+                "Existing index rows must survive the directory migration.",
+            )
+            build_index(legacy_vault)
+            current_directory = _db_path(legacy_vault).parent
+            legacy_directory = _legacy_db_path(legacy_vault).parent
+            current_directory.rename(legacy_directory)
+            migration = build_index(legacy_vault)
+            migrated_query = query_index(legacy_vault, "retainedlegacyfixture")
+            checks.append(
+                (
+                    "Legacy index directory migrates through build and remains searchable",
+                    migration.get("index_migrated_from") == str(legacy_directory)
+                    and _db_path(legacy_vault).is_file()
+                    and not legacy_directory.exists()
+                    and migrated_query["results"][0]["path"]
+                    == str(legacy_card.resolve()),
+                )
+            )
+
+        with tempfile.TemporaryDirectory(prefix="epitype-dual-index-") as temp_dir:
+            dual_vault = Path(temp_dir)
+            dual_card = dual_vault / "current.md"
+            _write_card(
+                dual_card,
+                "name: Current Index Card\ndescription: currentindexfixture\nscope: infra",
+                "The current index wins when both directories exist.",
+            )
+            build_index(dual_vault)
+            dual_legacy_directory = _legacy_db_path(dual_vault).parent
+            dual_legacy_directory.mkdir()
+            dual_query = query_index(dual_vault, "currentindexfixture")
+            checks.append(
+                (
+                    "Current index wins and the legacy directory is disclosed",
+                    dual_query["results"][0]["path"] == str(dual_card.resolve())
+                    and any(
+                        "can be deleted" in warning
+                        and str(dual_legacy_directory) in warning
+                        for warning in dual_query.get("warnings", ())
+                    ),
+                )
+            )
     except Exception as exc:
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 23
+    total = 29
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
@@ -1316,7 +1546,7 @@ def main(argv=None):
                 include_superseded=args.include_superseded,
                 include_noncard=args.include_noncard,
             )
-            exit_code = 0
+            exit_code = 1 if payload.get("error") else 0
         elif args.command == "recall":
             payload = recall_index(
                 args.vault,
@@ -1324,7 +1554,7 @@ def main(argv=None):
                 include_superseded=args.include_superseded,
                 include_noncard=args.include_noncard,
             )
-            exit_code = 0
+            exit_code = 1 if payload.get("error") else 0
         else:
             payload = {"error": "command required", "commands": ["build", "query", "recall"]}
             exit_code = 2

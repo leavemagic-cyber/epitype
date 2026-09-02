@@ -62,6 +62,18 @@ repo 搬家時只需執行 `python install/graft.py relocate --to C:\新的\repo
 
 可從 [`templates/`](templates/) 選一個起點：`minimal` 適合單人單機，`team` 是共用 vault 加統一寫鎖契約，`power` 則保留全件、census 與 exam-ready 目錄。
 
+## 本機搜尋索引
+
+先明確建立 vault 的本機 FTS 索引，再執行查詢或情境喚回：
+
+```powershell
+python epitype/memsearch.py build C:\path\to\vault
+python epitype/memsearch.py query 關鍵詞 --vault C:\path\to\vault
+python epitype/memsearch.py recall "自然語言提示" --vault C:\path\to\vault
+```
+
+產生的資料庫位於 `<vault>/.epitype/memory_fts.sqlite3`，Git 會忽略它。`query` 與 `recall` 不會建立缺少的索引：此時會以非零退出碼回傳 JSON `no-index` 錯誤並指引先跑 `build`；已有有效索引但沒有命中時，仍維持原本的零結果 payload。既有索引若已過期，仍會做增量更新，該次回覆會帶 `index_updated: true`。`build` 也會在現行目錄尚不存在時，把偵測到的舊版索引原地搬到現行目錄沿用；若新舊目錄同時存在，Epitype 會採用現行索引，並提示舊目錄可在驗證後刪除。
+
 ## 解除安裝
 
 一樣先預覽，再只移除 Epitype 自己擁有的註冊與設定：

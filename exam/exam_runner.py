@@ -195,6 +195,8 @@ def _run_question(question):
         vault = root / "vault"
         vault.mkdir()
         written = _write_cards(vault, question.get("setup"))
+        if category in ("recall", "supersession"):
+            memsearch.build_index(vault)
         if category == "recall":
             failure = _judge_recall(vault, question.get("input"), expect)
         elif category == "gate":
