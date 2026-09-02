@@ -145,3 +145,48 @@ python install/graft.py doctor
 After moving the repository, run `python install/graft.py relocate --to <new-root>` once; it rewrites `config.json` and then runs `doctor` itself.
 
 The selftest proves a synthetic filesystem round trip. `doctor` proves current local registration and synthetic hook execution; neither proves every future host version.
+
+## 7. The host accepts the registration but never runs the hook
+
+### Symptom
+
+The installer writes the hook entries, doctor reports registration PASS, and the host still never injects a single line of memory. Nothing errors; the user concludes the memory system has no memory.
+
+### Why it happens
+
+Some hosts execute a hook only after the user has explicitly trusted it, and keep that trust in a separate state store. Registration and trust are different facts; a registration-only health check cannot see the second one.
+
+### Epitype countermeasure
+
+`adapters/codex/hook_trust.py check` reads the registrations and the host's trust store, classifies every Epitype hook as `TRUSTED`, `UNTRUSTED`, `DISABLED`, or `MODIFIED` (definition changed after trust was granted), and exits non-zero with the exact review step. Trust itself stays a user action in the host UI; Epitype never forges it.
+
+### Self-verification
+
+```powershell
+python adapters/codex/hook_trust.py --selftest
+python adapters/codex/hook_trust.py check
+```
+
+The selftest uses synthetic hook and config files. The `check` run inspects the real host state and is the only way to prove the hooks can run there.
+
+## 8. The card exists, but recall cannot reach it
+
+### Symptom
+
+A rule or permission was written down, and the next session still asks for it again. Nobody deleted anything; retrieval simply never looked where the card was.
+
+### Why it happens
+
+Three independent gaps produce the same symptom: the index refresh rule compared card age against index age, so a card written shortly after a rebuild stayed unindexed until an unrelated later write; the host auto-creates a memory directory per working directory that a fixed vault list never named; and consent given in conversation was only carded when the agent remembered to do so.
+
+### Epitype countermeasure
+
+Index staleness is rate-limited by index age (bounded delay, no permanent blind spot). `resolve_vaults` joins the working directory's native memory directory and its ancestors when they already hold cards, ahead of configured vaults. Grant-shaped prompts are captured verbatim into `<first vault>/grants/`, deduplicated by digest, lock-guarded, and indexed immediately so the very next prompt can recall them; interpretation is left to whoever reads the card.
+
+### Self-verification
+
+```powershell
+python epitype/memsearch.py --selftest
+python adapters/claude/recall_hook.py --selftest
+python adapters/claude/sessionstart_hook.py --selftest
+```
