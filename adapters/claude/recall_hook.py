@@ -97,7 +97,10 @@ def _capture_owner_sentence(prompt, vault, event, started_at, kind):
     sentence = _matched_sentence(prompt, trigger)
     if sentence is None:
         return None
-    digest = _grant_digest(sentence)
+    return _write_capture(vault, directory_name, kind, _grant_digest(sentence), label, sentence, event, started_at)
+
+
+def _write_capture(vault, directory_name, kind, digest, label, body, event, started_at):
     directory = vault / directory_name
     try:
         if any(directory.glob(f"{kind}-*-{digest}.md")):
@@ -115,7 +118,7 @@ def _capture_owner_sentence(prompt, vault, event, started_at, kind):
             f"cwd: {_one_line(event.get('cwd'))}\n"
             f"session_id: {_one_line(event.get('session_id', event.get('sessionId')))}\n"
             "---\n"
-            f"{sentence}\n"
+            f"{body}\n"
         )
         with memspec.file_lock(target, memspec.GRANT_LOCK_SECONDS) as locked:
             if not locked or target.exists():
@@ -124,12 +127,80 @@ def _capture_owner_sentence(prompt, vault, event, started_at, kind):
             temporary.write_text(card, encoding="utf-8")
             os.replace(temporary, target)
         # The staleness grace window would hide the new card from the very next
-        # prompt; a grant must be recallable immediately, so refresh incrementally.
+        # prompt; a captured owner sentence must be recallable immediately.
         if not expired(started_at):
             memsearch.build_index(vault, lock_timeout=0.0)
         return target
     except (OSError, sqlite3.Error):
         return None
+
+
+def _assistant_text(item):
+    """Text of one transcript record if it is an assistant turn (Claude or Codex shape)."""
+    if not isinstance(item, dict) or item.get("isSidechain") is True:
+        return None
+    if item.get("type") == "assistant":
+        message = item.get("message")
+    elif item.get("type") == "response_item":
+        message = item.get("payload")
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            return None
+    else:
+        return None
+    if not isinstance(message, dict):
+        return None
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return None
+    return "".join(
+        block.get("text", "")
+        for block in content
+        if isinstance(block, dict) and block.get("type") in ("text", "output_text") and isinstance(block.get("text"), str)
+    )
+
+
+def _last_assistant_text(transcript_path):
+    """Last assistant turn in the transcript tail, or None. Reads a bounded window only."""
+    try:
+        path = Path(transcript_path)
+        with path.open("rb") as stream:
+            stream.seek(0, os.SEEK_END)
+            size = stream.tell()
+            stream.seek(max(0, size - memspec.RULING_TAIL_BYTES))
+            data = stream.read()
+    except (OSError, TypeError, ValueError):
+        return None
+    turn = []
+    for raw in reversed(data.split(b"\n")):
+        try:
+            item = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            continue
+        text = _assistant_text(item)
+        if text is None:
+            if turn and item.get("type") in ("user", "response_item"):
+                break
+            continue
+        if text.strip():
+            turn.append(text)
+    return "".join(reversed(turn)) if turn else None
+
+
+def _capture_ruling(prompt, vault, event, started_at):
+    """The owner's answer to a question the agent explicitly put to them."""
+    owner_utterance, _reason = is_owner_utterance(prompt, memspec.NEVER_MATCH_REGEX)
+    if not owner_utterance or len(prompt.strip()) < memspec.RULING_MIN_ANSWER_CHARS or expired(started_at):
+        return None
+    question = _last_assistant_text(event.get("transcript_path"))
+    if not question or not memspec.RULING_QUESTION_REGEX.search(question):
+        return None
+    asked = _one_line(question)[-memspec.RULING_QUESTION_MAX_CHARS:]
+    body = f"問（助理）：{asked}\n答（owner 逐字）：{prompt.strip()}"
+    return _write_capture(
+        vault, memspec.RULING_DIRECTORY, "ruling", _grant_digest(prompt), "owner ruling auto-captured", body, event, started_at
+    )
 
 
 def _session_component(session_id):
@@ -163,11 +234,13 @@ def _handle(event, started_at):
     if config is None:
         return None
 
+    capture_vault = config[memspec.CONFIG_VAULTS_FIELD][0]
     for kind in CAPTURE_KINDS:
-        _capture_owner_sentence(prompt, config[memspec.CONFIG_VAULTS_FIELD][0], event, started_at, kind)
+        _capture_owner_sentence(prompt, capture_vault, event, started_at, kind)
+    _capture_ruling(prompt, capture_vault, event, started_at)
 
-    # A correction the owner already made outranks any lexical hit: it goes
-    # first, marked, so a stale plan line cannot be re-proposed over it.
+    # A correction or ruling the owner already made outranks any lexical hit:
+    # it goes first, marked, so a stale plan line cannot be re-proposed over it.
     corrections = []
     others = []
     for vault in resolve_vaults(config, event):
@@ -184,8 +257,11 @@ def _handle(event, started_at):
         for hit in result.get("results", ())[: memspec.FTS_TOP_K]:
             path = _one_line(hit.get("path"))
             line = " | ".join((_one_line(hit.get("name")), _one_line(hit.get("description")), path))
-            if Path(path).parent.name == memspec.CORRECTION_DIRECTORY:
+            parent = Path(path).parent.name
+            if parent == memspec.CORRECTION_DIRECTORY:
                 corrections.append("- " + memspec.CORRECTION_PREFIX + line)
+            elif parent == memspec.RULING_DIRECTORY:
+                corrections.append("- " + memspec.RULING_PREFIX + line)
             else:
                 others.append("- " + line)
     pieces = [memspec.UNTRUSTED_ADVISORY, *corrections, *others]
@@ -649,6 +725,101 @@ def _selftest():
                 )
             )
 
+            widened = (
+                "3.不是!只有6s是標準合約，其他還是微型，小單期是指1口",
+                "6S 維持擋單<我怎麼不知道有這個設定，請深度分析記憶",
+                "小口合約意思是1口，不是指微型，6S就是沒有微型，我很清楚",
+            )
+            widened_ok = True
+            for sentence in widened:
+                run_synthetic(
+                    Path(__file__),
+                    {"prompt": sentence, "session_id": uuid.uuid4().hex},
+                    grant_config,
+                )
+                widened_ok = widened_ok and bool(
+                    list((grant_vault / memspec.CORRECTION_DIRECTORY).glob("correction-*.md"))
+                ) and any(
+                    _matched_sentence(sentence, memspec.CORRECTION_TRIGGER_REGEX)
+                    and _grant_digest(_matched_sentence(sentence, memspec.CORRECTION_TRIGGER_REGEX)) in path.name
+                    for path in (grant_vault / memspec.CORRECTION_DIRECTORY).glob("correction-*.md")
+                )
+            checks.append(("2026-09-02 contract-phase corrections all trigger capture", widened_ok))
+
+            transcript = root / "ruling-transcript.jsonl"
+            asked = "請你定一下：小單期是「1 口標準合約」還是維持「換微型合約」？定了我才動，要你裁決。"
+            transcript.write_text(
+                json.dumps({"type": "user", "message": {"role": "user", "content": "先前的問題"}}, ensure_ascii=False)
+                + "\n"
+                + json.dumps(
+                    {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": asked}]}},
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            answer = "只有6s是標準合約，其他還是微型，小單期是指1口(微型或標準)"
+            for _ in range(2):
+                run_synthetic(
+                    Path(__file__),
+                    {"prompt": answer, "session_id": uuid.uuid4().hex, "transcript_path": os.fspath(transcript)},
+                    grant_config,
+                )
+            ruling_files = list((grant_vault / memspec.RULING_DIRECTORY).glob(f"ruling-*-{_grant_digest(answer)}.md"))
+            ruling_text = ruling_files[0].read_text(encoding="utf-8") if ruling_files else ""
+            checks.append(
+                (
+                    "owner answer to an explicit ruling request is captured once with the question",
+                    len(ruling_files) == 1
+                    and answer in ruling_text
+                    and "小單期是「1 口標準合約」" in ruling_text
+                    and "description: owner ruling auto-captured " in ruling_text,
+                )
+            )
+            transcript.write_text(
+                json.dumps(
+                    {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "已完成，繼續下一步。"}]}},
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            rulings_before = tuple((grant_vault / memspec.RULING_DIRECTORY).glob("*.md"))
+            run_synthetic(
+                Path(__file__),
+                {"prompt": "好，那就照這樣做下去", "session_id": uuid.uuid4().hex, "transcript_path": os.fspath(transcript)},
+                grant_config,
+            )
+            checks.append(
+                (
+                    "reply after a non-question assistant turn is not a ruling",
+                    tuple((grant_vault / memspec.RULING_DIRECTORY).glob("*.md")) == rulings_before,
+                )
+            )
+            pinned = run_synthetic(
+                Path(__file__),
+                {"prompt": "小單期 6S 標準合約 還是微型", "session_id": uuid.uuid4().hex},
+                grant_config,
+            )
+            pinned_value = json.loads(pinned.stdout) if pinned.stdout.strip() else {}
+            pinned_lines = [
+                line
+                for line in pinned_value.get("hookSpecificOutput", {}).get("additionalContext", "").splitlines()
+                if line.startswith("- ")
+            ]
+            checks.append(
+                (
+                    "ruling is pinned with its own marker",
+                    pinned.returncode == 0
+                    and bool(ruling_files)
+                    and any(line.startswith("- " + memspec.RULING_PREFIX) and ruling_files[0].stem in line for line in pinned_lines)
+                    and all(
+                        line.startswith("- " + memspec.RULING_PREFIX) or line.startswith("- " + memspec.CORRECTION_PREFIX)
+                        for line in pinned_lines[: sum(1 for line in pinned_lines if memspec.RULING_PREFIX in line or memspec.CORRECTION_PREFIX in line)]
+                    ),
+                )
+            )
+
             home = root / "home"
             project = root / "work" / "proj"
             project.mkdir(parents=True)
@@ -916,7 +1087,7 @@ def _selftest():
             shutil.rmtree(marker_directory, ignore_errors=True)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 26
+    total = 30
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

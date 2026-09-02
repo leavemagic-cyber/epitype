@@ -174,9 +174,27 @@ CORRECTION_PREFIX = "⚠ owner 曾糾正："
 CORRECTION_TRIGGER_PATTERN = (
     r"(?:我(?:不是)?說過|說過(?:幾|很多|好多)次|再次|不是這樣|錯了|不要亂|別再|別亂|不是叫你"
     r"|不要再|怎麼還|你還是|我糾正|更正一下"
+    # 2026-09-02 QUORUM 合約階段事故:三句糾正「我怎麼不知道有這個設定」「不是指微型…我很清楚」
+    # 「不是!只有6s是標準合約」全不在上列;句首「不是!」「不對，」與定義式「不是指」是強糾正訊號。
+    r"|^\s*不是[!！]|^\s*不對[,，!！。]|我怎麼不知道|我很清楚|不是指|你(?:搞|弄|理解|想|看)錯"
     r"|\bI\s+(?:already\s+)?told\s+you\b|\bI\s+said\b|\bstop\s+doing\b|\bdon'?t\s+do\s+that\b|\bnot\s+like\s+that\b)"
 )
 CORRECTION_TRIGGER_REGEX = re.compile(CORRECTION_TRIGGER_PATTERN, re.IGNORECASE)
+
+# 2026-09-02 事故:agent 明說「要你裁決」,owner 答了,答案能否留下全看 agent 記不記得寫卡。
+# 規則:上一則助理訊息含裁決請求時,owner 的回覆逐字入 rulings/,連同被問的題目;喚回時與
+# corrections 一樣置頂。題目只取 transcript 尾窗,避免每句 prompt 都讀整份 transcript。
+RULING_DIRECTORY = "rulings"
+RULING_PREFIX = "⚖ owner 裁決："
+RULING_QUESTION_PATTERN = (
+    r"(?:要你裁決|請你裁決|請裁決|裁決|裁示|請你定|請定一下|由你決定|要你決定|你定了我才|等你決定"
+    r"|請你確認|需要你決定|\bplease\s+decide\b|\byour\s+call\b|\bneed\s+your\s+decision\b|\bwhich\s+do\s+you\s+want\b)"
+)
+RULING_QUESTION_REGEX = re.compile(RULING_QUESTION_PATTERN, re.IGNORECASE)
+RULING_TAIL_BYTES = 64 * 1024
+RULING_QUESTION_MAX_CHARS = 600
+RULING_MIN_ANSWER_CHARS = 4
+NEVER_MATCH_REGEX = re.compile(r"(?!x)x")
 
 # 2026-09-02 事故：7/22 寫進計畫卡的「未辦（owner 自行）」掛到 9/2，每輪盤點都被
 # 重新端出來；待辦有入口沒出口。規則：待辦標記行必須帶可跑的 verify: 或已收尾，
