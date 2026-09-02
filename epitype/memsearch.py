@@ -240,6 +240,11 @@ def _read_card(path):
     return fields
 
 
+def card_files(vault):
+    """Public view of the card scan so other lints share one privacy filter."""
+    return _markdown_files(Path(vault).resolve())
+
+
 def _markdown_files(vault):
     files = []
     # Keep the recursive vault scan, but no private path segment may leak into

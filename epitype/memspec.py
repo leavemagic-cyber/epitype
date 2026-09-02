@@ -166,6 +166,29 @@ GRANT_QUOTED_TEXT_REGEX = re.compile(GRANT_QUOTED_TEXT_PATTERN)
 GRANT_SENTENCE_SPLIT_REGEX = re.compile(GRANT_SENTENCE_SPLIT_PATTERN)
 GRANT_NEWLINE_REGEX = re.compile(GRANT_NEWLINE_PATTERN)
 
+# 2026-09-02 事故：owner 的糾正（「我不是說過…不要亂處理」）只在 agent 記得寫卡時才
+# 留下，下一場同題重犯。糾正句與授權句走同一條捕捉路徑；這裡是 runtime 用的窄集，
+# SCAR_CORRECTION_PATTERNS 仍是普查用的寬表（裸「又」「again」誤觸太多，不入窄集）。
+CORRECTION_DIRECTORY = "corrections"
+CORRECTION_PREFIX = "⚠ owner 曾糾正："
+CORRECTION_TRIGGER_PATTERN = (
+    r"(?:我(?:不是)?說過|說過(?:幾|很多|好多)次|再次|不是這樣|錯了|不要亂|別再|別亂|不是叫你"
+    r"|不要再|怎麼還|你還是|我糾正|更正一下"
+    r"|\bI\s+(?:already\s+)?told\s+you\b|\bI\s+said\b|\bstop\s+doing\b|\bdon'?t\s+do\s+that\b|\bnot\s+like\s+that\b)"
+)
+CORRECTION_TRIGGER_REGEX = re.compile(CORRECTION_TRIGGER_PATTERN, re.IGNORECASE)
+
+# 2026-09-02 事故：7/22 寫進計畫卡的「未辦（owner 自行）」掛到 9/2，每輪盤點都被
+# 重新端出來；待辦有入口沒出口。規則：待辦標記行必須帶可跑的 verify: 或已收尾，
+# 逾期者由 pending_lint 點名並在 SessionStart 以一行摘要提醒。
+PENDING_MARKER_PATTERN = r"(?:未辦|待辦|⏳|\bTODO\b|待\s*owner|owner\s*自行|待處理|待決)"
+PENDING_CLOSED_PATTERN = r"(?:^\s*[-*]?\s*~~|作廢|已完成|已辦|已處理|已收案|✅|superseded)"
+PENDING_VERIFY_MARKER = "verify:"
+PENDING_MAX_AGE_DAYS = 14
+PENDING_MARKER_REGEX = re.compile(PENDING_MARKER_PATTERN, re.IGNORECASE)
+PENDING_CLOSED_REGEX = re.compile(PENDING_CLOSED_PATTERN, re.IGNORECASE)
+PENDING_DATE_REGEX = re.compile(r"(20\d\d)-(\d\d)-(\d\d)")
+
 # 2026-09-01 實測事故：別名查無時缺少全文兜底，會讓既存卡片完全不可達；
 # 規則：DB 使用 vault-root 相對路徑，且不得綁定特定 CLI。
 FTS_INDEX_DIRECTORY = ".epitype"

@@ -40,8 +40,8 @@ def _without_quoted_text(prompt):
     return memspec.GRANT_QUOTED_TEXT_REGEX.sub("", prompt)
 
 
-def is_owner_utterance(prompt):
-    """Reject non-owner and ambiguous prompt shapes before grant matching."""
+def is_owner_utterance(prompt, trigger=memspec.GRANT_TRIGGER_REGEX):
+    """Reject non-owner and ambiguous prompt shapes before trigger matching."""
     if not isinstance(prompt, str) or not prompt.strip():
         return False, "empty-prompt"
     folded = prompt.casefold()
@@ -58,20 +58,29 @@ def is_owner_utterance(prompt):
 
     quoted = memspec.GRANT_QUOTED_TEXT_REGEX.findall(prompt)
     if (
-        any(memspec.GRANT_TRIGGER_REGEX.search(value) for value in quoted)
-        and not memspec.GRANT_TRIGGER_REGEX.search(_without_quoted_text(prompt))
+        any(trigger.search(value) for value in quoted)
+        and not trigger.search(_without_quoted_text(prompt))
     ):
         return False, "quoted-trigger-only"
     return True, "owner-utterance-shape"
 
 
-def _grant_sentence(prompt):
+# Grants and corrections are the two owner sentences that must survive the
+# session they were said in; both take the same source-checked capture path.
+CAPTURE_KINDS = {
+    "grant": (memspec.GRANT_DIRECTORY, memspec.GRANT_TRIGGER_REGEX, "owner grant auto-captured"),
+    "correction": (
+        memspec.CORRECTION_DIRECTORY,
+        memspec.CORRECTION_TRIGGER_REGEX,
+        "owner correction auto-captured",
+    ),
+}
+
+
+def _matched_sentence(prompt, trigger):
     for sentence in memspec.GRANT_SENTENCE_SPLIT_REGEX.split(prompt):
         candidate = sentence.strip()
-        if (
-            candidate
-            and memspec.GRANT_TRIGGER_REGEX.search(_without_quoted_text(candidate))
-        ):
+        if candidate and trigger.search(_without_quoted_text(candidate)):
             return candidate
     return None
 
@@ -80,26 +89,27 @@ def _grant_digest(sentence):
     return hashlib.sha256(_one_line(sentence).encode("utf-8")).hexdigest()[:12]
 
 
-def _capture_grant(prompt, vault, event, started_at):
-    owner_utterance, _reason = is_owner_utterance(prompt)
+def _capture_owner_sentence(prompt, vault, event, started_at, kind):
+    directory_name, trigger, label = CAPTURE_KINDS[kind]
+    owner_utterance, _reason = is_owner_utterance(prompt, trigger)
     if not owner_utterance or expired(started_at):
         return None
-    sentence = _grant_sentence(prompt)
+    sentence = _matched_sentence(prompt, trigger)
     if sentence is None:
         return None
     digest = _grant_digest(sentence)
-    directory = vault / memspec.GRANT_DIRECTORY
+    directory = vault / directory_name
     try:
-        if any(directory.glob(f"grant-*-{digest}.md")):
+        if any(directory.glob(f"{kind}-*-{digest}.md")):
             return None
         directory.mkdir(parents=True, exist_ok=True)
         stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        name = f"grant-{stamp[:10].replace('-', '')}-{digest}"
+        name = f"{kind}-{stamp[:10].replace('-', '')}-{digest}"
         target = directory / f"{name}.md"
         card = (
             "---\n"
             f"name: {name}\n"
-            f"description: owner grant auto-captured {stamp[:10]}\n"
+            f"description: {label} {stamp[:10]}\n"
             f"{memspec.SCOPE_FIELD}: governance-core\n"
             f"captured_at: {stamp}\n"
             f"cwd: {_one_line(event.get('cwd'))}\n"
@@ -153,9 +163,13 @@ def _handle(event, started_at):
     if config is None:
         return None
 
-    _capture_grant(prompt, config[memspec.CONFIG_VAULTS_FIELD][0], event, started_at)
+    for kind in CAPTURE_KINDS:
+        _capture_owner_sentence(prompt, config[memspec.CONFIG_VAULTS_FIELD][0], event, started_at, kind)
 
-    pieces = [memspec.UNTRUSTED_ADVISORY]
+    # A correction the owner already made outranks any lexical hit: it goes
+    # first, marked, so a stale plan line cannot be re-proposed over it.
+    corrections = []
+    others = []
     for vault in resolve_vaults(config, event):
         if expired(started_at):
             return None
@@ -168,16 +182,13 @@ def _handle(event, started_at):
         if expired(started_at):
             return None
         for hit in result.get("results", ())[: memspec.FTS_TOP_K]:
-            pieces.append(
-                "- "
-                + " | ".join(
-                    (
-                        _one_line(hit.get("name")),
-                        _one_line(hit.get("description")),
-                        _one_line(hit.get("path")),
-                    )
-                )
-            )
+            path = _one_line(hit.get("path"))
+            line = " | ".join((_one_line(hit.get("name")), _one_line(hit.get("description")), path))
+            if Path(path).parent.name == memspec.CORRECTION_DIRECTORY:
+                corrections.append("- " + memspec.CORRECTION_PREFIX + line)
+            else:
+                others.append("- " + line)
+    pieces = [memspec.UNTRUSTED_ADVISORY, *corrections, *others]
 
     context = bounded_context(
         "UserPromptSubmit",
@@ -577,6 +588,67 @@ def _selftest():
                 )
             )
 
+            (grant_vault / "plan.md").write_text(
+                "---\nname: Drive Plan\ndescription: 待刪 SWSetup 未辦（owner 自行）\n---\nSWSetup 3.32 GB 未辦\n",
+                encoding="utf-8",
+            )
+            memsearch.build_index(grant_vault)
+            correction_sentence = "SWSetup 我不是說過，你只能處理AI產生資料，不要亂處理"
+            for _ in range(2):
+                run_synthetic(
+                    Path(__file__),
+                    {"prompt": f"待刪_雜項 SWSetup 卡到現在。{correction_sentence}", "session_id": uuid.uuid4().hex},
+                    grant_config,
+                )
+            correction_files = list(
+                (grant_vault / memspec.CORRECTION_DIRECTORY).glob(
+                    f"correction-*-{_grant_digest(correction_sentence)}.md"
+                )
+            )
+            correction_text = correction_files[0].read_text(encoding="utf-8") if correction_files else ""
+            checks.append(
+                (
+                    "owner correction captured verbatim once under corrections/",
+                    len(correction_files) == 1
+                    and correction_text.partition("\n---\n")[2].rstrip("\n") == correction_sentence
+                    and "description: owner correction auto-captured " in correction_text,
+                )
+            )
+            corrections_before = tuple((grant_vault / memspec.CORRECTION_DIRECTORY).glob("*.md"))
+            run_synthetic(
+                Path(__file__),
+                {"prompt": "我又想到一個點子，再看一次資料夾", "session_id": uuid.uuid4().hex},
+                grant_config,
+            )
+            checks.append(
+                (
+                    "bare 又/再 wording is not a correction",
+                    tuple((grant_vault / memspec.CORRECTION_DIRECTORY).glob("*.md")) == corrections_before,
+                )
+            )
+            ranked = run_synthetic(
+                Path(__file__),
+                {"prompt": "SWSetup 未辦 要不要處理", "session_id": uuid.uuid4().hex},
+                grant_config,
+            )
+            ranked_value = json.loads(ranked.stdout) if ranked.stdout.strip() else {}
+            ranked_lines = [
+                line
+                for line in ranked_value.get("hookSpecificOutput", {}).get("additionalContext", "").splitlines()
+                if line.startswith("- ")
+            ]
+            checks.append(
+                (
+                    "correction is pinned first and marked even when a plan card matches better",
+                    ranked.returncode == 0
+                    and bool(correction_files)
+                    and len(ranked_lines) >= 2
+                    and ranked_lines[0].startswith("- " + memspec.CORRECTION_PREFIX)
+                    and correction_files[0].stem in ranked_lines[0]
+                    and any("Drive Plan" in line for line in ranked_lines[1:]),
+                )
+            )
+
             home = root / "home"
             project = root / "work" / "proj"
             project.mkdir(parents=True)
@@ -844,7 +916,7 @@ def _selftest():
             shutil.rmtree(marker_directory, ignore_errors=True)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 23
+    total = 26
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

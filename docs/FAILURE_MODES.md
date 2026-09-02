@@ -183,10 +183,14 @@ Three independent gaps produce the same symptom: the index refresh rule compared
 
 Index staleness is rate-limited by index age (bounded delay, no permanent blind spot). `resolve_vaults` joins the working directory's native memory directory and its ancestors when they already hold cards, ahead of configured vaults. Grant-shaped prompts are captured verbatim into `<first vault>/grants/`, deduplicated by digest, lock-guarded, and indexed immediately so the very next prompt can recall them; interpretation is left to whoever reads the card.
 
+Two more gaps showed up once the first three were closed: a to-do line written months ago ("pending, owner to handle") kept resurfacing after the owner had ruled the item out of scope, and the owner's correction of that resurfacing survived only as long as the agent remembered to card it. Correction-shaped owner sentences now take the same capture path into `<first vault>/corrections/`, and recall pins any correction hit first with a visible marker, ahead of whatever plan card matched better lexically. `epitype/pending_lint.py` names to-do lines that have an entry but no exit (no `verify:`, not closed, older than the configured window), and session start announces the count in a single first line so the budget cannot drop it.
+
 ### Self-verification
 
 ```powershell
 python epitype/memsearch.py --selftest
+python epitype/pending_lint.py --selftest
 python adapters/claude/recall_hook.py --selftest
 python adapters/claude/sessionstart_hook.py --selftest
+python epitype/pending_lint.py <vault> --strict
 ```

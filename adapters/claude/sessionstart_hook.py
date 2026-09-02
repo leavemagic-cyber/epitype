@@ -11,7 +11,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from epitype import memspec
+from epitype import memspec, pending_lint
 from _hook_common import (
     bounded_context,
     emit,
@@ -31,8 +31,16 @@ def _handle(event, started_at):
         return None
     budget = config[memspec.CONFIG_BUDGET_BYTES_FIELD]
     pieces = []
+    vaults = resolve_vaults(config, event)
 
-    for vault in resolve_vaults(config, event):
+    # One line, first, so the budget cannot drop it: pending items with an entry
+    # and no exit are exactly what resurfaces as wrong memory later.
+    if not expired(started_at):
+        overdue = pending_lint.summary_line(vaults)
+        if overdue:
+            pieces.append(overdue)
+
+    for vault in vaults:
         if expired(started_at):
             return None
         index_path = vault / memspec.MEMORY_INDEX_FILENAME
@@ -134,6 +142,22 @@ def _selftest():
                 )
             )
 
+            (vault / "plan.md").write_text(
+                "---\nname: plan\ndescription: synthetic plan\n---\n- 2026-07-22 未辦（owner 自行）：SWSetup\n",
+                encoding="utf-8",
+            )
+            overdue_result = run_synthetic(Path(__file__), {"source": "startup"}, config)
+            overdue_value = json.loads(overdue_result.stdout) if overdue_result.stdout.strip() else {}
+            overdue_context = overdue_value.get("hookSpecificOutput", {}).get("additionalContext", "")
+            checks.append(
+                (
+                    "overdue pending line is announced first, in one line",
+                    overdue_result.returncode == 0
+                    and overdue_context.startswith("⏳ 殭屍待辦 1 行／1 卡")
+                    and "index detail" in overdue_context,
+                )
+            )
+
             bad_config = root / "bad-config.json"
             bad_config.write_text("{broken", encoding="utf-8")
             bad_result = run_synthetic(
@@ -153,7 +177,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 5
+    total = 6
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
