@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import posixpath
 import re
+import shutil
 import sqlite3
 import subprocess
 import tempfile
@@ -420,9 +421,13 @@ def _is_stale(vault, db_path):
     if latest is None:
         return False
     try:
-        return latest - db_path.stat().st_mtime > memspec.FTS_STALE_SECONDS
+        indexed_at = db_path.stat().st_mtime
     except OSError:
         return True
+    # Rate-limit rebuilds by index age, never by card age: a card landing inside
+    # the window is picked up once the window has passed instead of staying
+    # invisible until some later card happens to fall outside it.
+    return latest > indexed_at and time.time() - indexed_at > memspec.FTS_STALE_SECONDS
 
 
 def _hit_fields(row, term):
@@ -1198,6 +1203,28 @@ def _selftest():
             stale_results = query_index(vault, "自動重建證據")["results"]
             checks.append(("Stale incremental rebuild", bool(stale_results) and stale_results[0]["path"] == str(mixed.resolve())))
 
+            grace_vault = Path(tempfile.mkdtemp(prefix="epitype-grace-"))
+            grace_old = grace_vault / "old.md"
+            grace_old.write_text("---\nname: Old\ndescription: graceoldneedle\n---\n", encoding="utf-8")
+            build_index(grace_vault)
+            grace_db = _db_path(grace_vault)
+            grace_young = grace_vault / "young.md"
+            grace_young.write_text("---\nname: Young\ndescription: graceyoungneedle\n---\n", encoding="utf-8")
+            grace_now = time.time()
+            os.utime(grace_old, (grace_now - 2000, grace_now - 2000))
+            os.utime(grace_db, (grace_now - 100, grace_now - 100))
+            os.utime(grace_young, (grace_now - 90, grace_now - 90))
+            inside_window = _is_stale(grace_vault, grace_db)
+            os.utime(grace_db, (grace_now - 1000, grace_now - 1000))
+            os.utime(grace_young, (grace_now - 990, grace_now - 990))
+            checks.append((
+                "Card inside grace window indexes once the index itself ages out",
+                not inside_window
+                and _is_stale(grace_vault, grace_db)
+                and query_index(grace_vault, "graceyoungneedle")["results"][0]["path"] == str(grace_young.resolve()),
+            ))
+            shutil.rmtree(grace_vault, ignore_errors=True)
+
             other.write_text(other.read_text(encoding="utf-8") + "concurrentwriteproof\n", encoding="utf-8")
             concurrent_mtime = time.time() + 2.0
             os.utime(other, (concurrent_mtime, concurrent_mtime))
@@ -1239,7 +1266,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 22
+    total = 23
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
