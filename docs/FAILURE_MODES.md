@@ -61,7 +61,7 @@ Memory is usually delivered as advisory context. Enforcement hooks may exist, bu
 
 ### Epitype countermeasure
 
-A scar card may carry `trigger.tool`, `trigger.input`, and `advice`. A match drives a bounded deny response, offers a safer alternative, and appends an audit row. The distinct claim is memory-derived interception criteria; the hook and deny mechanism themselves are not claimed as novel.
+A scar card may carry `trigger.tool`, `trigger.input`, and `advice`. With `trigger.match: command`, matching targets executable positions rather than prose mentions, so false denials do not push operators toward bypassing the gate. A match drives a bounded deny response, offers a safer alternative, and appends an audit row. The distinct claim is memory-derived interception criteria; the hook and deny mechanism themselves are not claimed as novel.
 
 ### Self-verification
 

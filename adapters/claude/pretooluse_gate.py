@@ -2,10 +2,12 @@ import sys, time; sys.dont_write_bytecode = True; _STARTED_AT = time.monotonic()
 """Claude PreToolUse adapter for fail-open, card-driven safety advice."""
 
 from datetime import datetime, timezone
+import ast
 import json
 import os
 from pathlib import Path
 import re
+import shlex
 import tempfile
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -21,6 +23,12 @@ from _hook_common import (
     read_event,
     run_synthetic,
     write_config,
+)
+
+_TRIGGER_KEYS = (
+    memspec.TRIGGER_TOOL_FIELD,
+    memspec.TRIGGER_INPUT_FIELD,
+    memspec.TRIGGER_MATCH_FIELD,
 )
 
 
@@ -78,7 +86,7 @@ def _inline_mapping(raw):
             raise ValueError("malformed trigger mapping")
         key, raw_value = item.split(":", 1)
         key = key.strip()
-        if key not in (memspec.TRIGGER_TOOL_FIELD, memspec.TRIGGER_INPUT_FIELD):
+        if key not in _TRIGGER_KEYS:
             raise ValueError("unknown trigger field")
         if key in result:
             raise ValueError("duplicate trigger field")
@@ -167,7 +175,7 @@ def _parse_trigger_card(path):
                 continue
             key, raw_value = stripped.split(":", 1)
             key = key.strip()
-            if key not in (memspec.TRIGGER_TOOL_FIELD, memspec.TRIGGER_INPUT_FIELD):
+            if key not in _TRIGGER_KEYS:
                 problems.append("unknown trigger field")
                 continue
             if key in trigger:
@@ -188,18 +196,214 @@ def _parse_trigger_card(path):
 
     tool_pattern = trigger.get(memspec.TRIGGER_TOOL_FIELD, "")
     input_pattern = trigger.get(memspec.TRIGGER_INPUT_FIELD, "")
+    match_mode = trigger.get(memspec.TRIGGER_MATCH_FIELD, "")
     advice = fields.get(memspec.ADVICE_FIELD, "").strip()
     if not tool_pattern or not input_pattern or not advice:
         raise ValueError("trigger cards require tool, input, and advice")
+    if match_mode not in ("", memspec.TRIGGER_COMMAND_MATCH):
+        raise ValueError("trigger match must be command when present")
     tool_regex = re.compile(tool_pattern)
     input_regex = re.compile(input_pattern)
     return {
         "path": path.resolve(),
         "name": fields.get("name", "").strip() or path.stem,
         "advice": advice,
+        "match_mode": match_mode,
         "tool_regex": tool_regex,
         "input_regex": input_regex,
     }
+
+
+class _CommandParseError(ValueError):
+    pass
+
+
+_HEREDOC_TOKEN = re.compile(
+    r"\"(?:\\.|[^\"\\])*\"|'[^']*'|"
+    r"<<(?P<tabs>-)?[ \t]*(?P<quote>['\"]?)(?P<name>[A-Za-z0-9_.:+-]+)(?P=quote)"
+)
+
+
+def _heredoc_markers(line):
+    return [
+        (match.group("name"), bool(match.group("tabs")))
+        for match in _HEREDOC_TOKEN.finditer(line)
+        if match.group("name") and not line.startswith("<<<", match.start())
+    ]
+
+
+def _without_heredoc_bodies(command):
+    output = []
+    pending = []
+    for line in command.splitlines(keepends=True):
+        if pending:
+            delimiter, strip_tabs = pending[0]
+            candidate = line.rstrip("\r\n")
+            if strip_tabs:
+                candidate = candidate.lstrip("\t")
+            if candidate == delimiter:
+                pending.pop(0)
+            continue
+        output.append(line)
+        pending.extend(_heredoc_markers(line.rstrip("\r\n")))
+    if pending:
+        raise _CommandParseError("unterminated heredoc")
+    return "".join(output)
+
+
+def _shell_segments(command):
+    command = _without_heredoc_bodies(command)
+    lexer = shlex.shlex(command, posix=False, punctuation_chars="|&;\n")
+    lexer.whitespace = " \t\r"
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    try:
+        raw_tokens = list(lexer)
+    except ValueError as exc:
+        raise _CommandParseError("invalid shell token syntax") from exc
+    segments, current, comment = [], [], False
+    for raw in raw_tokens:
+        if raw == "\n" or raw and set(raw) <= {"|", "&", ";"}:
+            if current:
+                segments.append(current)
+            current, comment = [], False
+            continue
+        quoted = len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in ('"', "'")
+        if not quoted and raw.startswith("#"):
+            comment = True
+        if comment:
+            continue
+        value = raw[1:-1] if quoted else raw
+        shell_substitution = "$(" in value or "`" in value
+        if (not quoted and (shell_substitution or any(mark in value for mark in "(){}"))) or (
+            quoted and raw[0] == '"' and shell_substitution
+        ):
+            raise _CommandParseError("unsupported shell grouping")
+        current.append(value)
+    if current:
+        segments.append(current)
+    return segments
+
+
+def _executable_name(value):
+    name = re.split(r"[\\/]", value)[-1]
+    return re.sub(r"(?i)\.(?:exe|com|cmd|bat|ps1|sh|py)$", "", name)
+
+
+def _python_embedded_commands(code, depth):
+    try:
+        tree = ast.parse(code)
+    except SyntaxError as exc:
+        raise _CommandParseError("invalid Python command string") from exc
+    commands = []
+    execution_calls = {"system", "popen", "run", "call", "check_call", "check_output", "exec", "eval"}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not node.args:
+            continue
+        function = node.func
+        name = function.attr if isinstance(function, ast.Attribute) else (
+            function.id if isinstance(function, ast.Name) else ""
+        )
+        if name.lower() not in execution_calls:
+            continue
+        argument, value = node.args[0], None
+        if isinstance(argument, ast.Constant):
+            value = argument.value
+        elif isinstance(argument, (ast.List, ast.Tuple)):
+            values = [
+                item.value for item in argument.elts
+                if isinstance(item, ast.Constant) and isinstance(item.value, str)
+            ]
+            value = " ".join(values) if len(values) == len(argument.elts) else None
+        if isinstance(value, str):
+            nested = _python_embedded_commands if name.lower() in ("exec", "eval") else _command_candidates
+            commands.extend(nested(value, depth + 1))
+    return commands
+
+
+def _command_candidates(command, depth=0):
+    if depth > 8:
+        raise _CommandParseError("command wrapper nesting too deep")
+    candidates = []
+    for tokens in _shell_segments(command):
+        index = 0
+        while index < len(tokens):
+            if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tokens[index]):
+                index += 1
+                continue
+            executable = _executable_name(tokens[index]).lower()
+            if executable in ("&", "call", "command", "exec", "nohup"):
+                index += 1
+                continue
+            if executable == "env":
+                index += 1
+                while index < len(tokens) and (
+                    tokens[index].startswith("-")
+                    or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tokens[index])
+                ):
+                    index += 1
+                continue
+            if executable == "sudo":
+                index += 1
+                value_options = {"-u", "--user", "-g", "--group", "-h", "--host"}
+                while index < len(tokens) and tokens[index].startswith("-"):
+                    option = tokens[index].split("=", 1)[0]
+                    index += 1
+                    if option in value_options and index < len(tokens):
+                        index += 1
+                continue
+            break
+        if index >= len(tokens):
+            continue
+
+        executable = _executable_name(tokens[index])
+        lowered = executable.lower()
+        arguments = tokens[index + 1 :]
+        wrapper_flags = {
+            "cmd": {"/c", "/k"},
+            "powershell": {"-c", "-command"},
+            "pwsh": {"-c", "-command"},
+            "bash": {"-c"},
+            "sh": {"-c"},
+            "zsh": {"-c"},
+        }
+        if lowered in wrapper_flags:
+            for flag_index, value in enumerate(arguments):
+                if value.lower() in wrapper_flags[lowered]:
+                    payload = " ".join(arguments[flag_index + 1 :])
+                    if not payload:
+                        raise _CommandParseError("shell wrapper lacks command string")
+                    candidates.extend(_command_candidates(payload, depth + 1))
+                    break
+
+        if lowered == "py" or re.fullmatch(r"python(?:\d+(?:\.\d+)*)?", lowered):
+            for flag_index, value in enumerate(arguments):
+                if value.lower() == "-c":
+                    if flag_index + 1 >= len(arguments):
+                        raise _CommandParseError("Python wrapper lacks command string")
+                    candidates.extend(
+                        _python_embedded_commands(arguments[flag_index + 1], depth)
+                    )
+                    break
+
+        script_flags = {
+            "node": {"-e", "--eval"},
+            "ruby": {"-e"},
+            "perl": {"-e"},
+        }
+        if lowered in script_flags:
+            for flag_index, value in enumerate(arguments):
+                if value.lower() in script_flags[lowered]:
+                    if flag_index + 1 >= len(arguments):
+                        raise _CommandParseError("interpreter lacks command string")
+                    candidates.extend(
+                        _python_embedded_commands(arguments[flag_index + 1], depth)
+                    )
+                    break
+
+        visible_arguments = [value for value in arguments if not value.startswith((">", "<"))]
+        candidates.append(" ".join((executable, *visible_arguments)).strip())
+    return candidates
 
 
 def _append_gate_log(vault, row, started_at):
@@ -220,10 +424,13 @@ def _append_gate_log(vault, row, started_at):
             os.fsync(stream.fileno())
 
 
-def _append_audit(vault, tool_name, card_name, started_at):
+def _append_audit(vault, tool_name, card_name, started_at, fallback=None):
+    row = {"tool": tool_name, "card": card_name}
+    if fallback is not None:
+        row["fallback"] = fallback
     _append_gate_log(
         vault,
-        {"tool": tool_name, "card": card_name},
+        row,
         started_at,
     )
 
@@ -246,8 +453,9 @@ def _handle(event, started_at, metrics=None):
     tool_name = event.get("tool_name")
     if not isinstance(tool_name, str) or not tool_name:
         return None
+    tool_input = event.get("tool_input")
     tool_input_text = json.dumps(
-        event.get("tool_input"),
+        tool_input,
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
@@ -277,11 +485,32 @@ def _handle(event, started_at, metrics=None):
                 cards.append((vault, card))
 
     match = None
+    command_state = None
     for vault, card in cards:
-        if card["tool_regex"].search(tool_name) and card["input_regex"].search(
-            tool_input_text
-        ):
-            match = (vault, card)
+        if not card["tool_regex"].search(tool_name):
+            continue
+        fallback = None
+        if card["match_mode"] == memspec.TRIGGER_COMMAND_MATCH:
+            if command_state is None:
+                command = tool_input.get("command") if isinstance(tool_input, dict) else None
+                try:
+                    if not isinstance(command, str):
+                        raise _CommandParseError("command input is not text")
+                    command_state = (_command_candidates(command), False)
+                except _CommandParseError:
+                    command_state = ((), True)
+            candidates, used_fallback = command_state
+            if used_fallback:
+                input_matches = card["input_regex"].search(tool_input_text) is not None
+                fallback = "fulltext"
+            else:
+                input_matches = any(
+                    card["input_regex"].match(candidate) for candidate in candidates
+                )
+        else:
+            input_matches = card["input_regex"].search(tool_input_text) is not None
+        if input_matches:
+            match = (vault, card, fallback)
             break
     if match is None:
         return None
@@ -289,8 +518,8 @@ def _handle(event, started_at, metrics=None):
         metrics.update(fail_open=True, outcome="timeout", reason="timeout")
         return None
 
-    vault, card = match
-    _append_audit(vault, tool_name, card["name"], started_at)
+    vault, card, fallback = match
+    _append_audit(vault, tool_name, card["name"], started_at, fallback)
     if expired(started_at):
         metrics.update(fail_open=True, outcome="timeout", reason="timeout")
         return None
@@ -486,6 +715,72 @@ def _selftest():
                 )
             )
 
+            command_vault = root / "command-vault"
+            command_vault.mkdir()
+            card_specs = (
+                ("kill-host", "match: command, ", r"(?i)(?:taskkill\b.*\bclaude(?:\.exe)?\b|Stop-Process\b.*\bclaude\b)", "Keep the host process running."),
+                ("destructive-git", "match: command, ", r"(?i)git\b.*\breset\b.*--hard\b", "Preserve the working tree."),
+                ("credential-read", "", r"(?i)(?:\.env|auth\.json)", "Keep credential material unread."),
+            )
+            for name, match_field, pattern, advice in card_specs:
+                (command_vault / f"{name}.md").write_text(
+                    f"---\nname: {name}\ntrigger: {{tool: ^Bash$, {match_field}input: '{pattern}'}}\nadvice: {advice}\n---\n",
+                    encoding="utf-8",
+                )
+            command_config = root / "command-config.json"
+            write_config(command_config, [command_vault])
+
+            def command_result(command):
+                result = run_synthetic(
+                    Path(__file__),
+                    {"tool_name": "Bash", "tool_input": {"command": command}},
+                    command_config,
+                )
+                value = json.loads(result.stdout) if result.stdout.strip() else {}
+                decision = value.get("hookSpecificOutput", {}).get("permissionDecision")
+                return result, decision
+
+            command_cases = (
+                ("Python heredoc prose allows", "python - <<'PY'\npayload = {'lesson': 'taskkill /IM claude.exe'}\nprint(payload)\nPY\n", None),
+                ("cat heredoc prose allows", "cat <<'EOF'\ntaskkill /IM claude.exe\nEOF\n", None),
+                ("quoted command mention allows", 'echo "taskkill /IM claude.exe"', None),
+                ("Python prose write allows", 'python -c "open(\'ledger.txt\', \'w\').write(\'taskkill /IM claude.exe\')"', None),
+                ("interpreter -e prose allows", 'node -e "console.log(\'taskkill /IM claude.exe\')"', None),
+                ("comment mention allows", "echo safe # taskkill /IM claude.exe", None),
+                ("executable position denies", "taskkill /IM claude.exe", "deny"),
+                ("second chained segment denies", "echo safe && taskkill /IM claude.exe", "deny"),
+                ("cmd wrapper denies", 'cmd /c "taskkill /IM claude.exe"', "deny"),
+                ("PowerShell wrapper denies", 'powershell -Command "Stop-Process -Name claude"', "deny"),
+                ("bash wrapper denies", "bash -c 'taskkill /IM claude.exe'", "deny"),
+                ("Python os.system wrapper denies", 'python -c "import os; os.system(\'taskkill /IM claude.exe\')"', "deny"),
+                ("interpreter -e exec wrapper denies", 'node -e "exec(\'taskkill /IM claude.exe\')"', "deny"),
+                ("path and extension normalization denies", r"C:\Windows\System32\taskkill.exe /IM claude.exe", "deny"),
+                ("env assignment and sudo wrapper deny", "MODE=safe sudo taskkill /IM claude.exe", "deny"),
+                ("destructive git original case denies", "git reset --hard", "deny"),
+                ("credential path original case denies", "Get-Content .env", "deny"),
+            )
+            for name, command, expected in command_cases:
+                result, decision = command_result(command)
+                checks.append((name, result.returncode == 0 and decision == expected))
+
+            malformed, malformed_decision = command_result(
+                'echo "taskkill /IM claude.exe'
+            )
+            checks.append((
+                "unbalanced quote falls back and denies",
+                malformed.returncode == 0 and malformed_decision == "deny",
+            ))
+            command_log = command_vault / memspec.GATE_LOG_FILENAME
+            command_rows = [
+                json.loads(line)
+                for line in command_log.read_text(encoding="utf-8").splitlines()
+                if line
+            ]
+            checks.append(("fallback audit is explicit", any(
+                row.get("card") == "kill-host" and row.get("fallback") == "fulltext"
+                for row in command_rows
+            )))
+
             missing_config = root / "missing-config.json"
             missing = run_synthetic(
                 Path(__file__),
@@ -507,7 +802,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 7
+    total = 26
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
