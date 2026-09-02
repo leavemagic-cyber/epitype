@@ -2,3 +2,7 @@ __pycache__/
 *.pyc
 .epitype/
 .[c]airn/
+dist/
+build/
+*.egg-info/
+node_modules/

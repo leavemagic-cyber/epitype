@@ -2,7 +2,9 @@
 
 [繁體中文](README.zh-TW.md)
 
-Epitype is a memory governance layer for CLI agents. It keeps the host's native memory as the storage authority, then adds the structure, timing, action gates, and evidence needed for remembered rules to affect later behavior.
+Epitype is a memory governance layer for CLI agents.
+
+It keeps the host's native memory as the storage authority, then adds the structure, timing, action gates, and evidence needed for remembered rules to affect later behavior.
 
 An agent can retrieve the right fact and still break the rule attached to it. Epitype focuses on that gap:
 
@@ -46,7 +48,11 @@ Missing indexes, stale indexes, shim failures, malformed cards, and lock content
 
 ## Quickstart
 
-Requirements: Python 3 and a Claude Code or Codex installation with hook support.
+Requirements: Python 3.11 or newer and a Claude Code or Codex installation with hook support.
+
+Install: `pip install epitype`, then use the `epitype-graft` command in place of `python install/graft.py` below (for example `epitype-graft install --dry-run`).
+
+The `epitype` package on npm is only a signpost back to this Python project.
 
 From the repository root, preview the planned changes:
 
