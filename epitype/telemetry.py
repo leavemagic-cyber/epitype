@@ -24,25 +24,29 @@ FIELDS = (
     "injected_bytes",
     "terms",
     "vaults",
+    "vault_skipped",
     "ms",
     "reason",
 )
 HOSTS = frozenset(("claude", "codex"))
-OUTCOMES = frozenset(("hit", "miss", "deny", "allow", "fail-open", "error"))
+OUTCOMES = frozenset(("hit", "miss", "deny", "allow", "fail-open", "error", "timeout"))
 REASONS = frozenset(
     (
         "adapter-error",
         "auto-remedied",
         "card-deny",
+        "config",
         "context-injected",
         "detector-error",
         "detector-timeout",
+        "exception",
         "hook-error",
         "hook-timeout",
         "invalid-event",
         "map-written",
         "no-context",
         "no-hit",
+        "no-index",
         "no-match",
         "shim-adapter-missing",
         "shim-config-missing",
@@ -50,6 +54,7 @@ REASONS = frozenset(
         "shim-exception",
         "shim-repo-root-missing",
         "shim-repo-root-not-dir",
+        "timeout",
     )
 )
 
@@ -89,6 +94,8 @@ def _nonnegative_integer(value, name):
 
 
 def _validated_record(record):
+    record = dict(record)
+    record.setdefault("vault_skipped", 0)
     if len(record) != len(FIELDS) or set(record) != set(FIELDS):
         raise ValueError("telemetry fields are not the fixed schema")
     if record["host"] not in HOSTS:
@@ -101,7 +108,7 @@ def _validated_record(record):
         raise ValueError("invalid telemetry event")
     if not isinstance(record["ts"], str) or not record["ts"].endswith("Z"):
         raise ValueError("invalid telemetry timestamp")
-    for name in ("hits", "injected_bytes", "terms", "vaults", "ms"):
+    for name in ("hits", "injected_bytes", "terms", "vaults", "vault_skipped", "ms"):
         _nonnegative_integer(record[name], name)
     return record
 
@@ -115,6 +122,7 @@ def append(
     injected_bytes=0,
     terms=0,
     vaults=0,
+    vault_skipped=0,
     ms=0,
     reason,
     home=None,
@@ -136,6 +144,7 @@ def append(
                 "injected_bytes": injected_bytes,
                 "terms": terms,
                 "vaults": vaults,
+                "vault_skipped": vault_skipped,
                 "ms": ms,
                 "reason": reason,
             }

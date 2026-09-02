@@ -92,12 +92,33 @@ def _migrate_legacy_index(vault):
     migrated_from = None
     if legacy_directory.is_dir() and not current_directory.exists():
         try:
-            legacy_directory.rename(current_directory)
+            os.replace(legacy_directory, current_directory)
             migrated_from = str(legacy_directory)
         except FileNotFoundError:
             # Another builder may have completed the same atomic directory move.
             pass
     return migrated_from
+
+
+def _read_db_path(vault):
+    current_db = _db_path(vault)
+    current_directory = current_db.parent
+    legacy_db = _legacy_db_path(vault)
+    legacy_directory = legacy_db.parent
+    if current_db.is_file():
+        return current_db, False
+    if current_directory.exists() or not legacy_db.is_file():
+        return current_db, False
+    try:
+        os.replace(legacy_directory, current_directory)
+    except OSError:
+        # A locked or permission-blocked directory move must not turn a valid
+        # legacy snapshot into silent no-index. Read it in place for this call.
+        if current_db.is_file():
+            return current_db, False
+        if legacy_db.is_file():
+            return legacy_db, True
+    return current_db, False
 
 
 def _no_index_result(vault):
@@ -713,11 +734,11 @@ def query_index(vault, term, include_superseded=False, include_noncard=False):
     term = str(term).strip()
     if not term:
         raise ValueError("query term must not be empty")
-    db_path = _db_path(vault)
+    db_path, migration_pending = _read_db_path(vault)
     if not db_path.is_file():
         return _no_index_result(vault)
     index_updated = False
-    if _is_stale(vault, db_path):
+    if not migration_pending and _is_stale(vault, db_path):
         # 2026-09-01 實測事故：重建競爭若阻斷查詢會讓喚回不可用；規則：拿不到鎖
         # 即讀既有 SQLite 快照。
         index_updated = build_index(vault, lock_timeout=0.0)["status"] == "built"
@@ -763,6 +784,8 @@ def query_index(vault, term, include_superseded=False, include_noncard=False):
     }
     if index_updated:
         payload["index_updated"] = True
+    if migration_pending:
+        payload["index_migration_pending"] = True
     warnings = _index_warnings(vault)
     if warnings:
         payload["warnings"] = warnings
@@ -771,15 +794,18 @@ def query_index(vault, term, include_superseded=False, include_noncard=False):
 
 def recall_index(vault, prompt, include_superseded=False, include_noncard=False):
     vault = _resolve_vault(vault)
-    db_path = _db_path(vault)
+    db_path, migration_pending = _read_db_path(vault)
     if not db_path.is_file():
         return _no_index_result(vault)
     prompt = str(prompt).strip()
     terms = _recall_terms(prompt)
     if not terms:
-        return {"query": prompt, "terms": [], "count": 0, "results": [], "guidance": []}
+        payload = {"query": prompt, "terms": [], "count": 0, "results": [], "guidance": []}
+        if migration_pending:
+            payload["index_migration_pending"] = True
+        return payload
     index_updated = False
-    if _is_stale(vault, db_path):
+    if not migration_pending and _is_stale(vault, db_path):
         index_updated = build_index(vault, lock_timeout=0.0)["status"] == "built"
 
     connection = _read_connection(db_path)
@@ -830,6 +856,8 @@ def recall_index(vault, prompt, include_superseded=False, include_noncard=False)
     }
     if index_updated:
         payload["index_updated"] = True
+    if migration_pending:
+        payload["index_migration_pending"] = True
     warnings = _index_warnings(vault)
     if warnings:
         payload["warnings"] = warnings
@@ -1469,6 +1497,77 @@ def _selftest():
                 )
             )
 
+        with tempfile.TemporaryDirectory(prefix="epitype-read-migration-") as temp_dir:
+            read_vault = Path(temp_dir)
+            read_card = read_vault / "read.md"
+            _write_card(
+                read_card,
+                "name: Read Migration Card\ndescription: readmigrationfixture\nscope: infra",
+                "Query and recall both migrate the existing snapshot on first read.",
+            )
+            build_index(read_vault)
+            read_current = _db_path(read_vault).parent
+            read_legacy = _legacy_db_path(read_vault).parent
+            os.replace(read_current, read_legacy)
+            read_query = query_index(read_vault, "readmigrationfixture")
+            checks.append(
+                (
+                    "Query migrates a legacy index on read",
+                    read_query["count"] == 1
+                    and read_current.is_dir()
+                    and not read_legacy.exists(),
+                )
+            )
+            os.replace(read_current, read_legacy)
+            read_recall = recall_index(read_vault, "find readmigrationfixture")
+            checks.append(
+                (
+                    "Recall migrates a legacy index on read",
+                    read_recall["count"] == 1
+                    and read_current.is_dir()
+                    and not read_legacy.exists(),
+                )
+            )
+
+        with tempfile.TemporaryDirectory(prefix="epitype-pending-migration-") as temp_dir:
+            pending_vault = Path(temp_dir)
+            pending_card = pending_vault / "pending.md"
+            _write_card(
+                pending_card,
+                "name: Pending Migration Card\ndescription: pendingmigrationfixture\nscope: infra",
+                "A blocked rename still reads the legacy snapshot.",
+            )
+            build_index(pending_vault)
+            pending_current = _db_path(pending_vault).parent
+            pending_legacy = _legacy_db_path(pending_vault).parent
+            os.replace(pending_current, pending_legacy)
+            real_replace = os.replace
+
+            def blocked_replace(source, destination):
+                if Path(source) == pending_legacy and Path(destination) == pending_current:
+                    raise PermissionError("synthetic blocked index migration")
+                return real_replace(source, destination)
+
+            os.replace = blocked_replace
+            try:
+                pending_query = query_index(pending_vault, "pendingmigrationfixture")
+                pending_recall = recall_index(
+                    pending_vault, "find pendingmigrationfixture"
+                )
+            finally:
+                os.replace = real_replace
+            checks.append(
+                (
+                    "Blocked read migration falls back to the legacy snapshot",
+                    pending_query["count"] == 1
+                    and pending_recall["count"] == 1
+                    and pending_query.get("index_migration_pending") is True
+                    and pending_recall.get("index_migration_pending") is True
+                    and pending_legacy.is_dir()
+                    and not pending_current.exists(),
+                )
+            )
+
         with tempfile.TemporaryDirectory(prefix="epitype-dual-index-") as temp_dir:
             dual_vault = Path(temp_dir)
             dual_card = dual_vault / "current.md"
@@ -1496,7 +1595,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 29
+    total = 32
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

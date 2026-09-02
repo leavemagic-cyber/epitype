@@ -29,6 +29,7 @@ def _metrics():
         "injected_bytes": 0,
         "terms": 0,
         "vaults": 0,
+        "vault_skipped": 0,
         "reason": "invalid-event",
     }
 
@@ -38,9 +39,13 @@ def _handle(event, started_at, host):
     transcript_value = event.get("transcript_path")
     if not isinstance(transcript_value, str) or not transcript_value.strip():
         return None, metrics
-    config = load_config(started_at)
+    try:
+        config = load_config(started_at)
+    except Exception:
+        metrics.update(outcome="error", reason="config")
+        return None, metrics
     if config is None or expired(started_at):
-        metrics.update(outcome="fail-open", reason="hook-timeout")
+        metrics.update(outcome="timeout", reason="timeout")
         return None, metrics
     metrics["vaults"] = len(config[memspec.CONFIG_VAULTS_FIELD])
 
@@ -60,7 +65,7 @@ def _handle(event, started_at, host):
     budget = config[memspec.CONFIG_BUDGET_BYTES_FIELD]
     if expired(started_at) or not payload_fits("PreCompact", context, budget):
         if expired(started_at):
-            metrics.update(outcome="fail-open", hits=0, reason="hook-timeout")
+            metrics.update(outcome="timeout", hits=0, reason="timeout")
         return None, metrics
     metrics["injected_bytes"] = 0 if host == "codex" else len(context.encode("utf-8"))
     return payload("PreCompact", context), metrics
@@ -134,11 +139,33 @@ def _selftest():
                     and not codex_result.stderr,
                 )
             )
+
+            bad_config = root / "bad-config.json"
+            bad_config.write_text("{broken", encoding="utf-8")
+            bad_home = root / "bad-home"
+            bad_result = run_synthetic(
+                Path(__file__),
+                {"transcript_path": str(transcript)},
+                bad_config,
+                environment={telemetry.TEST_HOME_ENV: str(bad_home)},
+            )
+            bad_records = telemetry.read_records(home=bad_home)
+            checks.append(
+                (
+                    "bad config fails open and records config",
+                    bad_result.returncode == 0
+                    and not bad_result.stdout
+                    and not bad_result.stderr
+                    and len(bad_records) == 1
+                    and bad_records[0]["outcome"] == "error"
+                    and bad_records[0]["reason"] == "config",
+                )
+            )
     except Exception as exc:
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 3
+    total = 4
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
@@ -160,9 +187,9 @@ def main():
         if value is not None and not expired(_STARTED_AT) and "--codex" not in arguments:
             emit(value)
         elif value is not None and expired(_STARTED_AT):
-            metrics.update(outcome="fail-open", hits=0, injected_bytes=0, reason="hook-timeout")
+            metrics.update(outcome="timeout", hits=0, injected_bytes=0, reason="timeout")
     except Exception:
-        metrics.update(outcome="fail-open", hits=0, injected_bytes=0, reason="hook-error")
+        metrics.update(outcome="error", hits=0, injected_bytes=0, reason="exception")
     telemetry.append(
         host,
         "PreCompact",
@@ -171,6 +198,7 @@ def main():
         injected_bytes=metrics["injected_bytes"],
         terms=metrics["terms"],
         vaults=metrics["vaults"],
+        vault_skipped=metrics["vault_skipped"],
         ms=max(0, int((time.monotonic() - _STARTED_AT) * 1000)),
         reason=metrics["reason"],
     )

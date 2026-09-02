@@ -24,6 +24,8 @@ python install/graft.py uninstall --dry-run
 
 The command edits `~/.claude/settings.json` and `~/.codex/hooks.json` only when marked Epitype entries exist. It then removes `~/.epitype/`, including the four generated launchers under `~/.epitype/hooks/`, `config.json`, and the bounded fail-open breadcrumb file `shim_status.json`. It does not delete `~/.epitype-vault`, `~/.codex/memories`, Claude project memory directories, or any card file. Timestamped backups remain beside every edited host file.
 
+A legacy generated index at `<vault>/.cairn/` is renamed to `<vault>/.epitype/` on the first read when the current index directory is absent. These per-vault index directories are separate from the user-level `~/.epitype/` configuration directory described above.
+
 ## Manual removal
 
 Use this route only if the automated command cannot run.

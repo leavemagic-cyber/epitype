@@ -40,6 +40,7 @@ def _record_telemetry(reason):
             "injected_bytes": 0,
             "terms": 0,
             "vaults": 0,
+            "vault_skipped": 0,
             "ms": 0,
             "reason": "shim-" + reason.replace("_", "-"),
         }

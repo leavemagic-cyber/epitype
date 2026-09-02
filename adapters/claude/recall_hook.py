@@ -2,6 +2,8 @@ import sys, time; sys.dont_write_bytecode = True; _STARTED_AT = time.monotonic()
 """Claude UserPromptSubmit adapter for bounded, deduplicated local recall."""
 
 import hashlib
+import contextlib
+import io
 import json
 import os
 from pathlib import Path
@@ -124,8 +126,24 @@ def _metrics():
         "injected_bytes": 0,
         "terms": 0,
         "vaults": 0,
+        "vault_skipped": 0,
         "reason": "invalid-event",
+        "failure_reason": None,
     }
+
+
+def _failure(metrics, reason):
+    metrics.update(
+        outcome="timeout" if reason == "timeout" else "error",
+        injected_bytes=0,
+        reason=reason,
+    )
+
+
+def _skip_vault(metrics, reason):
+    metrics["vault_skipped"] += 1
+    if metrics["failure_reason"] != "exception":
+        metrics["failure_reason"] = reason
 
 
 def _handle(event, started_at):
@@ -133,9 +151,13 @@ def _handle(event, started_at):
     prompt = event.get("prompt")
     if not isinstance(prompt, str) or not prompt.strip():
         return None, metrics
-    config = load_config(started_at)
+    try:
+        config = load_config(started_at)
+    except Exception:
+        _failure(metrics, "config")
+        return None, metrics
     if config is None:
-        metrics.update(outcome="fail-open", reason="hook-timeout")
+        _failure(metrics, "timeout")
         return None, metrics
 
     _capture_grant(prompt, config[memspec.CONFIG_VAULTS_FIELD][0], event, started_at)
@@ -146,12 +168,19 @@ def _handle(event, started_at):
     metrics["terms"] = len(memsearch._recall_terms(prompt))
     for vault in vaults:
         if expired(started_at):
-            metrics.update(outcome="fail-open", reason="hook-timeout")
+            _failure(metrics, "timeout")
             return None, metrics
-        result = memsearch.recall_index(vault, prompt)
+        try:
+            result = memsearch.recall_index(vault, prompt)
+        except Exception:
+            _skip_vault(metrics, "exception")
+            continue
+        if result.get("error") == "no-index":
+            _skip_vault(metrics, "no-index")
+            continue
         metrics["hits"] += max(0, int(result.get("count", 0)))
         if expired(started_at):
-            metrics.update(outcome="fail-open", reason="hook-timeout")
+            _failure(metrics, "timeout")
             return None, metrics
         for hit in result.get("results", ())[: memspec.FTS_TOP_K]:
             pieces.append(
@@ -172,7 +201,10 @@ def _handle(event, started_at):
         required_first=True,
     )
     if not context or context == memspec.UNTRUSTED_ADVISORY:
-        metrics["reason"] = "no-hit"
+        if metrics["failure_reason"]:
+            _failure(metrics, metrics["failure_reason"])
+        else:
+            metrics["reason"] = "no-hit"
         return None, metrics
     digest = hashlib.sha256(context.encode("utf-8")).hexdigest()
     session_id = event.get("session_id", event.get("sessionId", ""))
@@ -180,17 +212,38 @@ def _handle(event, started_at):
         session_id = ""
     if expired(started_at) or not _claim_marker(session_id, digest):
         if expired(started_at):
-            metrics.update(outcome="fail-open", reason="hook-timeout")
+            _failure(metrics, "timeout")
+        elif metrics["failure_reason"]:
+            metrics.update(outcome="error", reason=metrics["failure_reason"])
         else:
             metrics["outcome"] = "hit" if metrics["hits"] else "miss"
             metrics["reason"] = "context-injected" if metrics["hits"] else "no-hit"
         return None, metrics
-    metrics.update(
-        outcome="hit" if metrics["hits"] else "miss",
-        injected_bytes=len(context.encode("utf-8")),
-        reason="context-injected" if metrics["hits"] else "no-hit",
-    )
+    metrics.update(injected_bytes=len(context.encode("utf-8")))
+    if metrics["failure_reason"]:
+        metrics.update(outcome="error", reason=metrics["failure_reason"])
+    else:
+        metrics.update(
+            outcome="hit" if metrics["hits"] else "miss",
+            reason="context-injected" if metrics["hits"] else "no-hit",
+        )
     return payload("UserPromptSubmit", context), metrics
+
+
+def _append_metrics(host, metrics, started_at, *, home=None):
+    return telemetry.append(
+        host,
+        "UserPromptSubmit",
+        metrics["outcome"],
+        hits=metrics["hits"],
+        injected_bytes=metrics["injected_bytes"],
+        terms=metrics["terms"],
+        vaults=metrics["vaults"],
+        vault_skipped=metrics["vault_skipped"],
+        ms=max(0, int((time.monotonic() - started_at) * 1000)),
+        reason=metrics["reason"],
+        home=home,
+    )
 
 
 def _selftest():
@@ -356,10 +409,15 @@ def _selftest():
                 {"prompt": "how do I recover portable recall with broken settings", "session_id": uuid.uuid4().hex},
                 config,
             )
+            broken_records = telemetry.read_records(home=root / "synthetic-home")
             checks.append(
                 (
                     "bad config fail-open",
-                    broken.returncode == 0 and not broken.stdout and not broken.stderr,
+                    broken.returncode == 0
+                    and not broken.stdout
+                    and not broken.stderr
+                    and broken_records[-1]["outcome"] == "error"
+                    and broken_records[-1]["reason"] == "config",
                 )
             )
 
@@ -431,6 +489,276 @@ def _selftest():
                     and not any((home / ".claude" / "projects" / empty_slug / "memory").iterdir()),
                 )
             )
+
+            legacy_vault = root / "legacy-vault"
+            legacy_vault.mkdir()
+            legacy_card = legacy_vault / "legacy.md"
+            legacy_card.write_text(
+                "---\nname: Legacy Hook Card\ndescription: legacyhookneedle\n---\nlegacyhookneedle\n",
+                encoding="utf-8",
+            )
+            memsearch.build_index(legacy_vault)
+            legacy_current = memsearch._db_path(legacy_vault).parent
+            legacy_directory = memsearch._legacy_db_path(legacy_vault).parent
+            os.replace(legacy_current, legacy_directory)
+            legacy_config = root / "legacy-config.json"
+            write_config(legacy_config, [legacy_vault])
+            legacy_result = run_synthetic(
+                Path(__file__),
+                {"prompt": "find legacyhookneedle", "session_id": uuid.uuid4().hex},
+                legacy_config,
+                environment={telemetry.TEST_HOME_ENV: os.fspath(root / "legacy-home")},
+            )
+            legacy_value = (
+                json.loads(legacy_result.stdout) if legacy_result.stdout.strip() else {}
+            )
+            legacy_context = legacy_value.get("hookSpecificOutput", {}).get(
+                "additionalContext", ""
+            )
+            checks.append(
+                (
+                    "hook migrates a legacy index on first read",
+                    legacy_result.returncode == 0
+                    and "Legacy Hook Card" in legacy_context
+                    and legacy_current.is_dir()
+                    and not legacy_directory.exists(),
+                )
+            )
+
+            pending_vault = root / "pending-vault"
+            pending_vault.mkdir()
+            pending_card = pending_vault / "pending.md"
+            pending_card.write_text(
+                "---\nname: Pending Hook Card\ndescription: pendinghookneedle\n---\npendinghookneedle\n",
+                encoding="utf-8",
+            )
+            memsearch.build_index(pending_vault)
+            pending_current = memsearch._db_path(pending_vault).parent
+            pending_legacy = memsearch._legacy_db_path(pending_vault).parent
+            os.replace(pending_current, pending_legacy)
+            pending_config = root / "pending-config.json"
+            write_config(pending_config, [pending_vault])
+            real_replace = os.replace
+            old_config = os.environ.get(memspec.EPITYPE_CONFIG_ENV)
+
+            def blocked_replace(source, destination):
+                if Path(source) == pending_legacy and Path(destination) == pending_current:
+                    raise PermissionError("synthetic blocked index migration")
+                return real_replace(source, destination)
+
+            os.replace = blocked_replace
+            os.environ[memspec.EPITYPE_CONFIG_ENV] = os.fspath(pending_config)
+            try:
+                pending_value, _ = _handle(
+                    {"prompt": "find pendinghookneedle"}, time.monotonic()
+                )
+                pending_result = memsearch.recall_index(
+                    pending_vault, "find pendinghookneedle"
+                )
+            finally:
+                os.replace = real_replace
+                if old_config is None:
+                    os.environ.pop(memspec.EPITYPE_CONFIG_ENV, None)
+                else:
+                    os.environ[memspec.EPITYPE_CONFIG_ENV] = old_config
+            pending_context = (pending_value or {}).get("hookSpecificOutput", {}).get(
+                "additionalContext", ""
+            )
+            checks.append(
+                (
+                    "blocked migration reads the legacy index and marks pending",
+                    "Pending Hook Card" in pending_context
+                    and pending_result.get("index_migration_pending") is True
+                    and pending_legacy.is_dir()
+                    and not pending_current.exists(),
+                )
+            )
+
+            payload_home = root / "payload-home"
+            payload_project = root / "payload-work" / "shell"
+            payload_project.mkdir(parents=True)
+            payload_slug = re.sub(r"[^A-Za-z0-9]", "-", str(payload_project))
+            payload_shell = (
+                payload_home / ".claude" / "projects" / payload_slug / "memory"
+            )
+            payload_shell.mkdir(parents=True)
+            (payload_shell / "_LINT_STATUS.md").write_text(
+                "synthetic shell marker\n", encoding="utf-8"
+            )
+            payload_result = run_synthetic(
+                Path(__file__),
+                {
+                    "hook_event_name": "UserPromptSubmit",
+                    "transcript_path": os.fspath(root / "synthetic-transcript.jsonl"),
+                    "cwd": os.fspath(payload_project),
+                    "prompt": "find portable recall",
+                },
+                config,
+                environment={
+                    "HOME": os.fspath(payload_home),
+                    "USERPROFILE": os.fspath(payload_home),
+                },
+            )
+            payload_value = (
+                json.loads(payload_result.stdout) if payload_result.stdout.strip() else {}
+            )
+            payload_context = payload_value.get("hookSpecificOutput", {}).get(
+                "additionalContext", ""
+            )
+            checks.append(
+                (
+                    "real payload shape skips a lint-only cwd slug shell",
+                    payload_result.returncode == 0
+                    and "Portable Recall" in payload_context
+                    and not (payload_shell / memspec.FTS_INDEX_DIRECTORY).exists(),
+                )
+            )
+
+            multi_one = root / "multi-one"
+            multi_missing = root / "multi-missing"
+            multi_three = root / "multi-three"
+            for item in (multi_one, multi_missing, multi_three):
+                item.mkdir()
+            (multi_one / "one.md").write_text(
+                "---\nname: Multi One\ndescription: multivaultneedle\n---\nmultivaultneedle\n",
+                encoding="utf-8",
+            )
+            (multi_three / "three.md").write_text(
+                "---\nname: Multi Three\ndescription: multivaultneedle\n---\nmultivaultneedle\n",
+                encoding="utf-8",
+            )
+            memsearch.build_index(multi_one)
+            memsearch.build_index(multi_three)
+            multi_config = root / "multi-config.json"
+            write_config(multi_config, [multi_one, multi_missing, multi_three])
+            multi_home = root / "multi-home"
+            canary = "EPITYPE-U19-PRIVATE-CANARY-DO-NOT-STORE"
+            multi_result = run_synthetic(
+                Path(__file__),
+                {"prompt": canary + " find multivaultneedle"},
+                multi_config,
+                environment={telemetry.TEST_HOME_ENV: os.fspath(multi_home)},
+            )
+            multi_value = (
+                json.loads(multi_result.stdout) if multi_result.stdout.strip() else {}
+            )
+            multi_context = multi_value.get("hookSpecificOutput", {}).get(
+                "additionalContext", ""
+            )
+            multi_records = telemetry.read_records(home=multi_home)
+            multi_record = multi_records[-1] if multi_records else {}
+            checks.append(
+                (
+                    "one no-index vault is skipped while two vaults still answer",
+                    multi_result.returncode == 0
+                    and "Multi One" in multi_context
+                    and "Multi Three" in multi_context
+                    and multi_record.get("outcome") == "error"
+                    and multi_record.get("reason") == "no-index"
+                    and multi_record.get("vaults") == 3
+                    and multi_record.get("vault_skipped") == 1,
+                )
+            )
+
+            exception_vault = root / "multi-exception"
+            exception_vault.mkdir()
+            exception_config = root / "exception-config.json"
+            write_config(exception_config, [multi_one, exception_vault, multi_three])
+            exception_home = root / "exception-home"
+            old_config = os.environ.get(memspec.EPITYPE_CONFIG_ENV)
+            real_recall_index = memsearch.recall_index
+
+            def exploding_recall(vault_path, prompt, **kwargs):
+                if Path(vault_path) == exception_vault:
+                    raise sqlite3.OperationalError("synthetic vault query failure")
+                return real_recall_index(vault_path, prompt, **kwargs)
+
+            os.environ[memspec.EPITYPE_CONFIG_ENV] = os.fspath(exception_config)
+            memsearch.recall_index = exploding_recall
+            exception_started = time.monotonic()
+            try:
+                exception_value, exception_metrics = _handle(
+                    {"prompt": "find multivaultneedle"}, exception_started
+                )
+                _append_metrics(
+                    "claude", exception_metrics, exception_started, home=exception_home
+                )
+            finally:
+                memsearch.recall_index = real_recall_index
+                if old_config is None:
+                    os.environ.pop(memspec.EPITYPE_CONFIG_ENV, None)
+                else:
+                    os.environ[memspec.EPITYPE_CONFIG_ENV] = old_config
+            exception_context = (exception_value or {}).get(
+                "hookSpecificOutput", {}
+            ).get("additionalContext", "")
+            exception_records = telemetry.read_records(home=exception_home)
+            checks.append(
+                (
+                    "one query exception is skipped while other vaults still answer",
+                    "Multi One" in exception_context
+                    and "Multi Three" in exception_context
+                    and len(exception_records) == 1
+                    and exception_records[0]["outcome"] == "error"
+                    and exception_records[0]["reason"] == "exception"
+                    and exception_records[0]["vault_skipped"] == 1,
+                )
+            )
+
+            timeout_home = root / "timeout-home"
+            timeout_config = root / "timeout-config.json"
+            write_config(timeout_config, [vault])
+            old_expired = globals()["expired"]
+            old_stdin = sys.stdin
+            old_argv = sys.argv
+            old_config = os.environ.get(memspec.EPITYPE_CONFIG_ENV)
+            old_test_home = os.environ.get(telemetry.TEST_HOME_ENV)
+            timeout_stdout = io.StringIO()
+            timeout_stderr = io.StringIO()
+            try:
+                globals()["expired"] = lambda _started_at: True
+                sys.stdin = io.StringIO(json.dumps({"prompt": "find portable recall"}))
+                sys.argv = [os.fspath(Path(__file__))]
+                os.environ[memspec.EPITYPE_CONFIG_ENV] = os.fspath(timeout_config)
+                os.environ[telemetry.TEST_HOME_ENV] = os.fspath(timeout_home)
+                with contextlib.redirect_stdout(timeout_stdout), contextlib.redirect_stderr(
+                    timeout_stderr
+                ):
+                    timeout_code = main()
+            finally:
+                globals()["expired"] = old_expired
+                sys.stdin = old_stdin
+                sys.argv = old_argv
+                if old_config is None:
+                    os.environ.pop(memspec.EPITYPE_CONFIG_ENV, None)
+                else:
+                    os.environ[memspec.EPITYPE_CONFIG_ENV] = old_config
+                if old_test_home is None:
+                    os.environ.pop(telemetry.TEST_HOME_ENV, None)
+                else:
+                    os.environ[telemetry.TEST_HOME_ENV] = old_test_home
+            timeout_records = telemetry.read_records(home=timeout_home)
+            checks.append(
+                (
+                    "expired hook exits zero silently and records timeout",
+                    timeout_code == 0
+                    and not timeout_stdout.getvalue()
+                    and not timeout_stderr.getvalue()
+                    and len(timeout_records) == 1
+                    and timeout_records[0]["outcome"] == "timeout"
+                    and timeout_records[0]["reason"] == "timeout",
+                )
+            )
+
+            multi_telemetry = telemetry.telemetry_path(multi_home).read_text(
+                encoding="ascii"
+            )
+            checks.append(
+                (
+                    "prompt privacy canary never reaches telemetry",
+                    canary not in multi_telemetry,
+                )
+            )
     except Exception as exc:
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
     finally:
@@ -438,7 +766,7 @@ def _selftest():
             shutil.rmtree(marker_directory, ignore_errors=True)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 10
+    total = 17
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
@@ -460,20 +788,10 @@ def main():
         if value is not None and not expired(_STARTED_AT):
             emit(value)
         elif value is not None:
-            metrics.update(outcome="fail-open", injected_bytes=0, reason="hook-timeout")
+            _failure(metrics, "timeout")
     except Exception:
-        metrics.update(outcome="fail-open", injected_bytes=0, reason="hook-error")
-    telemetry.append(
-        host,
-        "UserPromptSubmit",
-        metrics["outcome"],
-        hits=metrics["hits"],
-        injected_bytes=metrics["injected_bytes"],
-        terms=metrics["terms"],
-        vaults=metrics["vaults"],
-        ms=max(0, int((time.monotonic() - _STARTED_AT) * 1000)),
-        reason=metrics["reason"],
-    )
+        _failure(metrics, "exception")
+    _append_metrics(host, metrics, _STARTED_AT)
     return 0
 
 

@@ -29,6 +29,7 @@ DETECTOR_BUDGET_MS = 150
 DETECTOR_HEADROOM_MS = 80
 ACTIVITY_HOURS = 24
 DEFAULT_MISS_STREAK = 8
+HOOK_INTERNAL_REASONS = frozenset(("no-index", "timeout", "config", "exception"))
 STATUSES = frozenset(("open", "acked", "closed"))
 SHIM_REASONS = frozenset(
     (
@@ -45,6 +46,7 @@ FAILURE_MODES = {
     "detector-timeout": "§9",
     "fail-open-seen": "§6",
     "host-silent": "§9",
+    "hook-internal-failure": "§9",
     "index-unreachable": "§8",
     "recall-miss-streak": "§9",
 }
@@ -54,6 +56,7 @@ REMEDIES = {
     "fail-open-seen": "Repair the named shim cause, then run graft doctor --clear-shim-status.",
     "host-silent:claude": "Check Claude hook registration and run graft doctor.",
     "host-silent:codex": "In Codex, open /hooks, approve Epitype, then run graft doctor.",
+    "hook-internal-failure": "Repair the recorded hook reason, then run graft doctor and a synthetic recall.",
     "index-unreachable": "Automatically rebuild the stale index; run graft doctor if it remains open.",
     "recall-miss-streak": "Run graft doctor and inspect whether the intended vault is indexed and reachable.",
 }
@@ -396,6 +399,41 @@ def detect_recall_miss_streak(records, *, threshold=DEFAULT_MISS_STREAK, now=Non
     ]
 
 
+def detect_hook_internal_failures(records, *, now=None):
+    current = _now(now)
+    cutoff = current - timedelta(hours=ACTIVITY_HOURS)
+    by_host = {}
+    for record in records:
+        host = record.get("host")
+        reason = record.get("reason")
+        timestamp = _parse_ts(record.get("ts"))
+        if (
+            host not in telemetry.HOSTS
+            or record.get("outcome") not in ("error", "timeout")
+            or reason not in HOOK_INTERNAL_REASONS
+            or timestamp is None
+            or timestamp < cutoff
+        ):
+            continue
+        by_host.setdefault(host, []).append((timestamp, record))
+    detections = []
+    for host, failures in sorted(by_host.items()):
+        latest = max(failures, key=lambda item: item[0])[1]
+        detections.append(
+            make_finding(
+                f"hook-internal-failure:{host}",
+                {
+                    "failures": len(failures),
+                    "host": host,
+                    "reason": latest["reason"],
+                    "vault_skipped": sum(row.get("vault_skipped", 0) for _, row in failures),
+                },
+                now=current,
+            )
+        )
+    return detections
+
+
 def _detect_fail_open(home, *, now=None):
     path = telemetry.state_root(home) / "shim_status.json"
     try:
@@ -505,6 +543,7 @@ def _default_collect(context):
         )
     )
     detections.extend(detect_recall_miss_streak(records, now=now))
+    detections.extend(detect_hook_internal_failures(records, now=now))
     detections.extend(_detect_fail_open(home, now=now))
     index_findings, index_statuses = _detect_index_unreachable(
         context["vaults"], now=now, deadline=deadline
@@ -629,6 +668,7 @@ def _telemetry_row(host="claude", hits=0, terms=3, ts="2026-09-02T00:00:00Z"):
         "injected_bytes": 0,
         "terms": terms,
         "vaults": 1,
+        "vault_skipped": 0,
         "ms": 1,
         "reason": "context-injected" if hits else "no-hit",
     }
@@ -669,6 +709,25 @@ def _selftest():
                     and not detect_recall_miss_streak(seven, now=now)
                     and not detect_recall_miss_streak(reset_seven, now=now)
                     and detect_recall_miss_streak(reset_eight, now=now)[0]["evidence"]["streak"] == 8,
+                )
+            )
+
+            internal_row = _telemetry_row(ts="2026-09-02T03:59:00Z")
+            internal_row.update(
+                outcome="error", reason="no-index", vault_skipped=1
+            )
+            internal = detect_hook_internal_failures([internal_row], now=now)
+            legacy_row = _telemetry_row()
+            legacy_row.pop("vault_skipped")
+            normalized_legacy_row = telemetry._validated_record(legacy_row)
+            checks.append(
+                (
+                    "hook-internal telemetry becomes a bounded finding",
+                    len(internal) == 1
+                    and internal[0]["code"] == "hook-internal-failure:claude"
+                    and internal[0]["evidence"]["reason"] == "no-index"
+                    and internal[0]["evidence"]["vault_skipped"] == 1
+                    and normalized_legacy_row["vault_skipped"] == 0,
                 )
             )
 
@@ -990,7 +1049,7 @@ def _selftest():
     if timeout_number is not None:
         print(f"DETECTOR timeout_elapsed_ms={timeout_number:.3f} budget_ms=150")
     passed = sum(bool(ok) for _, ok in checks)
-    total = 10
+    total = 11
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

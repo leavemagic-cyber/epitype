@@ -74,7 +74,7 @@ python epitype/memsearch.py query term --vault C:\path\to\vault
 python epitype/memsearch.py recall "natural-language prompt" --vault C:\path\to\vault
 ```
 
-The generated database lives at `<vault>/.epitype/memory_fts.sqlite3` and is ignored by Git. `query` and `recall` do not create a missing index: they return a nonzero JSON `no-index` error with guidance to run `build`, while a valid index with no matches keeps the normal zero-result payload. An existing stale index is still refreshed incrementally and that response includes `index_updated: true`. `build` also reuses a detected legacy index by moving it to the current directory when the current directory is absent; if both directories exist, Epitype uses the current one and reports that the legacy directory can be deleted after verification.
+The generated database lives at `<vault>/.epitype/memory_fts.sqlite3` and is ignored by Git. `query` and `recall` do not create a missing index: before returning a nonzero JSON `no-index` error, they atomically move an existing legacy `.cairn` index into place. If that move is blocked, they read the legacy snapshot and return `index_migration_pending: true`; a valid index with no matches keeps the normal zero-result payload. An existing stale index is still refreshed incrementally and that response includes `index_updated: true`. If both index directories exist, Epitype uses the current one and reports that the legacy directory can be deleted after verification.
 
 ## Uninstall
 

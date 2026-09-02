@@ -242,7 +242,7 @@ def _append_parse_defect(vault, path, error, started_at):
 
 def _handle(event, started_at, metrics=None):
     metrics = metrics if metrics is not None else {}
-    metrics.update(vaults=0, fail_open=False, reason="no-match")
+    metrics.update(vaults=0, vault_skipped=0, fail_open=False, outcome="allow", reason="no-match")
     tool_name = event.get("tool_name")
     if not isinstance(tool_name, str) or not tool_name:
         return None
@@ -252,9 +252,13 @@ def _handle(event, started_at, metrics=None):
         sort_keys=True,
         separators=(",", ":"),
     )
-    config = load_config(started_at)
+    try:
+        config = load_config(started_at)
+    except Exception:
+        metrics.update(fail_open=True, outcome="error", reason="config")
+        return None
     if config is None:
-        metrics.update(fail_open=True, reason="hook-timeout")
+        metrics.update(fail_open=True, outcome="timeout", reason="timeout")
         return None
     metrics["vaults"] = len(config[memspec.CONFIG_VAULTS_FIELD])
 
@@ -262,7 +266,7 @@ def _handle(event, started_at, metrics=None):
     for vault in config[memspec.CONFIG_VAULTS_FIELD]:
         for path in sorted(vault.rglob("*.md"), key=lambda item: str(item).casefold()):
             if expired(started_at):
-                metrics.update(fail_open=True, reason="hook-timeout")
+                metrics.update(fail_open=True, outcome="timeout", reason="timeout")
                 return None
             try:
                 card = _parse_trigger_card(path)
@@ -282,13 +286,13 @@ def _handle(event, started_at, metrics=None):
     if match is None:
         return None
     if expired(started_at):
-        metrics.update(fail_open=True, reason="hook-timeout")
+        metrics.update(fail_open=True, outcome="timeout", reason="timeout")
         return None
 
     vault, card = match
     _append_audit(vault, tool_name, card["name"], started_at)
     if expired(started_at):
-        metrics.update(fail_open=True, reason="hook-timeout")
+        metrics.update(fail_open=True, outcome="timeout", reason="timeout")
         return None
     reason = f"{card['advice']} [{card['path']}]"
     value = {
@@ -299,7 +303,7 @@ def _handle(event, started_at, metrics=None):
         }
     }
     if len(encode_payload(value).encode("utf-8")) > memspec.HOOK_MAX_OUTPUT_BYTES:
-        metrics.update(fail_open=True, reason="hook-error")
+        metrics.update(fail_open=True, outcome="error", reason="exception")
         return None
     metrics["reason"] = "card-deny"
     return value
@@ -326,8 +330,9 @@ def _process(event, started_at, host, *, home=None):
         telemetry.append(
             host,
             "PreToolUse",
-            "fail-open",
+            metrics["outcome"],
             vaults=metrics["vaults"],
+            vault_skipped=metrics["vault_skipped"],
             ms=elapsed_ms,
             reason=metrics["reason"],
             home=home,
@@ -487,12 +492,15 @@ def _selftest():
                 {"tool_name": "Bash", "tool_input": {"command": "remove target"}},
                 missing_config,
             )
+            missing_records = telemetry.read_records(home=root / "synthetic-home")
             checks.append(
                 (
                     "missing config infra failure allows silently",
                     missing.returncode == 0
                     and not missing.stdout
-                    and not missing.stderr,
+                    and not missing.stderr
+                    and missing_records[-1]["outcome"] == "error"
+                    and missing_records[-1]["reason"] == "config",
                 )
             )
     except Exception as exc:
@@ -519,13 +527,21 @@ def main():
         value, _ = _process(event, _STARTED_AT, host)
         if value is not None and not expired(_STARTED_AT):
             emit(value)
+        elif value is not None:
+            telemetry.append(
+                host,
+                "PreToolUse",
+                "timeout",
+                ms=max(0, int((time.monotonic() - _STARTED_AT) * 1000)),
+                reason="timeout",
+            )
     except Exception:
         telemetry.append(
             host,
             "PreToolUse",
-            "fail-open",
+            "error",
             ms=max(0, int((time.monotonic() - _STARTED_AT) * 1000)),
-            reason="hook-error",
+            reason="exception",
         )
     return 0
 

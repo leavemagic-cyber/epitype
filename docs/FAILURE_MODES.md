@@ -203,7 +203,7 @@ Registration checks, token measurement, interception audits, fail-open breadcrum
 
 ### Epitype countermeasure
 
-The evidence layer appends a fixed, content-free telemetry row for SessionStart, UserPromptSubmit, and PreCompact. PreToolUse writes rows only for deny, fail-open, or error; its ordinary allow path rate-limits a heartbeat to one touch per 60 seconds. SessionStart rotates the log after 512 KiB and retains at most 256 KiB of complete tail rows.
+The evidence layer appends a fixed, content-free telemetry row for SessionStart, UserPromptSubmit, and PreCompact. PreToolUse writes rows only for deny, error, or timeout; its ordinary allow path rate-limits a heartbeat to one touch per 60 seconds. Index-format or index-location upgrades must remain compatible on the read path, and hook-internal no-index, timeout, config, or exception failures must leave content-free telemetry instead of disappearing. SessionStart rotates the log after 512 KiB and retains at most 256 KiB of complete tail rows.
 
 The bounded detector compares 24-hour host session mtimes with hook evidence, recognizes repeated nontrivial zero-hit recall, imports shim fail-open and Codex trust failures, and checks the established stale-index rule. Results are deduplicated into `<vault0>/_EPITYPE_FINDINGS.md`; SessionStart injects one line only when an open finding exists, and `graft doctor` prints the same view. Operators move findings through `open` → `acked` → `closed`; a closed failure that reappears reopens and increments instead of disappearing.
 
