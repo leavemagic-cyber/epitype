@@ -2,7 +2,9 @@
 
 [English](README.md)
 
-Epitype 是 CLI agent 的記憶治理層。它沿用 host 的原生記憶作為儲存正本，再補上卡片結構、喚回時點、動作閘與驗證證據，讓已記住的規則能影響後續決策與工具動作。
+Epitype 是 CLI agent 的記憶治理層。
+
+它沿用 host 的原生記憶作為儲存正本，再補上卡片結構、喚回時點、動作閘與驗證證據，讓已記住的規則能影響後續決策與工具動作。
 
 AI 即使找回正確事實，仍可能違反隨附的規則。Epitype 處理的正是這段落差：
 
@@ -46,7 +48,11 @@ Epitype 把同一組原生 vault 接到四個 host 事件：
 
 ## 快速開始
 
-需求：Python 3，以及支援 hook 的 Claude Code 或 Codex。
+需求：Python 3.11 以上，以及支援 hook 的 Claude Code 或 Codex。
+
+安裝：`pip install epitype`，之後用 `epitype-graft` 指令取代下文的 `python install/graft.py`（例如 `epitype-graft install --dry-run`）。
+
+npm 上的 `epitype` 只是指回這個 Python 專案的路標套件。
 
 先在 repo 根目錄預覽預計變更：
 

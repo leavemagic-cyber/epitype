@@ -1,0 +1,17 @@
+{
+  "name": "epitype",
+  "version": "1.0.0",
+  "description": "Epitype is a memory governance layer for CLI agents.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/leavemagic-cyber/epitype.git"
+  },
+  "bin": {
+    "epitype": "bin/epitype.js"
+  },
+  "files": [
+    "README.md",
+    "bin/epitype.js"
+  ]
+}

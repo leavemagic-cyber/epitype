@@ -10,6 +10,13 @@ From the repository root, close active Claude Code and Codex sessions, then run:
 python install/graft.py uninstall
 ```
 
+For a PyPI installation, remove Epitype-owned registrations before uninstalling the package:
+
+```powershell
+epitype-graft uninstall
+pip uninstall epitype
+```
+
 For a sandbox or non-default home directory:
 
 ```powershell
