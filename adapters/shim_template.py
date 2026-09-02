@@ -19,9 +19,48 @@ SHIM_REASON_CODES = (
     "exception",
 )
 STATUS_FILENAME = "shim_status.json"
+EVENT_NAMES = {
+    "sessionstart.py": "SessionStart",
+    "recall.py": "UserPromptSubmit",
+    "precompact.py": "PreCompact",
+    "pretooluse.py": "PreToolUse",
+}
+
+
+def _record_telemetry(reason):
+    try:
+        shim_name = Path(__file__).name
+        host = "codex" if "--codex" in sys.argv[1:] else "claude"
+        record = {
+            "ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+            "host": host,
+            "event": EVENT_NAMES[shim_name],
+            "outcome": "fail-open",
+            "hits": 0,
+            "injected_bytes": 0,
+            "terms": 0,
+            "vaults": 0,
+            "ms": 0,
+            "reason": "shim-" + reason.replace("_", "-"),
+        }
+        payload = (json.dumps(record, ensure_ascii=True, separators=(",", ":")) + "\n").encode("ascii")
+        target = Path.home() / ".epitype" / "telemetry.jsonl"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        descriptor = os.open(
+            os.fspath(target),
+            os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_BINARY", 0),
+            0o600,
+        )
+        try:
+            os.write(descriptor, payload)
+        finally:
+            os.close(descriptor)
+    except Exception:
+        pass
 
 
 def _record_fail_open(reason):
+    _record_telemetry(reason)
     try:
         status_path = Path.home() / ".epitype" / STATUS_FILENAME
         records = {}

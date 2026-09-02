@@ -11,7 +11,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from epitype import memspec
+from epitype import findings, memspec, telemetry
 from _hook_common import (
     bounded_context,
     emit,
@@ -25,16 +25,51 @@ from _hook_common import (
 )
 
 
-def _handle(event, started_at):
+def _metrics():
+    return {
+        "outcome": "miss",
+        "hits": 0,
+        "injected_bytes": 0,
+        "terms": 0,
+        "vaults": 0,
+        "reason": "no-context",
+    }
+
+
+def _handle(event, started_at, host):
+    metrics = _metrics()
     config = load_config(started_at)
     if config is None:
-        return None
+        metrics.update(outcome="fail-open", reason="hook-timeout")
+        return None, metrics
     budget = config[memspec.CONFIG_BUDGET_BYTES_FIELD]
     pieces = []
+    resolved_vaults = resolve_vaults(config, event)
+    primary_vault = config[memspec.CONFIG_VAULTS_FIELD][0]
+    detector_vaults = [primary_vault]
+    detector_vaults.extend(vault for vault in resolved_vaults if vault != primary_vault)
+    metrics["vaults"] = len(detector_vaults)
 
-    for vault in resolve_vaults(config, event):
+    try:
+        records, _ = findings.run_and_record(
+            telemetry.runtime_home(),
+            detector_vaults,
+            current_host=host,
+        )
+    except Exception:
+        try:
+            records = findings.load(primary_vault)
+        except Exception:
+            records = []
+    finding_line = findings.injection_line(records)
+    if finding_line:
+        pieces.append(finding_line)
+        metrics["hits"] += 1
+
+    for vault in resolved_vaults:
         if expired(started_at):
-            return None
+            metrics.update(outcome="fail-open", reason="hook-timeout")
+            return None, metrics
         index_path = vault / memspec.MEMORY_INDEX_FILENAME
         if index_path.is_file():
             body = index_path.read_text(encoding="utf-8")
@@ -44,17 +79,32 @@ def _handle(event, started_at):
                 index_path.resolve(),
             )
             pieces.append(f"## {memspec.MEMORY_INDEX_FILENAME}\n{slim}")
+            metrics["hits"] += 1
 
         ledger_path = vault / memspec.WORK_LEDGER_FILENAME
         if ledger_path.is_file():
             ledger = ledger_path.read_text(encoding="utf-8")
             pieces.append(f"## {memspec.WORK_LEDGER_FILENAME}")
             pieces.extend(ledger.splitlines())
+            metrics["hits"] += 1
 
     if expired(started_at):
-        return None
-    context = bounded_context("SessionStart", pieces, budget)
-    return payload("SessionStart", context) if context else None
+        metrics.update(outcome="fail-open", reason="hook-timeout")
+        return None, metrics
+    context = bounded_context(
+        "SessionStart",
+        pieces,
+        budget,
+        required_first=bool(finding_line),
+    )
+    if not context:
+        return None, metrics
+    metrics.update(
+        outcome="hit",
+        injected_bytes=len(context.encode("utf-8")),
+        reason="context-injected",
+    )
+    return payload("SessionStart", context), metrics
 
 
 def _selftest():
@@ -148,15 +198,32 @@ def _selftest():
 
 
 def main():
-    if "--selftest" in sys.argv[1:]:
+    arguments = sys.argv[1:]
+    if "--selftest" in arguments:
         return _selftest()
+    host = telemetry.host_from_argv(arguments)
+    metrics = _metrics()
     try:
         event = read_event(sys.stdin)
-        value = _handle(event, _STARTED_AT)
+        value, metrics = _handle(event, _STARTED_AT, host)
         if value is not None and not expired(_STARTED_AT):
             emit(value)
+        elif value is not None:
+            metrics.update(outcome="fail-open", injected_bytes=0, reason="hook-timeout")
     except Exception:
-        pass
+        metrics.update(outcome="fail-open", injected_bytes=0, reason="hook-error")
+    telemetry.append(
+        host,
+        "SessionStart",
+        metrics["outcome"],
+        hits=metrics["hits"],
+        injected_bytes=metrics["injected_bytes"],
+        terms=metrics["terms"],
+        vaults=metrics["vaults"],
+        ms=max(0, int((time.monotonic() - _STARTED_AT) * 1000)),
+        reason=metrics["reason"],
+    )
+    telemetry.rotate()
     return 0
 
 

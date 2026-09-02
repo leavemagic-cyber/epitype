@@ -16,7 +16,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from epitype import memsearch, memspec
+from epitype import memsearch, memspec, telemetry
 from _hook_common import (
     bounded_context,
     emit,
@@ -117,23 +117,42 @@ def _claim_marker(session_id, block_digest):
     return True
 
 
+def _metrics():
+    return {
+        "outcome": "miss",
+        "hits": 0,
+        "injected_bytes": 0,
+        "terms": 0,
+        "vaults": 0,
+        "reason": "invalid-event",
+    }
+
+
 def _handle(event, started_at):
+    metrics = _metrics()
     prompt = event.get("prompt")
     if not isinstance(prompt, str) or not prompt.strip():
-        return None
+        return None, metrics
     config = load_config(started_at)
     if config is None:
-        return None
+        metrics.update(outcome="fail-open", reason="hook-timeout")
+        return None, metrics
 
     _capture_grant(prompt, config[memspec.CONFIG_VAULTS_FIELD][0], event, started_at)
 
     pieces = [memspec.UNTRUSTED_ADVISORY]
-    for vault in resolve_vaults(config, event):
+    vaults = resolve_vaults(config, event)
+    metrics["vaults"] = len(vaults)
+    metrics["terms"] = len(memsearch._recall_terms(prompt))
+    for vault in vaults:
         if expired(started_at):
-            return None
+            metrics.update(outcome="fail-open", reason="hook-timeout")
+            return None, metrics
         result = memsearch.recall_index(vault, prompt)
+        metrics["hits"] += max(0, int(result.get("count", 0)))
         if expired(started_at):
-            return None
+            metrics.update(outcome="fail-open", reason="hook-timeout")
+            return None, metrics
         for hit in result.get("results", ())[: memspec.FTS_TOP_K]:
             pieces.append(
                 "- "
@@ -153,14 +172,25 @@ def _handle(event, started_at):
         required_first=True,
     )
     if not context or context == memspec.UNTRUSTED_ADVISORY:
-        return None
+        metrics["reason"] = "no-hit"
+        return None, metrics
     digest = hashlib.sha256(context.encode("utf-8")).hexdigest()
     session_id = event.get("session_id", event.get("sessionId", ""))
     if not isinstance(session_id, str):
         session_id = ""
     if expired(started_at) or not _claim_marker(session_id, digest):
-        return None
-    return payload("UserPromptSubmit", context)
+        if expired(started_at):
+            metrics.update(outcome="fail-open", reason="hook-timeout")
+        else:
+            metrics["outcome"] = "hit" if metrics["hits"] else "miss"
+            metrics["reason"] = "context-injected" if metrics["hits"] else "no-hit"
+        return None, metrics
+    metrics.update(
+        outcome="hit" if metrics["hits"] else "miss",
+        injected_bytes=len(context.encode("utf-8")),
+        reason="context-injected" if metrics["hits"] else "no-hit",
+    )
+    return payload("UserPromptSubmit", context), metrics
 
 
 def _selftest():
@@ -297,6 +327,7 @@ def _selftest():
             write_config(config, [vault])
             cp950_environment = os.environ.copy()
             cp950_environment[memspec.EPITYPE_CONFIG_ENV] = os.fspath(config)
+            cp950_environment[telemetry.TEST_HOME_ENV] = os.fspath(root / "cp950-home")
             cp950_environment["PYTHONDONTWRITEBYTECODE"] = "1"
             cp950_environment["PYTHONUTF8"] = "0"
             cp950_environment["PYTHONIOENCODING"] = "cp950"
@@ -418,15 +449,31 @@ def _selftest():
 
 
 def main():
-    if "--selftest" in sys.argv[1:]:
+    arguments = sys.argv[1:]
+    if "--selftest" in arguments:
         return _selftest()
+    host = telemetry.host_from_argv(arguments)
+    metrics = _metrics()
     try:
         event = read_event(sys.stdin)
-        value = _handle(event, _STARTED_AT)
+        value, metrics = _handle(event, _STARTED_AT)
         if value is not None and not expired(_STARTED_AT):
             emit(value)
+        elif value is not None:
+            metrics.update(outcome="fail-open", injected_bytes=0, reason="hook-timeout")
     except Exception:
-        pass
+        metrics.update(outcome="fail-open", injected_bytes=0, reason="hook-error")
+    telemetry.append(
+        host,
+        "UserPromptSubmit",
+        metrics["outcome"],
+        hits=metrics["hits"],
+        injected_bytes=metrics["injected_bytes"],
+        terms=metrics["terms"],
+        vaults=metrics["vaults"],
+        ms=max(0, int((time.monotonic() - _STARTED_AT) * 1000)),
+        reason=metrics["reason"],
+    )
     return 0
 
 

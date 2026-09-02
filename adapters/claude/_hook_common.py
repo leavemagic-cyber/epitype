@@ -161,8 +161,16 @@ def emit(value):
 
 
 def run_synthetic(script, event, config_path, arguments=(), environment=None):
-    environment = {**os.environ, **(environment or {})}
+    overrides = environment or {}
+    synthetic_home = (
+        overrides.get("EPITYPE_TEST_HOME")
+        or overrides.get("USERPROFILE")
+        or overrides.get("HOME")
+        or os.fspath(Path(config_path).parent / "synthetic-home")
+    )
+    environment = {**os.environ, **overrides}
     environment[memspec.EPITYPE_CONFIG_ENV] = os.fspath(config_path)
+    environment["EPITYPE_TEST_HOME"] = synthetic_home
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
     return subprocess.run(
         [sys.executable, os.fspath(script), *arguments],

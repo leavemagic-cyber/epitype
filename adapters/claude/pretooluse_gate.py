@@ -12,7 +12,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from epitype import memspec
+from epitype import memspec, telemetry
 from _hook_common import (
     emit,
     encode_payload,
@@ -240,7 +240,9 @@ def _append_parse_defect(vault, path, error, started_at):
     )
 
 
-def _handle(event, started_at):
+def _handle(event, started_at, metrics=None):
+    metrics = metrics if metrics is not None else {}
+    metrics.update(vaults=0, fail_open=False, reason="no-match")
     tool_name = event.get("tool_name")
     if not isinstance(tool_name, str) or not tool_name:
         return None
@@ -252,12 +254,15 @@ def _handle(event, started_at):
     )
     config = load_config(started_at)
     if config is None:
+        metrics.update(fail_open=True, reason="hook-timeout")
         return None
+    metrics["vaults"] = len(config[memspec.CONFIG_VAULTS_FIELD])
 
     cards = []
     for vault in config[memspec.CONFIG_VAULTS_FIELD]:
         for path in sorted(vault.rglob("*.md"), key=lambda item: str(item).casefold()):
             if expired(started_at):
+                metrics.update(fail_open=True, reason="hook-timeout")
                 return None
             try:
                 card = _parse_trigger_card(path)
@@ -274,12 +279,16 @@ def _handle(event, started_at):
         ):
             match = (vault, card)
             break
-    if match is None or expired(started_at):
+    if match is None:
+        return None
+    if expired(started_at):
+        metrics.update(fail_open=True, reason="hook-timeout")
         return None
 
     vault, card = match
     _append_audit(vault, tool_name, card["name"], started_at)
     if expired(started_at):
+        metrics.update(fail_open=True, reason="hook-timeout")
         return None
     reason = f"{card['advice']} [{card['path']}]"
     value = {
@@ -290,8 +299,41 @@ def _handle(event, started_at):
         }
     }
     if len(encode_payload(value).encode("utf-8")) > memspec.HOOK_MAX_OUTPUT_BYTES:
+        metrics.update(fail_open=True, reason="hook-error")
         return None
+    metrics["reason"] = "card-deny"
     return value
+
+
+def _process(event, started_at, host, *, home=None):
+    metrics = {}
+    value = _handle(event, started_at, metrics)
+    elapsed_ms = max(0, int((time.monotonic() - started_at) * 1000))
+    if value is not None:
+        telemetry.append(
+            host,
+            "PreToolUse",
+            "deny",
+            hits=1,
+            injected_bytes=len(encode_payload(value).encode("utf-8")),
+            vaults=metrics["vaults"],
+            ms=elapsed_ms,
+            reason="card-deny",
+            home=home,
+        )
+        return value, False
+    if metrics["fail_open"]:
+        telemetry.append(
+            host,
+            "PreToolUse",
+            "fail-open",
+            vaults=metrics["vaults"],
+            ms=elapsed_ms,
+            reason=metrics["reason"],
+            home=home,
+        )
+        return None, False
+    return None, telemetry.heartbeat(host, "PreToolUse", home=home)
 
 
 def _selftest():
@@ -468,15 +510,23 @@ def _selftest():
 
 
 def main():
-    if "--selftest" in sys.argv[1:]:
+    arguments = sys.argv[1:]
+    if "--selftest" in arguments:
         return _selftest()
+    host = telemetry.host_from_argv(arguments)
     try:
         event = read_event(sys.stdin)
-        value = _handle(event, _STARTED_AT)
+        value, _ = _process(event, _STARTED_AT, host)
         if value is not None and not expired(_STARTED_AT):
             emit(value)
     except Exception:
-        pass
+        telemetry.append(
+            host,
+            "PreToolUse",
+            "fail-open",
+            ms=max(0, int((time.monotonic() - _STARTED_AT) * 1000)),
+            reason="hook-error",
+        )
     return 0
 
 

@@ -9,7 +9,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from epitype import compact_map, memspec
+from epitype import compact_map, memspec, telemetry
 from _hook_common import (
     emit,
     expired,
@@ -22,17 +22,32 @@ from _hook_common import (
 )
 
 
-def _handle(event, started_at):
+def _metrics():
+    return {
+        "outcome": "miss",
+        "hits": 0,
+        "injected_bytes": 0,
+        "terms": 0,
+        "vaults": 0,
+        "reason": "invalid-event",
+    }
+
+
+def _handle(event, started_at, host):
+    metrics = _metrics()
     transcript_value = event.get("transcript_path")
     if not isinstance(transcript_value, str) or not transcript_value.strip():
-        return None
+        return None, metrics
     config = load_config(started_at)
     if config is None or expired(started_at):
-        return None
+        metrics.update(outcome="fail-open", reason="hook-timeout")
+        return None, metrics
+    metrics["vaults"] = len(config[memspec.CONFIG_VAULTS_FIELD])
 
     transcript = Path(transcript_value).expanduser().resolve()
     if not transcript.is_file():
-        return None
+        metrics["reason"] = "no-context"
+        return None, metrics
     vault = config[memspec.CONFIG_VAULTS_FIELD][0]
     destination = (vault / memspec.COMPACT_MAP_FILENAME).resolve()
     compact_map.build_map(
@@ -40,11 +55,15 @@ def _handle(event, started_at):
         destination,
         memspec.COMPACT_MAP_DEFAULT_BUDGET_BYTES,
     )
+    metrics.update(outcome="hit", hits=1, reason="map-written")
     context = f"地圖已落於{destination},壓縮後先讀它按行號回撈原文。"
     budget = config[memspec.CONFIG_BUDGET_BYTES_FIELD]
     if expired(started_at) or not payload_fits("PreCompact", context, budget):
-        return None
-    return payload("PreCompact", context)
+        if expired(started_at):
+            metrics.update(outcome="fail-open", hits=0, reason="hook-timeout")
+        return None, metrics
+    metrics["injected_bytes"] = 0 if host == "codex" else len(context.encode("utf-8"))
+    return payload("PreCompact", context), metrics
 
 
 def _selftest():
@@ -133,13 +152,28 @@ def main():
     arguments = sys.argv[1:]
     if "--selftest" in arguments:
         return _selftest()
+    host = telemetry.host_from_argv(arguments)
+    metrics = _metrics()
     try:
         event = read_event(sys.stdin)
-        value = _handle(event, _STARTED_AT)
+        value, metrics = _handle(event, _STARTED_AT, host)
         if value is not None and not expired(_STARTED_AT) and "--codex" not in arguments:
             emit(value)
+        elif value is not None and expired(_STARTED_AT):
+            metrics.update(outcome="fail-open", hits=0, injected_bytes=0, reason="hook-timeout")
     except Exception:
-        pass
+        metrics.update(outcome="fail-open", hits=0, injected_bytes=0, reason="hook-error")
+    telemetry.append(
+        host,
+        "PreCompact",
+        metrics["outcome"],
+        hits=metrics["hits"],
+        injected_bytes=metrics["injected_bytes"],
+        terms=metrics["terms"],
+        vaults=metrics["vaults"],
+        ms=max(0, int((time.monotonic() - _STARTED_AT) * 1000)),
+        reason=metrics["reason"],
+    )
     return 0
 
 
