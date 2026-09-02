@@ -105,7 +105,7 @@ Write throughput is optimized without a promotion gate, explicit decision owners
 
 ### Epitype countermeasure
 
-The transcript scanner emits proposals only and does not write cards into a vault. A human or authorized workflow must review a proposal. Structured decisions then pass the decision lint contract before being treated as current.
+The transcript scanner emits proposals only and does not write cards into a vault. A human or authorized workflow must review a proposal. Grant capture must first establish that the source is an owner's direct utterance; system-injected text and quotations never qualify as owner speech. Structured decisions then pass the decision lint contract before being treated as current.
 
 ### Self-verification
 

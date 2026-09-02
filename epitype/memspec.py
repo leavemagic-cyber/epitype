@@ -131,6 +131,41 @@ COMPACT_MAP_FILENAME = "_COMPACT_MAP.md"
 GATE_LOG_FILENAME = "_GATE_LOG.jsonl"
 RECALL_MARKER_DIRECTORY = "epitype_markers"
 
+# 2026-09-02 dogfood #22：UserPromptSubmit 可能承載系統注入、subagent 通知、
+# 引文或工具輸出，觸發詞命中本身不能證明是 owner 親口授權。所有捕捉界線集中
+# 在 host-neutral memspec，adapter 只依同一份規格先判來源，再擷取授權句。
+GRANT_MAX_CHARS = 300
+GRANT_MAX_NEWLINES = 2
+GRANT_DIRECTORY = "grants"
+GRANT_LOCK_SECONDS = 0.2
+GRANT_REJECT_MARKERS = (
+    "<task-notification",
+    "<system-reminder",
+    "<cross-session-message",
+    "<command-",
+    "[system notification",
+    "<tool_result",
+    "<function_results",
+)
+GRANT_FENCED_CODE_MARKER = "```"
+GRANT_TRIGGER_PATTERN = (
+    r"(?:我同意|同意過|我授權|授權你|你可以(?:操作|使用|用|直接|動|改|刪|執行|做|開|關|讀|寫)"
+    r"|准你|准了|批准|允許你|不用問我|不必問我|直接(?:做|修|改|動|刪|執行)|隨你|照你"
+    r"|\bI\s+(?:agree|authori[sz]e|approve|consent)\b|\byou\s+(?:may|are\s+allowed\s+to|have\s+my\s+permission)\b"
+    r"|\bgo\s+ahead\b|\bpermission\s+granted\b|\bdon'?t\s+ask\s+me\b)"
+)
+GRANT_LEADING_TAG_PATTERN = r"^\s*<(?:[!?/][^>]*|[A-Za-z][^>]*)>"
+GRANT_QUOTED_TEXT_PATTERN = (
+    r"(?:「[^」\r\n]*」|『[^』\r\n]*』|“[^”\r\n]*”|‘[^’\r\n]*’|\"[^\"\r\n]*\")"
+)
+GRANT_SENTENCE_SPLIT_PATTERN = r"[。.\r\n]+"
+GRANT_NEWLINE_PATTERN = r"\r\n|\r|\n"
+GRANT_TRIGGER_REGEX = re.compile(GRANT_TRIGGER_PATTERN, re.IGNORECASE)
+GRANT_LEADING_TAG_REGEX = re.compile(GRANT_LEADING_TAG_PATTERN, re.IGNORECASE)
+GRANT_QUOTED_TEXT_REGEX = re.compile(GRANT_QUOTED_TEXT_PATTERN)
+GRANT_SENTENCE_SPLIT_REGEX = re.compile(GRANT_SENTENCE_SPLIT_PATTERN)
+GRANT_NEWLINE_REGEX = re.compile(GRANT_NEWLINE_PATTERN)
+
 # 2026-09-01 實測事故：別名查無時缺少全文兜底，會讓既存卡片完全不可達；
 # 規則：DB 使用 vault-root 相對路徑，且不得綁定特定 CLI。
 FTS_INDEX_DIRECTORY = ".epitype"
