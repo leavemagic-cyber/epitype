@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 import shlex
 import tempfile
+from typing import NamedTuple
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
@@ -223,6 +224,17 @@ class _CommandParseError(ValueError):
     pass
 
 
+class _ShellToken(NamedTuple):
+    value: str
+    quoted: bool
+
+
+class _CommandCandidate(NamedTuple):
+    text: str
+    executable_end: int
+    wrapper: bool = False
+
+
 def _uses_command_matching(tool_name, match_mode):
     return match_mode == memspec.TRIGGER_COMMAND_MATCH or (
         not match_mode and tool_name.casefold() in SHELL_TOOL_NAMES
@@ -290,7 +302,7 @@ def _shell_segments(command):
             quoted and raw[0] == '"' and shell_substitution
         ):
             raise _CommandParseError("unsupported shell grouping")
-        current.append(value)
+        current.append(_ShellToken(value, quoted))
     if current:
         segments.append(current)
     return segments
@@ -332,6 +344,13 @@ def _python_embedded_commands(code, depth):
     return commands
 
 
+def _as_wrapper_candidates(candidates):
+    return [
+        _CommandCandidate(candidate.text, candidate.executable_end, True)
+        for candidate in candidates
+    ]
+
+
 def _command_candidates(command, depth=0):
     if depth > 8:
         raise _CommandParseError("command wrapper nesting too deep")
@@ -339,26 +358,26 @@ def _command_candidates(command, depth=0):
     for tokens in _shell_segments(command):
         index = 0
         while index < len(tokens):
-            if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tokens[index]):
+            if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tokens[index].value):
                 index += 1
                 continue
-            executable = _executable_name(tokens[index]).lower()
+            executable = _executable_name(tokens[index].value).lower()
             if executable in ("&", "call", "command", "exec", "nohup"):
                 index += 1
                 continue
             if executable == "env":
                 index += 1
                 while index < len(tokens) and (
-                    tokens[index].startswith("-")
-                    or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tokens[index])
+                    tokens[index].value.startswith("-")
+                    or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tokens[index].value)
                 ):
                     index += 1
                 continue
             if executable == "sudo":
                 index += 1
                 value_options = {"-u", "--user", "-g", "--group", "-h", "--host"}
-                while index < len(tokens) and tokens[index].startswith("-"):
-                    option = tokens[index].split("=", 1)[0]
+                while index < len(tokens) and tokens[index].value.startswith("-"):
+                    option = tokens[index].value.split("=", 1)[0]
                     index += 1
                     if option in value_options and index < len(tokens):
                         index += 1
@@ -367,7 +386,8 @@ def _command_candidates(command, depth=0):
         if index >= len(tokens):
             continue
 
-        executable = _executable_name(tokens[index])
+        executable_token = tokens[index]
+        executable = _executable_name(executable_token.value)
         lowered = executable.lower()
         arguments = tokens[index + 1 :]
         wrapper_flags = {
@@ -379,21 +399,29 @@ def _command_candidates(command, depth=0):
             "zsh": {"-c"},
         }
         if lowered in wrapper_flags:
-            for flag_index, value in enumerate(arguments):
-                if value.lower() in wrapper_flags[lowered]:
-                    payload = " ".join(arguments[flag_index + 1 :])
+            for flag_index, token in enumerate(arguments):
+                if token.value.lower() in wrapper_flags[lowered]:
+                    payload = " ".join(
+                        item.value for item in arguments[flag_index + 1 :]
+                    )
                     if not payload:
                         raise _CommandParseError("shell wrapper lacks command string")
-                    candidates.extend(_command_candidates(payload, depth + 1))
+                    candidates.extend(
+                        _as_wrapper_candidates(_command_candidates(payload, depth + 1))
+                    )
                     break
 
         if lowered == "py" or re.fullmatch(r"python(?:\d+(?:\.\d+)*)?", lowered):
-            for flag_index, value in enumerate(arguments):
-                if value.lower() == "-c":
+            for flag_index, token in enumerate(arguments):
+                if token.value.lower() == "-c":
                     if flag_index + 1 >= len(arguments):
                         raise _CommandParseError("Python wrapper lacks command string")
                     candidates.extend(
-                        _python_embedded_commands(arguments[flag_index + 1], depth)
+                        _as_wrapper_candidates(
+                            _python_embedded_commands(
+                                arguments[flag_index + 1].value, depth
+                            )
+                        )
                     )
                     break
 
@@ -403,18 +431,46 @@ def _command_candidates(command, depth=0):
             "perl": {"-e"},
         }
         if lowered in script_flags:
-            for flag_index, value in enumerate(arguments):
-                if value.lower() in script_flags[lowered]:
+            for flag_index, token in enumerate(arguments):
+                if token.value.lower() in script_flags[lowered]:
                     if flag_index + 1 >= len(arguments):
                         raise _CommandParseError("interpreter lacks command string")
                     candidates.extend(
-                        _python_embedded_commands(arguments[flag_index + 1], depth)
+                        _as_wrapper_candidates(
+                            _python_embedded_commands(
+                                arguments[flag_index + 1].value, depth
+                            )
+                        )
                     )
                     break
 
-        visible_arguments = [value for value in arguments if not value.startswith((">", "<"))]
-        candidates.append(" ".join((executable, *visible_arguments)).strip())
+        visible_tokens = []
+        executable_end = 0
+        if not executable_token.quoted:
+            visible_tokens.append(executable)
+            executable_end = len(executable)
+        visible_tokens.extend(
+            token.value
+            for token in arguments
+            if not token.quoted and not token.value.startswith((">", "<"))
+        )
+        candidate = " ".join(visible_tokens).strip()
+        if candidate:
+            candidates.append(_CommandCandidate(candidate, executable_end))
     return candidates
+
+
+def _command_match_position(input_regex, candidates):
+    for candidate in candidates:
+        found = input_regex.search(candidate.text)
+        if found is None:
+            continue
+        if candidate.wrapper:
+            return "wrapper"
+        if candidate.executable_end and found.start() < candidate.executable_end:
+            return "executable"
+        return "argument"
+    return None
 
 
 def _append_gate_log(vault, row, started_at):
@@ -435,10 +491,14 @@ def _append_gate_log(vault, row, started_at):
             os.fsync(stream.fileno())
 
 
-def _append_audit(vault, tool_name, card_name, started_at, fallback=None):
+def _append_audit(
+    vault, tool_name, card_name, started_at, fallback=None, position=None
+):
     row = {"tool": tool_name, "card": card_name}
     if fallback is not None:
         row["fallback"] = fallback
+    if position is not None:
+        row["position"] = position
     _append_gate_log(
         vault,
         row,
@@ -492,6 +552,7 @@ def _handle(event, started_at):
         if not card["tool_regex"].search(tool_name):
             continue
         fallback = None
+        position = None
         if _uses_command_matching(tool_name, card["match_mode"]):
             if command_state is None:
                 command = tool_input.get("command") if isinstance(tool_input, dict) else None
@@ -506,21 +567,22 @@ def _handle(event, started_at):
                 input_matches = card["input_regex"].search(tool_input_text) is not None
                 fallback = "fulltext"
             else:
-                input_matches = any(
-                    card["input_regex"].match(candidate) for candidate in candidates
-                )
+                position = _command_match_position(card["input_regex"], candidates)
+                input_matches = position is not None
         else:
             input_matches = card["input_regex"].search(tool_input_text) is not None
         if input_matches:
-            match = (vault, card, fallback)
+            match = (vault, card, fallback, position)
             break
     if match is None:
         return None
     if expired(started_at):
         return None
 
-    vault, card, fallback = match
-    _append_audit(vault, tool_name, card["name"], started_at, fallback)
+    vault, card, fallback, position = match
+    _append_audit(
+        vault, tool_name, card["name"], started_at, fallback, position
+    )
     if expired(started_at):
         return None
     reason = f"{card['advice']} [{card['path']}]"
@@ -684,9 +746,11 @@ def _selftest():
             command_vault = root / "command-vault"
             command_vault.mkdir()
             card_specs = (
-                ("kill-host", "", r"(?i)(?:taskkill\b.*\bclaude(?:\.exe)?\b|Stop-Process\b.*\bclaude\b)", "Keep the host process running."),
+                ("argument-marker", "", r"x37c7c1b07e7f", "Block the synthetic argument marker."),
+                ("kill-host", "", r"(?i)(?:taskkill\b.*\b(?:claude|codex)(?:\.exe)?\b|Stop-Process\b.*\b(?:claude|codex)\b)", "Keep the host process running."),
                 ("destructive-git", "", r"(?i)git\b.*\breset\b.*--hard\b", "Preserve the working tree."),
                 ("credential-read", "match: fulltext, ", r"(?i)(?:\.env|auth\.json)", "Keep credential material unread."),
+                ("heredoc-backslash", "match: fulltext, ", r"(?s)<<.*\\\\", "Keep backslashes out of heredoc input."),
             )
             for name, match_field, pattern, advice in card_specs:
                 (command_vault / f"{name}.md").write_text(
@@ -713,9 +777,16 @@ def _selftest():
                 ("Python prose write allows", 'python -c "open(\'ledger.txt\', \'w\').write(\'taskkill /IM claude.exe\')"', None),
                 ("interpreter -e prose allows", 'node -e "console.log(\'taskkill /IM claude.exe\')"', None),
                 ("comment mention allows", "echo safe # taskkill /IM claude.exe", None),
+                ("fourth unquoted argument denies", "run prohibited synthetic action x37c7c1b07e7f", "deny"),
+                ("double-quoted argument marker allows", 'echo "prose x37c7c1b07e7f"', None),
+                ("single-quoted argument marker allows", "echo 'prose x37c7c1b07e7f'", None),
                 ("executable position denies", "taskkill /IM claude.exe", "deny"),
+                ("unquoted codex taskkill arguments deny", "taskkill /IM codex.exe /F", "deny"),
+                ("later Stop-Process name argument denies", "Stop-Process -Id 4242 -Name codex", "deny"),
+                ("Stop-Process comment mention allows", "Stop-Process -Id 4242 # codex", None),
                 ("second chained segment denies", "echo safe && taskkill /IM claude.exe", "deny"),
                 ("cmd wrapper denies", 'cmd /c "taskkill /IM claude.exe"', "deny"),
+                ("cmd wrapper with codex denies", 'cmd /c "taskkill /IM codex.exe"', "deny"),
                 ("PowerShell wrapper denies", 'powershell -Command "Stop-Process -Name claude"', "deny"),
                 ("bash wrapper denies", "bash -c 'taskkill /IM claude.exe'", "deny"),
                 ("Python os.system wrapper denies", 'python -c "import os; os.system(\'taskkill /IM claude.exe\')"', "deny"),
@@ -725,6 +796,7 @@ def _selftest():
                 ("destructive git original case denies", "git reset --hard", "deny"),
                 ("credential path original case denies", "Get-Content .env", "deny"),
                 ("explicit fulltext denies a prose mention", 'echo "auth.json"', "deny"),
+                ("explicit fulltext sees heredoc backslashes", "python - <<'PY'\np = 'C:\\Users\\x'\nPY\n", "deny"),
             )
             for name, command, expected in command_cases:
                 result, decision = command_result(command)
@@ -747,6 +819,9 @@ def _selftest():
                 row.get("card") == "kill-host" and row.get("fallback") == "fulltext"
                 for row in command_rows
             )))
+            checks.append(("audit identifies all command positions", {
+                "executable", "argument", "wrapper"
+            }.issubset({row.get("position") for row in command_rows})))
 
             missing_config = root / "missing-config.json"
             missing = run_synthetic(
@@ -766,7 +841,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 27
+    total = 36
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

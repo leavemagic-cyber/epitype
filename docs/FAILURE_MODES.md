@@ -61,7 +61,7 @@ Memory is usually delivered as advisory context. Enforcement hooks may exist, bu
 
 ### Epitype countermeasure
 
-A scar card may carry `trigger.tool`, `trigger.input`, and `advice`. Shell tools match executable positions by default rather than prose mentions; `trigger.match: fulltext` explicitly restores whole-input matching. A match drives a bounded deny response, offers a safer alternative, and appends an audit row. The distinct claim is memory-derived interception criteria; the hook and deny mechanism themselves are not claimed as novel.
+A scar card may carry `trigger.tool`, `trigger.input`, and `advice`. Shell tools match executable and unquoted argument positions by default, so trigger text in an argument is blocked too; only quoted string literals, heredoc bodies, and comments are excluded. `trigger.match: fulltext` explicitly restores whole-input matching. A match drives a bounded deny response, offers a safer alternative, and appends an audit row. The distinct claim is memory-derived interception criteria; the hook and deny mechanism themselves are not claimed as novel.
 
 ### Self-verification
 
