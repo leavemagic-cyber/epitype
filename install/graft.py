@@ -25,7 +25,15 @@ STATE_VERSION = 1
 CONFIG_DIRECTORY = ".epitype"
 CONFIG_FILENAME = "config.json"
 STATE_FILENAME = "install_state.json"
+HOOK_DIRECTORY = "hooks"
 FALLBACK_VAULT = ".epitype-vault"
+SHIM_ADAPTER_TOKEN = "__EPITYPE_ADAPTER_FILENAME__"
+HOOK_SPECS = {
+    "SessionStart": ("sessionstart.py", "sessionstart_hook.py"),
+    "UserPromptSubmit": ("recall.py", "recall_hook.py"),
+    "PreCompact": ("precompact.py", "precompact_hook.py"),
+    "PreToolUse": ("pretooluse.py", "pretooluse_gate.py"),
+}
 NATIVE_DISABLE_PATTERN = re.compile(
     r"(?:disable(?:d)?[^\r\n]{0,64}(?:memory|recall|history)|"
     r"(?:memory|recall|history)[^\r\n]{0,64}disable(?:d)?)",
@@ -265,13 +273,21 @@ def _marked(value):
     )
 
 
-def _hook_template(codex):
-    path = REPO_ROOT / "adapters" / "codex" / "hooks_template.json"
+def _replace_array_item(text, node, index, value):
+    item = node.items[index]
+    pretty = "\n" in text[node.start : node.end] or "\r" in text[node.start : node.end]
+    indent = _line_indent(text, item.start)
+    rendered = _render_json(value, pretty, indent, _newline(text))
+    return text[: item.start] + rendered + text[item.end :]
+
+
+def _hook_template(codex, hooks_root, repo_root=REPO_ROOT):
+    path = repo_root / "adapters" / "codex" / "hooks_template.json"
     value = json.loads(path.read_text(encoding="utf-8"))
     hooks = value.get("hooks")
     if not isinstance(hooks, dict):
         raise InstallError("Codex hook template has no hooks object")
-    repo_text = REPO_ROOT.as_posix()
+    hooks_text = hooks_root.resolve().as_posix()
     result = {}
     for event in EVENTS:
         entries = hooks.get(event)
@@ -286,7 +302,7 @@ def _hook_template(codex):
             raw = command.get("command")
             if not isinstance(raw, str):
                 raise InstallError(f"Codex hook template {event} command is malformed")
-            raw = raw.replace("{{EPITYPE_REPO_ROOT}}", repo_text)
+            raw = raw.replace("{{EPITYPE_HOOKS_ROOT}}", hooks_text)
             if not codex:
                 raw = raw.replace(" --codex", "")
             command["command"] = raw
@@ -328,7 +344,19 @@ def _merge_hooks(raw, entries):
             if event_member.value.kind != "array":
                 raise InstallError(f"hooks.{event} must be an array")
             values = [json.loads(text[item.start : item.end]) for item in event_member.value.items]
-            if any(_marked(value) for value in values):
+            marked_indices = [index for index, value in enumerate(values) if _marked(value)]
+            if marked_indices:
+                if len(marked_indices) == 1 and values[marked_indices[0]] == entries[event]:
+                    continue
+                if len(marked_indices) > 1:
+                    text = _remove_array_items(text, event_member.value, marked_indices[1:])
+                    root = _parse_json(text)
+                    hooks_node = _member(root, "hooks").value
+                    event_member = _member(hooks_node, event)
+                    values = [json.loads(text[item.start : item.end]) for item in event_member.value.items]
+                    marked_indices = [index for index, value in enumerate(values) if _marked(value)]
+                text = _replace_array_item(text, event_member.value, marked_indices[0], entries[event])
+                locations.append(f"hooks.{event}[id=epitype]")
                 continue
             text = _append_array_item(text, event_member.value, entries[event])
             locations.append(f"hooks.{event}[id=epitype]")
@@ -512,7 +540,7 @@ def _detect_native_vaults(home, hosts):
     return sorted(result, key=lambda item: os.path.normcase(os.fspath(item)))
 
 
-def _config_bytes(path, vaults):
+def _config_bytes(path, vaults, repo_root):
     if path.is_file():
         value = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(value, dict):
@@ -521,7 +549,49 @@ def _config_bytes(path, vaults):
         value = {}
     value["vaults"] = [os.fspath(path) for path in vaults]
     value.setdefault("budget_bytes", 10 * 1024)
+    value["repo_root"] = os.fspath(repo_root.resolve())
     return (json.dumps(value, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+
+
+def _repo_root_bytes(path, repo_root):
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise InstallError("Epitype config root must be an object")
+    value["repo_root"] = os.fspath(repo_root.resolve())
+    return (json.dumps(value, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+
+
+def _adapter_paths(repo_root):
+    return {
+        event: repo_root / "adapters" / "claude" / adapter_name
+        for event, (_, adapter_name) in HOOK_SPECS.items()
+    }
+
+
+def _validate_repo_root(raw_value):
+    if isinstance(raw_value, Path):
+        repo_root = raw_value.expanduser().resolve()
+    elif isinstance(raw_value, str) and raw_value.strip():
+        repo_root = Path(raw_value).expanduser().resolve()
+    else:
+        raise ValueError("config repo_root must be a non-empty path")
+    if not repo_root.is_dir():
+        raise NotADirectoryError(os.fspath(repo_root))
+    missing = [path for path in _adapter_paths(repo_root).values() if not path.is_file()]
+    if missing:
+        raise FileNotFoundError("missing hook adapters: " + ", ".join(os.fspath(path) for path in missing))
+    return repo_root
+
+
+def _shim_payloads(repo_root):
+    template_path = repo_root / "adapters" / "shim_template.py"
+    template = template_path.read_text(encoding="utf-8")
+    if template.count(SHIM_ADAPTER_TOKEN) != 1:
+        raise InstallError("shim template must contain exactly one adapter token")
+    return {
+        shim_name: template.replace(SHIM_ADAPTER_TOKEN, adapter_name).encode("utf-8")
+        for shim_name, adapter_name in HOOK_SPECS.values()
+    }
 
 
 def _load_state(path):
@@ -598,14 +668,14 @@ def _assert_native_protection(before, after):
         raise InstallError("native-memory protection rejected diff: " + " | ".join(violations))
 
 
-def _run_billing_guard(home, apply_changes, dry_run, transaction, output):
+def _run_billing_guard(home, apply_changes, dry_run, transaction, output, repo_root=REPO_ROOT):
     config = home / ".codex" / "config.toml"
-    tool = REPO_ROOT / "adapters" / "codex" / "config_guard.py"
+    tool = repo_root / "adapters" / "codex" / "config_guard.py"
     environment = os.environ.copy()
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
     check_result = subprocess.run(
         [sys.executable, os.fspath(tool), "check", "--config", os.fspath(config)],
-        cwd=REPO_ROOT,
+        cwd=repo_root,
         env=environment,
         capture_output=True,
         text=True,
@@ -640,7 +710,7 @@ def _run_billing_guard(home, apply_changes, dry_run, transaction, output):
                 os.fspath(temporary_config),
                 "--apply",
             ],
-            cwd=REPO_ROOT,
+            cwd=repo_root,
             env=environment,
             capture_output=True,
             text=True,
@@ -666,12 +736,30 @@ def _marker_count(path):
     return counts
 
 
-def _synthetic_health(output):
+def _marked_entries(path):
+    value = json.loads(path.read_text(encoding="utf-8"))
+    hooks = value.get("hooks", {}) if isinstance(value, dict) else {}
+    result = {}
+    for event in EVENTS:
+        entries = hooks.get(event, []) if isinstance(hooks, dict) else []
+        result[event] = [entry for entry in entries if _marked(entry)] if isinstance(entries, list) else []
+    return result
+
+
+def _home_environment(home):
+    environment = os.environ.copy()
+    environment["HOME"] = os.fspath(home)
+    environment["USERPROFILE"] = os.fspath(home)
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    return environment
+
+
+def _synthetic_health(home, repo_root, output):
     scripts = (
-        ("SessionStart", REPO_ROOT / "adapters" / "claude" / "sessionstart_hook.py", {"source": "epitype-doctor"}, ()),
-        ("UserPromptSubmit", REPO_ROOT / "adapters" / "claude" / "recall_hook.py", {"prompt": "synthetic doctor probe"}, ()),
-        ("PreCompact", REPO_ROOT / "adapters" / "claude" / "precompact_hook.py", {"transcript_path": ""}, ("--codex",)),
-        ("PreToolUse", REPO_ROOT / "adapters" / "claude" / "pretooluse_gate.py", {"tool_name": "SyntheticRead", "tool_input": {"path": "synthetic.txt"}}, ()),
+        ("SessionStart", "sessionstart.py", {"source": "epitype-doctor"}, ()),
+        ("UserPromptSubmit", "recall.py", {"prompt": "synthetic doctor probe"}, ()),
+        ("PreCompact", "precompact.py", {"transcript_path": ""}, ("--codex",)),
+        ("PreToolUse", "pretooluse.py", {"tool_name": "SyntheticRead", "tool_input": {"path": "synthetic.txt"}}, ()),
     )
     passed = 0
     with tempfile.TemporaryDirectory(prefix="epitype-doctor-") as temp_dir:
@@ -680,14 +768,14 @@ def _synthetic_health(output):
         vault.mkdir()
         config = root / "config.json"
         config.write_text(json.dumps({"vaults": [os.fspath(vault)]}), encoding="utf-8")
-        environment = os.environ.copy()
+        environment = _home_environment(home)
         environment["EPITYPE_CONFIG"] = os.fspath(config)
-        environment["PYTHONDONTWRITEBYTECODE"] = "1"
-        for name, script, event, arguments in scripts:
+        for name, shim_name, event, arguments in scripts:
+            script = home / CONFIG_DIRECTORY / HOOK_DIRECTORY / shim_name
             result = subprocess.run(
                 [sys.executable, os.fspath(script), *arguments],
                 input=json.dumps(event, ensure_ascii=False),
-                cwd=REPO_ROOT,
+                cwd=repo_root,
                 env=environment,
                 capture_output=True,
                 text=True,
@@ -715,19 +803,29 @@ def _doctor(home, dry_run=False, output=sys.stdout):
         vaults = config.get("vaults") if isinstance(config, dict) else None
         if not isinstance(vaults, list) or not vaults or not all(Path(item).is_dir() for item in vaults):
             raise ValueError("config vaults must be existing directories")
+        repo_root = _validate_repo_root(config.get("repo_root") if isinstance(config, dict) else None)
+        hooks_root = home / CONFIG_DIRECTORY / HOOK_DIRECTORY
+        shim_payloads = _shim_payloads(repo_root)
+        for shim_name, expected in shim_payloads.items():
+            shim_path = hooks_root / shim_name
+            if not shim_path.is_file() or shim_path.read_bytes() != expected:
+                raise ValueError(f"shim is missing or stale: {shim_path}")
+        print(f"SHIM RESOLUTION: PASS 4/4 repo_root={repo_root}", file=output)
         for name in hosts:
             hook_path = (
                 home / ".claude" / "settings.json"
                 if name == "claude"
                 else home / ".codex" / "hooks.json"
             )
-            counts = _marker_count(hook_path)
-            if any(counts[event] != 1 for event in EVENTS):
-                raise ValueError(f"{name} registration count is not exactly one: {counts}")
+            actual = _marked_entries(hook_path)
+            expected = _hook_template(name == "codex", hooks_root, repo_root)
+            mismatches = [event for event in EVENTS if actual[event] != [expected[event]]]
+            if mismatches:
+                raise ValueError(f"{name} shim registration mismatch: {', '.join(mismatches)}")
             print(f"REGISTRATION {name}: PASS 4/4", file=output)
         if not hosts:
             raise ValueError("no supported host detected")
-        return 0 if _synthetic_health(output) else 1
+        return 0 if _synthetic_health(home, repo_root, output) else 1
     except Exception as exc:
         print(f"DOCTOR FAIL {type(exc).__name__}: {exc}", file=output)
         return 1
@@ -737,7 +835,8 @@ def _planned_backup(path):
     return path.with_name(path.name + ".bak_epitype_<UTC>")
 
 
-def _install(home, dry_run=False, apply_billing_guard=False, output=sys.stdout):
+def _install(home, dry_run=False, apply_billing_guard=False, output=sys.stdout, repo_root=REPO_ROOT):
+    repo_root = _validate_repo_root(repo_root)
     hosts = _detect_hosts(home)
     if not hosts:
         raise InstallError("no supported host detected under --home")
@@ -745,6 +844,7 @@ def _install(home, dry_run=False, apply_billing_guard=False, output=sys.stdout):
     config_dir = home / CONFIG_DIRECTORY
     config_path = config_dir / CONFIG_FILENAME
     state_path = config_dir / STATE_FILENAME
+    hooks_root = config_dir / HOOK_DIRECTORY
     state = _load_state(state_path)
     native_vaults = _detect_native_vaults(home, hosts)
     fallback = home / FALLBACK_VAULT
@@ -762,19 +862,26 @@ def _install(home, dry_run=False, apply_billing_guard=False, output=sys.stdout):
             for vault in native_vaults:
                 print(f"NATIVE VAULT: {vault}", file=output)
 
-        config_data = _config_bytes(config_path, vaults)
+        config_data = _config_bytes(config_path, vaults, repo_root)
         if not config_path.exists() or config_path.read_bytes() != config_data:
-            print(f"{'DRY-RUN write' if dry_run else 'WRITE'} {config_path}: vaults", file=output)
+            print(f"{'DRY-RUN write' if dry_run else 'WRITE'} {config_path}: vaults, repo_root", file=output)
             if config_path.exists():
                 print(f"BACKUP: {_planned_backup(config_path) if dry_run else 'pending'}", file=output)
             if not dry_run:
                 transaction.write(config_path, config_data)
 
+        for shim_name, payload in _shim_payloads(repo_root).items():
+            shim_path = hooks_root / shim_name
+            if not shim_path.exists() or shim_path.read_bytes() != payload:
+                print(f"{'DRY-RUN write' if dry_run else 'WRITE'} stable shim: {shim_path}", file=output)
+                if not dry_run:
+                    transaction.write(shim_path, payload)
+
         targets = []
         if "claude" in hosts:
-            targets.append(("claude", home / ".claude" / "settings.json", _hook_template(False)))
+            targets.append(("claude", home / ".claude" / "settings.json", _hook_template(False, hooks_root, repo_root)))
         if "codex" in hosts:
-            targets.append(("codex", home / ".codex" / "hooks.json", _hook_template(True)))
+            targets.append(("codex", home / ".codex" / "hooks.json", _hook_template(True, hooks_root, repo_root)))
 
         for name, path, entries in targets:
             source = path.read_bytes() if path.is_file() else b"{}\n"
@@ -789,7 +896,7 @@ def _install(home, dry_run=False, apply_billing_guard=False, output=sys.stdout):
                     transaction.write(path, merged)
 
         if "codex" in hosts:
-            _run_billing_guard(home, apply_billing_guard, dry_run, transaction, output)
+            _run_billing_guard(home, apply_billing_guard, dry_run, transaction, output, repo_root)
 
         if dry_run:
             print(f"DRY-RUN write {state_path}: install ownership metadata", file=output)
@@ -817,6 +924,34 @@ def _install(home, dry_run=False, apply_billing_guard=False, output=sys.stdout):
         if not dry_run:
             transaction.rollback()
         raise
+
+
+def _relocate(home, target, dry_run=False, output=sys.stdout):
+    repo_root = _validate_repo_root(target)
+    config_path = home / CONFIG_DIRECTORY / CONFIG_FILENAME
+    if not config_path.is_file():
+        raise InstallError(f"Epitype config is missing: {config_path}")
+    config_data = _repo_root_bytes(config_path, repo_root)
+    changed = config_path.read_bytes() != config_data
+    print(f"RELOCATE TARGET VALID: {repo_root}", file=output)
+    if dry_run:
+        if changed:
+            print(f"DRY-RUN write {config_path}: repo_root", file=output)
+        print("DRY-RUN complete; no files changed.", file=output)
+        return 0
+
+    transaction = Transaction()
+    if changed:
+        transaction.write(config_path, config_data)
+    doctor_code = _doctor(home, output=output)
+    print("RELOCATE REPORT", file=output)
+    print(f"REPO ROOT: {repo_root}", file=output)
+    print(f"CONFIG: {'CHANGED' if changed else 'UNCHANGED'} {config_path}", file=output)
+    for source, backup in transaction.backups:
+        print(f"BACKUP: {source} -> {backup}", file=output)
+    print("HOST CONFIG: UNCHANGED", file=output)
+    print(f"DOCTOR: {'PASS' if doctor_code == 0 else 'FAIL'}", file=output)
+    return doctor_code
 
 
 def _uninstall(home, dry_run=False, output=sys.stdout):
@@ -893,6 +1028,12 @@ def _selftest():
     try:
         with tempfile.TemporaryDirectory(prefix="epitype-graft-") as temp_dir:
             root = Path(temp_dir)
+            old_repo = root / "repo-before-move"
+            shutil.copytree(
+                REPO_ROOT,
+                old_repo,
+                ignore=shutil.ignore_patterns(".git", "__pycache__", "*.pyc", ".pytest_cache"),
+            )
             home = root / "home"
             (home / ".claude").mkdir(parents=True)
             (home / ".codex").mkdir(parents=True)
@@ -911,7 +1052,7 @@ def _selftest():
             codex_config.write_bytes(config_source)
 
             first_output = io.StringIO()
-            first_code = _install(home, output=first_output)
+            first_code = _install(home, output=first_output, repo_root=old_repo)
             fallback = home / FALLBACK_VAULT
             config_value = json.loads((home / CONFIG_DIRECTORY / CONFIG_FILENAME).read_text(encoding="utf-8"))
             checks.append((
@@ -920,6 +1061,7 @@ def _selftest():
                 and fallback.is_dir()
                 and not list(fallback.iterdir())
                 and config_value.get("vaults") == [os.fspath(fallback.resolve())]
+                and config_value.get("repo_root") == os.fspath(old_repo.resolve())
                 and "HEALTH PASS 4/4" in first_output.getvalue(),
             ))
             claude_value = json.loads(claude.read_text(encoding="utf-8"))
@@ -931,6 +1073,20 @@ def _selftest():
                 and codex_value["hooks"]["PreToolUse"][0]["comment"] == "existing"
                 and all(_marker_count(claude)[event] == 1 for event in EVENTS)
                 and all(_marker_count(codex_hooks)[event] == 1 for event in EVENTS),
+            ))
+            hooks_root = home / CONFIG_DIRECTORY / HOOK_DIRECTORY
+            expected_claude = _hook_template(False, hooks_root, old_repo)
+            expected_codex = _hook_template(True, hooks_root, old_repo)
+            checks.append((
+                "install registers stable shims instead of repo adapters",
+                _marked_entries(claude) == {event: [expected_claude[event]] for event in EVENTS}
+                and _marked_entries(codex_hooks) == {event: [expected_codex[event]] for event in EVENTS}
+                and all(
+                    (hooks_root / shim_name).read_bytes() == payload
+                    for shim_name, payload in _shim_payloads(old_repo).items()
+                )
+                and "/adapters/claude/" not in claude.read_text(encoding="utf-8").replace("\\", "/")
+                and "/adapters/claude/" not in codex_hooks.read_text(encoding="utf-8").replace("\\", "/"),
             ))
             backups = list((home / ".claude").glob("settings.json.bak_epitype_*"))
             backups += list((home / ".codex").glob("hooks.json.bak_epitype_*"))
@@ -954,14 +1110,69 @@ def _selftest():
 
             installed_claude = claude.read_bytes()
             installed_codex = codex_hooks.read_bytes()
-            second_code = _install(home, output=io.StringIO())
+            installed_shims = _tree_digest(hooks_root)
+            second_code = _install(home, output=io.StringIO(), repo_root=old_repo)
             checks.append((
                 "repeat install is idempotent",
                 second_code == 0
                 and claude.read_bytes() == installed_claude
                 and codex_hooks.read_bytes() == installed_codex
+                and _tree_digest(hooks_root) == installed_shims
                 and all(_marker_count(claude)[event] == 1 for event in EVENTS)
                 and all(_marker_count(codex_hooks)[event] == 1 for event in EVENTS),
+            ))
+
+            moved_repo = root / "repo-after-move"
+            shutil.move(os.fspath(old_repo), os.fspath(moved_repo))
+            before_relocate_hosts = (claude.read_bytes(), codex_hooks.read_bytes())
+            relocate_output = io.StringIO()
+            relocate_code = _relocate(home, moved_repo, output=relocate_output)
+            relocated_config = json.loads(
+                (home / CONFIG_DIRECTORY / CONFIG_FILENAME).read_text(encoding="utf-8")
+            )
+            relocate_text = relocate_output.getvalue()
+            checks.append((
+                "moved repo relocates through config and all four shims pass",
+                relocate_code == 0
+                and relocated_config.get("repo_root") == os.fspath(moved_repo.resolve())
+                and before_relocate_hosts == (claude.read_bytes(), codex_hooks.read_bytes())
+                and all(f"HOOK {event}: PASS" in relocate_text for event in EVENTS)
+                and "SHIM RESOLUTION: PASS 4/4" in relocate_text
+                and "HEALTH PASS 4/4" in relocate_text
+                and "HOST CONFIG: UNCHANGED" in relocate_text,
+            ))
+
+            missing_home = root / "missing-root-home"
+            missing_hooks = missing_home / CONFIG_DIRECTORY / HOOK_DIRECTORY
+            missing_hooks.mkdir(parents=True)
+            for shim_name, payload in _shim_payloads(moved_repo).items():
+                (missing_hooks / shim_name).write_bytes(payload)
+            (missing_home / CONFIG_DIRECTORY / CONFIG_FILENAME).write_text(
+                json.dumps({"vaults": [os.fspath(fallback)]}),
+                encoding="utf-8",
+            )
+            missing_environment = _home_environment(missing_home)
+            missing_environment.pop("EPITYPE_CONFIG", None)
+            missing_results = [
+                subprocess.run(
+                    [sys.executable, os.fspath(missing_hooks / shim_name)],
+                    input='{"synthetic":true}',
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    env=missing_environment,
+                    timeout=10,
+                    check=False,
+                )
+                for shim_name, _ in HOOK_SPECS.values()
+            ]
+            checks.append((
+                "shims fail open silently when config lacks repo_root",
+                all(
+                    result.returncode == 0 and result.stdout == "" and result.stderr == ""
+                    for result in missing_results
+                ),
             ))
 
             card = fallback / "synthetic-card.md"
@@ -975,8 +1186,9 @@ def _selftest():
                 and codex_config.read_bytes() == config_source,
             ))
             checks.append((
-                "uninstall removes config but preserves vault cards",
+                "uninstall removes config and shim directory but preserves vault cards",
                 not (home / CONFIG_DIRECTORY).exists()
+                and not hooks_root.exists()
                 and card.read_text(encoding="utf-8") == "synthetic card\n",
             ))
 
@@ -993,6 +1205,34 @@ def _selftest():
                 and before_dry == _tree_digest(dry_home)
                 and all(f"hooks.{event}[id=epitype]" in dry_output.getvalue() for event in EVENTS)
                 and "no files changed" in dry_output.getvalue(),
+            ))
+
+            legacy_home = root / "legacy-home"
+            (legacy_home / ".claude").mkdir(parents=True)
+            legacy_settings = legacy_home / ".claude" / "settings.json"
+            legacy_hooks = {
+                event: [{
+                    "id": MARKER_VALUE,
+                    "hooks": [{
+                        "type": "command",
+                        "command": f'python "C:/old-repo/adapters/claude/{adapter_name}"',
+                    }],
+                }]
+                for event, (_, adapter_name) in HOOK_SPECS.items()
+            }
+            legacy_settings.write_text(
+                json.dumps({"hooks": legacy_hooks}, separators=(",", ":")) + "\n",
+                encoding="utf-8",
+            )
+            legacy_code = _install(legacy_home, output=io.StringIO())
+            legacy_root = legacy_home / CONFIG_DIRECTORY / HOOK_DIRECTORY
+            legacy_expected = _hook_template(False, legacy_root)
+            checks.append((
+                "repeat install upgrades legacy absolute adapter registrations",
+                legacy_code == 0
+                and _marked_entries(legacy_settings)
+                == {event: [legacy_expected[event]] for event in EVENTS}
+                and "old-repo" not in legacy_settings.read_text(encoding="utf-8"),
             ))
 
             later_home = root / "later-home"
@@ -1092,7 +1332,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 12
+    total = 16
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
@@ -1116,6 +1356,8 @@ def _parser():
     install.add_argument("--apply-billing-guard", action="store_true", help="apply, rather than only report, Codex billing guard settings")
     commands.add_parser("uninstall", parents=[common], help="remove only Epitype-owned registrations")
     commands.add_parser("doctor", parents=[common], help="inspect registrations and exercise synthetic hook stdin")
+    relocate = commands.add_parser("relocate", parents=[common], help="point stable shims at a moved Epitype repository")
+    relocate.add_argument("--to", type=Path, required=True, help="new Epitype repository root")
     return parser
 
 
@@ -1131,6 +1373,8 @@ def main(argv=None):
             return _install(home, dry_run, parsed.apply_billing_guard)
         if parsed.command == "uninstall":
             return _uninstall(home, dry_run)
+        if parsed.command == "relocate":
+            return _relocate(home, parsed.to, dry_run)
         return _doctor(home, dry_run)
     except Exception as exc:
         print(f"ERROR {type(exc).__name__}: {exc}", file=sys.stderr)

@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python \"{{EPITYPE_REPO_ROOT}}/adapters/claude/sessionstart_hook.py\"",
+            "command": "python \"{{EPITYPE_HOOKS_ROOT}}/sessionstart.py\"",
             "timeout": 3,
             "additionalContextLimit": 1800
           }
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python \"{{EPITYPE_REPO_ROOT}}/adapters/claude/recall_hook.py\"",
+            "command": "python \"{{EPITYPE_HOOKS_ROOT}}/recall.py\"",
             "timeout": 3,
             "additionalContextLimit": 1800
           }
@@ -29,7 +29,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python \"{{EPITYPE_REPO_ROOT}}/adapters/claude/precompact_hook.py\" --codex",
+            "command": "python \"{{EPITYPE_HOOKS_ROOT}}/precompact.py\" --codex",
             "timeout": 3
           }
         ]
@@ -40,7 +40,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python \"{{EPITYPE_REPO_ROOT}}/adapters/claude/pretooluse_gate.py\"",
+            "command": "python \"{{EPITYPE_HOOKS_ROOT}}/pretooluse.py\"",
             "timeout": 3
           }
         ]

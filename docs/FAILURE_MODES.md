@@ -128,7 +128,7 @@ Install and removal are treated as packaging details instead of governed behavio
 
 ### Epitype countermeasure
 
-`graft.py` previews changes, merges marked entries, backs up changed host files, rejects native-memory disable diffs, runs synthetic hook health checks, and removes only owned registrations. Its synthetic untouched-host round trip restores the original registration bytes and preserves vault cards; later host edits are preserved by marked-entry removal rather than overwritten with an old backup.
+`graft.py` previews changes, merges marked entries, backs up changed host files, rejects native-memory disable diffs, runs synthetic hook health checks, and removes only owned registrations. Hosts register stable launchers under `~/.epitype/hooks/`; after moving the repository, `graft.py relocate --to <new-root>` updates only `config.json`, resolves all four adapters, and runs `doctor` without changing host hook configuration. Its synthetic untouched-host round trip restores the original registration bytes and preserves vault cards; later host edits are preserved by marked-entry removal rather than overwritten with an old backup.
 
 ### Self-verification
 
@@ -141,5 +141,7 @@ For an installed local host, also run:
 ```powershell
 python install/graft.py doctor
 ```
+
+After moving the repository, run `python install/graft.py relocate --to <new-root>` once; it rewrites `config.json` and then runs `doctor` itself.
 
 The selftest proves a synthetic filesystem round trip. `doctor` proves current local registration and synthetic hook execution; neither proves every future host version.

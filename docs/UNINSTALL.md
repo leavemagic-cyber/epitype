@@ -22,7 +22,7 @@ Preview every affected file and JSON location without writing anything:
 python install/graft.py uninstall --dry-run
 ```
 
-The command edits `~/.claude/settings.json` and `~/.codex/hooks.json` only when marked Epitype entries exist. It then removes `~/.epitype/`. It does not delete `~/.epitype-vault`, `~/.codex/memories`, Claude project memory directories, or any card file. Timestamped backups remain beside every edited host file.
+The command edits `~/.claude/settings.json` and `~/.codex/hooks.json` only when marked Epitype entries exist. It then removes `~/.epitype/`, including the four generated launchers under `~/.epitype/hooks/` and `config.json`. It does not delete `~/.epitype-vault`, `~/.codex/memories`, Claude project memory directories, or any card file. Timestamped backups remain beside every edited host file.
 
 ## Manual removal
 
@@ -33,7 +33,7 @@ Use this route only if the automated command cannot run.
 3. Remove only array entries whose own `id` or `comment` field equals `epitype`. Preserve every other array entry and field.
 4. Remove an event key only if it was created for Epitype and its array is now empty. Remove the top-level `hooks` key only if Epitype created it and it is now empty. When uncertain, leave the empty object in place.
 5. Do not edit Claude's `permissions` or `deny` sections. Do not disable native memory, recall, or history settings.
-6. Delete `~/.epitype/`, which contains the Epitype config and install ownership metadata. Keep all vault directories and card files.
+6. Delete `~/.epitype/`, which contains the Epitype config, install ownership metadata, and generated `hooks/` shim directory. Keep all vault directories and card files.
 
 If installation used `--apply-billing-guard`, the two Codex context-limit settings in `~/.codex/config.toml` were an explicit, separate change. Restore them only if you intend to undo that choice; ordinary hook removal does not alter them.
 

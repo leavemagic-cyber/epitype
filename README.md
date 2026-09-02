@@ -56,6 +56,8 @@ python install/graft.py doctor
 
 Installation merges entries marked as Epitype, writes backups before changing existing host files, and points the shared configuration at detected native vaults. When no native vault is present, it creates an empty fallback vault; it does not disable native memory.
 
+If the repository moves, run `python install/graft.py relocate --to C:\path\to\new\repo`; host hook configuration does not need to be edited.
+
 Choose a starter under [`templates/`](templates/): `minimal` for one person on one machine, `team` for a shared vault with the common write-lock contract, or `power` for the full layout with census and exam-ready directories.
 
 ## Uninstall
