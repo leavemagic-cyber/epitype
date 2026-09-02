@@ -294,7 +294,7 @@ def _replace_array_item(text, node, index, value):
 
 def _hook_template(codex, hooks_root, repo_root=REPO_ROOT):
     path = repo_root / "adapters" / "codex" / "hooks_template.json"
-    value = json.loads(path.read_text(encoding="utf-8"))
+    value = json.loads(path.read_bytes().decode("utf-8-sig"))
     hooks = value.get("hooks")
     if not isinstance(hooks, dict):
         raise InstallError("Codex hook template has no hooks object")
@@ -541,7 +541,7 @@ def _detect_native_vaults(home, hosts):
     result = []
     seen = set()
     for candidate in candidates:
-        if not candidate.is_dir():
+        if not candidate.is_dir() or not any(path.is_file() for path in candidate.rglob("*.md")):
             continue
         resolved = candidate.resolve()
         key = os.path.normcase(os.fspath(resolved))
@@ -551,17 +551,73 @@ def _detect_native_vaults(home, hosts):
     return sorted(result, key=lambda item: os.path.normcase(os.fspath(item)))
 
 
-def _config_bytes(path, vaults, repo_root):
+def _set_object_member(text, key, value):
+    root = _parse_json(text)
+    member = _member(root, key)
+    if member is None:
+        return _append_object_member(text, root, key, value)
+    if json.loads(text[member.value.start : member.value.end]) == value:
+        return text
+    pretty = "\n" in text[root.start : root.end] or "\r" in text[root.start : root.end]
+    indent = _line_indent(text, member.start)
+    rendered = _render_json(value, pretty, indent, _newline(text))
+    return text[: member.value.start] + rendered + text[member.value.end :]
+
+
+def _existing_config_vaults(path):
+    if not path.is_file():
+        return [], []
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise InstallError("Epitype config root must be an object")
+    configured = value.get("vaults")
+    if not isinstance(configured, list) or not configured:
+        return [], []
+    valid = []
+    stale = []
+    for item in configured:
+        try:
+            exists = isinstance(item, str) and bool(item.strip()) and Path(item).is_dir()
+        except (OSError, ValueError):
+            exists = False
+        (valid if exists else stale).append(item)
+    return valid, stale
+
+
+def _config_bytes(path, vaults, repo_root, preserve_vault_bytes=False):
     if path.is_file():
-        value = json.loads(path.read_text(encoding="utf-8"))
+        raw = path.read_bytes()
+        bom = raw.startswith(b"\xef\xbb\xbf")
+        text = raw.decode("utf-8-sig")
+        value = json.loads(text)
         if not isinstance(value, dict):
             raise InstallError("Epitype config root must be an object")
+        _parse_json(text)
+        if not preserve_vault_bytes:
+            text = _set_object_member(text, "vaults", [os.fspath(item) for item in vaults])
+        if "budget_bytes" not in value:
+            text = _set_object_member(text, "budget_bytes", 10 * 1024)
+        text = _set_object_member(text, "repo_root", os.fspath(repo_root.resolve()))
+        encoded = text.encode("utf-8")
+        return (b"\xef\xbb\xbf" if bom else b"") + encoded
     else:
         value = {}
     value["vaults"] = [os.fspath(path) for path in vaults]
     value.setdefault("budget_bytes", 10 * 1024)
     value["repo_root"] = os.fspath(repo_root.resolve())
     return (json.dumps(value, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+
+
+def _vaults_bytes(path, vaults):
+    raw = path.read_bytes()
+    bom = raw.startswith(b"\xef\xbb\xbf")
+    text = raw.decode("utf-8-sig")
+    value = json.loads(text)
+    if not isinstance(value, dict):
+        raise InstallError("Epitype config root must be an object")
+    text = _set_object_member(text, "vaults", [os.fspath(item) for item in vaults])
+    encoded = text.encode("utf-8")
+    return (b"\xef\xbb\xbf" if bom else b"") + encoded
 
 
 def _repo_root_bytes(path, repo_root):
@@ -983,22 +1039,37 @@ def _install(home, dry_run=False, apply_billing_guard=False, output=sys.stdout, 
     hooks_root = config_dir / HOOK_DIRECTORY
     state = _load_state(state_path)
     native_vaults = _detect_native_vaults(home, hosts)
+    configured_vaults, stale_vaults = _existing_config_vaults(config_path)
     fallback = home / FALLBACK_VAULT
-    vaults = native_vaults or [fallback.resolve()]
+    if configured_vaults:
+        vaults = configured_vaults
+        preserve_vault_bytes = not stale_vaults
+        print(f"VAULTS: preserved {len(configured_vaults)} from config", file=output)
+        for stale in stale_vaults:
+            print(f"VAULTS: stale entry {stale}", file=output)
+        print(
+            f"VAULTS: detection found {len(native_vaults)}; not adopted (use the resync command)",
+            file=output,
+        )
+    else:
+        vaults = native_vaults or [fallback.resolve()]
+        preserve_vault_bytes = False
+        for stale in stale_vaults:
+            print(f"VAULTS: stale entry {stale}", file=output)
     transaction = Transaction()
     protected_paths = [home / ".claude" / "settings.json", home / ".codex" / "config.toml"]
     protected_before = {path: path.read_bytes() for path in protected_paths if path.is_file()}
 
     try:
-        if not native_vaults:
+        if not configured_vaults and not native_vaults:
             print(f"{'DRY-RUN create' if dry_run else 'CREATE'} empty vault: {fallback}", file=output)
             if not dry_run:
                 transaction.mkdir(fallback)
-        else:
+        elif not configured_vaults:
             for vault in native_vaults:
                 print(f"NATIVE VAULT: {vault}", file=output)
 
-        config_data = _config_bytes(config_path, vaults, repo_root)
+        config_data = _config_bytes(config_path, vaults, repo_root, preserve_vault_bytes)
         if not config_path.exists() or config_path.read_bytes() != config_data:
             print(f"{'DRY-RUN write' if dry_run else 'WRITE'} {config_path}: vaults, repo_root", file=output)
             if config_path.exists():
@@ -1059,6 +1130,66 @@ def _install(home, dry_run=False, apply_billing_guard=False, output=sys.stdout, 
     except Exception:
         if not dry_run:
             transaction.rollback()
+        raise
+
+
+def _resync_vaults(home, dry_run=False, output=sys.stdout):
+    hosts = _detect_hosts(home)
+    if not hosts:
+        raise InstallError("no supported host detected under --home")
+    config_path = home / CONFIG_DIRECTORY / CONFIG_FILENAME
+    if not config_path.is_file():
+        raise InstallError(f"Epitype config is missing: {config_path}")
+    value = json.loads(config_path.read_bytes().decode("utf-8-sig"))
+    if not isinstance(value, dict):
+        raise InstallError("Epitype config root must be an object")
+    current = value.get("vaults") if isinstance(value.get("vaults"), list) else []
+    detected = _detect_native_vaults(home, hosts)
+    fallback = home / FALLBACK_VAULT
+    vaults = detected or [fallback.resolve()]
+    print("HOSTS: " + ", ".join(hosts), file=output)
+    print(f"VAULTS: detection found {len(detected)}; resync requested", file=output)
+    current_keys = {
+        os.path.normcase(os.path.normpath(item))
+        for item in current
+        if isinstance(item, str)
+    }
+    detected_keys = {
+        os.path.normcase(os.path.normpath(os.fspath(item)))
+        for item in vaults
+    }
+    for item in current:
+        key = os.path.normcase(os.path.normpath(item)) if isinstance(item, str) else None
+        if key not in detected_keys:
+            print(f"VAULTS: remove {item}", file=output)
+    for item in vaults:
+        if os.path.normcase(os.path.normpath(os.fspath(item))) not in current_keys:
+            print(f"VAULTS: add {item}", file=output)
+
+    config_data = _vaults_bytes(config_path, vaults)
+    changed = config_path.read_bytes() != config_data
+    if dry_run:
+        if not detected and not fallback.exists():
+            print(f"DRY-RUN create empty vault: {fallback}", file=output)
+        if changed:
+            print(f"DRY-RUN write {config_path}: vaults", file=output)
+            print(f"BACKUP: {_planned_backup(config_path)}", file=output)
+        print("DRY-RUN complete; no files changed.", file=output)
+        return 0
+
+    transaction = Transaction()
+    try:
+        if not detected:
+            transaction.mkdir(fallback)
+        if changed:
+            transaction.write(config_path, config_data)
+        print("VAULT RESYNC REPORT", file=output)
+        print(f"CONFIG: {'CHANGED' if changed else 'UNCHANGED'} {config_path}", file=output)
+        for source, backup in transaction.backups:
+            print(f"BACKUP: {source} -> {backup}", file=output)
+        return 0
+    except Exception:
+        transaction.rollback()
         raise
 
 
@@ -1257,6 +1388,139 @@ def _selftest():
                 and _tree_digest(hooks_root) == installed_shims
                 and all(_marker_count(claude)[event] == 1 for event in EVENTS)
                 and all(_marker_count(codex_hooks)[event] == 1 for event in EVENTS),
+            ))
+
+            curated_home = root / "curated-home"
+            (curated_home / ".claude" / "memory").mkdir(parents=True)
+            curated_settings = curated_home / ".claude" / "settings.json"
+            curated_settings_source = b'{"hooks":{},"sentinel":"curated-round-trip"}\n'
+            curated_settings.write_bytes(curated_settings_source)
+            detected_vault = curated_home / ".claude" / "memory"
+            (detected_vault / "detected.md").write_text("detected\n", encoding="utf-8")
+            curated_a = root / "curated-a"
+            curated_b = root / "curated-b"
+            curated_a.mkdir()
+            curated_b.mkdir()
+            curated_config_dir = curated_home / CONFIG_DIRECTORY
+            curated_config_dir.mkdir()
+            curated_config = curated_config_dir / CONFIG_FILENAME
+            curated_paths = [os.fspath(curated_a.resolve()), os.fspath(curated_b.resolve())]
+            curated_config.write_bytes(
+                b'{\r\n  "vaults": '
+                + json.dumps(curated_paths, ensure_ascii=False, separators=(", ", ": ")).encode("utf-8")
+                + b',\r\n  "budget_bytes": 4096\r\n}\r\n'
+            )
+            curated_before_text = curated_config.read_text(encoding="utf-8")
+            curated_before_member = _member(_parse_json(curated_before_text), "vaults")
+            curated_vault_bytes = curated_before_text[
+                curated_before_member.value.start : curated_before_member.value.end
+            ].encode("utf-8")
+            curated_output = io.StringIO()
+            curated_code = _install(curated_home, output=curated_output, repo_root=old_repo)
+            curated_after_text = curated_config.read_text(encoding="utf-8")
+            curated_after_member = _member(_parse_json(curated_after_text), "vaults")
+            checks.append((
+                "repeat install preserves curated vault bytes instead of detected vaults",
+                curated_code == 0
+                and curated_after_text[
+                    curated_after_member.value.start : curated_after_member.value.end
+                ].encode("utf-8") == curated_vault_bytes
+                and json.loads(curated_after_text)["vaults"] == curated_paths
+                and "VAULTS: preserved 2 from config" in curated_output.getvalue()
+                and "VAULTS: detection found 1; not adopted (use the resync command)"
+                in curated_output.getvalue(),
+            ))
+
+            adopt_home = root / "adopt-home"
+            (adopt_home / ".claude" / "memory").mkdir(parents=True)
+            (adopt_home / ".claude" / "settings.json").write_text("{}\n", encoding="utf-8")
+            adopted_vault = adopt_home / ".claude" / "memory"
+            (adopted_vault / "native.md").write_text("native\n", encoding="utf-8")
+            (adopt_home / CONFIG_DIRECTORY).mkdir()
+            adopt_config = adopt_home / CONFIG_DIRECTORY / CONFIG_FILENAME
+            adopt_config.write_text('{"budget_bytes":4096}\n', encoding="utf-8")
+            adopt_code = _install(adopt_home, output=io.StringIO(), repo_root=old_repo)
+            checks.append((
+                "install adopts detection when config has no vaults key",
+                adopt_code == 0
+                and json.loads(adopt_config.read_text(encoding="utf-8"))["vaults"]
+                == [os.fspath(adopted_vault.resolve())],
+            ))
+
+            stale_home = root / "stale-home"
+            (stale_home / ".claude" / "memory").mkdir(parents=True)
+            (stale_home / ".claude" / "settings.json").write_text("{}\n", encoding="utf-8")
+            (stale_home / ".claude" / "memory" / "detected.md").write_text(
+                "detected\n",
+                encoding="utf-8",
+            )
+            stale_a = root / "stale-curated-a"
+            stale_b = root / "stale-curated-b"
+            stale_missing = root / "stale-curated-missing"
+            stale_a.mkdir()
+            stale_b.mkdir()
+            (stale_home / CONFIG_DIRECTORY).mkdir()
+            stale_config = stale_home / CONFIG_DIRECTORY / CONFIG_FILENAME
+            stale_config.write_text(
+                json.dumps({
+                    "vaults": [
+                        os.fspath(stale_a.resolve()),
+                        os.fspath(stale_missing.resolve()),
+                        os.fspath(stale_b.resolve()),
+                    ]
+                }),
+                encoding="utf-8",
+            )
+            stale_output = io.StringIO()
+            stale_code = _install(stale_home, output=stale_output, repo_root=old_repo)
+            checks.append((
+                "one stale curated entry keeps the other entries and rejects detection",
+                stale_code == 0
+                and json.loads(stale_config.read_text(encoding="utf-8"))["vaults"]
+                == [os.fspath(stale_a.resolve()), os.fspath(stale_b.resolve())]
+                and f"VAULTS: stale entry {stale_missing.resolve()}" in stale_output.getvalue()
+                and "VAULTS: preserved 2 from config" in stale_output.getvalue()
+                and "VAULTS: detection found 1; not adopted (use the resync command)"
+                in stale_output.getvalue(),
+            ))
+
+            before_resync_tree = _tree_digest(curated_home)
+            resync_dry_output = io.StringIO()
+            resync_dry_code = _resync_vaults(curated_home, dry_run=True, output=resync_dry_output)
+            after_resync_dry_tree = _tree_digest(curated_home)
+            before_resync_config = curated_config.read_bytes()
+            resync_output = io.StringIO()
+            resync_code = _resync_vaults(curated_home, output=resync_output)
+            resync_backups = list(curated_config.parent.glob(CONFIG_FILENAME + ".bak_epitype_*"))
+            checks.append((
+                "explicit vault resync previews without writes then backs up and adopts detection",
+                resync_dry_code == 0
+                and before_resync_tree == after_resync_dry_tree
+                and "DRY-RUN complete; no files changed." in resync_dry_output.getvalue()
+                and resync_code == 0
+                and json.loads(curated_config.read_text(encoding="utf-8"))["vaults"]
+                == [os.fspath(detected_vault.resolve())]
+                and any(path.read_bytes() == before_resync_config for path in resync_backups)
+                and "VAULTS: detection found 1; resync requested" in resync_output.getvalue()
+                and "vaults" in _parser().format_help(),
+            ))
+
+            hygiene_home = root / "detection-hygiene-home"
+            card_candidate = hygiene_home / ".claude" / "projects" / "with-card" / "memory"
+            empty_candidate = hygiene_home / ".claude" / "projects" / "empty" / "memory"
+            card_candidate.mkdir(parents=True)
+            empty_candidate.mkdir(parents=True)
+            (card_candidate / "card.md").write_text("card\n", encoding="utf-8")
+            checks.append((
+                "native detection skips candidate directories with no markdown cards",
+                _detect_native_vaults(hygiene_home, ("claude",)) == [card_candidate.resolve()],
+            ))
+
+            curated_uninstall_code = _uninstall(curated_home, output=io.StringIO())
+            checks.append((
+                "curated install and uninstall round trip keeps host bytes exact",
+                curated_uninstall_code == 0
+                and curated_settings.read_bytes() == curated_settings_source,
             ))
 
             config_path = home / CONFIG_DIRECTORY / CONFIG_FILENAME
@@ -1560,6 +1824,10 @@ def _selftest():
 
             native_home = root / "native-home"
             (native_home / ".codex" / "memories").mkdir(parents=True)
+            (native_home / ".codex" / "memories" / "native.md").write_text(
+                "native\n",
+                encoding="utf-8",
+            )
             native_config = native_home / ".codex" / "config.toml"
             native_hooks = native_home / ".codex" / "hooks.json"
             native_config.write_text(
@@ -1580,7 +1848,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 21
+    total = 27
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
@@ -1609,6 +1877,13 @@ def _parser():
         action="store_true",
         help="clear recorded shim fail-open breadcrumbs before running health checks",
     )
+    vaults = commands.add_parser("vaults", parents=[common], help="manage the configured vault list")
+    vaults.add_argument(
+        "--resync",
+        action="store_true",
+        required=True,
+        help="replace the configured vault list with current native detection",
+    )
     relocate = commands.add_parser("relocate", parents=[common], help="point stable shims at a moved Epitype repository")
     relocate.add_argument("--to", type=Path, required=True, help="new Epitype repository root")
     return parser
@@ -1626,6 +1901,8 @@ def main(argv=None):
             return _install(home, dry_run, parsed.apply_billing_guard)
         if parsed.command == "uninstall":
             return _uninstall(home, dry_run)
+        if parsed.command == "vaults":
+            return _resync_vaults(home, dry_run)
         if parsed.command == "relocate":
             return _relocate(home, parsed.to, dry_run)
         return _doctor(home, dry_run, clear_shim_status=parsed.clear_shim_status)

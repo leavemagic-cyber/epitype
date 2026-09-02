@@ -54,7 +54,7 @@ python install/graft.py install
 python install/graft.py doctor
 ```
 
-Installation merges entries marked as Epitype, writes backups before changing existing host files, and points the shared configuration at detected native vaults. When no native vault is present, it creates an empty fallback vault; it does not disable native memory.
+Installation merges entries marked as Epitype, writes backups before changing existing host files, and points the shared configuration at detected native vaults. When no native vault is present, it creates an empty fallback vault; it does not disable native memory. Reinstall preserves an existing curated vault list; adopting current detection instead requires the explicit `python install/graft.py vaults --resync` command, which supports `--dry-run`.
 
 If `doctor` reports `SHIM FAIL-OPEN SEEN`, inspect and repair the named cause, then acknowledge the recorded outage with `python install/graft.py doctor --clear-shim-status`.
 

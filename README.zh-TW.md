@@ -54,7 +54,7 @@ python install/graft.py install
 python install/graft.py doctor
 ```
 
-安裝器會 merge 帶 Epitype 標記的項目，既有 host 檔有變更前會先備份，並把共用設定指向偵測到的原生 vault。若沒有原生 vault，才建立空的 fallback vault；它不會停用原生記憶。
+安裝器會 merge 帶 Epitype 標記的項目，既有 host 檔有變更前會先備份，並把共用設定指向偵測到的原生 vault。若沒有原生 vault，才建立空的 fallback vault；它不會停用原生記憶。重新安裝會保留既有的 vault 策展清單；若要改採目前偵測結果，必須明確執行 `python install/graft.py vaults --resync`，並可先加 `--dry-run` 預覽。
 
 若 `doctor` 顯示 `SHIM FAIL-OPEN SEEN`，先檢查並修復列出的原因，再用 `python install/graft.py doctor --clear-shim-status` 明確確認並清除該次無聲下線紀錄。
 
