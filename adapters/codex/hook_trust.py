@@ -166,7 +166,7 @@ def _selftest():
     checks = []
     try:
         with tempfile.TemporaryDirectory(prefix=".hook-trust-", dir=_REPO_ROOT) as temp_dir:
-            root = Path(temp_dir)
+            root = Path(temp_dir).resolve()
             both = {
                 "user_prompt_submit:1:0": {"trusted_hash": "sha256:aa"},
                 "pre_compact:0:0": {"trusted_hash": "sha256:bb"},

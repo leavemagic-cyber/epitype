@@ -438,7 +438,7 @@ def _card_text(decision_key, status, decided_at, decided_by, extra=""):
 def _selftest():
     checks = []
     with tempfile.TemporaryDirectory(prefix="decision-lint-") as temp_dir:
-        root = Path(temp_dir)
+        root = Path(temp_dir).resolve()
 
         duplicate = root / "duplicate"
         duplicate.mkdir()

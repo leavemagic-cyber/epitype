@@ -602,7 +602,7 @@ def _selftest():
     checks = []
     try:
         with tempfile.TemporaryDirectory(prefix="epitype-gate-") as temp_dir:
-            root = Path(temp_dir)
+            root = Path(temp_dir).resolve()
             vault = root / "vault"
             vault.mkdir()
             card = vault / "safe-alternative.md"

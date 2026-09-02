@@ -33,6 +33,20 @@ def _emit(text, stream):
         print(text, end="" if text.endswith("\n") else "\n", file=stream)
 
 
+def _unresolved_fixture_roots(repo_root):
+    """Selftest fixtures must be resolved: GitHub's Windows runner hands out an 8.3
+    temp path (C:\\Users\\RUNNER~1\\...) while the product resolves every vault, so an
+    unresolved fixture string never equals the product's output there (CI 2026-09-02)."""
+    offenders = []
+    for path in sorted(repo_root.rglob("*.py")):
+        if any(part.startswith(".") or part == "__pycache__" for part in path.relative_to(repo_root).parts):
+            continue
+        for number, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+            if "Path(temp_dir)" in line and "Path(temp_dir).resolve()" not in line:
+                offenders.append(f"{path.relative_to(repo_root).as_posix()}:{number}")
+    return offenders
+
+
 def main():
     repo_root = Path(__file__).resolve().parents[1]
     environment = os.environ.copy()
@@ -69,8 +83,11 @@ def main():
         else:
             print(f"RESULT FAIL {name}: exit {result.returncode}", file=sys.stderr)
 
+    offenders = _unresolved_fixture_roots(repo_root)
+    if offenders:
+        print("RESULT FAIL fixture roots must use Path(temp_dir).resolve(): " + ", ".join(offenders), file=sys.stderr)
     print(f"TOTAL PASS {passed}/{len(SELFTESTS)}")
-    return 0 if passed == len(SELFTESTS) else 1
+    return 0 if passed == len(SELFTESTS) and not offenders else 1
 
 
 if __name__ == "__main__":

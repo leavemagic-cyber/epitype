@@ -389,7 +389,7 @@ def _selftest():
     checks = []
     try:
         with tempfile.TemporaryDirectory(prefix="memspec-") as temp_dir:
-            root = Path(temp_dir)
+            root = Path(temp_dir).resolve()
             target = root / "vault.md"
 
             with file_lock(target, 0.5) as first:

@@ -191,7 +191,7 @@ def _run_question(question):
         raise ValueError("expect must be an object")
 
     with tempfile.TemporaryDirectory(prefix="epitype-exam-") as temp_dir:
-        root = Path(temp_dir)
+        root = Path(temp_dir).resolve()
         vault = root / "vault"
         vault.mkdir()
         written = _write_cards(vault, question.get("setup"))

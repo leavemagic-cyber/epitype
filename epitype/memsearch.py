@@ -888,7 +888,7 @@ def _selftest():
 
     try:
         with tempfile.TemporaryDirectory(prefix="memsearch-") as temp_dir:
-            vault = Path(temp_dir)
+            vault = Path(temp_dir).resolve()
             no_index_vault = vault / "empty-vault"
             no_index_vault.mkdir()
             no_index_before = list(no_index_vault.rglob("*"))
@@ -1478,7 +1478,7 @@ def _selftest():
             checks.append(("Concurrent build without tears", concurrent_ok))
 
         with tempfile.TemporaryDirectory(prefix="epitype-legacy-index-") as temp_dir:
-            legacy_vault = Path(temp_dir)
+            legacy_vault = Path(temp_dir).resolve()
             legacy_card = legacy_vault / "retained.md"
             _write_card(
                 legacy_card,
@@ -1503,7 +1503,7 @@ def _selftest():
             )
 
         with tempfile.TemporaryDirectory(prefix="epitype-read-migration-") as temp_dir:
-            read_vault = Path(temp_dir)
+            read_vault = Path(temp_dir).resolve()
             read_card = read_vault / "read.md"
             _write_card(
                 read_card,
@@ -1535,7 +1535,7 @@ def _selftest():
             )
 
         with tempfile.TemporaryDirectory(prefix="epitype-pending-migration-") as temp_dir:
-            pending_vault = Path(temp_dir)
+            pending_vault = Path(temp_dir).resolve()
             pending_card = pending_vault / "pending.md"
             _write_card(
                 pending_card,
@@ -1574,7 +1574,7 @@ def _selftest():
             )
 
         with tempfile.TemporaryDirectory(prefix="epitype-dual-index-") as temp_dir:
-            dual_vault = Path(temp_dir)
+            dual_vault = Path(temp_dir).resolve()
             dual_card = dual_vault / "current.md"
             _write_card(
                 dual_card,

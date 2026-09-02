@@ -773,7 +773,7 @@ def _run_billing_guard(home, apply_changes, dry_run, transaction, output, repo_r
     # Apply against a temporary copy first. This keeps config_guard as the
     # source-driven implementation while graft owns the one required UTC backup.
     with tempfile.TemporaryDirectory(prefix="epitype-billing-") as temp_dir:
-        temporary_config = Path(temp_dir) / "config.toml"
+        temporary_config = Path(temp_dir).resolve() / "config.toml"
         temporary_config.write_bytes(config.read_bytes())
         apply_result = subprocess.run(
             [
@@ -932,7 +932,7 @@ def _synthetic_health(home, repo_root, output):
     )
     passed = 0
     with tempfile.TemporaryDirectory(prefix="epitype-doctor-") as temp_dir:
-        root = Path(temp_dir)
+        root = Path(temp_dir).resolve()
         vault = root / "vault"
         vault.mkdir()
         config = root / "config.json"
@@ -1300,7 +1300,7 @@ def _selftest():
     checks = []
     try:
         with tempfile.TemporaryDirectory(prefix="epitype-graft-") as temp_dir:
-            root = Path(temp_dir)
+            root = Path(temp_dir).resolve()
             old_repo = root / "repo-before-move"
             shutil.copytree(
                 REPO_ROOT,

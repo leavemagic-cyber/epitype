@@ -145,7 +145,7 @@ def _selftest():
     checks = []
     try:
         with tempfile.TemporaryDirectory(prefix="epitype-privacy-") as temp_dir:
-            root = Path(temp_dir)
+            root = Path(temp_dir).resolve()
             poison = root / "poison"
             poison.mkdir()
             toxic_text = "\n".join(

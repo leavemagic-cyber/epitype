@@ -51,7 +51,7 @@ def _selftest():
     checks = []
     try:
         with tempfile.TemporaryDirectory(prefix="epitype-precompact-") as temp_dir:
-            root = Path(temp_dir)
+            root = Path(temp_dir).resolve()
             vault = root / "vault"
             vault.mkdir()
             transcript = root / "transcript.jsonl"

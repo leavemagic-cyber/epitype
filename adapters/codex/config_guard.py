@@ -187,7 +187,7 @@ def _selftest():
     checks = []
     try:
         with tempfile.TemporaryDirectory(prefix=".config-guard-", dir=_REPO_ROOT) as temp_dir:
-            root = Path(temp_dir)
+            root = Path(temp_dir).resolve()
             known = root / "known.toml"
             source = (
                 b"# synthetic fixture\r\n"

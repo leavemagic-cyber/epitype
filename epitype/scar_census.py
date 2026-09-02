@@ -686,7 +686,7 @@ def _selftest():
     checks = []
     try:
         with tempfile.TemporaryDirectory(prefix="scar-census-") as temp_dir:
-            root = Path(temp_dir)
+            root = Path(temp_dir).resolve()
             sections_path = root / "resident.md"
             cards_path = root / "cards"
             marked_path = root / "index.md"

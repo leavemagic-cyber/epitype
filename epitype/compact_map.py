@@ -229,7 +229,7 @@ def _selftest():
     checks = []
     try:
         with tempfile.TemporaryDirectory(prefix='compact-map-') as temp_dir:
-            root = Path(temp_dir)
+            root = Path(temp_dir).resolve()
             transcript = root / 'synthetic.jsonl'
             output = root / 'map.txt'
             lines = [

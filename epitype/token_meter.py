@@ -141,7 +141,7 @@ def run_selftest():
     ]
     try:
         with tempfile.TemporaryDirectory(prefix="token_meter_") as temp_dir:
-            fake_path = Path(temp_dir) / "fake_rollout.jsonl"
+            fake_path = Path(temp_dir).resolve() / "fake_rollout.jsonl"
             fake_path.write_text("\n".join(fake_lines) + "\n", encoding="utf-8")
             report = parse_rollout(fake_path)
         expected = ((75, 5_000, 200, 4, 2), None, 1, (3,))

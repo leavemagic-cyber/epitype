@@ -288,7 +288,7 @@ def _selftest():
     marker_directory = None
     try:
         with tempfile.TemporaryDirectory(prefix="epitype-recall-") as temp_dir:
-            root = Path(temp_dir)
+            root = Path(temp_dir).resolve()
             vault = root / "vault"
             vault.mkdir()
             short_card = vault / "b-short.md"

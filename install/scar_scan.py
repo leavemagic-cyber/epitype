@@ -188,7 +188,7 @@ def _selftest():
     checks = []
     try:
         with tempfile.TemporaryDirectory(prefix="epitype-scar-scan-") as temp_dir:
-            root = Path(temp_dir)
+            root = Path(temp_dir).resolve()
             transcripts = root / "transcripts"
             transcripts.mkdir()
             first = transcripts / "first.jsonl"

@@ -179,7 +179,7 @@ def _selftest():
     checks = []
     try:
         with tempfile.TemporaryDirectory(prefix="ledger-gate-") as temp_dir:
-            root = Path(temp_dir)
+            root = Path(temp_dir).resolve()
 
             evidence_ok = root / "evidence-ok.txt"
             evidence_ok.write_bytes(b"prefix PATCH_APPLIED suffix")

@@ -89,7 +89,7 @@ def _selftest():
         )
 
         with tempfile.TemporaryDirectory(prefix="epitype-sessionstart-") as temp_dir:
-            root = Path(temp_dir)
+            root = Path(temp_dir).resolve()
             vault = root / "vault"
             vault.mkdir()
             (vault / memspec.MEMORY_INDEX_FILENAME).write_text(

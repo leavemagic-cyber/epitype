@@ -121,7 +121,7 @@ def _selftest():
     checks = []
     try:
         with tempfile.TemporaryDirectory(prefix="epitype-pending-") as temp_dir:
-            vault = Path(temp_dir) / "vault"
+            vault = Path(temp_dir).resolve() / "vault"
             vault.mkdir()
             today = date(2026, 9, 2)
             (vault / "plan.md").write_text(
