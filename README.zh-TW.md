@@ -52,7 +52,7 @@ Epitype 把同一組原生 vault 接到四個 host 事件：
 
 安裝：`pip install epitype`，之後用 `epitype-graft` 指令取代下文的 `python install/graft.py`（例如 `epitype-graft install --dry-run`）。
 
-npm 上的 `epitype` 只是指回這個 Python 專案的路標套件。
+npm 上的 `@hungyu/epitype` 只是指回這個 Python 專案的路標套件（npm 判裸名 `epitype` 與既有套件過於相似，不接受）。
 
 先在 repo 根目錄預覽預計變更：
 

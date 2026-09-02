@@ -1,5 +1,5 @@
 {
-  "name": "epitype",
+  "name": "@hungyu/epitype",
   "version": "1.0.0",
   "description": "Epitype is a memory governance layer for CLI agents.",
   "license": "MIT",

@@ -52,7 +52,7 @@ Requirements: Python 3.11 or newer and a Claude Code or Codex installation with 
 
 Install: `pip install epitype`, then use the `epitype-graft` command in place of `python install/graft.py` below (for example `epitype-graft install --dry-run`).
 
-The `epitype` package on npm is only a signpost back to this Python project.
+The `@hungyu/epitype` package on npm is only a signpost back to this Python project (npm rejects the bare name as too similar to an existing package).
 
 From the repository root, preview the planned changes:
 
