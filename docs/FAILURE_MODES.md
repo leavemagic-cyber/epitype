@@ -83,7 +83,7 @@ Question-answering benchmarks are easy to compare. Behavioral compliance require
 
 ### Epitype countermeasure
 
-Every current tool and adapter exposes a synthetic `--selftest`, and `tests/run_all.py` requires every listed component to pass. v1.0 is reserved for the later exam-gated release. Current component selftests are useful engineering evidence, but they are not yet a mature field benchmark.
+Every current tool and adapter exposes a synthetic `--selftest`, and `tests/run_all.py` requires every listed component to pass. The exam engine ships in `exam/`, and the publication gate also runs the full corpus with strict failure semantics. These checks are useful behavioral regression evidence, but they are not a mature field benchmark.
 
 ### Self-verification
 
