@@ -1,7 +1,11 @@
 name: CI
 
+# Runs only where a red light is worth an email: the published branch, release
+# tags, and incoming pull requests (owner ruling 2026-09-02).
 on:
   push:
+    branches: [master]
+    tags: ['v*']
   pull_request:
 
 permissions:
