@@ -2,7 +2,9 @@ import sys, time; sys.dont_write_bytecode = True; _STARTED_AT = time.monotonic()
 """Claude SessionStart adapter for slim index and work-ledger injection."""
 
 import json
+import os
 from pathlib import Path
+import re
 import tempfile
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -17,20 +19,20 @@ from _hook_common import (
     load_config,
     payload,
     read_event,
+    resolve_vaults,
     run_synthetic,
     write_config,
 )
 
 
 def _handle(event, started_at):
-    del event
     config = load_config(started_at)
     if config is None:
         return None
     budget = config[memspec.CONFIG_BUDGET_BYTES_FIELD]
     pieces = []
 
-    for vault in config[memspec.CONFIG_VAULTS_FIELD]:
+    for vault in resolve_vaults(config, event):
         if expired(started_at):
             return None
         index_path = vault / memspec.MEMORY_INDEX_FILENAME
@@ -104,11 +106,38 @@ def _selftest():
                     and str((vault / memspec.MEMORY_INDEX_FILENAME).resolve()) in context,
                 )
             )
+
+            home = root / "home"
+            project = root / "work" / "proj"
+            project.mkdir(parents=True)
+            slug = re.sub(r"[^A-Za-z0-9]", "-", str(project))
+            native = home / ".claude" / "projects" / slug / "memory"
+            native.mkdir(parents=True)
+            (native / memspec.MEMORY_INDEX_FILENAME).write_text(
+                "# Native Index\nnative index detail\n",
+                encoding="utf-8",
+            )
+            native_result = run_synthetic(
+                Path(__file__),
+                {"source": "startup", "cwd": str(project)},
+                config,
+                environment={"HOME": os.fspath(home), "USERPROFILE": os.fspath(home)},
+            )
+            native_value = json.loads(native_result.stdout) if native_result.stdout.strip() else {}
+            native_context = native_value.get("hookSpecificOutput", {}).get("additionalContext", "")
+            checks.append(
+                (
+                    "cwd-slug native index injected ahead of configured vaults",
+                    native_result.returncode == 0
+                    and native_context.index("native index detail") < native_context.index("index detail")
+                    and "ledger detail" in native_context,
+                )
+            )
     except Exception as exc:
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 3
+    total = 4
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

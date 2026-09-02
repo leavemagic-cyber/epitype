@@ -4,9 +4,13 @@ import sys; sys.dont_write_bytecode = True; [getattr(stream, "reconfigure", lamb
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 
 from epitype import memspec
+
+NATIVE_PROJECTS_SUBPATH = (".claude", "projects")
+_SLUG_PATTERN = re.compile(r"[^A-Za-z0-9]")
 
 
 def expired(started_at):
@@ -66,6 +70,56 @@ def load_config(started_at):
     }
 
 
+def _holds_cards(vault):
+    try:
+        if (vault / memspec.MEMORY_INDEX_FILENAME).is_file():
+            return True
+        return any(
+            item.suffix.lower() == ".md" and not item.name.startswith("_")
+            for item in vault.iterdir()
+        )
+    except OSError:
+        return False
+
+
+def native_cwd_vaults(cwd, home=None):
+    """Claude Code auto-creates one memory directory per cwd slug; cards written
+    there must be recallable without editing config, so the cwd and each ancestor
+    join the vault list whenever their directory already holds an index or a card.
+    Empty auto-created shells are skipped so no index is planted in them."""
+    if not isinstance(cwd, str) or not cwd.strip():
+        return []
+    projects = (home or Path.home()).joinpath(*NATIVE_PROJECTS_SUBPATH)
+    try:
+        start = Path(cwd)
+        bases = (start, *start.parents)
+    except (TypeError, ValueError):
+        return []
+    found = []
+    for base in bases:
+        texts = {str(base)}
+        try:
+            texts.add(str(base.resolve()))
+        except OSError:
+            pass
+        for text in sorted(texts):
+            candidate = projects / _SLUG_PATTERN.sub("-", text) / "memory"
+            if candidate.is_dir() and _holds_cards(candidate):
+                resolved = candidate.resolve()
+                if resolved not in found:
+                    found.append(resolved)
+    return found
+
+
+def resolve_vaults(config, event, home=None):
+    """Closest native cwd vault first, then the configured vaults, deduplicated."""
+    vaults = native_cwd_vaults(event.get("cwd") if isinstance(event, dict) else None, home)
+    for vault in config[memspec.CONFIG_VAULTS_FIELD]:
+        if vault not in vaults:
+            vaults.append(vault)
+    return vaults
+
+
 def payload(event_name, context):
     return {
         "hookSpecificOutput": {
@@ -106,8 +160,8 @@ def emit(value):
     print(encoded)
 
 
-def run_synthetic(script, event, config_path, arguments=()):
-    environment = os.environ.copy()
+def run_synthetic(script, event, config_path, arguments=(), environment=None):
+    environment = {**os.environ, **(environment or {})}
     environment[memspec.EPITYPE_CONFIG_ENV] = os.fspath(config_path)
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
     return subprocess.run(

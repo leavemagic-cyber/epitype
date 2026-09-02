@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import sqlite3
 import subprocess
 import tempfile
 import uuid
@@ -23,13 +24,74 @@ from _hook_common import (
     load_config,
     payload,
     read_event,
+    resolve_vaults,
     run_synthetic,
     write_config,
 )
 
+# An owner grant that only lives in one session is lost the moment nobody cards
+# it, and the next session asks for the same permission again. Grant-shaped
+# prompts are therefore captured mechanically into the first configured vault;
+# the wording is verbatim, the interpretation is left to whoever recalls it.
+GRANT_PATTERN = re.compile(
+    r"(?:我同意|同意過|我授權|授權你|你可以(?:操作|使用|用|直接|動|改|刪|執行|做|開|關|讀|寫)"
+    r"|准你|准了|批准|允許你|不用問我|不必問我|直接(?:做|修|改|動|刪|執行)|隨你|照你"
+    r"|\bI\s+(?:agree|authori[sz]e|approve|consent)\b|\byou\s+(?:may|are\s+allowed\s+to|have\s+my\s+permission)\b"
+    r"|\bgo\s+ahead\b|\bpermission\s+granted\b|\bdon'?t\s+ask\s+me\b)",
+    re.IGNORECASE,
+)
+GRANT_DIRECTORY = "grants"
+GRANT_BODY_MAX_CHARS = 2000
+GRANT_LOCK_SECONDS = 0.2
+
 
 def _one_line(value):
     return " ".join(str(value or "").split())
+
+
+def _grant_digest(prompt):
+    return hashlib.sha256(_one_line(prompt).encode("utf-8")).hexdigest()[:12]
+
+
+def _capture_grant(prompt, vault, event, started_at):
+    if not GRANT_PATTERN.search(prompt) or expired(started_at):
+        return None
+    digest = _grant_digest(prompt)
+    directory = vault / GRANT_DIRECTORY
+    try:
+        if any(directory.glob(f"grant-*-{digest}.md")):
+            return None
+        directory.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        name = f"grant-{stamp[:10].replace('-', '')}-{digest}"
+        target = directory / f"{name}.md"
+        summary = _one_line(prompt)[:120]
+        body = prompt if len(prompt) <= GRANT_BODY_MAX_CHARS else prompt[:GRANT_BODY_MAX_CHARS] + "\n[truncated]"
+        card = (
+            "---\n"
+            f"name: {name}\n"
+            f"description: owner grant auto-captured {stamp[:10]}: {summary}\n"
+            f"{memspec.SCOPE_FIELD}: governance-core\n"
+            f"captured_at: {stamp}\n"
+            f"cwd: {_one_line(event.get('cwd'))}\n"
+            f"session_id: {_one_line(event.get('session_id', event.get('sessionId')))}\n"
+            "---\n"
+            f"{body}\n\n"
+            "(auto-captured verbatim by the epitype recall hook; verify scope before acting)\n"
+        )
+        with memspec.file_lock(target, GRANT_LOCK_SECONDS) as locked:
+            if not locked or target.exists():
+                return None
+            temporary = target.with_name(target.name + ".tmp")
+            temporary.write_text(card, encoding="utf-8")
+            os.replace(temporary, target)
+        # The staleness grace window would hide the new card from the very next
+        # prompt; a grant must be recallable immediately, so refresh incrementally.
+        if not expired(started_at):
+            memsearch.build_index(vault, lock_timeout=0.0)
+        return target
+    except (OSError, sqlite3.Error):
+        return None
 
 
 def _session_component(session_id):
@@ -63,8 +125,10 @@ def _handle(event, started_at):
     if config is None:
         return None
 
+    _capture_grant(prompt, config[memspec.CONFIG_VAULTS_FIELD][0], event, started_at)
+
     pieces = [memspec.UNTRUSTED_ADVISORY]
-    for vault in config[memspec.CONFIG_VAULTS_FIELD]:
+    for vault in resolve_vaults(config, event):
         if expired(started_at):
             return None
         result = memsearch.recall_index(vault, prompt)
@@ -266,6 +330,74 @@ def _selftest():
                     broken.returncode == 0 and not broken.stdout and not broken.stderr,
                 )
             )
+
+            write_config(config, [vault])
+            grant_prompt = "你可以操作 chrome！我同意過，這件事以後不用再問"
+            for _ in range(2):
+                run_synthetic(Path(__file__), {"prompt": grant_prompt, "session_id": uuid.uuid4().hex}, config)
+            grant_files = list((vault / GRANT_DIRECTORY).glob("grant-*.md"))
+            grant_text = grant_files[0].read_text(encoding="utf-8") if grant_files else ""
+            checks.append(
+                (
+                    "owner grant captured verbatim once",
+                    len(grant_files) == 1
+                    and grant_prompt in grant_text
+                    and f"name: {grant_files[0].stem}" in grant_text
+                    and not (vault / GRANT_DIRECTORY / (grant_files[0].name + ".tmp")).exists(),
+                )
+            )
+            run_synthetic(Path(__file__), {"prompt": "請整理 chrome 分頁", "session_id": uuid.uuid4().hex}, config)
+            checks.append(
+                (
+                    "plain request captures nothing",
+                    len(list((vault / GRANT_DIRECTORY).glob("grant-*.md"))) == 1,
+                )
+            )
+            recalled = run_synthetic(
+                Path(__file__),
+                {"prompt": "chrome 操作有沒有同意過", "session_id": uuid.uuid4().hex},
+                config,
+            )
+            recalled_value = json.loads(recalled.stdout) if recalled.stdout.strip() else {}
+            recalled_context = recalled_value.get("hookSpecificOutput", {}).get("additionalContext", "")
+            checks.append(
+                (
+                    "captured grant is recallable",
+                    recalled.returncode == 0
+                    and bool(grant_files)
+                    and grant_files[0].stem in recalled_context,
+                )
+            )
+
+            home = root / "home"
+            project = root / "work" / "proj"
+            project.mkdir(parents=True)
+            slug = re.sub(r"[^A-Za-z0-9]", "-", str(project))
+            native = home / ".claude" / "projects" / slug / "memory"
+            native.mkdir(parents=True)
+            (native / "native-card.md").write_text(
+                "---\nname: Native Project Card\ndescription: nativeneedle lives in the cwd vault\n---\nnativeneedle\n",
+                encoding="utf-8",
+            )
+            empty_slug = re.sub(r"[^A-Za-z0-9]", "-", str(project.parent))
+            (home / ".claude" / "projects" / empty_slug / "memory").mkdir(parents=True)
+            home_environment = {"HOME": os.fspath(home), "USERPROFILE": os.fspath(home)}
+            native_result = run_synthetic(
+                Path(__file__),
+                {"prompt": "find nativeneedle", "session_id": uuid.uuid4().hex, "cwd": str(project)},
+                config,
+                environment=home_environment,
+            )
+            native_value = json.loads(native_result.stdout) if native_result.stdout.strip() else {}
+            native_context = native_value.get("hookSpecificOutput", {}).get("additionalContext", "")
+            checks.append(
+                (
+                    "cwd-slug native vault joins recall; empty ancestor shell stays untouched",
+                    native_result.returncode == 0
+                    and "Native Project Card" in native_context
+                    and not any((home / ".claude" / "projects" / empty_slug / "memory").iterdir()),
+                )
+            )
     except Exception as exc:
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
     finally:
@@ -273,7 +405,7 @@ def _selftest():
             shutil.rmtree(marker_directory, ignore_errors=True)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 6
+    total = 10
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
