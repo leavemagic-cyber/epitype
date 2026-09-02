@@ -56,6 +56,8 @@ python install/graft.py doctor
 
 安裝器會 merge 帶 Epitype 標記的項目，既有 host 檔有變更前會先備份，並把共用設定指向偵測到的原生 vault。若沒有原生 vault，才建立空的 fallback vault；它不會停用原生記憶。
 
+若 `doctor` 顯示 `SHIM FAIL-OPEN SEEN`，先檢查並修復列出的原因，再用 `python install/graft.py doctor --clear-shim-status` 明確確認並清除該次無聲下線紀錄。
+
 repo 搬家時只需執行 `python install/graft.py relocate --to C:\新的\repo\路徑`，不必修改 host 的 hook 設定。
 
 可從 [`templates/`](templates/) 選一個起點：`minimal` 適合單人單機，`team` 是共用 vault 加統一寫鎖契約，`power` 則保留全件、census 與 exam-ready 目錄。

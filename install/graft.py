@@ -25,15 +25,26 @@ STATE_VERSION = 1
 CONFIG_DIRECTORY = ".epitype"
 CONFIG_FILENAME = "config.json"
 STATE_FILENAME = "install_state.json"
+SHIM_STATUS_FILENAME = "shim_status.json"
 HOOK_DIRECTORY = "hooks"
 FALLBACK_VAULT = ".epitype-vault"
 SHIM_ADAPTER_TOKEN = "__EPITYPE_ADAPTER_FILENAME__"
+SHIM_TRACE_ENV = "EPITYPE_SHIM_TRACE"
 HOOK_SPECS = {
     "SessionStart": ("sessionstart.py", "sessionstart_hook.py"),
     "UserPromptSubmit": ("recall.py", "recall_hook.py"),
     "PreCompact": ("precompact.py", "precompact_hook.py"),
     "PreToolUse": ("pretooluse.py", "pretooluse_gate.py"),
 }
+SHIM_NAMES = tuple(shim_name for shim_name, _ in HOOK_SPECS.values())
+SHIM_REASON_CODES = frozenset((
+    "config_missing",
+    "config_unreadable",
+    "repo_root_missing",
+    "repo_root_not_dir",
+    "adapter_missing",
+    "exception",
+))
 NATIVE_DISABLE_PATTERN = re.compile(
     r"(?:disable(?:d)?[^\r\n]{0,64}(?:memory|recall|history)|"
     r"(?:memory|recall|history)[^\r\n]{0,64}disable(?:d)?)",
@@ -568,7 +579,7 @@ def _adapter_paths(repo_root):
     }
 
 
-def _validate_repo_root(raw_value):
+def _validate_repo_root(raw_value, require_adapters=True):
     if isinstance(raw_value, Path):
         repo_root = raw_value.expanduser().resolve()
     elif isinstance(raw_value, str) and raw_value.strip():
@@ -577,9 +588,10 @@ def _validate_repo_root(raw_value):
         raise ValueError("config repo_root must be a non-empty path")
     if not repo_root.is_dir():
         raise NotADirectoryError(os.fspath(repo_root))
-    missing = [path for path in _adapter_paths(repo_root).values() if not path.is_file()]
-    if missing:
-        raise FileNotFoundError("missing hook adapters: " + ", ".join(os.fspath(path) for path in missing))
+    if require_adapters:
+        missing = [path for path in _adapter_paths(repo_root).values() if not path.is_file()]
+        if missing:
+            raise FileNotFoundError("missing hook adapters: " + ", ".join(os.fspath(path) for path in missing))
     return repo_root
 
 
@@ -754,6 +766,101 @@ def _home_environment(home):
     return environment
 
 
+def _shim_status_path(home):
+    return home / CONFIG_DIRECTORY / SHIM_STATUS_FILENAME
+
+
+def _read_shim_status(home):
+    path = _shim_status_path(home)
+    if not path.exists():
+        return {}
+    if not path.is_file():
+        raise ValueError(f"shim status is not a file: {path}")
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict) or value.get("version") != 1:
+        raise ValueError("malformed shim status")
+    records = value.get("shims")
+    if not isinstance(records, dict) or len(records) > len(SHIM_NAMES):
+        raise ValueError("malformed shim status records")
+    validated = {}
+    for shim_name, record in records.items():
+        if shim_name not in SHIM_NAMES or not isinstance(record, dict):
+            raise ValueError("malformed shim status record")
+        timestamp = record.get("timestamp")
+        reason = record.get("reason")
+        if (
+            record.get("shim") != shim_name
+            or reason not in SHIM_REASON_CODES
+            or not isinstance(timestamp, str)
+            or not timestamp.endswith("Z")
+        ):
+            raise ValueError("malformed shim status record")
+        try:
+            parsed_timestamp = datetime.fromisoformat(timestamp[:-1] + "+00:00")
+        except ValueError as exc:
+            raise ValueError("malformed shim status timestamp") from exc
+        if parsed_timestamp.utcoffset() != timezone.utc.utcoffset(parsed_timestamp):
+            raise ValueError("shim status timestamp is not UTC")
+        validated[shim_name] = {
+            "timestamp": timestamp,
+            "shim": shim_name,
+            "reason": reason,
+        }
+    return validated
+
+
+def _report_shim_status(records, output, previous=None):
+    previous = previous or {}
+    for shim_name in SHIM_NAMES:
+        record = records.get(shim_name)
+        if record is None or record == previous.get(shim_name):
+            continue
+        print(
+            f"SHIM FAIL-OPEN SEEN: {shim_name} {record['reason']} {record['timestamp']}",
+            file=output,
+        )
+
+
+def _clear_shim_status(home, dry_run, output):
+    path = _shim_status_path(home)
+    if not path.exists():
+        print("SHIM STATUS CLEAR: no records", file=output)
+        return
+    if dry_run:
+        print(f"DRY-RUN remove shim status: {path}", file=output)
+        return
+    path.unlink()
+    print(f"SHIM STATUS CLEARED: {path}", file=output)
+
+
+def _synthetic_trace_reason(trace_path, shim_name, expected_adapter):
+    records = []
+    if trace_path.is_file():
+        for line in trace_path.read_text(encoding="utf-8").splitlines():
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(record, dict) and record.get("shim") == shim_name:
+                records.append(record)
+    if not records:
+        return "no-trace"
+    record = records[-1]
+    actual_adapter = record.get("adapter")
+    if not isinstance(actual_adapter, str):
+        return "adapter-mismatch"
+    actual_path = Path(actual_adapter)
+    if not actual_path.is_absolute() or (
+        os.path.normcase(os.path.normpath(actual_adapter))
+        != os.path.normcase(os.path.normpath(os.fspath(expected_adapter.resolve())))
+    ):
+        return "adapter-mismatch"
+    exit_code = record.get("exit")
+    if not isinstance(exit_code, int) or isinstance(exit_code, bool) or exit_code != 0:
+        return f"exit={exit_code if isinstance(exit_code, int) else '?'}"
+    return None
+
+
 def _synthetic_health(home, repo_root, output):
     scripts = (
         ("SessionStart", "sessionstart.py", {"source": "epitype-doctor"}, ()),
@@ -772,6 +879,8 @@ def _synthetic_health(home, repo_root, output):
         environment["EPITYPE_CONFIG"] = os.fspath(config)
         for name, shim_name, event, arguments in scripts:
             script = home / CONFIG_DIRECTORY / HOOK_DIRECTORY / shim_name
+            trace_path = root / f"{shim_name}.trace"
+            environment[SHIM_TRACE_ENV] = os.fspath(trace_path)
             result = subprocess.run(
                 [sys.executable, os.fspath(script), *arguments],
                 input=json.dumps(event, ensure_ascii=False),
@@ -784,26 +893,44 @@ def _synthetic_health(home, repo_root, output):
                 timeout=10,
                 check=False,
             )
-            ok = result.returncode == 0
+            expected_adapter = repo_root / "adapters" / "claude" / HOOK_SPECS[name][1]
+            reason = _synthetic_trace_reason(trace_path, shim_name, expected_adapter)
+            ok = reason is None
             passed += int(ok)
-            print(f"HOOK {name}: {'PASS' if ok else 'FAIL'} exit={result.returncode}", file=output)
+            print(f"HOOK {name}: {'PASS' if ok else 'FAIL'}", file=output)
+            if reason is not None:
+                print(f"REASON {name}: {reason}", file=output)
     print(f"HEALTH {'PASS' if passed == len(scripts) else 'FAIL'} {passed}/{len(scripts)}", file=output)
     return passed == len(scripts)
 
 
-def _doctor(home, dry_run=False, output=sys.stdout):
+def _doctor(home, dry_run=False, output=sys.stdout, clear_shim_status=False):
     hosts = _detect_hosts(home)
     print("HOSTS: " + (", ".join(hosts) if hosts else "none"), file=output)
     if dry_run:
+        records = _read_shim_status(home)
+        _report_shim_status(records, output)
+        if clear_shim_status:
+            _clear_shim_status(home, True, output)
         print("DRY-RUN hooks: SessionStart, UserPromptSubmit, PreCompact, PreToolUse", file=output)
+        if records:
+            print("DOCTOR FAIL fail-open breadcrumb requires --clear-shim-status", file=output)
+            return 1
         return 0
     config_path = home / CONFIG_DIRECTORY / CONFIG_FILENAME
     try:
+        if clear_shim_status:
+            _clear_shim_status(home, False, output)
+        initial_records = _read_shim_status(home)
+        _report_shim_status(initial_records, output)
         config = json.loads(config_path.read_text(encoding="utf-8"))
         vaults = config.get("vaults") if isinstance(config, dict) else None
         if not isinstance(vaults, list) or not vaults or not all(Path(item).is_dir() for item in vaults):
             raise ValueError("config vaults must be existing directories")
-        repo_root = _validate_repo_root(config.get("repo_root") if isinstance(config, dict) else None)
+        repo_root = _validate_repo_root(
+            config.get("repo_root") if isinstance(config, dict) else None,
+            require_adapters=False,
+        )
         hooks_root = home / CONFIG_DIRECTORY / HOOK_DIRECTORY
         shim_payloads = _shim_payloads(repo_root)
         for shim_name, expected in shim_payloads.items():
@@ -825,7 +952,16 @@ def _doctor(home, dry_run=False, output=sys.stdout):
             print(f"REGISTRATION {name}: PASS 4/4", file=output)
         if not hosts:
             raise ValueError("no supported host detected")
-        return 0 if _synthetic_health(home, repo_root, output) else 1
+        health_ok = _synthetic_health(home, repo_root, output)
+        final_records = _read_shim_status(home)
+        _report_shim_status(final_records, output, previous=initial_records)
+        if final_records:
+            print("DOCTOR FAIL fail-open breadcrumb requires --clear-shim-status", file=output)
+            return 1
+        if not health_ok:
+            print("DOCTOR FAIL synthetic hook health", file=output)
+            return 1
+        return 0
     except Exception as exc:
         print(f"DOCTOR FAIL {type(exc).__name__}: {exc}", file=output)
         return 1
@@ -1062,6 +1198,7 @@ def _selftest():
                 and not list(fallback.iterdir())
                 and config_value.get("vaults") == [os.fspath(fallback.resolve())]
                 and config_value.get("repo_root") == os.fspath(old_repo.resolve())
+                and all(f"HOOK {event}: PASS" in first_output.getvalue() for event in EVENTS)
                 and "HEALTH PASS 4/4" in first_output.getvalue(),
             ))
             claude_value = json.loads(claude.read_text(encoding="utf-8"))
@@ -1122,6 +1259,110 @@ def _selftest():
                 and all(_marker_count(codex_hooks)[event] == 1 for event in EVENTS),
             ))
 
+            config_path = home / CONFIG_DIRECTORY / CONFIG_FILENAME
+            installed_config = config_path.read_bytes()
+            broken_config = json.loads(installed_config)
+            broken_config["repo_root"] = os.fspath(root / "missing-repo-root")
+            config_path.write_text(
+                json.dumps(broken_config, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            canary = "SYNTHETIC-CANARY-STRING"
+            shim_environment = _home_environment(home)
+            shim_environment.pop("EPITYPE_CONFIG", None)
+            fail_open_result = subprocess.run(
+                [sys.executable, os.fspath(hooks_root / "pretooluse.py")],
+                input=json.dumps({"tool_name": "SyntheticRead", "tool_input": {"probe": canary}}),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=shim_environment,
+                timeout=10,
+                check=False,
+            )
+            status_path = _shim_status_path(home)
+            fail_open_status_bytes = status_path.read_bytes()
+            fail_open_status = json.loads(fail_open_status_bytes)
+            fail_open_record = fail_open_status.get("shims", {}).get("pretooluse.py", {})
+            fail_open_doctor_output = io.StringIO()
+            fail_open_doctor_code = _doctor(home, output=fail_open_doctor_output)
+            checks.append((
+                "repo-root fail-open stays silent, records reason, and fails doctor",
+                fail_open_result.returncode == 0
+                and fail_open_result.stdout == ""
+                and fail_open_result.stderr == ""
+                and fail_open_record.get("shim") == "pretooluse.py"
+                and fail_open_record.get("reason") == "repo_root_not_dir"
+                and fail_open_doctor_code == 1
+                and "SHIM FAIL-OPEN SEEN: pretooluse.py repo_root_not_dir "
+                in fail_open_doctor_output.getvalue()
+                and "DOCTOR FAIL" in fail_open_doctor_output.getvalue(),
+            ))
+            checks.append((
+                "shim breadcrumb excludes synthetic event content",
+                canary.encode("utf-8") not in fail_open_status_bytes,
+            ))
+            config_path.write_bytes(installed_config)
+            clear_output = io.StringIO()
+            clear_code = _doctor(home, output=clear_output, clear_shim_status=True)
+            checks.append((
+                "doctor clear removes breadcrumb and restores healthy result",
+                clear_code == 0
+                and not status_path.exists()
+                and "SHIM STATUS CLEARED:" in clear_output.getvalue()
+                and "HEALTH PASS 4/4" in clear_output.getvalue(),
+            ))
+
+            missing_adapter = old_repo / "adapters" / "claude" / "pretooluse_gate.py"
+            missing_adapter_bytes = missing_adapter.read_bytes()
+            missing_adapter.unlink()
+            missing_adapter_output = io.StringIO()
+            missing_adapter_code = _doctor(home, output=missing_adapter_output)
+            missing_adapter_text = missing_adapter_output.getvalue()
+            missing_adapter.write_bytes(missing_adapter_bytes)
+            recovered_code = _doctor(
+                home,
+                output=io.StringIO(),
+                clear_shim_status=True,
+            )
+            checks.append((
+                "missing adapter fails hook health for lack of positive trace",
+                missing_adapter_code == 1
+                and "HOOK PreToolUse: FAIL" in missing_adapter_text
+                and "REASON PreToolUse: no-trace" in missing_adapter_text
+                and "HEALTH FAIL 3/4" in missing_adapter_text
+                and recovered_code == 0,
+            ))
+
+            blocked_home = root / "blocked-status-home"
+            blocked_config_dir = blocked_home / CONFIG_DIRECTORY
+            blocked_config_dir.mkdir(parents=True)
+            (blocked_config_dir / CONFIG_FILENAME).write_text(
+                json.dumps({"repo_root": os.fspath(root / "also-missing")}),
+                encoding="utf-8",
+            )
+            (blocked_config_dir / SHIM_STATUS_FILENAME).mkdir()
+            blocked_environment = _home_environment(blocked_home)
+            blocked_environment.pop("EPITYPE_CONFIG", None)
+            blocked_result = subprocess.run(
+                [sys.executable, os.fspath(hooks_root / "pretooluse.py")],
+                input=json.dumps({"tool_name": "SyntheticRead", "tool_input": {"probe": canary}}),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=blocked_environment,
+                timeout=10,
+                check=False,
+            )
+            checks.append((
+                "breadcrumb write failure cannot infect fail-open behavior",
+                blocked_result.returncode == 0
+                and blocked_result.stdout == ""
+                and blocked_result.stderr == "",
+            ))
+
             moved_repo = root / "repo-after-move"
             shutil.move(os.fspath(old_repo), os.fspath(moved_repo))
             before_relocate_hosts = (claude.read_bytes(), codex_hooks.read_bytes())
@@ -1172,11 +1413,17 @@ def _selftest():
                 all(
                     result.returncode == 0 and result.stdout == "" and result.stderr == ""
                     for result in missing_results
+                )
+                and set(_read_shim_status(missing_home)) == set(SHIM_NAMES)
+                and all(
+                    record["reason"] == "repo_root_missing"
+                    for record in _read_shim_status(missing_home).values()
                 ),
             ))
 
             card = fallback / "synthetic-card.md"
             card.write_text("synthetic card\n", encoding="utf-8")
+            status_path.write_bytes(fail_open_status_bytes)
             uninstall_code = _uninstall(home, output=io.StringIO())
             checks.append((
                 "uninstall restores hook files byte-for-byte",
@@ -1186,9 +1433,10 @@ def _selftest():
                 and codex_config.read_bytes() == config_source,
             ))
             checks.append((
-                "uninstall removes config and shim directory but preserves vault cards",
+                "uninstall removes config, shims, and shim status but preserves vault cards",
                 not (home / CONFIG_DIRECTORY).exists()
                 and not hooks_root.exists()
+                and not status_path.exists()
                 and card.read_text(encoding="utf-8") == "synthetic card\n",
             ))
 
@@ -1332,7 +1580,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 16
+    total = 21
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
@@ -1355,7 +1603,12 @@ def _parser():
     install = commands.add_parser("install", parents=[common], help="merge and verify Epitype hooks")
     install.add_argument("--apply-billing-guard", action="store_true", help="apply, rather than only report, Codex billing guard settings")
     commands.add_parser("uninstall", parents=[common], help="remove only Epitype-owned registrations")
-    commands.add_parser("doctor", parents=[common], help="inspect registrations and exercise synthetic hook stdin")
+    doctor = commands.add_parser("doctor", parents=[common], help="inspect registrations and exercise synthetic hook stdin")
+    doctor.add_argument(
+        "--clear-shim-status",
+        action="store_true",
+        help="clear recorded shim fail-open breadcrumbs before running health checks",
+    )
     relocate = commands.add_parser("relocate", parents=[common], help="point stable shims at a moved Epitype repository")
     relocate.add_argument("--to", type=Path, required=True, help="new Epitype repository root")
     return parser
@@ -1375,7 +1628,7 @@ def main(argv=None):
             return _uninstall(home, dry_run)
         if parsed.command == "relocate":
             return _relocate(home, parsed.to, dry_run)
-        return _doctor(home, dry_run)
+        return _doctor(home, dry_run, clear_shim_status=parsed.clear_shim_status)
     except Exception as exc:
         print(f"ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
