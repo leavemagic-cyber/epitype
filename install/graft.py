@@ -18,11 +18,6 @@ import tomllib
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
-
-from epitype import findings
-
 MARKER_VALUE = "epitype"
 MARKER_FIELDS = ("id", "comment")
 EVENTS = ("SessionStart", "UserPromptSubmit", "PreCompact", "PreToolUse")
@@ -42,6 +37,12 @@ HOOK_SPECS = {
     "PreToolUse": ("pretooluse.py", "pretooluse_gate.py"),
 }
 SHIM_NAMES = tuple(shim_name for shim_name, _ in HOOK_SPECS.values())
+U12_SHIM_SHA256 = {
+    "sessionstart.py": "49932f9dff4d80ebc14045dd619289246afee9ba319bb37f3a786fbdaf746001",
+    "recall.py": "06d81067cd22c3a38c74980e13155d9b38eac5393677959d8ec5fedfdfe29085",
+    "precompact.py": "22386bf486c9e305d0439fe3cfb814a1e980fe3e96ef88a7769c987e8d416d99",
+    "pretooluse.py": "9c2cdb7d145eeba56e532a3ceae639375ae8952960d3f6d56191f79b03673ff2",
+}
 SHIM_REASON_CODES = frozenset((
     "config_missing",
     "config_unreadable",
@@ -938,7 +939,6 @@ def _synthetic_health(home, repo_root, output):
         config.write_text(json.dumps({"vaults": [os.fspath(vault)]}), encoding="utf-8")
         environment = _home_environment(home)
         environment["EPITYPE_CONFIG"] = os.fspath(config)
-        environment["EPITYPE_TEST_HOME"] = os.fspath(root / "observer-home")
         for name, shim_name, event, arguments in scripts:
             script = home / CONFIG_DIRECTORY / HOOK_DIRECTORY / shim_name
             trace_path = root / f"{shim_name}.trace"
@@ -989,8 +989,6 @@ def _doctor(home, dry_run=False, output=sys.stdout, clear_shim_status=False):
         vaults = config.get("vaults") if isinstance(config, dict) else None
         if not isinstance(vaults, list) or not vaults or not all(Path(item).is_dir() for item in vaults):
             raise ValueError("config vaults must be existing directories")
-        finding_records, _ = findings.run_and_record(home, [Path(item) for item in vaults])
-        print(findings.render(finding_records), end="", file=output)
         repo_root = _validate_repo_root(
             config.get("repo_root") if isinstance(config, dict) else None,
             require_adapters=False,
@@ -1029,17 +1027,6 @@ def _doctor(home, dry_run=False, output=sys.stdout, clear_shim_status=False):
     except Exception as exc:
         print(f"DOCTOR FAIL {type(exc).__name__}: {exc}", file=output)
         return 1
-
-
-def _findings_command(home, action, code, output=sys.stdout):
-    config_path = home / CONFIG_DIRECTORY / CONFIG_FILENAME
-    config = json.loads(config_path.read_text(encoding="utf-8"))
-    vaults = config.get("vaults") if isinstance(config, dict) else None
-    if not isinstance(vaults, list) or not vaults or not Path(vaults[0]).is_dir():
-        raise ValueError("config vault0 must be an existing directory")
-    record = findings.transition(Path(vaults[0]), action, code)
-    print(f"FINDING {record['code']}: {record['status']}", file=output)
-    return 0
 
 
 def _planned_backup(path):
@@ -1320,6 +1307,15 @@ def _selftest():
                 old_repo,
                 ignore=shutil.ignore_patterns(".git", "__pycache__", "*.pyc", ".pytest_cache"),
             )
+            shim_payloads = _shim_payloads(old_repo)
+            checks.append((
+                "rendered shims are byte-identical to U12",
+                set(shim_payloads) == set(U12_SHIM_SHA256)
+                and all(
+                    hashlib.sha256(payload).hexdigest() == U12_SHIM_SHA256[shim_name]
+                    for shim_name, payload in shim_payloads.items()
+                ),
+            ))
             home = root / "home"
             (home / ".claude").mkdir(parents=True)
             (home / ".codex").mkdir(parents=True)
@@ -1342,11 +1338,10 @@ def _selftest():
             fallback = home / FALLBACK_VAULT
             config_value = json.loads((home / CONFIG_DIRECTORY / CONFIG_FILENAME).read_text(encoding="utf-8"))
             checks.append((
-                "both hosts, card-empty fallback, and doctor",
+                "both hosts, empty fallback, and doctor",
                 first_code == 0
                 and fallback.is_dir()
-                and {path.name for path in fallback.iterdir()} == {findings.FINDINGS_FILENAME}
-                and "codex-untrusted" in (fallback / findings.FINDINGS_FILENAME).read_text(encoding="utf-8")
+                and not list(fallback.iterdir())
                 and config_value.get("vaults") == [os.fspath(fallback.resolve())]
                 and config_value.get("repo_root") == os.fspath(old_repo.resolve())
                 and all(f"HOOK {event}: PASS" in first_output.getvalue() for event in EVENTS)
@@ -1868,7 +1863,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 27
+    total = 28
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
@@ -1906,11 +1901,6 @@ def _parser():
     )
     relocate = commands.add_parser("relocate", parents=[common], help="point stable shims at a moved Epitype repository")
     relocate.add_argument("--to", type=Path, required=True, help="new Epitype repository root")
-    finding_commands = commands.add_parser("findings", parents=[common], help="acknowledge or close recorded findings")
-    finding_actions = finding_commands.add_subparsers(dest="findings_action", required=True)
-    for action in ("ack", "close"):
-        transition_parser = finding_actions.add_parser(action)
-        transition_parser.add_argument("code", help="exact finding code from _EPITYPE_FINDINGS.md")
     return parser
 
 
@@ -1930,11 +1920,6 @@ def main(argv=None):
             return _resync_vaults(home, dry_run)
         if parsed.command == "relocate":
             return _relocate(home, parsed.to, dry_run)
-        if parsed.command == "findings":
-            if dry_run:
-                print(f"DRY-RUN finding {parsed.findings_action}: {parsed.code}")
-                return 0
-            return _findings_command(home, parsed.findings_action, parsed.code)
         return _doctor(home, dry_run, clear_shim_status=parsed.clear_shim_status)
     except Exception as exc:
         print(f"ERROR {type(exc).__name__}: {exc}", file=sys.stderr)

@@ -14,7 +14,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from epitype import memspec, telemetry
+from epitype import memspec
 from _hook_common import (
     emit,
     encode_payload,
@@ -30,6 +30,7 @@ _TRIGGER_KEYS = (
     memspec.TRIGGER_INPUT_FIELD,
     memspec.TRIGGER_MATCH_FIELD,
 )
+SHELL_TOOL_NAMES = frozenset(("bash", "powershell", "sh", "cmd"))
 
 
 def _scalar(raw):
@@ -200,8 +201,12 @@ def _parse_trigger_card(path):
     advice = fields.get(memspec.ADVICE_FIELD, "").strip()
     if not tool_pattern or not input_pattern or not advice:
         raise ValueError("trigger cards require tool, input, and advice")
-    if match_mode not in ("", memspec.TRIGGER_COMMAND_MATCH):
-        raise ValueError("trigger match must be command when present")
+    if match_mode not in (
+        "",
+        memspec.TRIGGER_COMMAND_MATCH,
+        memspec.TRIGGER_FULLTEXT_MATCH,
+    ):
+        raise ValueError("trigger match must be command or fulltext when present")
     tool_regex = re.compile(tool_pattern)
     input_regex = re.compile(input_pattern)
     return {
@@ -216,6 +221,12 @@ def _parse_trigger_card(path):
 
 class _CommandParseError(ValueError):
     pass
+
+
+def _uses_command_matching(tool_name, match_mode):
+    return match_mode == memspec.TRIGGER_COMMAND_MATCH or (
+        not match_mode and tool_name.casefold() in SHELL_TOOL_NAMES
+    )
 
 
 _HEREDOC_TOKEN = re.compile(
@@ -447,9 +458,7 @@ def _append_parse_defect(vault, path, error, started_at):
     )
 
 
-def _handle(event, started_at, metrics=None):
-    metrics = metrics if metrics is not None else {}
-    metrics.update(vaults=0, vault_skipped=0, fail_open=False, outcome="allow", reason="no-match")
+def _handle(event, started_at):
     tool_name = event.get("tool_name")
     if not isinstance(tool_name, str) or not tool_name:
         return None
@@ -460,21 +469,14 @@ def _handle(event, started_at, metrics=None):
         sort_keys=True,
         separators=(",", ":"),
     )
-    try:
-        config = load_config(started_at)
-    except Exception:
-        metrics.update(fail_open=True, outcome="error", reason="config")
-        return None
+    config = load_config(started_at)
     if config is None:
-        metrics.update(fail_open=True, outcome="timeout", reason="timeout")
         return None
-    metrics["vaults"] = len(config[memspec.CONFIG_VAULTS_FIELD])
 
     cards = []
     for vault in config[memspec.CONFIG_VAULTS_FIELD]:
         for path in sorted(vault.rglob("*.md"), key=lambda item: str(item).casefold()):
             if expired(started_at):
-                metrics.update(fail_open=True, outcome="timeout", reason="timeout")
                 return None
             try:
                 card = _parse_trigger_card(path)
@@ -490,7 +492,7 @@ def _handle(event, started_at, metrics=None):
         if not card["tool_regex"].search(tool_name):
             continue
         fallback = None
-        if card["match_mode"] == memspec.TRIGGER_COMMAND_MATCH:
+        if _uses_command_matching(tool_name, card["match_mode"]):
             if command_state is None:
                 command = tool_input.get("command") if isinstance(tool_input, dict) else None
                 try:
@@ -515,13 +517,11 @@ def _handle(event, started_at, metrics=None):
     if match is None:
         return None
     if expired(started_at):
-        metrics.update(fail_open=True, outcome="timeout", reason="timeout")
         return None
 
     vault, card, fallback = match
     _append_audit(vault, tool_name, card["name"], started_at, fallback)
     if expired(started_at):
-        metrics.update(fail_open=True, outcome="timeout", reason="timeout")
         return None
     reason = f"{card['advice']} [{card['path']}]"
     value = {
@@ -532,42 +532,8 @@ def _handle(event, started_at, metrics=None):
         }
     }
     if len(encode_payload(value).encode("utf-8")) > memspec.HOOK_MAX_OUTPUT_BYTES:
-        metrics.update(fail_open=True, outcome="error", reason="exception")
         return None
-    metrics["reason"] = "card-deny"
     return value
-
-
-def _process(event, started_at, host, *, home=None):
-    metrics = {}
-    value = _handle(event, started_at, metrics)
-    elapsed_ms = max(0, int((time.monotonic() - started_at) * 1000))
-    if value is not None:
-        telemetry.append(
-            host,
-            "PreToolUse",
-            "deny",
-            hits=1,
-            injected_bytes=len(encode_payload(value).encode("utf-8")),
-            vaults=metrics["vaults"],
-            ms=elapsed_ms,
-            reason="card-deny",
-            home=home,
-        )
-        return value, False
-    if metrics["fail_open"]:
-        telemetry.append(
-            host,
-            "PreToolUse",
-            metrics["outcome"],
-            vaults=metrics["vaults"],
-            vault_skipped=metrics["vault_skipped"],
-            ms=elapsed_ms,
-            reason=metrics["reason"],
-            home=home,
-        )
-        return None, False
-    return None, telemetry.heartbeat(host, "PreToolUse", home=home)
 
 
 def _selftest():
@@ -707,7 +673,7 @@ def _selftest():
             regex_output = regex_value.get("hookSpecificOutput", {})
             checks.append(
                 (
-                    "quoted regex scalar participates in matching",
+                    "Read path card keeps fulltext matching",
                     regex_hit.returncode == 0
                     and regex_output.get("permissionDecision") == "deny"
                     and "Keep credential material unread."
@@ -718,9 +684,9 @@ def _selftest():
             command_vault = root / "command-vault"
             command_vault.mkdir()
             card_specs = (
-                ("kill-host", "match: command, ", r"(?i)(?:taskkill\b.*\bclaude(?:\.exe)?\b|Stop-Process\b.*\bclaude\b)", "Keep the host process running."),
-                ("destructive-git", "match: command, ", r"(?i)git\b.*\breset\b.*--hard\b", "Preserve the working tree."),
-                ("credential-read", "", r"(?i)(?:\.env|auth\.json)", "Keep credential material unread."),
+                ("kill-host", "", r"(?i)(?:taskkill\b.*\bclaude(?:\.exe)?\b|Stop-Process\b.*\bclaude\b)", "Keep the host process running."),
+                ("destructive-git", "", r"(?i)git\b.*\breset\b.*--hard\b", "Preserve the working tree."),
+                ("credential-read", "match: fulltext, ", r"(?i)(?:\.env|auth\.json)", "Keep credential material unread."),
             )
             for name, match_field, pattern, advice in card_specs:
                 (command_vault / f"{name}.md").write_text(
@@ -758,6 +724,7 @@ def _selftest():
                 ("env assignment and sudo wrapper deny", "MODE=safe sudo taskkill /IM claude.exe", "deny"),
                 ("destructive git original case denies", "git reset --hard", "deny"),
                 ("credential path original case denies", "Get-Content .env", "deny"),
+                ("explicit fulltext denies a prose mention", 'echo "auth.json"', "deny"),
             )
             for name, command, expected in command_cases:
                 result, decision = command_result(command)
@@ -787,22 +754,19 @@ def _selftest():
                 {"tool_name": "Bash", "tool_input": {"command": "remove target"}},
                 missing_config,
             )
-            missing_records = telemetry.read_records(home=root / "synthetic-home")
             checks.append(
                 (
                     "missing config infra failure allows silently",
                     missing.returncode == 0
                     and not missing.stdout
-                    and not missing.stderr
-                    and missing_records[-1]["outcome"] == "error"
-                    and missing_records[-1]["reason"] == "config",
+                    and not missing.stderr,
                 )
             )
     except Exception as exc:
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 26
+    total = 27
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
@@ -813,31 +777,15 @@ def _selftest():
 
 
 def main():
-    arguments = sys.argv[1:]
-    if "--selftest" in arguments:
+    if "--selftest" in sys.argv[1:]:
         return _selftest()
-    host = telemetry.host_from_argv(arguments)
     try:
         event = read_event(sys.stdin)
-        value, _ = _process(event, _STARTED_AT, host)
+        value = _handle(event, _STARTED_AT)
         if value is not None and not expired(_STARTED_AT):
             emit(value)
-        elif value is not None:
-            telemetry.append(
-                host,
-                "PreToolUse",
-                "timeout",
-                ms=max(0, int((time.monotonic() - _STARTED_AT) * 1000)),
-                reason="timeout",
-            )
     except Exception:
-        telemetry.append(
-            host,
-            "PreToolUse",
-            "error",
-            ms=max(0, int((time.monotonic() - _STARTED_AT) * 1000)),
-            reason="exception",
-        )
+        pass
     return 0
 
 

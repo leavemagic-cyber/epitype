@@ -18,7 +18,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from epitype import memsearch, memspec, telemetry
+from epitype import memsearch, memspec
 from _hook_common import (
     bounded_context,
     emit,
@@ -119,69 +119,28 @@ def _claim_marker(session_id, block_digest):
     return True
 
 
-def _metrics():
-    return {
-        "outcome": "miss",
-        "hits": 0,
-        "injected_bytes": 0,
-        "terms": 0,
-        "vaults": 0,
-        "vault_skipped": 0,
-        "reason": "invalid-event",
-        "failure_reason": None,
-    }
-
-
-def _failure(metrics, reason):
-    metrics.update(
-        outcome="timeout" if reason == "timeout" else "error",
-        injected_bytes=0,
-        reason=reason,
-    )
-
-
-def _skip_vault(metrics, reason):
-    metrics["vault_skipped"] += 1
-    if metrics["failure_reason"] != "exception":
-        metrics["failure_reason"] = reason
-
-
 def _handle(event, started_at):
-    metrics = _metrics()
     prompt = event.get("prompt")
     if not isinstance(prompt, str) or not prompt.strip():
-        return None, metrics
-    try:
-        config = load_config(started_at)
-    except Exception:
-        _failure(metrics, "config")
-        return None, metrics
+        return None
+    config = load_config(started_at)
     if config is None:
-        _failure(metrics, "timeout")
-        return None, metrics
+        return None
 
     _capture_grant(prompt, config[memspec.CONFIG_VAULTS_FIELD][0], event, started_at)
 
     pieces = [memspec.UNTRUSTED_ADVISORY]
-    vaults = resolve_vaults(config, event)
-    metrics["vaults"] = len(vaults)
-    metrics["terms"] = len(memsearch._recall_terms(prompt))
-    for vault in vaults:
+    for vault in resolve_vaults(config, event):
         if expired(started_at):
-            _failure(metrics, "timeout")
-            return None, metrics
+            return None
         try:
             result = memsearch.recall_index(vault, prompt)
         except Exception:
-            _skip_vault(metrics, "exception")
             continue
         if result.get("error") == "no-index":
-            _skip_vault(metrics, "no-index")
             continue
-        metrics["hits"] += max(0, int(result.get("count", 0)))
         if expired(started_at):
-            _failure(metrics, "timeout")
-            return None, metrics
+            return None
         for hit in result.get("results", ())[: memspec.FTS_TOP_K]:
             pieces.append(
                 "- "
@@ -201,49 +160,14 @@ def _handle(event, started_at):
         required_first=True,
     )
     if not context or context == memspec.UNTRUSTED_ADVISORY:
-        if metrics["failure_reason"]:
-            _failure(metrics, metrics["failure_reason"])
-        else:
-            metrics["reason"] = "no-hit"
-        return None, metrics
+        return None
     digest = hashlib.sha256(context.encode("utf-8")).hexdigest()
     session_id = event.get("session_id", event.get("sessionId", ""))
     if not isinstance(session_id, str):
         session_id = ""
     if expired(started_at) or not _claim_marker(session_id, digest):
-        if expired(started_at):
-            _failure(metrics, "timeout")
-        elif metrics["failure_reason"]:
-            metrics.update(outcome="error", reason=metrics["failure_reason"])
-        else:
-            metrics["outcome"] = "hit" if metrics["hits"] else "miss"
-            metrics["reason"] = "context-injected" if metrics["hits"] else "no-hit"
-        return None, metrics
-    metrics.update(injected_bytes=len(context.encode("utf-8")))
-    if metrics["failure_reason"]:
-        metrics.update(outcome="error", reason=metrics["failure_reason"])
-    else:
-        metrics.update(
-            outcome="hit" if metrics["hits"] else "miss",
-            reason="context-injected" if metrics["hits"] else "no-hit",
-        )
-    return payload("UserPromptSubmit", context), metrics
-
-
-def _append_metrics(host, metrics, started_at, *, home=None):
-    return telemetry.append(
-        host,
-        "UserPromptSubmit",
-        metrics["outcome"],
-        hits=metrics["hits"],
-        injected_bytes=metrics["injected_bytes"],
-        terms=metrics["terms"],
-        vaults=metrics["vaults"],
-        vault_skipped=metrics["vault_skipped"],
-        ms=max(0, int((time.monotonic() - started_at) * 1000)),
-        reason=metrics["reason"],
-        home=home,
-    )
+        return None
+    return payload("UserPromptSubmit", context)
 
 
 def _selftest():
@@ -380,7 +304,6 @@ def _selftest():
             write_config(config, [vault])
             cp950_environment = os.environ.copy()
             cp950_environment[memspec.EPITYPE_CONFIG_ENV] = os.fspath(config)
-            cp950_environment[telemetry.TEST_HOME_ENV] = os.fspath(root / "cp950-home")
             cp950_environment["PYTHONDONTWRITEBYTECODE"] = "1"
             cp950_environment["PYTHONUTF8"] = "0"
             cp950_environment["PYTHONIOENCODING"] = "cp950"
@@ -409,15 +332,12 @@ def _selftest():
                 {"prompt": "how do I recover portable recall with broken settings", "session_id": uuid.uuid4().hex},
                 config,
             )
-            broken_records = telemetry.read_records(home=root / "synthetic-home")
             checks.append(
                 (
                     "bad config fail-open",
                     broken.returncode == 0
                     and not broken.stdout
-                    and not broken.stderr
-                    and broken_records[-1]["outcome"] == "error"
-                    and broken_records[-1]["reason"] == "config",
+                    and not broken.stderr,
                 )
             )
 
@@ -507,7 +427,6 @@ def _selftest():
                 Path(__file__),
                 {"prompt": "find legacyhookneedle", "session_id": uuid.uuid4().hex},
                 legacy_config,
-                environment={telemetry.TEST_HOME_ENV: os.fspath(root / "legacy-home")},
             )
             legacy_value = (
                 json.loads(legacy_result.stdout) if legacy_result.stdout.strip() else {}
@@ -549,7 +468,7 @@ def _selftest():
             os.replace = blocked_replace
             os.environ[memspec.EPITYPE_CONFIG_ENV] = os.fspath(pending_config)
             try:
-                pending_value, _ = _handle(
+                pending_value = _handle(
                     {"prompt": "find pendinghookneedle"}, time.monotonic()
                 )
                 pending_result = memsearch.recall_index(
@@ -631,13 +550,10 @@ def _selftest():
             memsearch.build_index(multi_three)
             multi_config = root / "multi-config.json"
             write_config(multi_config, [multi_one, multi_missing, multi_three])
-            multi_home = root / "multi-home"
-            canary = "EPITYPE-U19-PRIVATE-CANARY-DO-NOT-STORE"
             multi_result = run_synthetic(
                 Path(__file__),
-                {"prompt": canary + " find multivaultneedle"},
+                {"prompt": "find multivaultneedle"},
                 multi_config,
-                environment={telemetry.TEST_HOME_ENV: os.fspath(multi_home)},
             )
             multi_value = (
                 json.loads(multi_result.stdout) if multi_result.stdout.strip() else {}
@@ -645,18 +561,12 @@ def _selftest():
             multi_context = multi_value.get("hookSpecificOutput", {}).get(
                 "additionalContext", ""
             )
-            multi_records = telemetry.read_records(home=multi_home)
-            multi_record = multi_records[-1] if multi_records else {}
             checks.append(
                 (
                     "one no-index vault is skipped while two vaults still answer",
                     multi_result.returncode == 0
                     and "Multi One" in multi_context
-                    and "Multi Three" in multi_context
-                    and multi_record.get("outcome") == "error"
-                    and multi_record.get("reason") == "no-index"
-                    and multi_record.get("vaults") == 3
-                    and multi_record.get("vault_skipped") == 1,
+                    and "Multi Three" in multi_context,
                 )
             )
 
@@ -664,7 +574,6 @@ def _selftest():
             exception_vault.mkdir()
             exception_config = root / "exception-config.json"
             write_config(exception_config, [multi_one, exception_vault, multi_three])
-            exception_home = root / "exception-home"
             old_config = os.environ.get(memspec.EPITYPE_CONFIG_ENV)
             real_recall_index = memsearch.recall_index
 
@@ -677,11 +586,8 @@ def _selftest():
             memsearch.recall_index = exploding_recall
             exception_started = time.monotonic()
             try:
-                exception_value, exception_metrics = _handle(
+                exception_value = _handle(
                     {"prompt": "find multivaultneedle"}, exception_started
-                )
-                _append_metrics(
-                    "claude", exception_metrics, exception_started, home=exception_home
                 )
             finally:
                 memsearch.recall_index = real_recall_index
@@ -692,27 +598,20 @@ def _selftest():
             exception_context = (exception_value or {}).get(
                 "hookSpecificOutput", {}
             ).get("additionalContext", "")
-            exception_records = telemetry.read_records(home=exception_home)
             checks.append(
                 (
                     "one query exception is skipped while other vaults still answer",
                     "Multi One" in exception_context
-                    and "Multi Three" in exception_context
-                    and len(exception_records) == 1
-                    and exception_records[0]["outcome"] == "error"
-                    and exception_records[0]["reason"] == "exception"
-                    and exception_records[0]["vault_skipped"] == 1,
+                    and "Multi Three" in exception_context,
                 )
             )
 
-            timeout_home = root / "timeout-home"
             timeout_config = root / "timeout-config.json"
             write_config(timeout_config, [vault])
             old_expired = globals()["expired"]
             old_stdin = sys.stdin
             old_argv = sys.argv
             old_config = os.environ.get(memspec.EPITYPE_CONFIG_ENV)
-            old_test_home = os.environ.get(telemetry.TEST_HOME_ENV)
             timeout_stdout = io.StringIO()
             timeout_stderr = io.StringIO()
             try:
@@ -720,7 +619,6 @@ def _selftest():
                 sys.stdin = io.StringIO(json.dumps({"prompt": "find portable recall"}))
                 sys.argv = [os.fspath(Path(__file__))]
                 os.environ[memspec.EPITYPE_CONFIG_ENV] = os.fspath(timeout_config)
-                os.environ[telemetry.TEST_HOME_ENV] = os.fspath(timeout_home)
                 with contextlib.redirect_stdout(timeout_stdout), contextlib.redirect_stderr(
                     timeout_stderr
                 ):
@@ -733,30 +631,12 @@ def _selftest():
                     os.environ.pop(memspec.EPITYPE_CONFIG_ENV, None)
                 else:
                     os.environ[memspec.EPITYPE_CONFIG_ENV] = old_config
-                if old_test_home is None:
-                    os.environ.pop(telemetry.TEST_HOME_ENV, None)
-                else:
-                    os.environ[telemetry.TEST_HOME_ENV] = old_test_home
-            timeout_records = telemetry.read_records(home=timeout_home)
             checks.append(
                 (
-                    "expired hook exits zero silently and records timeout",
+                    "expired hook exits zero silently",
                     timeout_code == 0
                     and not timeout_stdout.getvalue()
-                    and not timeout_stderr.getvalue()
-                    and len(timeout_records) == 1
-                    and timeout_records[0]["outcome"] == "timeout"
-                    and timeout_records[0]["reason"] == "timeout",
-                )
-            )
-
-            multi_telemetry = telemetry.telemetry_path(multi_home).read_text(
-                encoding="ascii"
-            )
-            checks.append(
-                (
-                    "prompt privacy canary never reaches telemetry",
-                    canary not in multi_telemetry,
+                    and not timeout_stderr.getvalue(),
                 )
             )
     except Exception as exc:
@@ -766,7 +646,7 @@ def _selftest():
             shutil.rmtree(marker_directory, ignore_errors=True)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 17
+    total = 16
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
@@ -777,21 +657,15 @@ def _selftest():
 
 
 def main():
-    arguments = sys.argv[1:]
-    if "--selftest" in arguments:
+    if "--selftest" in sys.argv[1:]:
         return _selftest()
-    host = telemetry.host_from_argv(arguments)
-    metrics = _metrics()
     try:
         event = read_event(sys.stdin)
-        value, metrics = _handle(event, _STARTED_AT)
+        value = _handle(event, _STARTED_AT)
         if value is not None and not expired(_STARTED_AT):
             emit(value)
-        elif value is not None:
-            _failure(metrics, "timeout")
     except Exception:
-        _failure(metrics, "exception")
-    _append_metrics(host, metrics, _STARTED_AT)
+        pass
     return 0
 
 

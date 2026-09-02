@@ -14,7 +14,6 @@ SELFTESTS = (
     Path("epitype") / "compact_map.py",
     Path("epitype") / "scar_census.py",
     Path("epitype") / "token_meter.py",
-    Path("epitype") / "findings.py",
     Path("adapters") / "claude" / "recall_hook.py",
     Path("adapters") / "claude" / "sessionstart_hook.py",
     Path("adapters") / "claude" / "precompact_hook.py",

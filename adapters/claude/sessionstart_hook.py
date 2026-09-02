@@ -11,7 +11,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from epitype import findings, memspec, telemetry
+from epitype import memspec
 from _hook_common import (
     bounded_context,
     emit,
@@ -25,56 +25,16 @@ from _hook_common import (
 )
 
 
-def _metrics():
-    return {
-        "outcome": "miss",
-        "hits": 0,
-        "injected_bytes": 0,
-        "terms": 0,
-        "vaults": 0,
-        "vault_skipped": 0,
-        "reason": "no-context",
-    }
-
-
-def _handle(event, started_at, host):
-    metrics = _metrics()
-    try:
-        config = load_config(started_at)
-    except Exception:
-        metrics.update(outcome="error", reason="config")
-        return None, metrics
+def _handle(event, started_at):
+    config = load_config(started_at)
     if config is None:
-        metrics.update(outcome="timeout", reason="timeout")
-        return None, metrics
+        return None
     budget = config[memspec.CONFIG_BUDGET_BYTES_FIELD]
     pieces = []
-    resolved_vaults = resolve_vaults(config, event)
-    primary_vault = config[memspec.CONFIG_VAULTS_FIELD][0]
-    detector_vaults = [primary_vault]
-    detector_vaults.extend(vault for vault in resolved_vaults if vault != primary_vault)
-    metrics["vaults"] = len(detector_vaults)
 
-    try:
-        records, _ = findings.run_and_record(
-            telemetry.runtime_home(),
-            detector_vaults,
-            current_host=host,
-        )
-    except Exception:
-        try:
-            records = findings.load(primary_vault)
-        except Exception:
-            records = []
-    finding_line = findings.injection_line(records)
-    if finding_line:
-        pieces.append(finding_line)
-        metrics["hits"] += 1
-
-    for vault in resolved_vaults:
+    for vault in resolve_vaults(config, event):
         if expired(started_at):
-            metrics.update(outcome="timeout", reason="timeout")
-            return None, metrics
+            return None
         index_path = vault / memspec.MEMORY_INDEX_FILENAME
         if index_path.is_file():
             body = index_path.read_text(encoding="utf-8")
@@ -84,32 +44,17 @@ def _handle(event, started_at, host):
                 index_path.resolve(),
             )
             pieces.append(f"## {memspec.MEMORY_INDEX_FILENAME}\n{slim}")
-            metrics["hits"] += 1
 
         ledger_path = vault / memspec.WORK_LEDGER_FILENAME
         if ledger_path.is_file():
             ledger = ledger_path.read_text(encoding="utf-8")
             pieces.append(f"## {memspec.WORK_LEDGER_FILENAME}")
             pieces.extend(ledger.splitlines())
-            metrics["hits"] += 1
 
     if expired(started_at):
-        metrics.update(outcome="timeout", reason="timeout")
-        return None, metrics
-    context = bounded_context(
-        "SessionStart",
-        pieces,
-        budget,
-        required_first=bool(finding_line),
-    )
-    if not context:
-        return None, metrics
-    metrics.update(
-        outcome="hit",
-        injected_bytes=len(context.encode("utf-8")),
-        reason="context-injected",
-    )
-    return payload("SessionStart", context), metrics
+        return None
+    context = bounded_context("SessionStart", pieces, budget)
+    return payload("SessionStart", context) if context else None
 
 
 def _selftest():
@@ -191,23 +136,17 @@ def _selftest():
 
             bad_config = root / "bad-config.json"
             bad_config.write_text("{broken", encoding="utf-8")
-            bad_home = root / "bad-home"
             bad_result = run_synthetic(
                 Path(__file__),
                 {"source": "startup"},
                 bad_config,
-                environment={telemetry.TEST_HOME_ENV: str(bad_home)},
             )
-            bad_records = telemetry.read_records(home=bad_home)
             checks.append(
                 (
-                    "bad config fails open and records config",
+                    "bad config fails open silently",
                     bad_result.returncode == 0
                     and not bad_result.stdout
-                    and not bad_result.stderr
-                    and len(bad_records) == 1
-                    and bad_records[0]["outcome"] == "error"
-                    and bad_records[0]["reason"] == "config",
+                    and not bad_result.stderr,
                 )
             )
     except Exception as exc:
@@ -225,33 +164,15 @@ def _selftest():
 
 
 def main():
-    arguments = sys.argv[1:]
-    if "--selftest" in arguments:
+    if "--selftest" in sys.argv[1:]:
         return _selftest()
-    host = telemetry.host_from_argv(arguments)
-    metrics = _metrics()
     try:
         event = read_event(sys.stdin)
-        value, metrics = _handle(event, _STARTED_AT, host)
+        value = _handle(event, _STARTED_AT)
         if value is not None and not expired(_STARTED_AT):
             emit(value)
-        elif value is not None:
-            metrics.update(outcome="timeout", injected_bytes=0, reason="timeout")
     except Exception:
-        metrics.update(outcome="error", injected_bytes=0, reason="exception")
-    telemetry.append(
-        host,
-        "SessionStart",
-        metrics["outcome"],
-        hits=metrics["hits"],
-        injected_bytes=metrics["injected_bytes"],
-        terms=metrics["terms"],
-        vaults=metrics["vaults"],
-        vault_skipped=metrics["vault_skipped"],
-        ms=max(0, int((time.monotonic() - _STARTED_AT) * 1000)),
-        reason=metrics["reason"],
-    )
-    telemetry.rotate()
+        pass
     return 0
 
 

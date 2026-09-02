@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python \"{{EPITYPE_HOOKS_ROOT}}/sessionstart.py\" --codex",
+            "command": "python \"{{EPITYPE_HOOKS_ROOT}}/sessionstart.py\"",
             "timeout": 3,
             "additionalContextLimit": 1800
           }
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python \"{{EPITYPE_HOOKS_ROOT}}/recall.py\" --codex",
+            "command": "python \"{{EPITYPE_HOOKS_ROOT}}/recall.py\"",
             "timeout": 3,
             "additionalContextLimit": 1800
           }
@@ -40,7 +40,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python \"{{EPITYPE_HOOKS_ROOT}}/pretooluse.py\" --codex",
+            "command": "python \"{{EPITYPE_HOOKS_ROOT}}/pretooluse.py\"",
             "timeout": 3
           }
         ]

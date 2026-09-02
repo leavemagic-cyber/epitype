@@ -61,7 +61,7 @@ Memory is usually delivered as advisory context. Enforcement hooks may exist, bu
 
 ### Epitype countermeasure
 
-A scar card may carry `trigger.tool`, `trigger.input`, and `advice`. With `trigger.match: command`, matching targets executable positions rather than prose mentions, so false denials do not push operators toward bypassing the gate. A match drives a bounded deny response, offers a safer alternative, and appends an audit row. The distinct claim is memory-derived interception criteria; the hook and deny mechanism themselves are not claimed as novel.
+A scar card may carry `trigger.tool`, `trigger.input`, and `advice`. Shell tools match executable positions by default rather than prose mentions; `trigger.match: fulltext` explicitly restores whole-input matching. A match drives a bounded deny response, offers a safer alternative, and appends an audit row. The distinct claim is memory-derived interception criteria; the hook and deny mechanism themselves are not claimed as novel.
 
 ### Self-verification
 
@@ -190,30 +190,3 @@ python epitype/memsearch.py --selftest
 python adapters/claude/recall_hook.py --selftest
 python adapters/claude/sessionstart_hook.py --selftest
 ```
-
-## 9. Silent failure has no feedback loop
-
-### Symptom
-
-Memory fails during real use, but no machine-owned record or next-session signal exists. The user must notice the missing recall, capture evidence, and open a separate session before Epitype knows anything failed.
-
-### Why it happens
-
-Registration checks, token measurement, interception audits, fail-open breadcrumbs, and manual doctor probes each observe one adjacent condition. None of them turns real hook execution or the absence of expected execution into a durable, deduplicated finding with an explicit disposition path.
-
-### Epitype countermeasure
-
-The evidence layer appends a fixed, content-free telemetry row for SessionStart, UserPromptSubmit, and PreCompact. PreToolUse writes rows only for deny, error, or timeout; its ordinary allow path rate-limits a heartbeat to one touch per 60 seconds. Index-format or index-location upgrades must remain compatible on the read path, and hook-internal no-index, timeout, config, or exception failures must leave content-free telemetry instead of disappearing. SessionStart rotates the log after 512 KiB and retains at most 256 KiB of complete tail rows.
-
-The bounded detector compares 24-hour host session mtimes with hook evidence, recognizes repeated nontrivial zero-hit recall, imports shim fail-open and Codex trust failures, and checks the established stale-index rule. Results are deduplicated into `<vault0>/_EPITYPE_FINDINGS.md`; SessionStart injects one line only when an open finding exists, and `graft doctor` prints the same view. Operators move findings through `open` → `acked` → `closed`; a closed failure that reappears reopens and increments instead of disappearing.
-
-Automatic repair is limited to rebuilding a stale reachable index and recording `auto-remedied`. All host trust, registration, configuration, and source changes remain explicit operator actions.
-
-### Self-verification
-
-```powershell
-python epitype/findings.py --selftest
-python tests/privacy_lint.py
-```
-
-The synthetic suite covers silent-host evidence, miss streak reset, deduplication, reopen semantics, the 200-byte injection bound, a privacy canary, the 200-call PreToolUse allow budget, detector timeout containment, and complete-line log rotation. It uses only temporary homes, session trees, vaults, and telemetry files; it does not inspect or modify a real host or memory vault.

@@ -103,10 +103,12 @@ def scan_repo(repo, blocklist=None):
     if not (repo / ".git").exists():
         raise ValueError(f"not a Git repository: {repo}")
     rules = _BUILTIN_RULES + _blocklist_rules(blocklist)
-    findings = []
+    violations = []
     tracked = _tracked_files(repo)
     for relative in tracked:
         path = repo / relative
+        if not path.exists() and not path.is_symlink():
+            continue
         try:
             if path.is_symlink():
                 text = os.readlink(path)
@@ -120,10 +122,10 @@ def scan_repo(repo, blocklist=None):
                 if rule.name in allowed:
                     continue
                 if rule.regex.search(line):
-                    findings.append(
+                    violations.append(
                         Finding(Path(relative).as_posix(), line_number, rule.name)
                     )
-    return tracked, findings
+    return tracked, violations
 
 
 def _git_init_and_add(root):
@@ -159,8 +161,8 @@ def _selftest():
             blocklist = root / "local-blocklist.txt"
             blocklist.write_text("orchard-private-marker\n", encoding="utf-8")
             _git_init_and_add(poison)
-            _, poison_findings = scan_repo(poison, blocklist)
-            patterns = {finding.pattern for finding in poison_findings}
+            _, poison_violations = scan_repo(poison, blocklist)
+            patterns = {finding.pattern for finding in poison_violations}
             checks.append(
                 (
                     "poisoned tracked fixture is blocked",
@@ -185,13 +187,16 @@ def _selftest():
                 "Contact " + "license" + "@" + "example.test for this synthetic fixture.\n",
                 encoding="utf-8",
             )
+            removed = clean / "removed.md"
+            removed.write_text("Tracked and then removed.\n", encoding="utf-8")
             _git_init_and_add(clean)
-            _, clean_findings = scan_repo(clean)
-            checks.append(("clean tracked tree passes", clean_findings == []))
+            removed.unlink()
+            _, clean_violations = scan_repo(clean)
+            checks.append(("clean tracked tree passes", clean_violations == []))
             checks.append(
                 (
                     "specific LICENSE allowlist is effective",
-                    not any(finding.path == "LICENSE" for finding in clean_findings),
+                    not any(finding.path == "LICENSE" for finding in clean_violations),
                 )
             )
     except Exception as exc:
@@ -217,14 +222,14 @@ def main(argv=None):
     if args.selftest:
         return _selftest()
     try:
-        tracked, findings = scan_repo(args.repo, args.blocklist)
+        tracked, violations = scan_repo(args.repo, args.blocklist)
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"PRIVACY ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
-    for finding in findings:
+    for finding in violations:
         print(f"FAIL {finding.path}:{finding.line} [{finding.pattern}]")
-    if findings:
-        print(f"PRIVACY FAIL {len(findings)} finding(s) in {len(tracked)} tracked file(s)")
+    if violations:
+        print(f"PRIVACY FAIL {len(violations)} finding(s) in {len(tracked)} tracked file(s)")
         return 1
     print(f"PRIVACY PASS {len(tracked)} tracked file(s)")
     return 0

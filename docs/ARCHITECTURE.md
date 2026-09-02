@@ -74,10 +74,3 @@ These rules govern selection; they do not let memory override the host's system,
 Supported Claude Code and Codex registrations use the same four event names: `SessionStart`, `UserPromptSubmit`, `PreCompact`, and `PreToolUse`. They also share the vault list and limits from `epitype/memspec.py`. Host adapters translate the event envelope; they do not fork the memory format.
 
 This is a two-host implementation boundary. Future hosts and future host upgrades require their own integration tests before they can be described as supported.
-
-## Failure feedback components
-
-| Component | Responsibility | Boundaries |
-|---|---|---|
-| `epitype/telemetry.py` | Appends one privacy-bounded execution row for SessionStart, UserPromptSubmit, and PreCompact; records only exceptional PreToolUse outcomes and rate-limits its allow heartbeat | Fixed numeric/code schema, one `O_APPEND` write, no prompt/card/tool input, 512 KiB rotation at SessionStart |
-| `epitype/findings.py` | Converts recent execution evidence and host-state checks into a deduplicated stateful finding view, a bounded SessionStart notice, doctor output, and ack/close transitions | 150 ms detector wall-clock budget; only stale-index rebuild is automatic; host settings and source code are never changed |

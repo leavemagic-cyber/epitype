@@ -9,7 +9,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from epitype import compact_map, memspec, telemetry
+from epitype import compact_map, memspec
 from _hook_common import (
     emit,
     expired,
@@ -22,37 +22,17 @@ from _hook_common import (
 )
 
 
-def _metrics():
-    return {
-        "outcome": "miss",
-        "hits": 0,
-        "injected_bytes": 0,
-        "terms": 0,
-        "vaults": 0,
-        "vault_skipped": 0,
-        "reason": "invalid-event",
-    }
-
-
-def _handle(event, started_at, host):
-    metrics = _metrics()
+def _handle(event, started_at):
     transcript_value = event.get("transcript_path")
     if not isinstance(transcript_value, str) or not transcript_value.strip():
-        return None, metrics
-    try:
-        config = load_config(started_at)
-    except Exception:
-        metrics.update(outcome="error", reason="config")
-        return None, metrics
+        return None
+    config = load_config(started_at)
     if config is None or expired(started_at):
-        metrics.update(outcome="timeout", reason="timeout")
-        return None, metrics
-    metrics["vaults"] = len(config[memspec.CONFIG_VAULTS_FIELD])
+        return None
 
     transcript = Path(transcript_value).expanduser().resolve()
     if not transcript.is_file():
-        metrics["reason"] = "no-context"
-        return None, metrics
+        return None
     vault = config[memspec.CONFIG_VAULTS_FIELD][0]
     destination = (vault / memspec.COMPACT_MAP_FILENAME).resolve()
     compact_map.build_map(
@@ -60,15 +40,11 @@ def _handle(event, started_at, host):
         destination,
         memspec.COMPACT_MAP_DEFAULT_BUDGET_BYTES,
     )
-    metrics.update(outcome="hit", hits=1, reason="map-written")
     context = f"地圖已落於{destination},壓縮後先讀它按行號回撈原文。"
     budget = config[memspec.CONFIG_BUDGET_BYTES_FIELD]
     if expired(started_at) or not payload_fits("PreCompact", context, budget):
-        if expired(started_at):
-            metrics.update(outcome="timeout", hits=0, reason="timeout")
-        return None, metrics
-    metrics["injected_bytes"] = 0 if host == "codex" else len(context.encode("utf-8"))
-    return payload("PreCompact", context), metrics
+        return None
+    return payload("PreCompact", context)
 
 
 def _selftest():
@@ -142,23 +118,17 @@ def _selftest():
 
             bad_config = root / "bad-config.json"
             bad_config.write_text("{broken", encoding="utf-8")
-            bad_home = root / "bad-home"
             bad_result = run_synthetic(
                 Path(__file__),
                 {"transcript_path": str(transcript)},
                 bad_config,
-                environment={telemetry.TEST_HOME_ENV: str(bad_home)},
             )
-            bad_records = telemetry.read_records(home=bad_home)
             checks.append(
                 (
-                    "bad config fails open and records config",
+                    "bad config fails open silently",
                     bad_result.returncode == 0
                     and not bad_result.stdout
-                    and not bad_result.stderr
-                    and len(bad_records) == 1
-                    and bad_records[0]["outcome"] == "error"
-                    and bad_records[0]["reason"] == "config",
+                    and not bad_result.stderr,
                 )
             )
     except Exception as exc:
@@ -179,29 +149,13 @@ def main():
     arguments = sys.argv[1:]
     if "--selftest" in arguments:
         return _selftest()
-    host = telemetry.host_from_argv(arguments)
-    metrics = _metrics()
     try:
         event = read_event(sys.stdin)
-        value, metrics = _handle(event, _STARTED_AT, host)
+        value = _handle(event, _STARTED_AT)
         if value is not None and not expired(_STARTED_AT) and "--codex" not in arguments:
             emit(value)
-        elif value is not None and expired(_STARTED_AT):
-            metrics.update(outcome="timeout", hits=0, injected_bytes=0, reason="timeout")
     except Exception:
-        metrics.update(outcome="error", hits=0, injected_bytes=0, reason="exception")
-    telemetry.append(
-        host,
-        "PreCompact",
-        metrics["outcome"],
-        hits=metrics["hits"],
-        injected_bytes=metrics["injected_bytes"],
-        terms=metrics["terms"],
-        vaults=metrics["vaults"],
-        vault_skipped=metrics["vault_skipped"],
-        ms=max(0, int((time.monotonic() - _STARTED_AT) * 1000)),
-        reason=metrics["reason"],
-    )
+        pass
     return 0
 
 
