@@ -186,8 +186,10 @@ CORRECTION_TRIGGER_REGEX = re.compile(CORRECTION_TRIGGER_PATTERN, re.IGNORECASE)
 # corrections 一樣置頂。題目只取 transcript 尾窗,避免每句 prompt 都讀整份 transcript。
 RULING_DIRECTORY = "rulings"
 RULING_PREFIX = "⚖ owner 裁決："
+# 2026-09-03 誤抓：報告裡提到「裁決」兩字也被當成提問（owner 回「這個在原始版本沒做到?」被存成裁決）。
+# 規則：只認明確的「請你／要你／由你」提問形，裸「裁決」「裁示」不算。
 RULING_QUESTION_PATTERN = (
-    r"(?:要你裁決|請你裁決|請裁決|裁決|裁示|請你定|請定一下|由你決定|要你決定|你定了我才|等你決定"
+    r"(?:要你裁決|請你裁決|請裁決|請你裁示|要你裁示|請你定|請定一下|由你決定|要你決定|你定了我才|等你決定"
     r"|請你確認|需要你決定|\bplease\s+decide\b|\byour\s+call\b|\bneed\s+your\s+decision\b|\bwhich\s+do\s+you\s+want\b)"
 )
 RULING_QUESTION_REGEX = re.compile(RULING_QUESTION_PATTERN, re.IGNORECASE)

@@ -832,6 +832,25 @@ def _selftest():
                     tuple((grant_vault / memspec.RULING_DIRECTORY).glob("*.md")) == rulings_before,
                 )
             )
+            transcript.write_text(
+                json.dumps(
+                    {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "修了三處：「裁決」只存問題前後 150 字；描述帶原句；帳本瘦身。全部測試過。"}]}},
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            run_synthetic(
+                Path(__file__),
+                {"prompt": "這個在原始版本沒做到?", "session_id": uuid.uuid4().hex, "transcript_path": os.fspath(transcript)},
+                grant_config,
+            )
+            checks.append(
+                (
+                    "a report that merely mentions 裁決 is not a ruling request",
+                    tuple((grant_vault / memspec.RULING_DIRECTORY).glob("*.md")) == rulings_before,
+                )
+            )
             pinned = run_synthetic(
                 Path(__file__),
                 {"prompt": "小單期 6S 標準合約 還是微型", "session_id": uuid.uuid4().hex},
@@ -1123,7 +1142,7 @@ def _selftest():
             shutil.rmtree(marker_directory, ignore_errors=True)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 30
+    total = 31
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
