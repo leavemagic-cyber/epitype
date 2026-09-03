@@ -193,6 +193,27 @@ RULING_QUESTION_PATTERN = (
     r"|請你確認|需要你決定|\bplease\s+decide\b|\byour\s+call\b|\bneed\s+your\s+decision\b|\bwhich\s+do\s+you\s+want\b)"
 )
 RULING_QUESTION_REGEX = re.compile(RULING_QUESTION_PATTERN, re.IGNORECASE)
+# 2026-09-03 對抗審查 #5：U31 只排除 GRANT_QUOTED_TEXT_PATTERN 的引號，報告裡用
+# Markdown 反引號寫的 `請你裁決` 仍被當成提問。裁決專用的引號集加上反引號；
+# ASCII 單引號不納入（英文縮寫 don't 會製造假引號區間）。
+RULING_QUOTED_TEXT_PATTERN = (
+    GRANT_QUOTED_TEXT_PATTERN + r"|```[^`]*```|`[^`\r\n]*`"
+)
+RULING_QUOTED_TEXT_REGEX = re.compile(RULING_QUOTED_TEXT_PATTERN)
+
+# 2026-09-03 對抗審查 #5：捕捉卡是持久檔並進索引，之後還會被注入；憑證形狀的
+# 內容一律拒收（fail-closed），原句仍留在 transcript。家目錄路徑不列入，否則本機
+# 幾乎每句 owner 指令都會被拒。
+CAPTURE_REJECT_PATTERN = (
+    r"(?:(?:api[_-]?key|access[_-]?key|secret|token|password|passwd|pwd|authorization|bearer)"
+    r"\s*[:=]\s*\S{8,}"
+    r"|\b(?:sk|pk|ghp|gho|ghs|ghu|ghr|xox[abposr])[-_][A-Za-z0-9]{16,}\b"
+    r"|-----BEGIN [A-Z ]*PRIVATE KEY-----"
+    r"|\b[A-Za-z0-9_\-]{24,}\.[A-Za-z0-9_\-]{16,}\.[A-Za-z0-9_\-]{16,}\b"
+    r"|\b[A-Za-z][A-Za-z0-9+.\-]*://[^\s:@/]+:[^\s@/]+@)"
+)
+CAPTURE_REJECT_REGEX = re.compile(CAPTURE_REJECT_PATTERN, re.IGNORECASE)
+
 RULING_TAIL_BYTES = 64 * 1024
 RULING_QUESTION_WINDOW_CHARS = 150   # kept on each side of the request phrase
 RULING_QUESTION_TAIL_CHARS = 400     # the request must sit near the end of the assistant turn
@@ -206,6 +227,10 @@ NEVER_MATCH_REGEX = re.compile(r"(?!x)x")
 RECALL_DESCRIPTION_MAX_CHARS = 120
 RECALL_BODY_ONLY_MAX_PER_VAULT = 2
 RECALL_TOTAL_MAX_LINES = 8
+# Pinned cards (corrections, rulings) are looked for in a deeper window than the
+# ordinary top-k (FTS_TOP_K, below), or one ranked sixth by word frequency would
+# never be seen. Three times the ordinary window.
+RECALL_PINNED_SCAN_LIMIT = 15
 RECALL_LEGEND_PREFIX = "vaults: "
 
 # 2026-09-03 owner:「你在過程一直讀這種跟寫出這種有必要嗎?很浪費token吧」。工具呼叫之間的
@@ -217,6 +242,8 @@ NARRATION_MIN_CHARS = 8
 NARRATION_PREFIX = "⛔ 旁白"
 NARRATION_ADVICE = "機械重試零旁白；只在需 owner 決定／計畫改變／最終報告時說話"
 NARRATION_MARKER_DIRECTORY = "epitype_narration"
+# 2026-09-03 對抗審查 #4：marker 只建不收會在 temp 無限累積；超過這個年齡就清掉。
+NARRATION_MARKER_TTL_SECONDS = 24 * 3600
 
 # 2026-09-02 事故：7/22 寫進計畫卡的「未辦（owner 自行）」掛到 9/2，每輪盤點都被
 # 重新端出來；待辦有入口沒出口。規則：待辦標記行必須帶可跑的 verify: 或已收尾，

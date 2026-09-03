@@ -520,11 +520,34 @@ def _append_parse_defect(vault, path, error, started_at):
     )
 
 
+def _sweep_narration_markers(root, now, keep=None):
+    """Markers are a same-session dedupe, not a record: drop the aged-out ones."""
+    try:
+        for session_directory in root.iterdir():
+            if not session_directory.is_dir() or session_directory == keep:
+                continue
+            empty = True
+            for marker in session_directory.iterdir():
+                try:
+                    if now - marker.stat().st_mtime > memspec.NARRATION_MARKER_TTL_SECONDS:
+                        marker.unlink()
+                    else:
+                        empty = False
+                except OSError:
+                    empty = False
+            if empty:
+                session_directory.rmdir()
+    except OSError:
+        pass
+
+
 def _narration_marker(session_id, text):
     digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
     component = re.sub(r"[^A-Za-z0-9._-]", "_", str(session_id or "nosession"))[:128] or "nosession"
-    directory = Path(tempfile.gettempdir()) / memspec.NARRATION_MARKER_DIRECTORY / component
+    root = Path(tempfile.gettempdir()) / memspec.NARRATION_MARKER_DIRECTORY
+    directory = root / component
     try:
+        _sweep_narration_markers(root, time.time(), keep=directory)
         directory.mkdir(parents=True, exist_ok=True)
         with (directory / digest).open("x", encoding="ascii") as stream:
             stream.write(digest + "\n")
@@ -754,6 +777,25 @@ def _selftest():
                 )
             )
 
+            sweep_root = Path(tempfile.gettempdir()) / memspec.NARRATION_MARKER_DIRECTORY
+            aged_session = sweep_root / ("aged-" + uuid.uuid4().hex)
+            aged_session.mkdir(parents=True, exist_ok=True)
+            aged_marker = aged_session / "0123456789abcdef"
+            aged_marker.write_text("aged\n", encoding="ascii")
+            aged_time = time.time() - memspec.NARRATION_MARKER_TTL_SECONDS - 60
+            os.utime(aged_marker, (aged_time, aged_time))
+            run_synthetic(
+                Path(__file__),
+                {"tool_name": "Read", "tool_input": {"path": "synthetic.txt"}, "transcript_path": narrated, "session_id": uuid.uuid4().hex},
+                config,
+            )
+            checks.append(
+                (
+                    "aged narration markers are swept instead of accumulating",
+                    not aged_marker.exists() and not aged_session.exists(),
+                )
+            )
+
             miss = run_synthetic(
                 Path(__file__),
                 {"tool_name": "Read", "tool_input": {"path": "synthetic.txt"}},
@@ -942,7 +984,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 40
+    total = 41
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

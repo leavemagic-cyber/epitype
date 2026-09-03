@@ -10,7 +10,7 @@ prompts and cuts it, and it closes the gaps where an owner's own words were bein
 
 | | v1.0.0 | v1.1.0 |
 |---|---|---|
-| Recall injection per prompt | 3.6 KB / 11 lines | **2.3 KB / 7.7 lines** |
+| Recall injection per prompt | 3.6 KB / 11 lines | **2.3 KB / 8.0 lines** |
 | Absolute paths as a share of it | 32% | 17% |
 | Session start (non-governance project) | 10 KB, hitting the budget cap | 7.6 KB |
 
@@ -18,7 +18,10 @@ prompts and cuts it, and it closes the gaps where an owner's own words were bein
   absolute vault path on every hit; descriptions are truncated; at most two body-only hits
   per vault; the whole block is capped, with pinned corrections and rulings first (U29).
 - Session start injects the working directory's own vault plus the governance vault only.
-  Another project's index and ledger no longer crowd the budget (U29).
+  Another project's index and ledger no longer crowd the budget (U29). **Behaviour change
+  for multi-vault installs**: the governance vault is the configured vault that holds the
+  working ledger, and a vault reached from the working directory is always kept. If no
+  configured vault holds a ledger, every configured vault is injected as before.
 - Narration between tool calls ("that failure was my path typo, rerunning with C:/...")
   costs output tokens and then re-read context on every later turn while telling the owner
   nothing. The PreToolUse gate now names any such segment in one line without touching the
@@ -51,6 +54,27 @@ prompts and cuts it, and it closes the gaps where an owner's own words were bein
   fails on any unresolved one (U27).
 - `.github/workflows/ci.yml` runs on master pushes, `v*` tags, and pull requests instead of
   every push.
+
+### Found by pre-release adversarial review
+
+An independent review of the changes above found five defects, each reproduced before it
+was fixed and now covered by a selftest:
+
+- A correction or ruling that matched only in its body was discarded by the weak-hit cap,
+  and pinned lines were exempt from the total cap, so recall could exceed its own limit.
+  Card kind is now decided before any cap, the cap covers every line, and pinned cards are
+  searched in a window three times the ordinary one so a correction ranked below the
+  top-k still surfaces.
+- The `vaults:` legend could be dropped by a tight budget while `V1/...` hits survived,
+  leaving aliases nothing could resolve. The legend now shares the required first block,
+  and a path that cannot be made relative is printed in full rather than given an alias.
+- A working-directory vault that also appeared in the configured list was dropped from
+  session start.
+- A request phrase inside Markdown backticks still counted as a request for a ruling.
+- Captured cards are persistent, indexed, and re-injected later, so credential-shaped
+  text (`token=`, `sk_...`, private-key headers, JWTs, `user:pass@host`) is now refused at
+  capture time instead of being copied into the vault.
+- Narration markers in the temp directory are swept after a day instead of accumulating.
 
 ## v1.0.0 — 2026-09-02
 

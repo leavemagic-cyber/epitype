@@ -101,6 +101,11 @@ def _capture_owner_sentence(prompt, vault, event, started_at, kind):
 
 
 def _write_capture(vault, directory_name, kind, digest, label, body, event, started_at, summary=None):
+    # A captured card is persistent, indexed, and re-injected later: credential-shaped
+    # text never earns that (adversarial review 2026-09-03 #5). The sentence still
+    # exists in the transcript; Epitype simply does not copy it into the vault.
+    if memspec.CAPTURE_REJECT_REGEX.search(body):
+        return None
     directory = vault / directory_name
     try:
         if any(directory.glob(f"{kind}-*-{digest}.md")):
@@ -203,7 +208,7 @@ def _capture_ruling(prompt, vault, event, started_at):
     # Quoted phrases are the assistant talking *about* requests (「請你裁決」in a
     # report), not making one: a match inside quotes does not count. A live
     # request sits at the end of the turn; keep only the window around it.
-    quoted = [(m.start(), m.end()) for m in memspec.GRANT_QUOTED_TEXT_REGEX.finditer(flat)]
+    quoted = [(m.start(), m.end()) for m in memspec.RULING_QUOTED_TEXT_REGEX.finditer(flat)]
     matches = [
         m for m in memspec.RULING_QUESTION_REGEX.finditer(flat)
         if not any(start <= m.start() < end for start, end in quoted)
@@ -259,14 +264,14 @@ def _handle(event, started_at):
 
     # A correction or ruling the owner already made outranks any lexical hit:
     # it goes first, marked, so a stale plan line cannot be re-proposed over it.
-    corrections = []
+    pinned = []
     others = []
     legend = []
     for vault in resolve_vaults(config, event):
         if expired(started_at):
             return None
         try:
-            result = memsearch.recall_index(vault, prompt)
+            result = memsearch.recall_index(vault, prompt, limit=memspec.RECALL_PINNED_SCAN_LIMIT)
         except Exception:
             continue
         if result.get("error") == "no-index":
@@ -276,35 +281,44 @@ def _handle(event, started_at):
         alias = f"V{len(legend) + 1}"
         used = False
         body_only = 0
-        for hit in result.get("results", ())[: memspec.FTS_TOP_K]:
-            # A card matched only in its body is a weak lexical hit; two per vault is plenty.
-            if list(hit.get("hit_fields") or ()) == ["body"]:
-                if body_only >= memspec.RECALL_BODY_ONLY_MAX_PER_VAULT:
-                    continue
-                body_only += 1
+        ordinary = 0
+        for hit in result.get("results", ()):
             path = _one_line(hit.get("path"))
-            try:
-                relative = Path(path).resolve().relative_to(vault).as_posix()
-            except (OSError, ValueError):
-                relative = path
-            description = _one_line(hit.get("description"))[: memspec.RECALL_DESCRIPTION_MAX_CHARS]
-            line = " | ".join((_one_line(hit.get("name")), description, f"{alias}/{relative}"))
             parent = Path(path).parent.name
-            if parent == memspec.CORRECTION_DIRECTORY:
-                corrections.append("- " + memspec.CORRECTION_PREFIX + line)
-            elif parent == memspec.RULING_DIRECTORY:
-                corrections.append("- " + memspec.RULING_PREFIX + line)
-            else:
-                others.append("- " + line)
+            prefix = {
+                memspec.CORRECTION_DIRECTORY: memspec.CORRECTION_PREFIX,
+                memspec.RULING_DIRECTORY: memspec.RULING_PREFIX,
+            }.get(parent)
+            # A card matched only in its body is a weak lexical hit; two per vault
+            # is plenty. What the owner corrected or ruled is never weak, so the
+            # kind is decided before the cap (adversarial review 2026-09-03 #1).
+            if prefix is None:
+                if ordinary >= memspec.FTS_TOP_K:
+                    continue  # ordinary cards keep the classic top-k window
+                if list(hit.get("hit_fields") or ()) == ["body"]:
+                    if body_only >= memspec.RECALL_BODY_ONLY_MAX_PER_VAULT:
+                        continue
+                    body_only += 1
+                ordinary += 1
+            try:
+                located = f"{alias}/{Path(path).resolve().relative_to(vault).as_posix()}"
+            except (OSError, ValueError):
+                located = path  # never emit an alias the legend cannot resolve
+            description = _one_line(hit.get("description"))[: memspec.RECALL_DESCRIPTION_MAX_CHARS]
+            line = "- " + (prefix or "") + " | ".join((_one_line(hit.get("name")), description, located))
+            (pinned if prefix else others).append(line)
             used = True
         if used:
             legend.append(f"{alias}={vault}")
-    others = others[: max(0, memspec.RECALL_TOTAL_MAX_LINES - len(corrections))]
-    pieces = [memspec.UNTRUSTED_ADVISORY]
-    if legend:
-        pieces.append(memspec.RECALL_LEGEND_PREFIX + " ".join(legend))
-    pieces.extend(corrections)
-    pieces.extend(others)
+    # The cap covers everything, pinned lines included; pinned lines win the room.
+    pinned = pinned[: memspec.RECALL_TOTAL_MAX_LINES]
+    others = others[: max(0, memspec.RECALL_TOTAL_MAX_LINES - len(pinned))]
+    # The legend is what makes V1/... resolvable, so it shares the required first
+    # piece with the advisory instead of being droppable on its own.
+    head = memspec.UNTRUSTED_ADVISORY
+    if legend and (pinned or others):
+        head += "\n" + memspec.RECALL_LEGEND_PREFIX + " ".join(legend)
+    pieces = [head, *pinned, *others]
 
     context = bounded_context(
         "UserPromptSubmit",
@@ -312,7 +326,7 @@ def _handle(event, started_at):
         config[memspec.CONFIG_BUDGET_BYTES_FIELD],
         required_first=True,
     )
-    if not context or context == memspec.UNTRUSTED_ADVISORY:
+    if not context or context == head:
         return None
     digest = hashlib.sha256(context.encode("utf-8")).hexdigest()
     session_id = event.get("session_id", event.get("sessionId", ""))
@@ -899,6 +913,96 @@ def _selftest():
                 )
             )
 
+            # Adversarial review 2026-09-03: the caps and the legend are load-bearing.
+            caps_vault = root / "caps-vault"
+            caps_vault.mkdir()
+            for index in range(4):
+                (caps_vault / memspec.CORRECTION_DIRECTORY).mkdir(exist_ok=True)
+                (caps_vault / memspec.CORRECTION_DIRECTORY / f"correction-2026090{index}-cap{index}.md").write_text(
+                    f"---\nname: correction-2026090{index}-cap{index}\ndescription: owner correction auto-captured\n---\ncapneedle case {index}\n",
+                    encoding="utf-8",
+                )
+            for index in range(6):
+                (caps_vault / f"plain{index}.md").write_text(
+                    f"---\nname: Plain {index}\ndescription: capneedle plain {index}\n---\ncapneedle body {index}\n",
+                    encoding="utf-8",
+                )
+            memsearch.build_index(caps_vault)
+            caps_config = root / "caps-config.json"
+            write_config(caps_config, [caps_vault])
+            caps_result = run_synthetic(
+                Path(__file__), {"prompt": "capneedle", "session_id": uuid.uuid4().hex}, caps_config
+            )
+            caps_value = json.loads(caps_result.stdout) if caps_result.stdout.strip() else {}
+            caps_context = caps_value.get("hookSpecificOutput", {}).get("additionalContext", "")
+            caps_lines = [line for line in caps_context.splitlines() if line.startswith("- ")]
+            pinned_lines = [line for line in caps_lines if memspec.CORRECTION_PREFIX in line]
+            checks.append(
+                (
+                    "body-only cap never drops a correction, and the cap covers every line",
+                    caps_result.returncode == 0
+                    and len(pinned_lines) == 4
+                    and len(caps_lines) <= memspec.RECALL_TOTAL_MAX_LINES
+                    and caps_lines[: len(pinned_lines)] == pinned_lines,
+                )
+            )
+            checks.append(
+                (
+                    "an alias hit never ships without the legend that resolves it",
+                    (memspec.RECALL_LEGEND_PREFIX in caps_context)
+                    and all(
+                        (memspec.RECALL_LEGEND_PREFIX in caps_context)
+                        for line in caps_lines
+                        if "V1/" in line
+                    ),
+                )
+            )
+            tight_config = root / "tight-config.json"
+            write_config(tight_config, [caps_vault], budget=200)
+            tight_result = run_synthetic(
+                Path(__file__), {"prompt": "capneedle", "session_id": uuid.uuid4().hex}, tight_config
+            )
+            tight_value = json.loads(tight_result.stdout) if tight_result.stdout.strip() else {}
+            tight_context = tight_value.get("hookSpecificOutput", {}).get("additionalContext", "")
+            checks.append(
+                (
+                    "a budget too small for the legend injects nothing rather than dangling aliases",
+                    tight_result.returncode == 0
+                    and ("V1/" not in tight_context or memspec.RECALL_LEGEND_PREFIX in tight_context),
+                )
+            )
+            secret_prompt = "你可以直接用 api_key=sk_live_0123456789abcdefghij 這組去連"
+            secrets_before = tuple(sorted((grant_vault / memspec.GRANT_DIRECTORY).glob("*.md")))
+            run_synthetic(
+                Path(__file__), {"prompt": secret_prompt, "session_id": uuid.uuid4().hex}, grant_config
+            )
+            checks.append(
+                (
+                    "credential-shaped text is never copied into a card",
+                    tuple(sorted((grant_vault / memspec.GRANT_DIRECTORY).glob("*.md"))) == secrets_before,
+                )
+            )
+            transcript.write_text(
+                json.dumps(
+                    {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "已修：`請你裁決` 只作為範例，不再誤抓。"}]}},
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            backtick_before = tuple(sorted((grant_vault / memspec.RULING_DIRECTORY).glob("*.md")))
+            run_synthetic(
+                Path(__file__),
+                {"prompt": "這樣可以嗎", "session_id": uuid.uuid4().hex, "transcript_path": os.fspath(transcript)},
+                grant_config,
+            )
+            checks.append(
+                (
+                    "a request phrase inside backticks is not a ruling request",
+                    tuple(sorted((grant_vault / memspec.RULING_DIRECTORY).glob("*.md"))) == backtick_before,
+                )
+            )
+
             home = root / "home"
             project = root / "work" / "proj"
             project.mkdir(parents=True)
@@ -1166,7 +1270,7 @@ def _selftest():
             shutil.rmtree(marker_directory, ignore_errors=True)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 32
+    total = 37
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

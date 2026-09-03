@@ -797,7 +797,10 @@ def query_index(vault, term, include_superseded=False, include_noncard=False):
     return payload
 
 
-def recall_index(vault, prompt, include_superseded=False, include_noncard=False):
+def recall_index(vault, prompt, include_superseded=False, include_noncard=False, limit=None):
+    """`limit` widens the returned window; callers that pin a card class need to
+    see past the default top-k or a pinned card ranked below it never surfaces
+    (adversarial review 2026-09-03 #1)."""
     vault = _resolve_vault(vault)
     db_path, migration_pending = _read_db_path(vault)
     if not db_path.is_file():
@@ -851,7 +854,8 @@ def recall_index(vault, prompt, include_superseded=False, include_noncard=False)
     finally:
         connection.close()
     candidates.sort(key=lambda item: item[0])
-    results = [item[1] for item in candidates[:memspec.FTS_TOP_K]]
+    window = memspec.FTS_TOP_K if limit is None else max(int(limit), memspec.FTS_TOP_K)
+    results = [item[1] for item in candidates[:window]]
     payload = {
         "query": prompt,
         "terms": terms,

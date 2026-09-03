@@ -17,6 +17,7 @@ from _hook_common import (
     emit,
     expired,
     load_config,
+    native_cwd_vaults,
     payload,
     read_event,
     resolve_vaults,
@@ -31,11 +32,24 @@ def _handle(event, started_at):
         return None
     budget = config[memspec.CONFIG_BUDGET_BYTES_FIELD]
     pieces = []
-    # Session start carries the cwd's own vault(s) plus the governance vault
-    # (config[0]); another project's index and ledger are noise here and were
-    # crowding the budget. Recall still reaches that project's cards by content.
+    # Session start carries the cwd's own vault(s) plus the governance vault;
+    # another project's index and ledger are noise here and were crowding the
+    # budget. Recall still reaches that project's cards by content.
+    # The governance vault is the one holding the working ledger, not whichever
+    # path sorted first: the installer sorts vaults alphabetically, so position
+    # carries no meaning, and a cwd vault that also appears in the configured
+    # list must never be dropped (adversarial review 2026-09-03 #3, #7).
+    resolved = resolve_vaults(config, event)
     configured = config[memspec.CONFIG_VAULTS_FIELD]
-    vaults = [vault for vault in resolve_vaults(config, event) if vault == configured[0] or vault not in configured]
+    native = native_cwd_vaults(event.get("cwd") if isinstance(event, dict) else None)
+    governance = next(
+        (vault for vault in configured if (vault / memspec.WORK_LEDGER_FILENAME).is_file()),
+        None,
+    )
+    if governance is None:
+        vaults = resolved  # no ledger anywhere: keep the pre-1.1.0 behaviour
+    else:
+        vaults = [vault for vault in resolved if vault in native or vault == governance]
 
     # One line, first, so the budget cannot drop it: pending items with an entry
     # and no exit are exactly what resurfaces as wrong memory later.
@@ -182,6 +196,44 @@ def _selftest():
                 )
             )
 
+            # Adversarial review 2026-09-03 #3/#7: the cwd vault may also be a
+            # configured one, and the governance vault is the ledger holder, not
+            # whichever path the installer happened to sort first.
+            both_home = root / "both-home"
+            both_project = root / "both-work" / "proj"
+            both_project.mkdir(parents=True)
+            both_slug = re.sub(r"[^A-Za-z0-9]", "-", str(both_project))
+            both_native = both_home / ".claude" / "projects" / both_slug / "memory"
+            both_native.mkdir(parents=True)
+            (both_native / memspec.MEMORY_INDEX_FILENAME).write_text("# Both\nboth native detail\n", encoding="utf-8")
+            gov = root / "gov-vault"
+            gov.mkdir()
+            (gov / memspec.MEMORY_INDEX_FILENAME).write_text("# Gov\ngov index detail\n", encoding="utf-8")
+            (gov / memspec.WORK_LEDGER_FILENAME).write_text("gov ledger detail\n", encoding="utf-8")
+            other = root / "aaa-other-project"
+            other.mkdir()
+            (other / memspec.MEMORY_INDEX_FILENAME).write_text("# Other\nother index detail\n", encoding="utf-8")
+            both_config = root / "both-config.json"
+            write_config(both_config, [other, gov, both_native])
+            both_result = run_synthetic(
+                Path(__file__),
+                {"source": "startup", "cwd": str(both_project)},
+                both_config,
+                environment={"HOME": os.fspath(both_home), "USERPROFILE": os.fspath(both_home)},
+            )
+            both_value = json.loads(both_result.stdout) if both_result.stdout.strip() else {}
+            both_context = both_value.get("hookSpecificOutput", {}).get("additionalContext", "")
+            checks.append(
+                (
+                    "cwd vault survives being configured too; governance is the ledger holder",
+                    both_result.returncode == 0
+                    and "both native detail" in both_context
+                    and "gov index detail" in both_context
+                    and "gov ledger detail" in both_context
+                    and "other index detail" not in both_context,
+                )
+            )
+
             bad_config = root / "bad-config.json"
             bad_config.write_text("{broken", encoding="utf-8")
             bad_result = run_synthetic(
@@ -201,7 +253,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 7
+    total = 8
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
