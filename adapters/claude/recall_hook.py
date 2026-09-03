@@ -200,9 +200,14 @@ def _capture_ruling(prompt, vault, event, started_at):
     if not question:
         return None
     flat = _one_line(question)
-    # A live request sits at the end of the assistant turn; a mention of 裁決 in a
-    # report body is not a question. Keep only the window around the request.
-    matches = list(memspec.RULING_QUESTION_REGEX.finditer(flat))
+    # Quoted phrases are the assistant talking *about* requests (「請你裁決」in a
+    # report), not making one: a match inside quotes does not count. A live
+    # request sits at the end of the turn; keep only the window around it.
+    quoted = [(m.start(), m.end()) for m in memspec.GRANT_QUOTED_TEXT_REGEX.finditer(flat)]
+    matches = [
+        m for m in memspec.RULING_QUESTION_REGEX.finditer(flat)
+        if not any(start <= m.start() < end for start, end in quoted)
+    ]
     if not matches or matches[-1].start() < len(flat) - memspec.RULING_QUESTION_TAIL_CHARS:
         return None
     hit = matches[-1]
@@ -851,6 +856,25 @@ def _selftest():
                     tuple((grant_vault / memspec.RULING_DIRECTORY).glob("*.md")) == rulings_before,
                 )
             )
+            transcript.write_text(
+                json.dumps(
+                    {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "已修：只認「請你裁決／由你決定」這類明確提問形，裸「裁決」不算，假卡已移走。"}]}},
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            run_synthetic(
+                Path(__file__),
+                {"prompt": "這屬於大變更?", "session_id": uuid.uuid4().hex, "transcript_path": os.fspath(transcript)},
+                grant_config,
+            )
+            checks.append(
+                (
+                    "request phrases quoted inside a report do not make a ruling request",
+                    tuple((grant_vault / memspec.RULING_DIRECTORY).glob("*.md")) == rulings_before,
+                )
+            )
             pinned = run_synthetic(
                 Path(__file__),
                 {"prompt": "小單期 6S 標準合約 還是微型", "session_id": uuid.uuid4().hex},
@@ -1142,7 +1166,7 @@ def _selftest():
             shutil.rmtree(marker_directory, ignore_errors=True)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 31
+    total = 32
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
