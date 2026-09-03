@@ -172,7 +172,7 @@ GRANT_NEWLINE_REGEX = re.compile(GRANT_NEWLINE_PATTERN)
 CORRECTION_DIRECTORY = "corrections"
 CORRECTION_PREFIX = "⚠ owner 曾糾正："
 CORRECTION_TRIGGER_PATTERN = (
-    r"(?:我(?:不是)?說過|說過(?:幾|很多|好多)次|再次|不是這樣|錯了|不要亂|別再|別亂|不是叫你"
+    r"(?:我(?:不是)?說過|說過(?:幾|很多|好多)次|不是這樣|錯了|不要亂|別再|別亂|不是叫你"
     r"|不要再|怎麼還|你還是|我糾正|更正一下"
     # 2026-09-02 QUORUM 合約階段事故:三句糾正「我怎麼不知道有這個設定」「不是指微型…我很清楚」
     # 「不是!只有6s是標準合約」全不在上列;句首「不是!」「不對，」與定義式「不是指」是強糾正訊號。
@@ -192,9 +192,19 @@ RULING_QUESTION_PATTERN = (
 )
 RULING_QUESTION_REGEX = re.compile(RULING_QUESTION_PATTERN, re.IGNORECASE)
 RULING_TAIL_BYTES = 64 * 1024
-RULING_QUESTION_MAX_CHARS = 600
+RULING_QUESTION_WINDOW_CHARS = 150   # kept on each side of the request phrase
+RULING_QUESTION_TAIL_CHARS = 400     # the request must sit near the end of the assistant turn
 RULING_MIN_ANSWER_CHARS = 4
+CAPTURE_SUMMARY_CHARS = 80           # captured cards carry the owner's words in description
 NEVER_MATCH_REGEX = re.compile(r"(?!x)x")
+
+# 2026-09-03 owner「整體深度檢視分析epitype，能夠節省token就不應該浪費」：40 句真 prompt
+# 實測每句注入 3.6KB／11 行，其中絕對路徑佔 32%、描述佔 54%，且每庫固定 5 條不論相關。
+# 規則：路徑用圖例別名（V1/相對路徑）、描述截斷、只命中正文的弱卡每庫最多 2 條、總行數封頂。
+RECALL_DESCRIPTION_MAX_CHARS = 120
+RECALL_BODY_ONLY_MAX_PER_VAULT = 2
+RECALL_TOTAL_MAX_LINES = 8
+RECALL_LEGEND_PREFIX = "vaults: "
 
 # 2026-09-03 owner:「你在過程一直讀這種跟寫出這種有必要嗎?很浪費token吧」。工具呼叫之間的
 # 旁白(「改成 C:/… 重跑一次」)輸出一次、之後每輪當 context 重讀一次;36 小時內全機 7797 段

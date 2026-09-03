@@ -100,7 +100,7 @@ def _capture_owner_sentence(prompt, vault, event, started_at, kind):
     return _write_capture(vault, directory_name, kind, _grant_digest(sentence), label, sentence, event, started_at)
 
 
-def _write_capture(vault, directory_name, kind, digest, label, body, event, started_at):
+def _write_capture(vault, directory_name, kind, digest, label, body, event, started_at, summary=None):
     directory = vault / directory_name
     try:
         if any(directory.glob(f"{kind}-*-{digest}.md")):
@@ -109,10 +109,13 @@ def _write_capture(vault, directory_name, kind, digest, label, body, event, star
         stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         name = f"{kind}-{stamp[:10].replace('-', '')}-{digest}"
         target = directory / f"{name}.md"
+        # The description is what recall injects; it must carry the owner's words,
+        # not just a label, or the model has to open the file to learn anything.
+        summary = _one_line(summary if summary is not None else body)[: memspec.CAPTURE_SUMMARY_CHARS]
         card = (
             "---\n"
             f"name: {name}\n"
-            f"description: {label} {stamp[:10]}\n"
+            f"description: {label} {stamp[:10]}: {summary}\n"
             f"{memspec.SCOPE_FIELD}: governance-core\n"
             f"captured_at: {stamp}\n"
             f"cwd: {_one_line(event.get('cwd'))}\n"
@@ -194,12 +197,22 @@ def _capture_ruling(prompt, vault, event, started_at):
     if not owner_utterance or len(prompt.strip()) < memspec.RULING_MIN_ANSWER_CHARS or expired(started_at):
         return None
     question = _last_assistant_text(event.get("transcript_path"))
-    if not question or not memspec.RULING_QUESTION_REGEX.search(question):
+    if not question:
         return None
-    asked = _one_line(question)[-memspec.RULING_QUESTION_MAX_CHARS:]
-    body = f"問（助理）：{asked}\n答（owner 逐字）：{prompt.strip()}"
+    flat = _one_line(question)
+    # A live request sits at the end of the assistant turn; a mention of 裁決 in a
+    # report body is not a question. Keep only the window around the request.
+    matches = list(memspec.RULING_QUESTION_REGEX.finditer(flat))
+    if not matches or matches[-1].start() < len(flat) - memspec.RULING_QUESTION_TAIL_CHARS:
+        return None
+    hit = matches[-1]
+    window = memspec.RULING_QUESTION_WINDOW_CHARS
+    asked = flat[max(0, hit.start() - window): hit.end() + window].strip()
+    answer = prompt.strip()
+    body = f"問（助理）：{asked}\n答（owner 逐字）：{answer}"
     return _write_capture(
-        vault, memspec.RULING_DIRECTORY, "ruling", _grant_digest(prompt), "owner ruling auto-captured", body, event, started_at
+        vault, memspec.RULING_DIRECTORY, "ruling", _grant_digest(prompt), "owner ruling auto-captured", body, event, started_at,
+        summary=answer,
     )
 
 
@@ -243,6 +256,7 @@ def _handle(event, started_at):
     # it goes first, marked, so a stale plan line cannot be re-proposed over it.
     corrections = []
     others = []
+    legend = []
     for vault in resolve_vaults(config, event):
         if expired(started_at):
             return None
@@ -254,9 +268,22 @@ def _handle(event, started_at):
             continue
         if expired(started_at):
             return None
+        alias = f"V{len(legend) + 1}"
+        used = False
+        body_only = 0
         for hit in result.get("results", ())[: memspec.FTS_TOP_K]:
+            # A card matched only in its body is a weak lexical hit; two per vault is plenty.
+            if list(hit.get("hit_fields") or ()) == ["body"]:
+                if body_only >= memspec.RECALL_BODY_ONLY_MAX_PER_VAULT:
+                    continue
+                body_only += 1
             path = _one_line(hit.get("path"))
-            line = " | ".join((_one_line(hit.get("name")), _one_line(hit.get("description")), path))
+            try:
+                relative = Path(path).resolve().relative_to(vault).as_posix()
+            except (OSError, ValueError):
+                relative = path
+            description = _one_line(hit.get("description"))[: memspec.RECALL_DESCRIPTION_MAX_CHARS]
+            line = " | ".join((_one_line(hit.get("name")), description, f"{alias}/{relative}"))
             parent = Path(path).parent.name
             if parent == memspec.CORRECTION_DIRECTORY:
                 corrections.append("- " + memspec.CORRECTION_PREFIX + line)
@@ -264,7 +291,15 @@ def _handle(event, started_at):
                 corrections.append("- " + memspec.RULING_PREFIX + line)
             else:
                 others.append("- " + line)
-    pieces = [memspec.UNTRUSTED_ADVISORY, *corrections, *others]
+            used = True
+        if used:
+            legend.append(f"{alias}={vault}")
+    others = others[: max(0, memspec.RECALL_TOTAL_MAX_LINES - len(corrections))]
+    pieces = [memspec.UNTRUSTED_ADVISORY]
+    if legend:
+        pieces.append(memspec.RECALL_LEGEND_PREFIX + " ".join(legend))
+    pieces.extend(corrections)
+    pieces.extend(others)
 
     context = bounded_context(
         "UserPromptSubmit",
@@ -354,7 +389,8 @@ def _selftest():
                     and memspec.UNTRUSTED_ADVISORY in context
                     and "Portable Recall" in context
                     and "Synthetic card" in context
-                    and str(short_card.resolve()) in context,
+                    and f"V1/{short_card.name}" in context
+                    and f"V1={vault.resolve()}" in context,
                 )
             )
 
@@ -380,9 +416,9 @@ def _selftest():
                     supersession_result.returncode == 0
                     and len(injected_cards) == 1
                     and "Current Hook Decision" in supersession_context
-                    and str(current_decision.resolve()) in supersession_context
+                    and f"V1/{current_decision.name}" in supersession_context
                     and "Retired Hook Decision" not in supersession_context
-                    and str(old_decision.resolve()) not in supersession_context,
+                    and old_decision.name not in supersession_context,
                 )
             )
 
@@ -576,7 +612,7 @@ def _selftest():
                     and len(direct_files) == 1
                     and direct_body == direct_grant
                     and re.fullmatch(
-                        r"description: owner grant auto-captured \d{4}-\d{2}-\d{2}",
+                        r"description: owner grant auto-captured \d{4}-\d{2}-\d{2}: " + re.escape(direct_grant),
                         direct_description,
                     )
                     is not None,

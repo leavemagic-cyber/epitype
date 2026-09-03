@@ -31,7 +31,11 @@ def _handle(event, started_at):
         return None
     budget = config[memspec.CONFIG_BUDGET_BYTES_FIELD]
     pieces = []
-    vaults = resolve_vaults(config, event)
+    # Session start carries the cwd's own vault(s) plus the governance vault
+    # (config[0]); another project's index and ledger are noise here and were
+    # crowding the budget. Recall still reaches that project's cards by content.
+    configured = config[memspec.CONFIG_VAULTS_FIELD]
+    vaults = [vault for vault in resolve_vaults(config, event) if vault == configured[0] or vault not in configured]
 
     # One line, first, so the budget cannot drop it: pending items with an entry
     # and no exit are exactly what resurfaces as wrong memory later.
@@ -158,6 +162,26 @@ def _selftest():
                 )
             )
 
+            second = root / "second-vault"
+            second.mkdir()
+            (second / memspec.MEMORY_INDEX_FILENAME).write_text("# Second\nsecond index detail\n", encoding="utf-8")
+            (second / memspec.WORK_LEDGER_FILENAME).write_text("second ledger detail\n", encoding="utf-8")
+            two_config = root / "two-config.json"
+            write_config(two_config, [vault, second])
+            two_result = run_synthetic(Path(__file__), {"source": "startup"}, two_config)
+            two_value = json.loads(two_result.stdout) if two_result.stdout.strip() else {}
+            two_context = two_value.get("hookSpecificOutput", {}).get("additionalContext", "")
+            checks.append(
+                (
+                    "only the governance vault's index and ledger are injected, not another project's",
+                    two_result.returncode == 0
+                    and "index detail" in two_context
+                    and "ledger detail" in two_context
+                    and "second index detail" not in two_context
+                    and "second ledger detail" not in two_context,
+                )
+            )
+
             bad_config = root / "bad-config.json"
             bad_config.write_text("{broken", encoding="utf-8")
             bad_result = run_synthetic(
@@ -177,7 +201,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 6
+    total = 7
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
