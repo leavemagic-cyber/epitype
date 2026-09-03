@@ -196,6 +196,16 @@ RULING_QUESTION_MAX_CHARS = 600
 RULING_MIN_ANSWER_CHARS = 4
 NEVER_MATCH_REGEX = re.compile(r"(?!x)x")
 
+# 2026-09-03 owner:「你在過程一直讀這種跟寫出這種有必要嗎?很浪費token吧」。工具呼叫之間的
+# 旁白(「改成 C:/… 重跑一次」)輸出一次、之後每輪當 context 重讀一次;36 小時內全機 7797 段
+# /819k 字。規則:PreToolUse 讀 transcript 尾窗,發現本輪工具呼叫之間的文字段就回一行
+# additionalContext 點名(不改 permissionDecision);開工第一段不算旁白。
+NARRATION_TAIL_BYTES = 64 * 1024
+NARRATION_MIN_CHARS = 8
+NARRATION_PREFIX = "⛔ 旁白"
+NARRATION_ADVICE = "機械重試零旁白；只在需 owner 決定／計畫改變／最終報告時說話"
+NARRATION_MARKER_DIRECTORY = "epitype_narration"
+
 # 2026-09-02 事故：7/22 寫進計畫卡的「未辦（owner 自行）」掛到 9/2，每輪盤點都被
 # 重新端出來；待辦有入口沒出口。規則：待辦標記行必須帶可跑的 verify: 或已收尾，
 # 逾期者由 pending_lint 點名並在 SessionStart 以一行摘要提醒。

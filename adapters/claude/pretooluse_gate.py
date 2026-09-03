@@ -3,19 +3,21 @@ import sys, time; sys.dont_write_bytecode = True; _STARTED_AT = time.monotonic()
 
 from datetime import datetime, timezone
 import ast
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import shlex
 import tempfile
+import uuid
 from typing import NamedTuple
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from epitype import memspec
+from epitype import memspec, narration_meter
 from _hook_common import (
     emit,
     encode_payload,
@@ -518,6 +520,43 @@ def _append_parse_defect(vault, path, error, started_at):
     )
 
 
+def _narration_marker(session_id, text):
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+    component = re.sub(r"[^A-Za-z0-9._-]", "_", str(session_id or "nosession"))[:128] or "nosession"
+    directory = Path(tempfile.gettempdir()) / memspec.NARRATION_MARKER_DIRECTORY / component
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        with (directory / digest).open("x", encoding="ascii") as stream:
+            stream.write(digest + "\n")
+    except FileExistsError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
+def _narration_context(event, started_at):
+    """One bounded line when the model narrated between tool calls (owner 2026-09-03).
+
+    Never touches permissionDecision: the tool still goes through the normal
+    permission path; the text only tells the model what it just paid for.
+    """
+    if expired(started_at):
+        return None
+    blocks = narration_meter.current_turn_blocks(event.get("transcript_path"))
+    text = narration_meter.pending_narration(blocks)
+    if text is None:
+        return None
+    if not _narration_marker(event.get("session_id"), text):
+        return None  # a batch of tool calls after one narration is flagged once
+    segments = len(narration_meter.narration_segments(blocks))
+    context = (
+        f"{memspec.NARRATION_PREFIX} {len(text.strip())} 字（本輪第 {max(segments, 1)} 段）："
+        f"{memspec.NARRATION_ADVICE}"
+    )
+    return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": context}}
+
+
 def _handle(event, started_at):
     tool_name = event.get("tool_name")
     if not isinstance(tool_name, str) or not tool_name:
@@ -575,7 +614,7 @@ def _handle(event, started_at):
             match = (vault, card, fallback, position)
             break
     if match is None:
-        return None
+        return _narration_context(event, started_at)
     if expired(started_at):
         return None
 
@@ -650,6 +689,68 @@ def _selftest():
                     len(log_rows) == 1
                     and log_rows[0].get("tool") == "Bash"
                     and log_rows[0].get("card") == "synthetic-safety",
+                )
+            )
+
+            def transcript_rows(*rows):
+                path = root / f"narration-{uuid.uuid4().hex}.jsonl"
+                path.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n", encoding="utf-8")
+                return os.fspath(path)
+
+            def assistant(kind, value):
+                block = {"type": "text", "text": value} if kind == "text" else {"type": "tool_use", "id": value, "name": "Bash", "input": {}}
+                return {"type": "assistant", "message": {"role": "assistant", "content": [block]}}
+
+            prompt_row = {"type": "user", "message": {"role": "user", "content": "修一下"}}
+            result_row = {"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1"}]}}
+            narrated = transcript_rows(
+                prompt_row,
+                assistant("text", "先看檔案。"),
+                assistant("tool_use", "t1"),
+                result_row,
+                assistant("text", "那次失敗是我的路徑錯，改成 C:/… 重跑一次。"),
+            )
+            narration_session = "narration-" + uuid.uuid4().hex
+            flagged = run_synthetic(
+                Path(__file__),
+                {"tool_name": "Read", "tool_input": {"path": "synthetic.txt"}, "transcript_path": narrated, "session_id": narration_session},
+                config,
+            )
+            flagged_value = json.loads(flagged.stdout) if flagged.stdout.strip() else {}
+            flagged_output = flagged_value.get("hookSpecificOutput", {})
+            checks.append(
+                (
+                    "narration between tool calls is named without touching the permission decision",
+                    flagged.returncode == 0
+                    and flagged_output.get("additionalContext", "").startswith(memspec.NARRATION_PREFIX)
+                    and memspec.NARRATION_ADVICE in flagged_output.get("additionalContext", "")
+                    and "permissionDecision" not in flagged_output,
+                )
+            )
+            repeat = run_synthetic(
+                Path(__file__),
+                {"tool_name": "Read", "tool_input": {"path": "synthetic.txt"}, "transcript_path": narrated, "session_id": narration_session},
+                config,
+            )
+            checks.append(("same narration is flagged once per session", repeat.returncode == 0 and not repeat.stdout.strip()))
+            opening = transcript_rows(prompt_row, assistant("text", "先看檔案再改，這是開工說明。"))
+            clean = run_synthetic(
+                Path(__file__),
+                {"tool_name": "Read", "tool_input": {"path": "synthetic.txt"}, "transcript_path": opening, "session_id": uuid.uuid4().hex},
+                config,
+            )
+            checks.append(("opening line before the first tool call is not narration", clean.returncode == 0 and not clean.stdout.strip()))
+            deny_first = run_synthetic(
+                Path(__file__),
+                {"tool_name": "Bash", "tool_input": {"command": "remove target"}, "transcript_path": narrated, "session_id": uuid.uuid4().hex},
+                config,
+            )
+            deny_value = json.loads(deny_first.stdout) if deny_first.stdout.strip() else {}
+            checks.append(
+                (
+                    "a matching card still denies ahead of narration context",
+                    deny_value.get("hookSpecificOutput", {}).get("permissionDecision") == "deny"
+                    and "additionalContext" not in deny_value.get("hookSpecificOutput", {}),
                 )
             )
 
@@ -841,7 +942,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 36
+    total = 40
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
