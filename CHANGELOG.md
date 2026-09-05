@@ -46,6 +46,13 @@ inside the interpreter fell from 4.0–4.6 s to about 0.4 s.
   epitype` gains a `__main__` guard; a tag publish requires `package.json` to
   carry the tag version; `tests/run_all.py --jobs N` runs selftests in parallel
   on CI.
+- Hook commands are registered without quotes whenever the paths allow it. Codex
+  on Windows runs hooks through `cmd.exe /C`, which strips the first and last
+  quote of a line that starts with one, so the fully quoted form the
+  2026-09-04 batch introduced failed every Codex hook before Python started. A
+  path that needs quoting also gets a `commandWindows` form wrapped in one outer
+  pair of quotes. Doctor prints each hook's wall time and warns when
+  `repo_root` has uncommitted changes.
 - Hook registrations allow ten seconds instead of three (owner ruling
   2026-09-05); the hook's own deadline is nine. Existing installs pick this up
   by re-running `install`, and Codex hosts then need the four hooks trusted

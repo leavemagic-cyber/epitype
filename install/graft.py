@@ -325,13 +325,30 @@ def _hook_template(codex, hooks_root, repo_root=REPO_ROOT, python_executable=Non
             raw = command.get("command")
             if not isinstance(raw, str):
                 raise InstallError(f"Codex hook template {event} command is malformed")
-            raw = raw.replace("{{EPITYPE_HOOKS_ROOT}}", hooks_text)
-            raw = raw.replace("{{PYTHON_EXECUTABLE}}", python_text)
+            raw = _SHIM_PLACEHOLDER.sub(lambda match: _shell_token(hooks_text + match.group(1)), raw)
+            raw = raw.replace("{{PYTHON_EXECUTABLE}}", _shell_token(python_text))
             if not codex:
                 raw = raw.replace(" --codex", "")
             command["command"] = raw
+            command.pop("commandWindows", None)
+            if '"' in raw:
+                # Codex runs Windows hooks through `cmd.exe /C`, which drops the
+                # first and last quote of a line that starts with one; an outer
+                # pair of quotes is what survives that rule (2026-09-05: the
+                # quoted form silently failed every Codex hook for a day).
+                command["commandWindows"] = f'"{raw}"'
         result[event] = entry
     return result
+
+
+_SHIM_PLACEHOLDER = re.compile(r"\{\{EPITYPE_HOOKS_ROOT\}\}(/\S+)")
+_PLAIN_TOKEN = re.compile(r"[A-Za-z0-9_./:\\-]+")
+
+
+def _shell_token(text):
+    """Quote a command token only when a shell needs it: an unquoted path is the
+    one form cmd.exe, bash, and sh all read the same way."""
+    return text if _PLAIN_TOKEN.fullmatch(text) else f'"{text}"'
 
 
 def _merge_hooks(raw, entries):
@@ -837,6 +854,14 @@ _COMMAND_HEAD = re.compile(r'^\s*(?:"([^"]+)"|(\S+))\s+(.*)$')
 _PATH_PYTHON_NAMES = ("python", "python3", "py")
 
 
+def _unwrap_command(command):
+    """The cmd.exe-safe form carries one outer pair of quotes; compare what is inside."""
+    text = command or ""
+    if text.startswith('"') and text.endswith('"') and text.count('"') >= 4:
+        return text[1:-1]
+    return text
+
+
 def _split_command(command):
     """(interpreter token, rest) of a registered hook command."""
     match = _COMMAND_HEAD.match(command or "")
@@ -865,12 +890,12 @@ def _entry_matches(actual, expected):
             if not isinstance(actual_hook, dict) or set(actual_hook) != set(expected_hook):
                 return False
             for hook_key, hook_value in expected_hook.items():
-                if hook_key != "command":
+                if hook_key not in ("command", "commandWindows"):
                     if actual_hook.get(hook_key) != hook_value:
                         return False
                     continue
-                python, rest = _split_command(actual_hook.get("command"))
-                expected_python, expected_rest = _split_command(hook_value)
+                python, rest = _split_command(_unwrap_command(actual_hook.get(hook_key)))
+                expected_python, expected_rest = _split_command(_unwrap_command(hook_value))
                 if python is None or rest != expected_rest:
                     return False
                 if python == expected_python or Path(python).name.lower() in _PATH_PYTHON_NAMES:
@@ -1540,6 +1565,19 @@ def _selftest():
                 and not _entry_matches(variant(timeout=30), rendered),
             ))
 
+            spaced_python = home / "Program Files" / "Python" / "python.exe"
+            spaced = _hook_template(True, hooks_root, old_repo, python_executable=os.fspath(spaced_python))
+            spaced_hook = spaced["PreCompact"]["hooks"][0]
+            checks.append((
+                "hook commands are unquoted when paths allow it, and a quoted command gets a cmd.exe-safe commandWindows",
+                '"' not in rendered_command
+                and "commandWindows" not in rendered["hooks"][0]
+                and spaced_hook["command"].startswith(f'"{spaced_python.resolve().as_posix()}" ')
+                and spaced_hook["command"].endswith("/precompact.py --codex")
+                and spaced_hook["commandWindows"] == f'"{spaced_hook["command"]}"'
+                and _entry_matches(json.loads(json.dumps(spaced["PreCompact"])), spaced["PreCompact"]),
+            ))
+
             checks.append((
                 "doctor reports each hook's wall time beside its verdict",
                 all(f"HOOK {event}: PASS (" in first_output.getvalue() for event in EVENTS),
@@ -2052,7 +2090,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 32
+    total = 33
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

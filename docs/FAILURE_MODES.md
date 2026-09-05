@@ -160,6 +160,8 @@ Some hosts execute a hook only after the user has explicitly trusted it, and kee
 
 `adapters/codex/hook_trust.py check` reads the registrations and the host's trust store, classifies every Epitype hook as `TRUSTED`, `UNTRUSTED`, `DISABLED`, or `MODIFIED` (definition changed after trust was granted), and exits non-zero with the exact review step. Trust itself stays a user action in the host UI; Epitype never forges it.
 
+A trusted registration can still never run: on Windows, Codex launches command hooks through `cmd.exe /C`, whose quoting rule drops the first and last quote of a line that begins with one. A command written as `"…/python.exe" "…/recall.py"` therefore fails at the shell before Python starts (2026-09-05, a day after a quoted form was introduced), while Claude Code, which runs the same line through a POSIX shell, keeps working. The installer now leaves tokens unquoted whenever the path allows, and when a token must be quoted it also registers a `commandWindows` form wrapped in one outer pair of quotes, which is what `cmd.exe /C` preserves.
+
 ### Self-verification
 
 ```powershell
