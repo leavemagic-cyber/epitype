@@ -2,6 +2,7 @@ import sys; [getattr(stream, "reconfigure", lambda **_: None)(encoding="utf-8", 
 """記憶架構的規格同源與跨 CLI 寫鎖 host 中立正本。"""
 
 from contextlib import contextmanager
+from datetime import date, datetime
 import errno
 import os
 from pathlib import Path
@@ -220,6 +221,15 @@ CAPTURE_LABEL_REGEX = re.compile(r"^owner (?:grant|correction|ruling) auto-captu
 # When a budget cuts the injected context, the cut is said, never silent.
 CONTEXT_TRUNCATED_SUFFIX = "…（超出預算，餘 {dropped} 段未注入）"
 
+# 2026-09-05 事故：owner 08-13 已裁定的事被 AI 當成待選項端回來。決策卡進了索引，卻只
+# 當普通卡注入、描述截到 120 字，原話一個字都沒到現場。規則：決策卡是 owner 親裁的現況，
+# 喚回時與 rulings 同級置頂且排在自動捕捉之前（親裁 > 自動捕捉），並帶 owner 原話；
+# 每場開場（含壓縮後重注）逐條列出該庫的現行裁定。
+DECISION_PREFIX = "⚖ 裁定："
+SESSIONSTART_DECISIONS_HEADER = "⚖ 現行裁定（{vault}）"
+SESSIONSTART_DECISIONS_MAX_LINES = 12
+SESSIONSTART_DECISION_QUOTE_CHARS = 80
+
 # 2026-09-03 owner:「你在過程一直讀這種跟寫出這種有必要嗎?很浪費token吧」。工具呼叫之間的
 # 旁白(「改成 C:/… 重跑一次」)輸出一次、之後每輪當 context 重讀一次;36 小時內全機 7797 段
 # /819k 字。規則:PreToolUse 讀 transcript 尾窗,發現本輪工具呼叫之間的文字段就回一行
@@ -242,6 +252,111 @@ PENDING_MAX_AGE_DAYS = 14
 PENDING_MARKER_REGEX = re.compile(PENDING_MARKER_PATTERN, re.IGNORECASE)
 PENDING_CLOSED_REGEX = re.compile(PENDING_CLOSED_PATTERN, re.IGNORECASE)
 PENDING_DATE_REGEX = re.compile(r"(20\d\d)-(\d\d)-(\d\d)")
+
+# 2026-09-06 owner 裁定：卡片要像表單——分種類、各有必填欄位、缺了不收。實測缺口：
+# titan 298/299 張無別名、113 張無日期、通用庫 73 張事件卡沒有升級流程。規則：型別名
+# 與必填欄位表在此同源；lint 與 hook 各自定義的話，同一張卡兩端會判成不同型別。
+CARD_TYPE_DECISION = "decision"
+CARD_TYPE_SCAR = "scar"
+CARD_TYPE_GRANT = "grant"
+CARD_TYPE_CORRECTION = "correction"
+CARD_TYPE_RULING = "ruling"
+CARD_TYPE_PENDING = "pending"
+CARD_TYPE_FEEDBACK = "feedback"
+CARD_TYPE_PROJECT = "project"
+CARD_TYPE_REFERENCE = "reference"
+CARD_TYPE_USER = "user"
+CARD_TYPE_HABIT = "habit"
+CARD_TYPES = (
+    CARD_TYPE_DECISION,
+    CARD_TYPE_SCAR,
+    CARD_TYPE_GRANT,
+    CARD_TYPE_CORRECTION,
+    CARD_TYPE_RULING,
+    CARD_TYPE_PENDING,
+    CARD_TYPE_FEEDBACK,
+    CARD_TYPE_PROJECT,
+    CARD_TYPE_REFERENCE,
+    CARD_TYPE_USER,
+    CARD_TYPE_HABIT,
+)
+# 事件卡是逐字捕捉的 owner 原話，別名由落戶流程補，不由捕捉端要求。
+EVENT_CARD_TYPES = (CARD_TYPE_GRANT, CARD_TYPE_CORRECTION, CARD_TYPE_RULING)
+GENERIC_CARD_TYPES = (
+    CARD_TYPE_FEEDBACK,
+    CARD_TYPE_PROJECT,
+    CARD_TYPE_REFERENCE,
+    CARD_TYPE_USER,
+    CARD_TYPE_HABIT,
+)
+DEFAULT_CARD_TYPE = CARD_TYPE_FEEDBACK
+EVENT_CARD_DIRECTORIES = (
+    (GRANT_DIRECTORY, CARD_TYPE_GRANT),
+    (CORRECTION_DIRECTORY, CARD_TYPE_CORRECTION),
+    (RULING_DIRECTORY, CARD_TYPE_RULING),
+)
+
+NAME_FIELD = "name"
+DESCRIPTION_FIELD = "description"
+CAPTURED_AT_FIELD = "captured_at"
+SESSION_FIELD = "session_id"
+INCIDENT_FIELD = "incident"
+FORBIDDEN_FIELD = "forbidden"
+VERIFY_FIELD = "verify"
+VALID_UNTIL_FIELD = "valid_until"
+GRANT_EXPIRES_FIELD = "expires_at"
+LAST_VERIFIED_AT_FIELD = "last_verified_at"
+PENDING_OWNER_FIELD = "owner"
+PENDING_EXIT_FIELD = "exit"
+PENDING_NAME_PREFIX = "pending-"
+METADATA_FIELD = "metadata"
+METADATA_TYPE_FIELD = "metadata.type"
+METADATA_MODIFIED_FIELD = "metadata.modified"
+TRIGGER_TOOL_PATH = TRIGGER_FIELD + "." + TRIGGER_TOOL_FIELD
+TRIGGER_INPUT_PATH = TRIGGER_FIELD + "." + TRIGGER_INPUT_FIELD
+# 到期日是作者親手寫的，過期只 WARN；協定 §3.5 允許歸檔、永遠不允許刪。
+CARD_EXPIRY_FIELDS = (GRANT_EXPIRES_FIELD, VALID_UNTIL_FIELD)
+# 通用卡的日期任一即可；沒有任何日期的卡無法判斷它講的是哪個時點的事實。
+CARD_DATE_FIELDS = (LAST_VERIFIED_AT_FIELD, METADATA_MODIFIED_FIELD)
+# 這些欄位必須是至少一項的序列，空清單等於沒有欄位。
+CARD_LIST_FIELDS = (ALIASES_FIELD, FORBIDDEN_FIELD)
+CARD_EVENT_REQUIRED_FIELDS = (NAME_FIELD, DESCRIPTION_FIELD, CAPTURED_AT_FIELD, SESSION_FIELD)
+CARD_GENERIC_REQUIRED_FIELDS = (NAME_FIELD, DESCRIPTION_FIELD)
+CARD_REQUIRED_FIELDS = {
+    CARD_TYPE_DECISION: (
+        DECISION_KEY_FIELD,
+        DECISION_STATUS_FIELD,
+        CURRENT_DECISION_AT_FIELD,
+        DECIDED_BY_FIELD,
+        ALIASES_FIELD,
+    ),
+    CARD_TYPE_SCAR: (TRIGGER_TOOL_PATH, TRIGGER_INPUT_PATH, ADVICE_FIELD, INCIDENT_FIELD),
+    CARD_TYPE_GRANT: CARD_EVENT_REQUIRED_FIELDS,
+    CARD_TYPE_CORRECTION: CARD_EVENT_REQUIRED_FIELDS,
+    CARD_TYPE_RULING: CARD_EVENT_REQUIRED_FIELDS,
+    CARD_TYPE_PENDING: (PENDING_OWNER_FIELD, VERIFY_FIELD, PENDING_EXIT_FIELD),
+    CARD_TYPE_FEEDBACK: CARD_GENERIC_REQUIRED_FIELDS,
+    CARD_TYPE_PROJECT: CARD_GENERIC_REQUIRED_FIELDS,
+    CARD_TYPE_REFERENCE: CARD_GENERIC_REQUIRED_FIELDS,
+    CARD_TYPE_USER: CARD_GENERIC_REQUIRED_FIELDS,
+    CARD_TYPE_HABIT: CARD_GENERIC_REQUIRED_FIELDS,
+}
+CARD_OPTIONAL_FIELDS = {
+    CARD_TYPE_DECISION: (FORBIDDEN_FIELD, VERIFY_FIELD, VALID_UNTIL_FIELD),
+    CARD_TYPE_SCAR: (ALIASES_FIELD,),
+    CARD_TYPE_GRANT: (GRANT_EXPIRES_FIELD,),
+    CARD_TYPE_CORRECTION: (),
+    CARD_TYPE_RULING: (),
+    CARD_TYPE_PENDING: (),
+    CARD_TYPE_FEEDBACK: (ALIASES_FIELD,),
+    CARD_TYPE_PROJECT: (ALIASES_FIELD,),
+    CARD_TYPE_REFERENCE: (ALIASES_FIELD,),
+    CARD_TYPE_USER: (ALIASES_FIELD,),
+    CARD_TYPE_HABIT: (ALIASES_FIELD,),
+}
+# SessionStart 只給一行；lint 是磁碟掃描，超過這個時間就不印，開場不能被它拖住。
+CARD_LINT_HOOK_BUDGET_SECONDS = 2.0
+CARD_LINT_NOTICE = '🧾 卡片型別檢查：FAIL {fail}／WARN {warn} → python epitype/card_lint.py "{vault}"'
 
 # 2026-09-01 實測事故：別名查無時缺少全文兜底，會讓既存卡片完全不可達；
 # 規則：DB 使用 vault-root 相對路徑，且不得綁定特定 CLI。
@@ -273,6 +388,35 @@ LOCK_POLL_SECONDS = 0.01
 FRONTMATTER_BOUNDARY = "---"
 YAML_DOCUMENT_END = "..."
 BLOCK_SCALAR_STYLES = ("|", ">", "|-", ">-", "|+", ">+")
+# U38 平面欄位讀法同源：card_lint 的巢狀掃描、stop_gate 的 forbidden/aliases 掃描與
+# frontmatter_fields 本身共用同一條 top-level key 形狀，不得各自重寫。
+TOP_LEVEL_FIELD = re.compile(r"^([A-Za-z_][A-Za-z0-9_-]*)\s*:\s*(.*)$")
+
+# 2026-09-05 事故：owner 已裁「虛擬必須鏡像實盤」的事，被同一場 session 重新端成選項
+# 問 owner（owner：「為什麼還是會發生這種錯誤？」）。SessionStart 注入與 UserPromptSubmit
+# 喚回都只是「說給模型聽」，回合結束前沒有任何一道閘比對模型剛說出口的話。規則：Stop
+# 閘的上限、理由句、疑問句判定與 marker 命名在此同源，兩個 host 共用同一支 adapter。
+# 決策卡的禁詞欄位沿用既有的 FORBIDDEN_FIELD（"forbidden"），不另立同義常數。
+STOP_GATE_MAX_CARDS_PER_VAULT = 30
+STOP_GATE_FRONTMATTER_MAX_BYTES = 16 * 1024
+STOP_GATE_MESSAGE_MAX_CHARS = 20000
+STOP_GATE_QUOTE_MAX_CHARS = 160
+STOP_GATE_FRAGMENT_MAX_CHARS = 40
+# 單字別名會命中任何句子；兩個以上別名同時出現在同一個問句，才是同一件已裁定的事。
+STOP_GATE_MIN_ALIAS_CHARS = 2
+STOP_GATE_ALIAS_HITS = 2
+STOP_GATE_SENTENCE_TERMINATORS = "。！？!?；;\n"
+STOP_GATE_QUESTION_ENDINGS = ("？", "?")
+# 「可以嗎」已被「嗎」涵蓋，不重複列。
+STOP_GATE_QUESTION_MARKERS = ("嗎", "呢", "要不要", "是否")
+STOP_GATE_FORBIDDEN_REASON = (
+    "⚖ 已裁定（{decision}）：{quote}。請依裁定改寫，不得再提「{fragment}」"
+)
+STOP_GATE_QUESTION_REASON = "此事 owner 已於 {decided_at} 裁定：{quote}。不得再問，直接照裁定做"
+STOP_GATE_QUESTION_REASON_UNDATED = "此事 owner 已裁定：{quote}。不得再問，直接照裁定做"
+STOP_GATE_PATTERN_DEFECT = "⚠ Epitype 回合閘：裁定 {decision} 的 forbidden「{pattern}」無法使用（{reason}），這一項暫不生效。"
+STOP_GATE_MARKER_PREFIX = "stop-"
+STOP_GATE_LOG_KIND = "stop_block"
 
 
 def split_frontmatter(text):
@@ -336,6 +480,115 @@ def join_block_scalar(style, lines):
     if style.startswith("|"):
         return "\n".join(lines).strip()
     return " ".join(line for line in lines if line).strip()
+
+
+def is_iso_date(value):
+    """True when value parses as an ISO-8601 date or datetime (Z accepted)."""
+    if not value:
+        return False
+    try:
+        date.fromisoformat(value)
+        return True
+    except ValueError:
+        pass
+    try:
+        normalized = value[:-1] + "+00:00" if value.endswith(("Z", "z")) else value
+        datetime.fromisoformat(normalized)
+        return True
+    except ValueError:
+        return False
+
+
+def frontmatter_fields(path):
+    """(top-level scalar fields, problem) for one card's frontmatter — U38's
+    single reading of a card: the index, every lint, and the action gate all
+    call this instead of keeping their own copy. Dup keys first-wins, block
+    scalars joined via join_block_scalar, tab-indented lines flagged and
+    skipped, plain scalars via parse_scalar. `problem` is up to 3 diagnostics
+    joined with "；", or None when the frontmatter parses clean; a caller that
+    only wants fields (a hook's hot path) discards it."""
+    try:
+        text = path.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeError) as exc:
+        return {}, f"無法以 UTF-8 讀取 frontmatter：{type(exc).__name__}"
+
+    front_lines, closing_index = split_frontmatter(text)
+    if front_lines is None:
+        return {}, None
+    if closing_index is None:
+        return {}, "frontmatter 缺少結束界線"
+
+    fields = {}
+    problems = []
+    active_container_indent = None
+    block_field = None
+    block_style = None
+    block_indent = None
+    block_lines = []
+
+    def finish_block():
+        nonlocal block_field, block_style, block_indent, block_lines
+        if block_field is not None:
+            fields[block_field] = join_block_scalar(block_style, block_lines)
+        block_field = None
+        block_style = None
+        block_indent = None
+        block_lines = []
+
+    for line_number, raw_line in enumerate(front_lines, start=2):
+        if not raw_line.strip() or raw_line.lstrip().startswith("#"):
+            if block_field is not None:
+                block_lines.append("")
+            continue
+
+        indent = len(raw_line) - len(raw_line.lstrip(" "))
+        if "\t" in raw_line[: len(raw_line) - len(raw_line.lstrip())]:
+            problems.append(f"L{line_number} 使用 tab 縮排")
+            continue
+
+        if block_field is not None:
+            if indent > 0:
+                if block_indent is None:
+                    block_indent = indent
+                block_lines.append(raw_line[min(indent, block_indent) :])
+                continue
+            finish_block()
+
+        if indent > 0:
+            if active_container_indent is not None:
+                continue
+            problems.append(f"L{line_number} 有無上層欄位的縮排內容")
+            continue
+
+        active_container_indent = None
+        match = TOP_LEVEL_FIELD.match(raw_line)
+        if match is None:
+            problems.append(f"L{line_number} 不是 top-level key: value")
+            continue
+
+        key, raw_value = match.groups()
+        if key in fields:
+            problems.append(f"L{line_number} 重複欄位 {key}")
+            continue
+        stripped = raw_value.strip()
+        if stripped in BLOCK_SCALAR_STYLES:
+            block_field = key
+            block_style = stripped
+            block_indent = None
+            block_lines = []
+            continue
+
+        value, problem = parse_scalar(raw_value)
+        fields[key] = value
+        if problem:
+            problems.append(f"L{line_number} {problem}")
+        if not stripped:
+            active_container_indent = 0
+
+    finish_block()
+    if problems:
+        return fields, "；".join(problems[:3])
+    return fields, None
 
 
 def slim_index(body, budget, full_path):

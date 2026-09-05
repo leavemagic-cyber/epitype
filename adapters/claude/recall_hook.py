@@ -14,6 +14,18 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from epitype import memsearch, memspec
+# 捕捉核心住在 epitype.capture，讓離線回放（harvest）套用同一份觸發與遮罩規則；
+# 這裡保留原本的私名，呼叫端與 selftest 不因搬移而改。
+from epitype.capture import (
+    CAPTURE_KINDS,
+    capture_owner_sentence as _capture_owner_sentence,
+    capture_ruling as _capture_ruling,
+    grant_digest as _grant_digest,
+    is_owner_utterance,
+    matched_sentence as _matched_sentence,
+    one_line as _one_line,
+    write_capture as _write_capture,
+)
 from _hook_common import (
     bounded_context,
     emit,
@@ -28,205 +40,6 @@ from _hook_common import (
     session_component,
     write_config,
 )
-
-
-def _one_line(value):
-    return " ".join(str(value or "").split())
-
-
-def _without_quoted_text(prompt):
-    return memspec.GRANT_QUOTED_TEXT_REGEX.sub("", prompt)
-
-
-def is_owner_utterance(prompt, trigger=memspec.GRANT_TRIGGER_REGEX):
-    """Reject non-owner and ambiguous prompt shapes before trigger matching."""
-    if not isinstance(prompt, str) or not prompt.strip():
-        return False, "empty-prompt"
-    folded = prompt.casefold()
-    if any(marker in folded for marker in memspec.GRANT_REJECT_MARKERS):
-        return False, "system-injected-marker"
-    if memspec.GRANT_FENCED_CODE_MARKER in prompt:
-        return False, "fenced-code"
-    if memspec.GRANT_LEADING_TAG_REGEX.search(prompt):
-        return False, "tagged-block"
-    if len(prompt) > memspec.GRANT_MAX_CHARS:
-        return False, "over-max-chars"
-    if len(memspec.GRANT_NEWLINE_REGEX.findall(prompt)) > memspec.GRANT_MAX_NEWLINES:
-        return False, "too-many-newlines"
-
-    quoted = memspec.GRANT_QUOTED_TEXT_REGEX.findall(prompt)
-    if (
-        any(trigger.search(value) for value in quoted)
-        and not trigger.search(_without_quoted_text(prompt))
-    ):
-        return False, "quoted-trigger-only"
-    return True, "owner-utterance-shape"
-
-
-# Grants and corrections are the two owner sentences that must survive the
-# session they were said in; both take the same source-checked capture path.
-CAPTURE_KINDS = {
-    "grant": (memspec.GRANT_DIRECTORY, memspec.GRANT_TRIGGER_REGEX, "owner grant auto-captured"),
-    "correction": (
-        memspec.CORRECTION_DIRECTORY,
-        memspec.CORRECTION_TRIGGER_REGEX,
-        "owner correction auto-captured",
-    ),
-}
-
-
-def _matched_sentence(prompt, trigger):
-    for sentence in memspec.GRANT_SENTENCE_SPLIT_REGEX.split(prompt):
-        candidate = sentence.strip()
-        if candidate and trigger.search(_without_quoted_text(candidate)):
-            return candidate
-    return None
-
-
-def _grant_digest(sentence):
-    return hashlib.sha256(_one_line(sentence).encode("utf-8")).hexdigest()[:12]
-
-
-def _capture_owner_sentence(prompt, vault, event, started_at, kind):
-    directory_name, trigger, label = CAPTURE_KINDS[kind]
-    owner_utterance, _reason = is_owner_utterance(prompt, trigger)
-    if not owner_utterance or expired(started_at):
-        return None
-    sentence = _matched_sentence(prompt, trigger)
-    if sentence is None:
-        return None
-    return _write_capture(vault, directory_name, kind, _grant_digest(sentence), label, sentence, event, started_at)
-
-
-def _write_capture(vault, directory_name, kind, digest, label, body, event, started_at, summary=None):
-    # A captured card is persistent, indexed, and re-injected later: credential-shaped
-    # text never earns that (adversarial review 2026-09-03 #5). The sentence still
-    # exists in the transcript; Epitype simply does not copy it into the vault.
-    if memspec.CAPTURE_REJECT_REGEX.search(body):
-        return None
-    directory = vault / directory_name
-    try:
-        if any(directory.glob(f"{kind}-*-{digest}.md")):
-            return None
-        directory.mkdir(parents=True, exist_ok=True)
-        stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        name = f"{kind}-{stamp[:10].replace('-', '')}-{digest}"
-        target = directory / f"{name}.md"
-        # The description is what recall injects; it must carry the owner's words,
-        # not just a label, or the model has to open the file to learn anything.
-        summary = _one_line(summary if summary is not None else body)[: memspec.CAPTURE_SUMMARY_CHARS]
-        card = (
-            "---\n"
-            f"name: {name}\n"
-            f"description: {label} {stamp[:10]}: {summary}\n"
-            f"{memspec.SCOPE_FIELD}: governance-core\n"
-            f"captured_at: {stamp}\n"
-            f"cwd: {_one_line(event.get('cwd'))}\n"
-            f"session_id: {_one_line(event.get('session_id', event.get('sessionId')))}\n"
-            "---\n"
-            f"{body}\n"
-        )
-        with memspec.file_lock(target, memspec.GRANT_LOCK_SECONDS) as locked:
-            if not locked or target.exists():
-                return None
-            temporary = target.with_name(target.name + ".tmp")
-            temporary.write_text(card, encoding="utf-8")
-            os.replace(temporary, target)
-        # The staleness grace window would hide the new card from the very next
-        # prompt; a captured owner sentence must be recallable immediately. When
-        # the index lock is taken by another hook, age the index instead so the
-        # next reader rebuilds it.
-        if not expired(started_at):
-            remaining = memspec.HOOK_TIMEOUT_SECONDS - (time.monotonic() - started_at)
-            wait = max(0.0, min(memspec.GRANT_LOCK_SECONDS, remaining - 0.5))
-            if memsearch.build_index(vault, lock_timeout=wait).get("status") != "built":
-                memsearch.mark_stale(vault)
-        return target
-    except (OSError, sqlite3.Error):
-        return None
-
-
-def _assistant_text(item):
-    """Text of one transcript record if it is an assistant turn (Claude or Codex shape)."""
-    if not isinstance(item, dict) or item.get("isSidechain") is True:
-        return None
-    if item.get("type") == "assistant":
-        message = item.get("message")
-    elif item.get("type") == "response_item":
-        message = item.get("payload")
-        if not isinstance(message, dict) or message.get("role") != "assistant":
-            return None
-    else:
-        return None
-    if not isinstance(message, dict):
-        return None
-    content = message.get("content")
-    if isinstance(content, str):
-        return content
-    if not isinstance(content, list):
-        return None
-    return "".join(
-        block.get("text", "")
-        for block in content
-        if isinstance(block, dict) and block.get("type") in ("text", "output_text") and isinstance(block.get("text"), str)
-    )
-
-
-def _last_assistant_text(transcript_path):
-    """Last assistant turn in the transcript tail, or None. Reads a bounded window only."""
-    try:
-        path = Path(transcript_path)
-        with path.open("rb") as stream:
-            stream.seek(0, os.SEEK_END)
-            size = stream.tell()
-            stream.seek(max(0, size - memspec.RULING_TAIL_BYTES))
-            data = stream.read()
-    except (OSError, TypeError, ValueError):
-        return None
-    turn = []
-    for raw in reversed(data.split(b"\n")):
-        try:
-            item = json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, ValueError):
-            continue
-        text = _assistant_text(item)
-        if text is None:
-            if turn and item.get("type") in ("user", "response_item"):
-                break
-            continue
-        if text.strip():
-            turn.append(text)
-    return "".join(reversed(turn)) if turn else None
-
-
-def _capture_ruling(prompt, vault, event, started_at):
-    """The owner's answer to a question the agent explicitly put to them."""
-    owner_utterance, _reason = is_owner_utterance(prompt, memspec.NEVER_MATCH_REGEX)
-    if not owner_utterance or len(prompt.strip()) < memspec.RULING_MIN_ANSWER_CHARS or expired(started_at):
-        return None
-    question = _last_assistant_text(event.get("transcript_path"))
-    if not question:
-        return None
-    flat = _one_line(question)
-    # Quoted phrases are the assistant talking *about* requests (「請你裁決」in a
-    # report), not making one: a match inside quotes does not count. A live
-    # request sits at the end of the turn; keep only the window around it.
-    quoted = [(m.start(), m.end()) for m in memspec.RULING_QUOTED_TEXT_REGEX.finditer(flat)]
-    matches = [
-        m for m in memspec.RULING_QUESTION_REGEX.finditer(flat)
-        if not any(start <= m.start() < end for start, end in quoted)
-    ]
-    if not matches or matches[-1].start() < len(flat) - memspec.RULING_QUESTION_TAIL_CHARS:
-        return None
-    hit = matches[-1]
-    window = memspec.RULING_QUESTION_WINDOW_CHARS
-    asked = flat[max(0, hit.start() - window): hit.end() + window].strip()
-    answer = prompt.strip()
-    body = f"問（助理）：{asked}\n答（owner 逐字）：{answer}"
-    return _write_capture(
-        vault, memspec.RULING_DIRECTORY, "ruling", _grant_digest(prompt), "owner ruling auto-captured", body, event, started_at,
-        summary=answer,
-    )
 
 
 def _sweep_recall_markers(root, now, keep=None):
@@ -273,6 +86,42 @@ def _claim_marker(session_id, block_digest):
     return True
 
 
+def _frontmatter_fields(path):
+    """Top-level frontmatter scalars for one card, discarding the diagnostics.
+
+    U38: the parse itself lives once, in memspec.frontmatter_fields — the same
+    duplicate-key-first-wins and block-scalar rules decision_lint._parse_frontmatter
+    uses. No decision_lint import on this hot path: its argparse/dataclasses
+    cost is real time a prompt with no decision hit must not pay; memspec alone
+    is what the rest of this hook already imports.
+    """
+    fields, _problem = memspec.frontmatter_fields(path)
+    return fields
+
+
+def _active_decision(path):
+    """(decision_key, current_decision_at, owner_quote) for an active decision card.
+
+    The index carries `status` but neither the decision's key nor the owner's own
+    words, so the card is opened — only a card the index already called active,
+    a handful per prompt, never the vault. Status is re-read from the card so a
+    stale index cannot pin a decision the owner has already superseded.
+    """
+    try:
+        fields = _frontmatter_fields(Path(path))
+    except Exception:
+        return None
+    key = _one_line(fields.get(memspec.DECISION_KEY_FIELD))
+    status = _one_line(fields.get(memspec.DECISION_STATUS_FIELD))
+    if not key or status != memspec.ACTIVE_DECISION_STATUS:
+        return None
+    return (
+        key,
+        _one_line(fields.get(memspec.CURRENT_DECISION_AT_FIELD)),
+        _one_line(fields.get(memspec.OWNER_QUOTE_FIELD)),
+    )
+
+
 def _handle(event, started_at):
     prompt = event.get("prompt")
     if not isinstance(prompt, str) or not prompt.strip():
@@ -288,6 +137,10 @@ def _handle(event, started_at):
 
     # A correction or ruling the owner already made outranks any lexical hit:
     # it goes first, marked, so a stale plan line cannot be re-proposed over it.
+    # An active decision card outranks even those: a captured sentence is what the
+    # owner said once, a decision card is the standing ruling somebody curated
+    # from it (親裁 > 自動捕捉), so decisions take the first seats.
+    decisions = []
     pinned = []
     others = []
     legend = []
@@ -320,6 +173,13 @@ def _handle(event, started_at):
                 # the owner's word on this prompt and must not take a pinned seat.
                 # A correction's body is the owner's own sentence, so it keeps its seat.
                 prefix = None
+            # Decided before the caps, for the same reason a correction is: the
+            # owner's standing ruling is never a weak hit.
+            decision = None
+            if prefix is None and _one_line(hit.get(memspec.DECISION_STATUS_FIELD)) == memspec.ACTIVE_DECISION_STATUS:
+                decision = _active_decision(path)
+                if decision is not None:
+                    prefix = memspec.DECISION_PREFIX
             # A card matched only in its body is a weak lexical hit; two per vault
             # is plenty. What the owner corrected or ruled is never weak, so the
             # kind is decided before the cap (adversarial review 2026-09-03 #1).
@@ -342,15 +202,22 @@ def _handle(event, started_at):
             name = _one_line(hit.get("name"))
             description = memspec.CAPTURE_LABEL_REGEX.sub("", _one_line(hit.get("description")))
             description = description[: memspec.RECALL_DESCRIPTION_MAX_CHARS]
-            # Say each fact once: a name the path already spells is not repeated.
-            parts = (description, located) if located.endswith(f"/{name}.md") else (name, description, located)
+            if decision is not None:
+                key, decided_at, quote = decision
+                # The decision's own key and date identify it better than a card
+                # name, and the owner's words go in uncut: a ruling paraphrased
+                # into 120 characters is what let 08-13 come back as an option.
+                parts = (key + (f"（{decided_at}）" if decided_at else ""), quote or description, located)
+            else:
+                # Say each fact once: a name the path already spells is not repeated.
+                parts = (description, located) if located.endswith(f"/{name}.md") else (name, description, located)
             line = "- " + (prefix or "") + " | ".join(part for part in parts if part)
-            (pinned if prefix else others).append(line)
+            (decisions if decision is not None else pinned if prefix else others).append(line)
             used = True
         if used:
             legend.append(f"{alias}={vault}")
     # The cap covers everything, pinned lines included; pinned lines win the room.
-    pinned = pinned[: memspec.RECALL_TOTAL_MAX_LINES]
+    pinned = [*decisions, *pinned][: memspec.RECALL_TOTAL_MAX_LINES]
     others = others[: max(0, memspec.RECALL_TOTAL_MAX_LINES - len(pinned))]
     # The legend is what makes V1/... resolvable, so it shares the required first
     # piece with the advisory instead of being droppable on its own.
@@ -526,7 +393,8 @@ def _selftest():
                     "default supersession filtering reaches injection",
                     supersession_result.returncode == 0
                     and len(injected_cards) == 1
-                    and "Current Hook Decision" in supersession_context
+                    # An active decision is pinned by its key, not its card name.
+                    and injected_cards[0].startswith("- " + memspec.DECISION_PREFIX + "hook-read-contract")
                     and f"V1/{current_decision.name}" in supersession_context
                     and "Retired Hook Decision" not in supersession_context
                     and old_decision.name not in supersession_context,
@@ -1118,6 +986,78 @@ def _selftest():
                     and ("V1/" not in tight_context or memspec.RECALL_LEGEND_PREFIX in tight_context),
                 )
             )
+            # 2026-09-05 事故：owner 08-13 的裁定被當成選項端回來。決策卡是 owner 親裁
+            # 的現況，要與 rulings 同級置頂、排在自動捕捉之前，並帶原話。
+            decision_vault = root / "decision-vault"
+            decision_vault.mkdir()
+            (decision_vault / memspec.CORRECTION_DIRECTORY).mkdir()
+            (decision_vault / memspec.CORRECTION_DIRECTORY / "correction-20260904-dec00000.md").write_text(
+                "---\nname: correction-20260904-dec00000\n"
+                "description: owner correction auto-captured 2026-09-04: decisionneedle 不要亂改\n---\n"
+                "decisionneedle 不要亂改\n",
+                encoding="utf-8",
+            )
+            for index in range(9):
+                (decision_vault / f"decision-{index}.md").write_text(
+                    f"---\nname: Decision {index}\n"
+                    f"description: decisionneedle 摘要 {index}\n"
+                    f"{memspec.DECISION_KEY_FIELD}: rule-{index}\n"
+                    f"{memspec.DECISION_STATUS_FIELD}: {memspec.ACTIVE_DECISION_STATUS}\n"
+                    f"{memspec.CURRENT_DECISION_AT_FIELD}: 2026-08-1{index}\n"
+                    f"{memspec.DECIDED_BY_FIELD}: {memspec.OWNER_EXPLICIT_DECIDER}\n"
+                    f"{memspec.OWNER_QUOTE_FIELD}: 只有 6s 是標準合約 {index}\n---\n"
+                    f"decisionneedle body {index}\n",
+                    encoding="utf-8",
+                )
+            (decision_vault / "decision-retired.md").write_text(
+                "---\nname: Decision Retired\n"
+                "description: decisionneedle 舊制\n"
+                f"{memspec.DECISION_KEY_FIELD}: rule-0\n"
+                f"{memspec.DECISION_STATUS_FIELD}: {memspec.SUPERSEDED_DECISION_STATUS}\n"
+                f"{memspec.SUPERSEDED_BY_FIELD}: decision-0.md\n"
+                f"{memspec.CURRENT_DECISION_AT_FIELD}: 2026-01-01\n"
+                f"{memspec.OWNER_QUOTE_FIELD}: 舊制不再適用\n---\n"
+                "decisionneedle retired body\n",
+                encoding="utf-8",
+            )
+            memsearch.build_index(decision_vault)
+            decision_config = root / "decision-config.json"
+            write_config(decision_config, [decision_vault])
+            decision_result = run_synthetic(
+                Path(__file__), {"prompt": "decisionneedle", "session_id": uuid.uuid4().hex}, decision_config
+            )
+            decision_value = json.loads(decision_result.stdout) if decision_result.stdout.strip() else {}
+            decision_context = decision_value.get("hookSpecificOutput", {}).get("additionalContext", "")
+            decision_lines = [line for line in decision_context.splitlines() if line.startswith("- ")]
+            decision_pinned = [
+                line for line in decision_lines if line.startswith("- " + memspec.DECISION_PREFIX)
+            ]
+            checks.append(
+                (
+                    "an active decision card is pinned with its key, date and the owner's own words",
+                    decision_result.returncode == 0
+                    and bool(decision_pinned)
+                    and decision_lines[0].startswith("- " + memspec.DECISION_PREFIX)
+                    and any("（2026-08-1" in line and "只有 6s 是標準合約" in line for line in decision_pinned),
+                )
+            )
+            checks.append(
+                (
+                    "a superseded decision is never pinned nor injected",
+                    "decision-retired" not in decision_context
+                    and "舊制" not in decision_context,
+                )
+            )
+            checks.append(
+                (
+                    "decisions take the first seats and the total cap still holds",
+                    len(decision_lines) <= memspec.RECALL_TOTAL_MAX_LINES
+                    and decision_lines[: len(decision_pinned)] == decision_pinned
+                    and all(
+                        memspec.CORRECTION_PREFIX not in line for line in decision_lines[: len(decision_pinned)]
+                    ),
+                )
+            )
             secret_prompt = "你可以直接用 api_key=sk_live_0123456789abcdefghij 這組去連"
             secrets_before = tuple(sorted((grant_vault / memspec.GRANT_DIRECTORY).glob("*.md")))
             run_synthetic(
@@ -1417,7 +1357,7 @@ def _selftest():
             shutil.rmtree(marker_directory, ignore_errors=True)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 41
+    total = 44
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

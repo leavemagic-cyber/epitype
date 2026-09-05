@@ -34,6 +34,17 @@ EXPECTED = {
     "quoted-hash.md": ("hash card", "keeps # inside quotes", "active", 3),
 }
 
+# U38: memspec.frontmatter_fields is the ported primitive behind
+# decision_lint._parse_frontmatter's thin wrapper — every hook and lint that used
+# to keep its own copy now calls one of these two. These fixtures add the shapes
+# EXPECTED above does not exercise (tab indent, no frontmatter at all) for the
+# parity check below; the oversized-file shape is generated at test time instead
+# of stored here.
+MEMSPEC_PARITY_EXTRA_CARDS = {
+    "tab-indent.md": "---\nname: tab card\ndescription: ok\n\tstatus: active\n---\nbody\n",
+    "no-frontmatter.md": "not a card\njust text\n",
+}
+
 
 def _readings(path):
     """(name, description, status, frontmatter line count) as each reader sees them."""
@@ -61,6 +72,25 @@ def _selftest():
         vault = Path(temp_dir).resolve()
         for name, text in CARDS.items():
             (vault / name).write_bytes(text.encode("utf-8"))
+        for name, text in MEMSPEC_PARITY_EXTRA_CARDS.items():
+            (vault / name).write_bytes(text.encode("utf-8"))
+        oversized_value = "x" * (2 * 1024 * 1024)
+        (vault / "oversized.md").write_bytes(
+            f"---\nname: big card\ndescription: {oversized_value}\nstatus: active\n---\nbody\n".encode("utf-8")
+        )
+        parity_names = [*CARDS, *MEMSPEC_PARITY_EXTRA_CARDS, "oversized.md"]
+        parity_mismatches = [
+            name
+            for name in parity_names
+            if memspec.frontmatter_fields(vault / name) != decision_lint._parse_frontmatter(vault / name)
+        ]
+        checks.append((
+            "memspec.frontmatter_fields matches decision_lint._parse_frontmatter's wrapper "
+            "on every fixture (dup key, block scalar, CRLF, BOM, tab indent, no frontmatter, oversized)",
+            not parity_mismatches,
+        ))
+        if parity_mismatches:
+            print(f"    mismatched fixtures: {parity_mismatches!r}", file=sys.stderr)
         for name, expected in EXPECTED.items():
             readings, problem = _readings(vault / name)
             agreed = all(value == expected for value in readings.values())
@@ -85,7 +115,7 @@ def _selftest():
             and memsearch.query_index(vault, "first wins")["count"] == 1,
         ))
     passed = sum(bool(ok) for _, ok in checks)
-    total = len(EXPECTED) + 3
+    total = len(EXPECTED) + 4
     for label, ok in checks:
         if not ok:
             print(f"FAILED: {label}")

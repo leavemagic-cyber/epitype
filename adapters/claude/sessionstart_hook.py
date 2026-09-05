@@ -11,7 +11,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from epitype import memspec, pending_lint
+from epitype import card_lint, memsearch, memspec, pending_lint
 from _hook_common import (
     bounded_context,
     emit,
@@ -25,6 +25,84 @@ from _hook_common import (
     run_synthetic,
     write_config,
 )
+
+
+def _frontmatter_fields(path):
+    """Top-level frontmatter scalars for one card, discarding the diagnostics.
+
+    U38: the parse itself lives once, in memspec.frontmatter_fields — the same
+    duplicate-key-first-wins and block-scalar rules decision_lint._parse_frontmatter
+    uses. No decision_lint import on this hot path: its argparse/dataclasses
+    cost is real time SessionStart must not pay; memspec alone is what the
+    rest of this hook already imports.
+    """
+    fields, _problem = memspec.frontmatter_fields(path)
+    return fields
+
+
+def _active_decisions(vault, started_at):
+    """(current_decision_at, decision_key, owner's words) per active decision card.
+
+    Read from disk rather than from the index: the index carries `status` but
+    neither the decision's key nor the owner's words, and a vault whose index was
+    never built must still open the session with its standing rulings. None when
+    the hook's deadline arrives mid-scan — half a vault's rulings would read as
+    the whole list.
+    """
+    found = []
+    try:
+        paths = memsearch.card_files(vault)
+    except Exception:
+        return None
+    for path in paths:
+        if expired(started_at):
+            return None
+        try:
+            fields = _frontmatter_fields(path)
+        except Exception:
+            continue
+        key = " ".join(str(fields.get(memspec.DECISION_KEY_FIELD) or "").split())
+        status = " ".join(str(fields.get(memspec.DECISION_STATUS_FIELD) or "").split())
+        if not key or status != memspec.ACTIVE_DECISION_STATUS:
+            continue
+        said = " ".join(str(fields.get(memspec.OWNER_QUOTE_FIELD) or "").split())
+        if not said:
+            said = " ".join(str(fields.get(memspec.DESCRIPTION_FIELD) or "").split())
+        found.append(
+            (
+                " ".join(str(fields.get(memspec.CURRENT_DECISION_AT_FIELD) or "").split()),
+                key,
+                said[: memspec.SESSIONSTART_DECISION_QUOTE_CHARS],
+            )
+        )
+    found.sort(key=lambda row: row[1])
+    found.sort(key=lambda row: row[0], reverse=True)  # newest first; undated last
+    return found
+
+
+def _decision_block(vault, label, started_at):
+    """The vault's standing rulings as one piece: a header without its rulings,
+    or rulings without the vault they bind, is worse than no block at all."""
+    rows = _active_decisions(vault, started_at)
+    if not rows:
+        return None
+    lines = [memspec.SESSIONSTART_DECISIONS_HEADER.format(vault=label)]
+    for decided_at, key, said in rows[: memspec.SESSIONSTART_DECISIONS_MAX_LINES]:
+        lines.append("｜".join(part for part in (key, decided_at, said) if part))
+    dropped = len(rows) - memspec.SESSIONSTART_DECISIONS_MAX_LINES
+    if dropped > 0:
+        lines.append(f'…另 {dropped} 條：python epitype/decision_lint.py "{vault}"')
+    return "\n".join(lines)
+
+
+def _vault_labels(vaults):
+    """Directory names, falling back to the full path where a name repeats: every
+    native cwd vault is called `memory`, so the short name alone can be a lie."""
+    names = [vault.name for vault in vaults]
+    return [
+        name if names.count(name) == 1 else str(vault)
+        for vault, name in zip(vaults, names)
+    ]
 
 
 def _handle(event, started_at):
@@ -55,6 +133,25 @@ def _handle(event, started_at):
         overdue = pending_lint.summary_line(vaults)
         if overdue:
             pieces.append(overdue)
+
+    # A card missing its type's required fields is a card the recall side will
+    # hand over half-true. One line, and only when the scan finished inside its
+    # own budget: half a vault's numbers are worse than no numbers.
+    if not expired(started_at):
+        malformed = card_lint.summary_line(vaults)
+        if malformed:
+            pieces.append(malformed)
+
+    # 2026-09-05 事故：owner 08-13 親裁的事被端回來當選項。A standing ruling the model
+    # cannot see is a ruling it re-opens, so every session — including the one that
+    # resumes after a compaction — opens with the vault's active decisions, in the
+    # owner's own words, before any index.
+    for vault, label in zip(vaults, _vault_labels(vaults)):
+        if expired(started_at):
+            break
+        block = _decision_block(vault, label, started_at)
+        if block:
+            pieces.append(block)
 
     for vault in vaults:
         if expired(started_at):
@@ -174,6 +271,41 @@ def _selftest():
                 )
             )
 
+            # A card that fails its type's required fields is named in one line;
+            # a vault whose cards are all clean gets no line at all.
+            card_vault = root / "card-vault"
+            card_vault.mkdir()
+            (card_vault / memspec.MEMORY_INDEX_FILENAME).write_text("# Cards\ncard index detail\n", encoding="utf-8")
+            broken = card_vault / "broken-card.md"
+            broken.write_text(
+                "---\nname: broken-card\ndescription: english only and undated\n---\nbody\n",
+                encoding="utf-8",
+            )
+            card_config = root / "card-config.json"
+            write_config(card_config, [card_vault])
+            broken_result = run_synthetic(Path(__file__), {"source": "startup"}, card_config)
+            broken_value = json.loads(broken_result.stdout) if broken_result.stdout.strip() else {}
+            broken_context = broken_value.get("hookSpecificOutput", {}).get("additionalContext", "")
+            broken.write_text(
+                "---\nname: broken-card\ndescription: 2026-09-01 乾淨卡\naliases:\n  - 乾淨\nmetadata:\n  type: feedback\n---\nbody\n",
+                encoding="utf-8",
+            )
+            clean_result = run_synthetic(Path(__file__), {"source": "startup"}, card_config)
+            clean_value = json.loads(clean_result.stdout) if clean_result.stdout.strip() else {}
+            clean_context = clean_value.get("hookSpecificOutput", {}).get("additionalContext", "")
+            checks.append(
+                (
+                    "card-type lint adds one line when a card FAILs and no line when every card is clean",
+                    broken_result.returncode == 0
+                    and clean_result.returncode == 0
+                    and "🧾 卡片型別檢查：FAIL 1" in broken_context
+                    and broken_context.count("🧾") == 1
+                    and "card index detail" in broken_context
+                    and "🧾" not in clean_context
+                    and "card index detail" in clean_context,
+                )
+            )
+
             second = root / "second-vault"
             second.mkdir()
             (second / memspec.MEMORY_INDEX_FILENAME).write_text("# Second\nsecond index detail\n", encoding="utf-8")
@@ -232,6 +364,83 @@ def _selftest():
                 )
             )
 
+            # 2026-09-05 事故：owner 08-13 親裁的事被端回來當選項。開場要逐條列出該庫
+            # 的現行裁定，帶原話、新→舊，壓縮後重注的那一場也一樣。
+            decision_vault = root / "decision-vault"
+            decision_vault.mkdir()
+            (decision_vault / memspec.MEMORY_INDEX_FILENAME).write_text(
+                "# Decisions\ndecision index detail\n", encoding="utf-8"
+            )
+            for index in range(14):
+                (decision_vault / f"decision-{index:02d}.md").write_text(
+                    f"---\nname: Decision {index}\ndescription: 2026 決策摘要 {index}\n"
+                    f"{memspec.DECISION_KEY_FIELD}: rule-{index:02d}\n"
+                    f"{memspec.DECISION_STATUS_FIELD}: {memspec.ACTIVE_DECISION_STATUS}\n"
+                    f"{memspec.CURRENT_DECISION_AT_FIELD}: 2026-08-{index + 1:02d}\n"
+                    f"{memspec.DECIDED_BY_FIELD}: {memspec.OWNER_EXPLICIT_DECIDER}\n"
+                    f"{memspec.OWNER_QUOTE_FIELD}: 只有 6s 是標準合約 {index}\n---\nbody\n",
+                    encoding="utf-8",
+                )
+            (decision_vault / "decision-retired.md").write_text(
+                "---\nname: Decision Retired\ndescription: 舊制\n"
+                f"{memspec.DECISION_KEY_FIELD}: rule-retired\n"
+                f"{memspec.DECISION_STATUS_FIELD}: {memspec.SUPERSEDED_DECISION_STATUS}\n"
+                f"{memspec.SUPERSEDED_BY_FIELD}: decision-00.md\n"
+                f"{memspec.CURRENT_DECISION_AT_FIELD}: 2026-01-01\n---\nbody\n",
+                encoding="utf-8",
+            )
+            decision_config = root / "decision-config.json"
+            write_config(decision_config, [decision_vault])
+            decision_result = run_synthetic(Path(__file__), {"source": "startup"}, decision_config)
+            decision_value = json.loads(decision_result.stdout) if decision_result.stdout.strip() else {}
+            decision_context = decision_value.get("hookSpecificOutput", {}).get("additionalContext", "")
+            decision_header = memspec.SESSIONSTART_DECISIONS_HEADER.format(vault=decision_vault.name)
+            decision_lines = [
+                line for line in decision_context.splitlines() if line.startswith("rule-")
+            ]
+            checks.append(
+                (
+                    "active decisions open the session in the owner's words, newest first, above the index",
+                    decision_result.returncode == 0
+                    and decision_header in decision_context
+                    and decision_lines[:2] == [
+                        "rule-13｜2026-08-14｜只有 6s 是標準合約 13",
+                        "rule-12｜2026-08-13｜只有 6s 是標準合約 12",
+                    ]
+                    and "rule-retired" not in decision_context
+                    and decision_context.index(decision_header)
+                    < decision_context.index("decision index detail"),
+                )
+            )
+            checks.append(
+                (
+                    "the list is capped and the cut is said with the command that shows the rest",
+                    len(decision_lines) == memspec.SESSIONSTART_DECISIONS_MAX_LINES
+                    and f'…另 2 條：python epitype/decision_lint.py "{decision_vault}"' in decision_context,
+                )
+            )
+            compact_result = run_synthetic(Path(__file__), {"source": "compact"}, decision_config)
+            compact_value = json.loads(compact_result.stdout) if compact_result.stdout.strip() else {}
+            compact_context = compact_value.get("hookSpecificOutput", {}).get("additionalContext", "")
+            checks.append(
+                (
+                    "the session that resumes after a compaction gets the same decisions",
+                    compact_result.returncode == 0
+                    and decision_header in compact_context
+                    and "rule-13｜2026-08-14｜只有 6s 是標準合約 13" in compact_context,
+                )
+            )
+            plain_result = run_synthetic(Path(__file__), {"source": "startup"}, config)
+            plain_value = json.loads(plain_result.stdout) if plain_result.stdout.strip() else {}
+            plain_context = plain_value.get("hookSpecificOutput", {}).get("additionalContext", "")
+            checks.append(
+                (
+                    "a vault with no active decision card gets no block at all",
+                    plain_result.returncode == 0
+                    and "現行裁定" not in plain_context
+                    and "index detail" in plain_context,
+                )
+            )
             bad_config = root / "bad-config.json"
             bad_config.write_text("{broken", encoding="utf-8")
             bad_result = run_synthetic(
@@ -251,7 +460,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 8
+    total = 13
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

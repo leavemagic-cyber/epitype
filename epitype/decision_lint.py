@@ -3,10 +3,8 @@ import sys; sys.dont_write_bytecode = True; [getattr(stream, "reconfigure", lamb
 
 import argparse
 from dataclasses import dataclass, field
-from datetime import date, datetime
 from pathlib import Path
 import posixpath
-import re
 import tempfile
 
 try:
@@ -31,7 +29,9 @@ SUPERSEDED_DECISION_STATUS = _memspec.SUPERSEDED_DECISION_STATUS
 
 FRONTMATTER_BOUNDARY = _memspec.FRONTMATTER_BOUNDARY
 YAML_DOCUMENT_END = _memspec.YAML_DOCUMENT_END
-TOP_LEVEL_FIELD = re.compile(r"^([A-Za-z_][A-Za-z0-9_-]*)\s*:\s*(.*)$")
+# U38：平面欄位讀法正本已搬進 memspec；這裡留同名別名給既有呼叫端（card_lint、
+# alias_batch、tests）不因搬移而壞。
+TOP_LEVEL_FIELD = _memspec.TOP_LEVEL_FIELD
 
 
 @dataclass(frozen=True)
@@ -65,105 +65,15 @@ _parse_scalar = _memspec.parse_scalar
 
 
 def _parse_frontmatter(path):
-    """回傳 top-level scalar 欄位；壞 YAML 留一則警告但保留已解析欄。"""
-    try:
-        text = path.read_text(encoding="utf-8-sig")
-    except (OSError, UnicodeError) as exc:
-        return {}, f"無法以 UTF-8 讀取 frontmatter：{type(exc).__name__}"
+    """回傳 top-level scalar 欄位；壞 YAML 留一則警告但保留已解析欄。
 
-    front_lines, closing_index = _memspec.split_frontmatter(text)
-    if front_lines is None:
-        return {}, None
-    if closing_index is None:
-        return {}, "frontmatter 缺少結束界線"
-
-    fields = {}
-    problems = []
-    active_container_indent = None
-    block_field = None
-    block_style = None
-    block_indent = None
-    block_lines = []
-
-    def finish_block():
-        nonlocal block_field, block_style, block_indent, block_lines
-        if block_field is not None:
-            fields[block_field] = _memspec.join_block_scalar(block_style, block_lines)
-        block_field = None
-        block_style = None
-        block_indent = None
-        block_lines = []
-
-    for line_number, raw_line in enumerate(front_lines, start=2):
-        if not raw_line.strip() or raw_line.lstrip().startswith("#"):
-            if block_field is not None:
-                block_lines.append("")
-            continue
-
-        indent = len(raw_line) - len(raw_line.lstrip(" "))
-        if "\t" in raw_line[: len(raw_line) - len(raw_line.lstrip())]:
-            problems.append(f"L{line_number} 使用 tab 縮排")
-            continue
-
-        if block_field is not None:
-            if indent > 0:
-                if block_indent is None:
-                    block_indent = indent
-                block_lines.append(raw_line[min(indent, block_indent) :])
-                continue
-            finish_block()
-
-        if indent > 0:
-            if active_container_indent is not None:
-                continue
-            problems.append(f"L{line_number} 有無上層欄位的縮排內容")
-            continue
-
-        active_container_indent = None
-        match = TOP_LEVEL_FIELD.match(raw_line)
-        if match is None:
-            problems.append(f"L{line_number} 不是 top-level key: value")
-            continue
-
-        key, raw_value = match.groups()
-        if key in fields:
-            problems.append(f"L{line_number} 重複欄位 {key}")
-            continue
-        stripped = raw_value.strip()
-        if stripped in _memspec.BLOCK_SCALAR_STYLES:
-            block_field = key
-            block_style = stripped
-            block_indent = None
-            block_lines = []
-            continue
-
-        value, problem = _parse_scalar(raw_value)
-        fields[key] = value
-        if problem:
-            problems.append(f"L{line_number} {problem}")
-        if not stripped:
-            active_container_indent = 0
-
-    finish_block()
-    if problems:
-        return fields, "；".join(problems[:3])
-    return fields, None
+    U38：薄包裝，正本讀法在 memspec.frontmatter_fields；行為與 diagnostics
+    文字不變，僅名稱在此保留給既有呼叫端。"""
+    return _memspec.frontmatter_fields(path)
 
 
-def _is_iso_date(value):
-    if not value:
-        return False
-    try:
-        date.fromisoformat(value)
-        return True
-    except ValueError:
-        pass
-    try:
-        normalized = value[:-1] + "+00:00" if value.endswith(("Z", "z")) else value
-        datetime.fromisoformat(normalized)
-        return True
-    except ValueError:
-        return False
+# U38：正本在 memspec.is_iso_date；同名別名給既有呼叫端。
+_is_iso_date = _memspec.is_iso_date
 
 
 def _target_index(cards, vault):
