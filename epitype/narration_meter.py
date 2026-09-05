@@ -80,7 +80,9 @@ def current_turn_blocks(transcript_path, tail_bytes=memspec.NARRATION_TAIL_BYTES
 
 
 def narration_segments(blocks):
-    """Text blocks that sit after the turn's first tool call and before its last one."""
+    """Text blocks emitted after the turn's first tool call. The gate consults
+    this when the next tool call starts, so every such block sat between two
+    tool calls; a report that truly ends the turn never reaches it."""
     positions = [index for index, (kind, _) in enumerate(blocks) if kind == "tool_use"]
     if len(positions) < 1:
         return []
@@ -186,7 +188,7 @@ def _selftest():
             transcript.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n", encoding="utf-8")
             blocks = current_turn_blocks(transcript)
             found = narration_segments(blocks)
-            checks.append(("opening line and short interjection excluded; mid-turn narration counted", found == ["那次失敗是我的路徑錯，改成 C:/… 重跑一次。", "做完了，三個測試都過。"] or found == ["那次失敗是我的路徑錯，改成 C:/… 重跑一次。"]))
+            checks.append(("opening line and short interjection excluded; every block after the first tool call counted", found == ["那次失敗是我的路徑錯，改成 C:/… 重跑一次。", "做完了，三個測試都過。"]))
             # pending_narration at the moment PreToolUse fires for t2 (text just emitted, tool_use maybe already written)
             at_t2 = [("text", "先看測試檔再改。"), ("tool_use", "t1"), ("text", "那次失敗是我的路徑錯，改成 C:/… 重跑一次。")]
             checks.append(("pending narration seen before the tool line is written", pending_narration(at_t2) == "那次失敗是我的路徑錯，改成 C:/… 重跑一次。"))

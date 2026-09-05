@@ -173,15 +173,24 @@ def payload_fits(event_name, context, context_budget):
 
 
 def bounded_context(event_name, pieces, context_budget, required_first=False):
+    """The longest prefix of `pieces` that fits the budget, in order: a piece
+    is never skipped for a later one (a ledger read with holes is worse than a
+    ledger cut short), and a cut is announced with the count of pieces left."""
+    pieces = [piece for piece in pieces if isinstance(piece, str) and piece]
     selected = []
-    for piece in pieces:
-        if not isinstance(piece, str) or not piece:
-            continue
+    for index, piece in enumerate(pieces):
         candidate = "\n".join(selected + [piece])
         if payload_fits(event_name, candidate, context_budget):
             selected.append(piece)
-        elif required_first and not selected:
+            continue
+        if required_first and not selected:
             return None
+        suffix = memspec.CONTEXT_TRUNCATED_SUFFIX.format(dropped=len(pieces) - index)
+        while selected and not payload_fits(event_name, "\n".join(selected + [suffix]), context_budget):
+            selected.pop()
+        if selected:
+            selected.append(suffix)
+        break
     return "\n".join(selected) if selected else None
 
 

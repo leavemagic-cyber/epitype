@@ -332,8 +332,12 @@ def _handle(event, started_at):
                     located = f"{alias}/{Path(path).resolve().relative_to(vault).as_posix()}"
                 except (OSError, ValueError):
                     located = path  # never emit an alias the legend cannot resolve
-            description = _one_line(hit.get("description"))[: memspec.RECALL_DESCRIPTION_MAX_CHARS]
-            line = "- " + (prefix or "") + " | ".join((_one_line(hit.get("name")), description, located))
+            name = _one_line(hit.get("name"))
+            description = memspec.CAPTURE_LABEL_REGEX.sub("", _one_line(hit.get("description")))
+            description = description[: memspec.RECALL_DESCRIPTION_MAX_CHARS]
+            # Say each fact once: a name the path already spells is not repeated.
+            parts = (description, located) if located.endswith(f"/{name}.md") else (name, description, located)
+            line = "- " + (prefix or "") + " | ".join(part for part in parts if part)
             (pinned if prefix else others).append(line)
             used = True
         if used:
@@ -343,10 +347,19 @@ def _handle(event, started_at):
     others = others[: max(0, memspec.RECALL_TOTAL_MAX_LINES - len(pinned))]
     # The legend is what makes V1/... resolvable, so it shares the required first
     # piece with the advisory instead of being droppable on its own.
+    if not pinned and not others:
+        return None
     head = memspec.UNTRUSTED_ADVISORY
-    if legend and (pinned or others):
+    if legend:
         head += "\n" + memspec.RECALL_LEGEND_PREFIX + " ".join(legend)
-    pieces = [head, *pinned, *others]
+    session_id = event.get("session_id", event.get("sessionId", ""))
+    if not isinstance(session_id, str):
+        session_id = ""
+    # The advisory and the legend are paid for once per session (and again after
+    # compaction, which clears the markers); each distinct legend is sent once.
+    head_digest = "head-" + hashlib.sha256(head.encode("utf-8")).hexdigest()[:24]
+    head_seen = bool(session_id) and (recall_marker_directory(session_id) / head_digest).is_file()
+    pieces = [*pinned, *others] if head_seen else [head, *pinned, *others]
 
     context = bounded_context(
         "UserPromptSubmit",
@@ -356,12 +369,13 @@ def _handle(event, started_at):
     )
     if not context or context == head:
         return None
-    digest = hashlib.sha256(context.encode("utf-8")).hexdigest()
-    session_id = event.get("session_id", event.get("sessionId", ""))
-    if not isinstance(session_id, str):
-        session_id = ""
+    # Dedupe on the cards, not on the head: the same cards are not re-sent
+    # merely because the head was dropped from their second appearance.
+    digest = hashlib.sha256("\n".join([*pinned, *others]).encode("utf-8")).hexdigest()
     if expired(started_at) or not _claim_marker(session_id, digest):
         return None
+    if not head_seen:
+        _claim_marker(session_id, head_digest)
     return payload("UserPromptSubmit", context)
 
 
