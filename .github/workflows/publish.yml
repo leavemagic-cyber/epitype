@@ -21,7 +21,7 @@ jobs:
         run: python -m pip install --upgrade build twine
       - name: Require a matching version and a green source tree
         run: |
-          python -c "import epitype, os, sys; expected = os.environ['GITHUB_REF_NAME'].removeprefix('v'); sys.exit(0 if epitype.__version__ == expected else f'tag {expected} != package {epitype.__version__}')"
+          python -c "import epitype, json, os, sys; expected = os.environ['GITHUB_REF_NAME'].removeprefix('v'); npm = json.load(open('package.json', encoding='utf-8'))['version']; sys.exit(0 if epitype.__version__ == expected == npm else f'tag {expected} != package {epitype.__version__} / package.json {npm}')"
           python tests/run_all.py
       - name: Build sdist and wheel
         run: python -m build

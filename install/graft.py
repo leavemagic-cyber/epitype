@@ -27,6 +27,8 @@ CONFIG_FILENAME = "config.json"
 STATE_FILENAME = "install_state.json"
 SHIM_STATUS_FILENAME = "shim_status.json"
 HOOK_DIRECTORY = "hooks"
+BACKUP_INFIX = ".bak_epitype_"
+BACKUPS_KEPT = 3
 FALLBACK_VAULT = ".epitype-vault"
 SHIM_ADAPTER_TOKEN = "__EPITYPE_ADAPTER_FILENAME__"
 SHIM_TRACE_ENV = "EPITYPE_SHIM_TRACE"
@@ -440,13 +442,28 @@ def _unmerge_hooks(raw, target_state):
 
 
 def _backup_name(path, timestamp):
-    base = path.with_name(path.name + ".bak_epitype_" + timestamp)
+    base = path.with_name(path.name + BACKUP_INFIX + timestamp)
     candidate = base
     counter = 2
     while candidate.exists():
         candidate = path.with_name(base.name + f"_{counter}")
         counter += 1
     return candidate
+
+
+def _prune_backups(path, keep):
+    """Every install, vault change, and relocation leaves a backup beside the
+    edited file; only the newest few are worth keeping."""
+    prefix = path.name + BACKUP_INFIX
+    try:
+        backups = sorted(
+            (item for item in path.parent.iterdir() if item.name.startswith(prefix) and item.is_file()),
+            key=lambda item: item.stat().st_mtime,
+        )
+        for stale in backups[:-keep] if keep > 0 else backups:
+            stale.unlink()
+    except OSError:
+        pass
 
 
 def _atomic_write(path, data):
@@ -498,6 +515,7 @@ class Transaction:
             backup = _backup_name(path, self.timestamp)
             shutil.copy2(path, backup)
             self.backups.append((path, backup))
+            _prune_backups(path, keep=BACKUPS_KEPT)
 
     def write(self, path, data):
         current = path.read_bytes() if path.exists() else None
@@ -814,6 +832,53 @@ def _marker_count(path):
     return counts
 
 
+_COMMAND_HEAD = re.compile(r'^\s*(?:"([^"]+)"|(\S+))\s+(.*)$')
+_PATH_PYTHON_NAMES = ("python", "python3", "py")
+
+
+def _split_command(command):
+    """(interpreter token, rest) of a registered hook command."""
+    match = _COMMAND_HEAD.match(command or "")
+    if match is None:
+        return None, command
+    return match.group(1) or match.group(2), match.group(3).strip()
+
+
+def _entry_matches(actual, expected):
+    """A registration matches when everything but the interpreter token is the
+    rendered template and the token names an interpreter that exists: the bare
+    PATH name older installs registered, or a resolvable executable. Doctor is
+    run from whichever Python is at hand, so requiring the exact path of the
+    running interpreter would fail every working install."""
+    if not isinstance(actual, dict) or set(actual) != set(expected):
+        return False
+    for key, value in expected.items():
+        if key != "hooks":
+            if actual.get(key) != value:
+                return False
+            continue
+        actual_hooks = actual.get("hooks")
+        if not isinstance(actual_hooks, list) or len(actual_hooks) != len(value):
+            return False
+        for actual_hook, expected_hook in zip(actual_hooks, value):
+            if not isinstance(actual_hook, dict) or set(actual_hook) != set(expected_hook):
+                return False
+            for hook_key, hook_value in expected_hook.items():
+                if hook_key != "command":
+                    if actual_hook.get(hook_key) != hook_value:
+                        return False
+                    continue
+                python, rest = _split_command(actual_hook.get("command"))
+                expected_python, expected_rest = _split_command(hook_value)
+                if python is None or rest != expected_rest:
+                    return False
+                if python == expected_python or Path(python).name.lower() in _PATH_PYTHON_NAMES:
+                    continue
+                if not Path(python).is_file():
+                    return False
+    return True
+
+
 def _marked_entries(path):
     value = json.loads(path.read_text(encoding="utf-8"))
     hooks = value.get("hooks", {}) if isinstance(value, dict) else {}
@@ -1007,6 +1072,8 @@ def _doctor(home, dry_run=False, output=sys.stdout, clear_shim_status=False):
             if not shim_path.is_file() or shim_path.read_bytes() != expected:
                 raise ValueError(f"shim is missing or stale: {shim_path}")
         print(f"SHIM RESOLUTION: PASS 4/4 repo_root={repo_root}", file=output)
+        if not hosts:
+            raise ValueError("no supported host detected")
         for name in hosts:
             hook_path = (
                 home / ".claude" / "settings.json"
@@ -1015,12 +1082,14 @@ def _doctor(home, dry_run=False, output=sys.stdout, clear_shim_status=False):
             )
             actual = _marked_entries(hook_path)
             expected = _hook_template(name == "codex", hooks_root, repo_root)
-            mismatches = [event for event in EVENTS if actual[event] != [expected[event]]]
+            mismatches = [
+                event
+                for event in EVENTS
+                if len(actual[event]) != 1 or not _entry_matches(actual[event][0], expected[event])
+            ]
             if mismatches:
                 raise ValueError(f"{name} shim registration mismatch: {', '.join(mismatches)}")
             print(f"REGISTRATION {name}: PASS 4/4", file=output)
-        if not hosts:
-            raise ValueError("no supported host detected")
         health_ok = _synthetic_health(home, repo_root, output)
         final_records = _read_shim_status(home)
         _report_shim_status(final_records, output, previous=initial_records)
@@ -1037,7 +1106,7 @@ def _doctor(home, dry_run=False, output=sys.stdout, clear_shim_status=False):
 
 
 def _planned_backup(path):
-    return path.with_name(path.name + ".bak_epitype_<UTC>")
+    return path.with_name(path.name + BACKUP_INFIX + "<UTC>")
 
 
 def _install(home, dry_run=False, apply_billing_guard=False, output=sys.stdout, repo_root=REPO_ROOT):
@@ -1385,6 +1454,42 @@ def _selftest():
                 len(backups) == 2
                 and any(path.read_bytes() == claude_source for path in backups)
                 and any(path.read_bytes() == codex_source for path in backups),
+            ))
+
+            prune_target = home / "prune" / "settings.json"
+            prune_target.parent.mkdir(parents=True)
+            prune_target.write_text("{}", encoding="utf-8")
+            for index in range(BACKUPS_KEPT + 3):
+                stale = prune_target.with_name(f"{prune_target.name}{BACKUP_INFIX}2026090{index}T000000Z")
+                stale.write_text(str(index), encoding="utf-8")
+                os.utime(stale, (1_700_000_000 + index, 1_700_000_000 + index))
+            _prune_backups(prune_target, keep=BACKUPS_KEPT)
+            remaining = sorted(item.name for item in prune_target.parent.iterdir() if BACKUP_INFIX in item.name)
+            checks.append((
+                "only the newest backups of an edited file are kept",
+                len(remaining) == BACKUPS_KEPT
+                and remaining[-1].endswith(f"2026090{BACKUPS_KEPT + 2}T000000Z")
+                and prune_target.is_file(),
+            ))
+
+            rendered = expected_claude["SessionStart"]
+            rendered_command = rendered["hooks"][0]["command"]
+            _, rendered_rest = _split_command(rendered_command)
+
+            def variant(command=None, **overrides):
+                entry = json.loads(json.dumps(rendered))
+                if command is not None:
+                    entry["hooks"][0]["command"] = command
+                entry["hooks"][0].update(overrides)
+                return entry
+
+            checks.append((
+                "doctor accepts a PATH interpreter or an existing one, and nothing else about the entry",
+                _entry_matches(variant(f"python {rendered_rest}"), rendered)
+                and _entry_matches(variant(f'"{sys.executable}" {rendered_rest}'), rendered)
+                and not _entry_matches(variant(f'"{home / "missing-python.exe"}" {rendered_rest}'), rendered)
+                and not _entry_matches(variant(f'python "{home / "elsewhere.py"}"'), rendered)
+                and not _entry_matches(variant(timeout=30), rendered),
             ))
 
             before_uninstall_dry = _tree_digest(home)
@@ -1870,7 +1975,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 28
+    total = 30
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

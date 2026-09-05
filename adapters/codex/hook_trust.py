@@ -104,12 +104,14 @@ def _classify(record, digest, seen_record):
 def run_check(home, output=sys.stdout, seen_path=None):
     hooks_path = (home / ".codex" / "hooks.json").resolve()
     config_path = home / ".codex" / "config.toml"
+    # Nothing checked is not a pass: exit 1 with a verdict that says so, never
+    # a "skip" that reads as green.
     if not hooks_path.is_file() or not config_path.is_file():
-        print("CODEX TRUST: SKIP no codex hooks.json/config.toml", file=output)
+        print("CODEX TRUST: UNVERIFIED no codex hooks.json/config.toml", file=output)
         return 1
     positions = _epitype_positions(hooks_path)
     if not positions:
-        print("CODEX TRUST: SKIP no epitype registrations", file=output)
+        print("CODEX TRUST: UNVERIFIED no epitype registrations", file=output)
         return 1
     counts = {event: 0 for event in REQUIRED_EVENTS}
     unexpected = []
@@ -262,7 +264,7 @@ def _selftest():
             home = root / "nocodex"
             home.mkdir()
             out = io.StringIO()
-            checks.append(("missing codex host is not a runnable success", run_check(home, out) == 1 and "SKIP" in out.getvalue()))
+            checks.append(("missing codex host is not a runnable success", run_check(home, out) == 1 and "UNVERIFIED" in out.getvalue()))
 
             cp950_environment = os.environ.copy()
             cp950_environment["PYTHONUTF8"] = "0"
