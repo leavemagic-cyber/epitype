@@ -5,7 +5,6 @@ import json
 import hashlib
 import os
 from pathlib import Path
-import re
 import tempfile
 import time
 
@@ -15,6 +14,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from epitype import compact_map, memspec
 from _hook_common import (
+    clear_recall_markers,
     emit,
     expired,
     governance_vault,
@@ -22,17 +22,15 @@ from _hook_common import (
     payload,
     payload_fits,
     read_event,
+    recall_marker_directory,
     run_synthetic,
+    session_component,
     write_config,
 )
 
 
 def _map_destination(vault, event, transcript):
-    raw_session = event.get("session_id", event.get("sessionId", ""))
-    session = raw_session if isinstance(raw_session, str) else ""
-    component = re.sub(r"[^A-Za-z0-9._-]", "_", session).strip("._-")[:80]
-    if not component:
-        component = "transcript"
+    component = session_component(event.get("session_id", event.get("sessionId", "")), limit=80)
     digest = hashlib.sha256(os.fspath(transcript).encode("utf-8")).hexdigest()[:12]
     return (vault / memspec.COMPACT_MAP_DIRECTORY / f"{component}-{digest}.md").resolve()
 
@@ -75,6 +73,9 @@ def _handle(event, started_at):
         memspec.COMPACT_MAP_DEFAULT_BUDGET_BYTES,
     )
     _sweep_maps(destination.parent, destination)
+    # What recall injected before compaction is gone after it; forget the
+    # same-session dedupe with it so corrections and rulings can return.
+    clear_recall_markers(event.get("session_id", event.get("sessionId", "")))
     context = f"地圖已落於{destination},壓縮後先讀它按行號回撈原文。"
     budget = config[memspec.CONFIG_BUDGET_BYTES_FIELD]
     if expired(started_at) or not payload_fits("PreCompact", context, budget):
@@ -137,7 +138,14 @@ def _selftest():
                 "transcript_path": str(second_transcript),
                 "session_id": "session-b",
             }
+            marker_directory = recall_marker_directory("session-b")
+            marker_directory.mkdir(parents=True, exist_ok=True)
+            (marker_directory / "digest").write_text("digest\n", encoding="ascii")
             second_result = run_synthetic(Path(__file__), second_event, config)
+            checks.append((
+                "compaction forgets the session's recall dedupe so injected cards can return",
+                not marker_directory.exists(),
+            ))
             second_destination = _map_destination(
                 vault, second_event, second_transcript.resolve()
             )
@@ -215,7 +223,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 6
+    total = 7
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

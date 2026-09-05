@@ -5,11 +5,35 @@ import json
 import os
 from pathlib import Path
 import re
+import tempfile
 
 from epitype import memspec
 
 NATIVE_PROJECTS_SUBPATH = (".claude", "projects")
 _SLUG_PATTERN = re.compile(r"[^A-Za-z0-9]")
+
+
+def session_component(session_id, limit=128):
+    """Filesystem-safe session identifier shared by every per-session marker."""
+    text = session_id if isinstance(session_id, str) else ""
+    return re.sub(r"[^A-Za-z0-9._-]", "_", text).strip("._-")[:limit] or "nosession"
+
+
+def recall_marker_directory(session_id):
+    return Path(tempfile.gettempdir()) / memspec.RECALL_MARKER_DIRECTORY / session_component(session_id)
+
+
+def clear_recall_markers(session_id):
+    """Compaction drops the injected context, so the same-session dedupe is
+    dropped with it: a correction injected before compaction must return after."""
+    directory = recall_marker_directory(session_id)
+    try:
+        for marker in directory.iterdir():
+            if marker.is_file() and not marker.is_symlink():
+                marker.unlink()
+        directory.rmdir()
+    except OSError:
+        pass
 
 
 def expired(started_at):

@@ -22,8 +22,10 @@ from _hook_common import (
     load_config,
     payload,
     read_event,
+    recall_marker_directory,
     resolve_vaults,
     run_synthetic,
+    session_component,
     write_config,
 )
 
@@ -131,9 +133,14 @@ def _write_capture(vault, directory_name, kind, digest, label, body, event, star
             temporary.write_text(card, encoding="utf-8")
             os.replace(temporary, target)
         # The staleness grace window would hide the new card from the very next
-        # prompt; a captured owner sentence must be recallable immediately.
+        # prompt; a captured owner sentence must be recallable immediately. When
+        # the index lock is taken by another hook, age the index instead so the
+        # next reader rebuilds it.
         if not expired(started_at):
-            memsearch.build_index(vault, lock_timeout=0.0)
+            remaining = memspec.HOOK_TIMEOUT_SECONDS - (time.monotonic() - started_at)
+            wait = max(0.0, min(memspec.GRANT_LOCK_SECONDS, remaining - 0.5))
+            if memsearch.build_index(vault, lock_timeout=wait).get("status") != "built":
+                memsearch.mark_stale(vault)
         return target
     except (OSError, sqlite3.Error):
         return None
@@ -222,15 +229,13 @@ def _capture_ruling(prompt, vault, event, started_at):
     )
 
 
-def _session_component(session_id):
-    component = re.sub(r"[^A-Za-z0-9._-]", "_", session_id)[:128]
-    return component or hashlib.sha256(session_id.encode("utf-8")).hexdigest()
-
-
 def _sweep_recall_markers(root, now, keep=None):
+    """Bounded by directories removed, not directories seen: fresh sessions that
+    sort first must not shield the aged ones behind them forever."""
+    removed = 0
     try:
-        for index, directory in enumerate(root.iterdir()):
-            if index >= memspec.RECALL_MARKER_SWEEP_LIMIT:
+        for directory in root.iterdir():
+            if removed >= memspec.RECALL_MARKER_SWEEP_LIMIT:
                 break
             try:
                 is_junction = getattr(directory, "is_junction", lambda: False)()
@@ -246,6 +251,7 @@ def _sweep_recall_markers(root, now, keep=None):
                     if marker.is_file() and not marker.is_symlink():
                         marker.unlink()
                 directory.rmdir()
+                removed += 1
             except OSError:
                 continue
     except OSError:
@@ -255,11 +261,7 @@ def _sweep_recall_markers(root, now, keep=None):
 def _claim_marker(session_id, block_digest):
     if not session_id:
         return True
-    directory = (
-        Path(tempfile.gettempdir())
-        / memspec.RECALL_MARKER_DIRECTORY
-        / _session_component(session_id)
-    )
+    directory = recall_marker_directory(session_id)
     _sweep_recall_markers(directory.parent, time.time(), keep=directory)
     directory.mkdir(parents=True, exist_ok=True)
     marker = directory / block_digest
@@ -322,10 +324,14 @@ def _handle(event, started_at):
                         continue
                     body_only += 1
                 ordinary += 1
-            try:
-                located = f"{alias}/{Path(path).resolve().relative_to(vault).as_posix()}"
-            except (OSError, ValueError):
-                located = path  # never emit an alias the legend cannot resolve
+            card_path = _one_line(hit.get("card_path"))
+            if card_path:
+                located = f"{alias}/{card_path}"
+            else:
+                try:
+                    located = f"{alias}/{Path(path).resolve().relative_to(vault).as_posix()}"
+                except (OSError, ValueError):
+                    located = path  # never emit an alias the legend cannot resolve
             description = _one_line(hit.get("description"))[: memspec.RECALL_DESCRIPTION_MAX_CHARS]
             line = "- " + (prefix or "") + " | ".join((_one_line(hit.get("name")), description, located))
             (pinned if prefix else others).append(line)
@@ -417,11 +423,7 @@ def _selftest():
             config = root / "config.json"
             write_config(config, [vault])
             session_id = "synthetic-" + uuid.uuid4().hex
-            marker_directory = (
-                Path(tempfile.gettempdir())
-                / memspec.RECALL_MARKER_DIRECTORY
-                / _session_component(session_id)
-            )
+            marker_directory = recall_marker_directory(session_id)
             event = {"prompt": "how do I use portable recall from the command line", "session_id": session_id}
 
             first = run_synthetic(Path(__file__), event, config)
@@ -447,11 +449,40 @@ def _selftest():
             (aged_directory / "digest").write_text("digest\n", encoding="ascii")
             aged = time.time() - memspec.RECALL_MARKER_TTL_SECONDS - 60
             os.utime(aged_directory, (aged, aged))
+            for index in range(memspec.RECALL_MARKER_SWEEP_LIMIT + 2):
+                (sweep_root / f"aaa-fresh-{index:03d}").mkdir()
             _sweep_recall_markers(sweep_root, time.time())
             checks.append((
-                "aged recall markers are swept in bounded batches",
-                not aged_directory.exists(),
+                "aged recall markers are swept even behind a full batch of fresh sessions",
+                not aged_directory.exists()
+                and (sweep_root / "aaa-fresh-000").is_dir()
+                and session_component(" weird/id. ") == "weird_id"
+                and session_component(None) == "nosession",
             ))
+
+            busy_card = vault / "busy-capture.md"
+            busy_db = memsearch._db_path(vault)
+            with memspec.file_lock(busy_db, 0.0) as held:
+                busy_target = _write_capture(
+                    vault,
+                    memspec.CORRECTION_DIRECTORY,
+                    "correction",
+                    "busylockdigest0",
+                    "owner correction auto-captured",
+                    "busylockneedle sentence",
+                    {"cwd": str(root), "session_id": session_id},
+                    time.monotonic(),
+                )
+            checks.append((
+                "a capture that cannot take the index lock ages the index so the next prompt rebuilds",
+                held
+                and busy_target is not None
+                and busy_target.is_file()
+                and memsearch._is_stale(vault, busy_db)
+                and memsearch.recall_index(vault, "busylockneedle")["count"] == 1,
+            ))
+            busy_target.unlink()
+            busy_card.unlink(missing_ok=True)
 
             supersession_result = run_synthetic(
                 Path(__file__),
@@ -1335,7 +1366,7 @@ def _selftest():
             shutil.rmtree(marker_directory, ignore_errors=True)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 39
+    total = 40
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
