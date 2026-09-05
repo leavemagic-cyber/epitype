@@ -231,6 +231,24 @@ def _target_index(cards, vault):
     return exact, loose
 
 
+def _chain_loops(card, replacement, vault, target_index, cards_by_path):
+    """A superseded card may point at a card that was itself superseded later;
+    the chain is valid as long as it never returns to a card already visited.
+    Any other break in the chain is reported on the card that carries it."""
+    seen = {card.path}
+    current = replacement
+    while current.fields.get(DECISION_STATUS_FIELD, "").strip() != ACTIVE_DECISION_STATUS:
+        if current.path in seen:
+            return True
+        seen.add(current.path)
+        target = current.fields.get(SUPERSEDED_BY_FIELD, "").strip()
+        matches = _resolve_target(current.path, target, vault, target_index) if target else set()
+        if len(matches) != 1:
+            return False
+        current = cards_by_path[next(iter(matches))]
+    return False
+
+
 def _resolve_target(source, raw_target, vault, target_index):
     target = posixpath.normpath(raw_target.strip().replace("\\", "/"))
     if not target or target == "." or target == ".." or target.startswith("../"):
@@ -341,9 +359,12 @@ def lint_vault(vault, audit=False):
         ]
         shown_key = decision_key or "<空白 decision_key>"
         if not active_cards:
+            # A key whose every card is retired is history, not a defect: the
+            # exam corpus and real vaults keep such keys (a stale pointer on one
+            # of them is already a rule-2 failure).
             paths = "；".join(str(card.path) for card in cards)
-            report.failures.append(
-                Finding("FAIL", paths, "1", f"decision_key={shown_key} 沒有現行卡")
+            report.warnings.append(
+                Finding("WARN", paths, "1", f"decision_key={shown_key} 沒有現行卡")
             )
         elif len(active_cards) > 1:
             paths = "；".join(str(card.path) for card in active_cards)
@@ -393,12 +414,9 @@ def lint_vault(vault, audit=False):
                 report.failures.append(
                     Finding("FAIL", str(card.path), "2", "superseded_by 必須指向相同 decision_key")
                 )
-            elif (
-                replacement.fields.get(DECISION_STATUS_FIELD, "").strip()
-                != ACTIVE_DECISION_STATUS
-            ):
+            elif _chain_loops(card, replacement, vault, target_index, cards_by_path):
                 report.failures.append(
-                    Finding("FAIL", str(card.path), "2", "superseded_by 必須指向 active 卡")
+                    Finding("FAIL", str(card.path), "2", "superseded_by 鏈形成循環，沒有現行卡可到達")
                 )
 
     if audit:
@@ -620,11 +638,11 @@ def _selftest():
         result = lint_vault(no_current)
         checks.append(
             (
-                "零現行卡與跨 key replacement 都失敗",
+                "零現行卡只警告，跨 key replacement 失敗",
                 result.exit_code == 1
                 and any(
                     item.rule == "1" and "沒有現行卡" in item.reason
-                    for item in result.failures
+                    for item in result.warnings
                 )
                 and any(
                     item.rule == "2" and "相同 decision_key" in item.reason
@@ -667,8 +685,24 @@ def _selftest():
         )
         result = lint_vault(stale_target)
         checks.append((
-            "replacement 必須直接指向 active 卡",
-            any(item.rule == "2" and "active 卡" in item.reason for item in result.failures),
+            "old→middle→current 的歷史鏈是合法的",
+            result.exit_code == 0 and not any(item.rule == "2" for item in result.failures),
+        ))
+        (stale_target / "current.md").write_text(
+            _card_text(
+                "replacement-key",
+                SUPERSEDED_DECISION_STATUS,
+                "2026-09-01",
+                OWNER_EXPLICIT_DECIDER,
+                f"{OWNER_QUOTE_FIELD}: 繞回舊版\n{SUPERSEDED_BY_FIELD}: old.md",
+            ),
+            encoding="utf-8",
+        )
+        result = lint_vault(stale_target)
+        checks.append((
+            "superseded_by 鏈形成循環時失敗",
+            result.exit_code == 1
+            and any(item.rule == "2" and "循環" in item.reason for item in result.failures),
         ))
 
         exact_path = root / "exact_path"
@@ -727,7 +761,7 @@ def _selftest():
         )
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 11
+    total = 12
     status = "PASS" if passed == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
