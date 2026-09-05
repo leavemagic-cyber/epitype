@@ -166,7 +166,7 @@ def _fixture(root, states, hook_command="python x.py"):
             ],
             "UserPromptSubmit": [
                 {"hooks": [{"type": "command", "command": "other.exe"}]},
-                {"hooks": [{"type": "command", "command": hook_command, "timeout": 3}], "id": MARKER_VALUE},
+                {"hooks": [{"type": "command", "command": hook_command, "timeout": 10}], "id": MARKER_VALUE},
             ],
             "PreToolUse": [
                 {"hooks": [{"type": "command", "command": hook_command + " --gate"}], "id": MARKER_VALUE}

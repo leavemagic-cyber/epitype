@@ -109,7 +109,7 @@ def _run_gate(vault, root, event):
         errors="replace",
         cwd=_REPO_ROOT,
         env=environment,
-        timeout=5,
+        timeout=memspec.HOOK_TIMEOUT_SECONDS + 5,
         check=False,
     )
     if result.returncode != 0:

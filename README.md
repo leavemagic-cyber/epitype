@@ -26,7 +26,7 @@ Epitype connects the same native vaults to four host events:
 | `PreToolUse` | Matches scar-card triggers against the tool and its input. A match returns a bounded denial, safer advice, and an audit row. |
 | `PreCompact` | Builds a small recovery map from the transcript tail before context compaction. |
 
-Injected memory remains advisory. It cannot override system or developer instructions, bypass host permissions, or grant a tool authority by itself. Hook output is capped at 10 KiB and each hook has a three-second fail-open deadline.
+Injected memory remains advisory. It cannot override system or developer instructions, bypass host permissions, or grant a tool authority by itself. Hook output is capped at 10 KiB and each hook has a ten-second fail-open deadline.
 
 ## Governance beyond recall
 

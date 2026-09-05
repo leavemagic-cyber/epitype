@@ -215,7 +215,7 @@ def run_synthetic(script, event, config_path, arguments=(), environment=None):
         encoding="utf-8",
         errors="replace",
         env=environment,
-        timeout=10,
+        timeout=memspec.HOOK_TIMEOUT_SECONDS + 10,
         check=False,
     )
 

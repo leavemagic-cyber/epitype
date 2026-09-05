@@ -46,6 +46,10 @@ inside the interpreter fell from 4.0–4.6 s to about 0.4 s.
   epitype` gains a `__main__` guard; a tag publish requires `package.json` to
   carry the tag version; `tests/run_all.py --jobs N` runs selftests in parallel
   on CI.
+- Hook registrations allow ten seconds instead of three (owner ruling
+  2026-09-05); the hook's own deadline is nine. Existing installs pick this up
+  by re-running `install`, and Codex hosts then need the four hooks trusted
+  again because their definition changed.
 - From the 2026-09-04 batch, kept as found: incremental index builds use mtime
   and size; owner captures and compact maps share the governance vault; compact
   maps are per session and bounded; the installed package provides a unified

@@ -207,7 +207,7 @@ Doctor passes, every selftest is green, and every prompt and tool call still inj
 
 ### Why it happens
 
-A hook must answer within the host's timeout and within its own deadline (three seconds each). Work that grows with the vault — resolving every directory entry to detect junctions, reading every card on every tool call, the interpreter's own start-up on a saturated CPU — can cross that line without any single step failing, and the deadline then does exactly what it was built to do: fail open, silently. A 2026-09-04 change that resolved every vault entry cost four seconds per call on a machine at 100% CPU; selftests with vaults of one to five cards could not see it.
+A hook must answer within the host's timeout and within its own deadline (three seconds each until 2026-09-05; now ten at the host and nine inside the hook). Work that grows with the vault — resolving every directory entry to detect junctions, reading every card on every tool call, the interpreter's own start-up on a saturated CPU — can cross that line without any single step failing, and the deadline then does exactly what it was built to do: fail open, silently. A 2026-09-04 change that resolved every vault entry cost four seconds per call on a machine at 100% CPU; selftests with vaults of one to five cards could not see it.
 
 ### Epitype countermeasure
 

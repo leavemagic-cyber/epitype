@@ -76,7 +76,11 @@ SCAR_CORRECTION_PATTERNS = (
 
 # Claude hook adapters share protocol, budget, and field names through this
 # module so installed entrypoints cannot silently drift from one another.
-HOOK_TIMEOUT_SECONDS = 3.0
+# The host registration allows 10 s (owner ruling 2026-09-05: the old 3 s was
+# never the owner's decision, and on a saturated CPU it silently emptied every
+# hook); the hook's own deadline stays inside that so a late answer is still
+# delivered rather than killed.
+HOOK_TIMEOUT_SECONDS = 9.0
 HOOK_DEFAULT_BUDGET_BYTES = 10 * 1024
 HOOK_MAX_OUTPUT_BYTES = 10 * 1024
 TRIGGER_REGEX_MAX_CHARS = 1024

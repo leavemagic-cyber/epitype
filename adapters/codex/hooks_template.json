@@ -6,7 +6,7 @@
           {
             "type": "command",
             "command": "\"{{PYTHON_EXECUTABLE}}\" \"{{EPITYPE_HOOKS_ROOT}}/sessionstart.py\"",
-            "timeout": 3,
+            "timeout": 10,
             "additionalContextLimit": 1800
           }
         ]
@@ -18,7 +18,7 @@
           {
             "type": "command",
             "command": "\"{{PYTHON_EXECUTABLE}}\" \"{{EPITYPE_HOOKS_ROOT}}/recall.py\"",
-            "timeout": 3,
+            "timeout": 10,
             "additionalContextLimit": 1800
           }
         ]
@@ -30,7 +30,7 @@
           {
             "type": "command",
             "command": "\"{{PYTHON_EXECUTABLE}}\" \"{{EPITYPE_HOOKS_ROOT}}/precompact.py\" --codex",
-            "timeout": 3
+            "timeout": 10
           }
         ]
       }
@@ -41,7 +41,7 @@
           {
             "type": "command",
             "command": "\"{{PYTHON_EXECUTABLE}}\" \"{{EPITYPE_HOOKS_ROOT}}/pretooluse.py\"",
-            "timeout": 3
+            "timeout": 10
           }
         ]
       }

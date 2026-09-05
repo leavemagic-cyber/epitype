@@ -26,7 +26,7 @@ Epitype 把同一組原生 vault 接到四個 host 事件：
 | `PreToolUse` | 用工具與輸入比對傷疤卡 trigger。命中時回傳有界拒絕、較安全的做法與一列稽核紀錄。 |
 | `PreCompact` | 在 context 壓縮前，從 transcript 尾端製作小型復原地圖。 |
 
-注入的記憶只是參考資料，不能推翻 system 或 developer 指令、繞過 host 權限，也不能自行授予工具操作權。每次 hook 輸出最多 10 KiB，執行超過三秒就 fail open，避免記憶層卡住宿主流程。
+注入的記憶只是參考資料，不能推翻 system 或 developer 指令、繞過 host 權限，也不能自行授予工具操作權。每次 hook 輸出最多 10 KiB，執行超過十秒就 fail open，避免記憶層卡住宿主流程。
 
 ## 不只把內容找回來
 
