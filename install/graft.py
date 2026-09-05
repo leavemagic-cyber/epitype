@@ -14,6 +14,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 import tomllib
 
 
@@ -992,6 +993,26 @@ def _synthetic_trace_reason(trace_path, shim_name, expected_adapter):
     return None
 
 
+def _uncommitted_changes(repo_root):
+    """Count of tracked files changed in repo_root's working tree; None when it
+    is not a git checkout or git is unavailable."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", os.fspath(repo_root), "status", "--porcelain", "--untracked-files=no"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    return sum(1 for line in result.stdout.splitlines() if line.strip())
+
+
 def _synthetic_health(home, repo_root, output):
     scripts = (
         ("SessionStart", "sessionstart.py", {"source": "epitype-doctor"}, ()),
@@ -1000,6 +1021,14 @@ def _synthetic_health(home, repo_root, output):
         ("PreToolUse", "pretooluse.py", {"tool_name": "SyntheticRead", "tool_input": {"path": "synthetic.txt"}}, ()),
     )
     passed = 0
+    hooks_root = home / CONFIG_DIRECTORY / HOOK_DIRECTORY
+    try:
+        allowed = {
+            name: float(entry["hooks"][0].get("timeout") or 0)
+            for name, entry in _hook_template(False, hooks_root, repo_root).items()
+        }
+    except (InstallError, OSError, ValueError):
+        allowed = {}
     with tempfile.TemporaryDirectory(prefix="epitype-doctor-") as temp_dir:
         root = Path(temp_dir).resolve()
         vault = root / "vault"
@@ -1009,9 +1038,10 @@ def _synthetic_health(home, repo_root, output):
         environment = _home_environment(home)
         environment["EPITYPE_CONFIG"] = os.fspath(config)
         for name, shim_name, event, arguments in scripts:
-            script = home / CONFIG_DIRECTORY / HOOK_DIRECTORY / shim_name
+            script = hooks_root / shim_name
             trace_path = root / f"{shim_name}.trace"
             environment[SHIM_TRACE_ENV] = os.fspath(trace_path)
+            started = time.monotonic()
             result = subprocess.run(
                 [sys.executable, os.fspath(script), *arguments],
                 input=json.dumps(event, ensure_ascii=False),
@@ -1021,16 +1051,26 @@ def _synthetic_health(home, repo_root, output):
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=10,
+                timeout=allowed.get(name, 0) + 10,
                 check=False,
             )
+            elapsed_ms = int((time.monotonic() - started) * 1000)
             expected_adapter = repo_root / "adapters" / "claude" / HOOK_SPECS[name][1]
             reason = _synthetic_trace_reason(trace_path, shim_name, expected_adapter)
             ok = reason is None
             passed += int(ok)
-            print(f"HOOK {name}: {'PASS' if ok else 'FAIL'}", file=output)
+            print(f"HOOK {name}: {'PASS' if ok else 'FAIL'} ({elapsed_ms} ms)", file=output)
             if reason is not None:
                 print(f"REASON {name}: {reason}", file=output)
+            # A hook that times out at the host fails open without a trace; the
+            # only place that shows the margin shrinking is here.
+            limit = allowed.get(name, 0)
+            if limit and elapsed_ms > limit * 500:
+                print(
+                    f"WARN {name} used {elapsed_ms} ms of the {limit:g} s the host allows on an empty vault;"
+                    " past the limit the host drops the hook silently",
+                    file=output,
+                )
     print(f"HEALTH {'PASS' if passed == len(scripts) else 'FAIL'} {passed}/{len(scripts)}", file=output)
     return passed == len(scripts)
 
@@ -1072,6 +1112,14 @@ def _doctor(home, dry_run=False, output=sys.stdout, clear_shim_status=False):
             if not shim_path.is_file() or shim_path.read_bytes() != expected:
                 raise ValueError(f"shim is missing or stale: {shim_path}")
         print(f"SHIM RESOLUTION: PASS 4/4 repo_root={repo_root}", file=output)
+        dirty = _uncommitted_changes(repo_root)
+        if dirty:
+            # The live hooks run whatever is in repo_root, committed or not
+            # (2026-09-04: an unfinished batch left in the tree ran live for a day).
+            print(
+                f"WARN repo_root has {dirty} uncommitted change(s): the live hooks run code no gate has passed",
+                file=output,
+            )
         if not hosts:
             raise ValueError("no supported host detected")
         for name in hosts:
@@ -1490,6 +1538,35 @@ def _selftest():
                 and not _entry_matches(variant(f'"{home / "missing-python.exe"}" {rendered_rest}'), rendered)
                 and not _entry_matches(variant(f'python "{home / "elsewhere.py"}"'), rendered)
                 and not _entry_matches(variant(timeout=30), rendered),
+            ))
+
+            checks.append((
+                "doctor reports each hook's wall time beside its verdict",
+                all(f"HOOK {event}: PASS (" in first_output.getvalue() for event in EVENTS),
+            ))
+
+            dirty_repo = home / "dirty-repo"
+            dirty_repo.mkdir()
+            git_ok = True
+            try:
+                for arguments in (
+                    ("init", "-q"),
+                    ("config", "user.email", "selftest@example.invalid"),
+                    ("config", "user.name", "selftest"),
+                ):
+                    subprocess.run(["git", "-C", os.fspath(dirty_repo), *arguments], check=True, capture_output=True, timeout=30)
+                (dirty_repo / "tracked.py").write_text("print(1)\n", encoding="utf-8")
+                subprocess.run(["git", "-C", os.fspath(dirty_repo), "add", "tracked.py"], check=True, capture_output=True, timeout=30)
+                subprocess.run(["git", "-C", os.fspath(dirty_repo), "commit", "-q", "-m", "seed"], check=True, capture_output=True, timeout=30)
+                clean_count = _uncommitted_changes(dirty_repo)
+                (dirty_repo / "tracked.py").write_text("print(2)\n", encoding="utf-8")
+                dirty_count = _uncommitted_changes(dirty_repo)
+            except (OSError, subprocess.SubprocessError):
+                git_ok = False
+            checks.append((
+                "doctor can tell a clean checkout from one whose live hooks run uncommitted code",
+                (not git_ok)
+                or (clean_count == 0 and dirty_count == 1 and _uncommitted_changes(home / "not-a-repo") is None),
             ))
 
             before_uninstall_dry = _tree_digest(home)
@@ -1975,7 +2052,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 30
+    total = 32
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

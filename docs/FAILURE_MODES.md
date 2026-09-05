@@ -221,4 +221,4 @@ python adapters/claude/pretooluse_gate.py --selftest
 python install/graft.py doctor
 ```
 
-Doctor's HEALTH step runs each hook once against a synthetic event; on a loaded machine, compare its wall time with the three-second timeout in the host registration — a hook that answers in two seconds there has little margin left.
+Doctor's HEALTH step runs each hook once against a synthetic event and prints its wall time beside the verdict, warning when a hook used more than half of the time the host registration allows. It also warns when `repo_root` has uncommitted changes: the live hooks run whatever is in that tree, and the 2026-09-04 batch ran live for a day precisely because an unfinished change needs no release to take effect.
