@@ -11,7 +11,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from epitype import card_lint, memsearch, memspec, pending_lint
+from epitype import card_lint, commitments, memsearch, memspec, pending_lint
 from _hook_common import (
     bounded_context,
     emit,
@@ -133,6 +133,13 @@ def _handle(event, started_at):
         overdue = pending_lint.summary_line(vaults)
         if overdue:
             pieces.append(overdue)
+
+    # U53：AI 自己開的承諾（「我等一下會…」）沒有任何人在追，而 compaction 正是它蒸發
+    # 的時刻——所以 source: compact 也印。這不是 owner 的待辦，帳本另放，一行帶最近一條。
+    if not expired(started_at):
+        promised = commitments.summary_line(vaults, memspec.COMMITMENT_SESSIONSTART_MAX)
+        if promised:
+            pieces.append(promised)
 
     # A card missing its type's required fields is a card the recall side will
     # hand over half-true. One line, and only when the scan finished inside its
@@ -441,6 +448,48 @@ def _selftest():
                     and "index detail" in plain_context,
                 )
             )
+            # U53: an AI promise nobody is tracking gets one line, under the pending
+            # line, and the compaction-resumed session needs it most of all.
+            promise_vault = root / "promise-vault"
+            promise_vault.mkdir()
+            (promise_vault / memspec.MEMORY_INDEX_FILENAME).write_text(
+                "# Cards\npromise index detail\n", encoding="utf-8"
+            )
+            (promise_vault / "plan.md").write_text(
+                "---\nname: plan\ndescription: synthetic plan\n---\n- 2026-07-22 未辦（owner 自行）：SWSetup\n",
+                encoding="utf-8",
+            )
+            promise_config = root / "promise-config.json"
+            write_config(promise_config, [promise_vault])
+            commitments.record(promise_vault, "sessionstart-promise", ["我等一下會補上 settle 的測試。"])
+            promise_result = run_synthetic(Path(__file__), {"source": "startup"}, promise_config)
+            promise_value = json.loads(promise_result.stdout) if promise_result.stdout.strip() else {}
+            promise_context = promise_value.get("hookSpecificOutput", {}).get("additionalContext", "")
+            promise_line = "⏳ AI 未兌現承諾 1 條（最近：我等一下會補上 settle 的測試。…）"
+            checks.append(
+                (
+                    "an open AI promise adds one line, after the owner's pending line",
+                    promise_result.returncode == 0
+                    and promise_line in promise_context
+                    and promise_context.index("⏳ 殭屍待辦") < promise_context.index(promise_line)
+                    and "promise index detail" in promise_context,
+                )
+            )
+            promise_compact = run_synthetic(Path(__file__), {"source": "compact"}, promise_config)
+            promise_compact_value = json.loads(promise_compact.stdout) if promise_compact.stdout.strip() else {}
+            promise_compact_context = promise_compact_value.get("hookSpecificOutput", {}).get(
+                "additionalContext", ""
+            )
+            checks.append(
+                (
+                    "the compaction-resumed session gets the promise line, and a vault with"
+                    " no open promise gets none",
+                    promise_compact.returncode == 0
+                    and promise_line in promise_compact_context
+                    and "AI 未兌現承諾" not in plain_context,
+                )
+            )
+
             bad_config = root / "bad-config.json"
             bad_config.write_text("{broken", encoding="utf-8")
             bad_result = run_synthetic(
@@ -460,7 +509,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 13
+    total = 15
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

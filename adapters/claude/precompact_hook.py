@@ -72,6 +72,18 @@ def _handle(event, started_at):
         destination,
         memspec.COMPACT_MAP_DEFAULT_BUDGET_BYTES,
     )
+    # U53：壓縮丟掉的正是「我等一下會…」那句話。地圖是壓縮前唯一落地的快照，所以
+    # 還沒兌現的承諾跟著它落地——讀地圖的人不必再去翻帳本。地圖已經寫好的事實不受
+    # 這一段影響：帳本讀不到就什麼都不加。
+    try:
+        from epitype import commitments
+
+        block = commitments.snapshot_block(vault, memspec.COMMITMENT_PRECOMPACT_MAX)
+        if block:
+            with destination.open("a", encoding="utf-8", newline="\n") as stream:
+                stream.write("\n" + block)
+    except Exception:
+        pass
     _sweep_maps(destination.parent, destination)
     # What recall injected before compaction is gone after it; forget the
     # same-session dedupe with it so corrections and rulings can return.
@@ -204,6 +216,25 @@ def _selftest():
                 and not (project_vault / memspec.COMPACT_MAP_DIRECTORY).exists(),
             ))
 
+            # U53: the map is the only pre-compaction snapshot that lands on disk,
+            # so the promises that compaction would erase land with it.
+            from epitype import commitments
+
+            commitments.record(vault, "precompact-promise", ["我等一下會補上 settle 的測試。"])
+            promise_result = run_synthetic(
+                Path(__file__),
+                {"transcript_path": str(transcript)},
+                routed_config,
+            )
+            promise_map = destination.read_text(encoding="utf-8")
+            checks.append((
+                "open promises are appended to the pre-compaction map",
+                promise_result.returncode == 0
+                and memspec.COMMITMENT_PRECOMPACT_HEADING in promise_map
+                and "我等一下會補上 settle 的測試。" in promise_map
+                and "Synthetic recovery request" in promise_map,
+            ))
+
             bad_config = root / "bad-config.json"
             bad_config.write_text("{broken", encoding="utf-8")
             bad_result = run_synthetic(
@@ -223,7 +254,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 7
+    total = 8
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
