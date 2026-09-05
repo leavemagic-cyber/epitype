@@ -26,6 +26,7 @@ SELFTESTS = (
     Path("install") / "scar_scan.py",
     Path("exam") / "exam_runner.py",
     Path("tests") / "privacy_lint.py",
+    Path("tests") / "package_smoke.py",
 )
 
 

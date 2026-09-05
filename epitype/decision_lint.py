@@ -9,20 +9,25 @@ import posixpath
 import re
 import tempfile
 
-from memspec import (
-    ACTIVE_DECISION_STATUS,
-    AI_AUTONOMOUS_DECIDER,
-    CURRENT_DECISION_AT_FIELD,
-    DECIDED_BY_FIELD,
-    DECIDED_BY_VALUES,
-    DECISION_KEY_FIELD,
-    DECISION_STATUS_FIELD,
-    DECISION_STATUS_VALUES,
-    OWNER_EXPLICIT_DECIDER,
-    OWNER_QUOTE_FIELD,
-    SUPERSEDED_BY_FIELD,
-    SUPERSEDED_DECISION_STATUS,
-)
+try:
+    from . import memspec as _memspec
+    from . import memsearch as _memsearch
+except ImportError:  # Direct script execution remains supported.
+    import memspec as _memspec
+    import memsearch as _memsearch
+
+ACTIVE_DECISION_STATUS = _memspec.ACTIVE_DECISION_STATUS
+AI_AUTONOMOUS_DECIDER = _memspec.AI_AUTONOMOUS_DECIDER
+CURRENT_DECISION_AT_FIELD = _memspec.CURRENT_DECISION_AT_FIELD
+DECIDED_BY_FIELD = _memspec.DECIDED_BY_FIELD
+DECIDED_BY_VALUES = _memspec.DECIDED_BY_VALUES
+DECISION_KEY_FIELD = _memspec.DECISION_KEY_FIELD
+DECISION_STATUS_FIELD = _memspec.DECISION_STATUS_FIELD
+DECISION_STATUS_VALUES = _memspec.DECISION_STATUS_VALUES
+OWNER_EXPLICIT_DECIDER = _memspec.OWNER_EXPLICIT_DECIDER
+OWNER_QUOTE_FIELD = _memspec.OWNER_QUOTE_FIELD
+SUPERSEDED_BY_FIELD = _memspec.SUPERSEDED_BY_FIELD
+SUPERSEDED_DECISION_STATUS = _memspec.SUPERSEDED_DECISION_STATUS
 
 FRONTMATTER_BOUNDARY = "---"
 YAML_DOCUMENT_END = "..."
@@ -273,7 +278,7 @@ def lint_vault(vault, audit=False):
         )
         return report
 
-    for path in sorted(vault.rglob("*.md"), key=lambda item: str(item).casefold()):
+    for path in _memsearch.card_files(vault):
         fields, yaml_problem = _parse_frontmatter(path)
         if yaml_problem:
             report.warnings.append(
@@ -337,8 +342,8 @@ def lint_vault(vault, audit=False):
         shown_key = decision_key or "<空白 decision_key>"
         if not active_cards:
             paths = "；".join(str(card.path) for card in cards)
-            report.warnings.append(
-                Finding("WARN", paths, "1", f"decision_key={shown_key} 沒有現行卡")
+            report.failures.append(
+                Finding("FAIL", paths, "1", f"decision_key={shown_key} 沒有現行卡")
             )
         elif len(active_cards) > 1:
             paths = "；".join(str(card.path) for card in active_cards)
@@ -352,6 +357,7 @@ def lint_vault(vault, audit=False):
             )
 
     target_index = _target_index(report.cards, vault)
+    cards_by_path = {card.path: card for card in report.cards}
     for card in report.cards:
         if (
             card.fields.get(DECISION_STATUS_FIELD, "").strip()
@@ -378,6 +384,22 @@ def lint_vault(vault, audit=False):
             report.failures.append(
                 Finding("FAIL", str(card.path), "2", f"superseded_by 指向不唯一：{targets}")
             )
+        else:
+            replacement = cards_by_path[next(iter(matches))]
+            if (
+                replacement.fields.get(DECISION_KEY_FIELD, "").strip()
+                != card.fields.get(DECISION_KEY_FIELD, "").strip()
+            ):
+                report.failures.append(
+                    Finding("FAIL", str(card.path), "2", "superseded_by 必須指向相同 decision_key")
+                )
+            elif (
+                replacement.fields.get(DECISION_STATUS_FIELD, "").strip()
+                != ACTIVE_DECISION_STATUS
+            ):
+                report.failures.append(
+                    Finding("FAIL", str(card.path), "2", "superseded_by 必須指向 active 卡")
+                )
 
     if audit:
         report.audit_rows = sorted(
@@ -598,11 +620,56 @@ def _selftest():
         result = lint_vault(no_current)
         checks.append(
             (
-                "零現行卡警告",
-                result.exit_code == 0
-                and any(item.rule == "1" and "沒有現行卡" in item.reason for item in result.warnings),
+                "零現行卡與跨 key replacement 都失敗",
+                result.exit_code == 1
+                and any(
+                    item.rule == "1" and "沒有現行卡" in item.reason
+                    for item in result.failures
+                )
+                and any(
+                    item.rule == "2" and "相同 decision_key" in item.reason
+                    for item in result.failures
+                ),
             )
         )
+
+        stale_target = root / "stale_target"
+        stale_target.mkdir()
+        (stale_target / "current.md").write_text(
+            _card_text(
+                "replacement-key",
+                ACTIVE_DECISION_STATUS,
+                "2026-09-01",
+                OWNER_EXPLICIT_DECIDER,
+                f"{OWNER_QUOTE_FIELD}: 現行版",
+            ),
+            encoding="utf-8",
+        )
+        (stale_target / "middle.md").write_text(
+            _card_text(
+                "replacement-key",
+                SUPERSEDED_DECISION_STATUS,
+                "2026-08-31",
+                OWNER_EXPLICIT_DECIDER,
+                f"{OWNER_QUOTE_FIELD}: 中間版\n{SUPERSEDED_BY_FIELD}: current.md",
+            ),
+            encoding="utf-8",
+        )
+        (stale_target / "old.md").write_text(
+            _card_text(
+                "replacement-key",
+                SUPERSEDED_DECISION_STATUS,
+                "2026-08-30",
+                OWNER_EXPLICIT_DECIDER,
+                f"{OWNER_QUOTE_FIELD}: 舊版\n{SUPERSEDED_BY_FIELD}: middle.md",
+            ),
+            encoding="utf-8",
+        )
+        result = lint_vault(stale_target)
+        checks.append((
+            "replacement 必須直接指向 active 卡",
+            any(item.rule == "2" and "active 卡" in item.reason for item in result.failures),
+        ))
 
         exact_path = root / "exact_path"
         (exact_path / "sub").mkdir(parents=True)
@@ -660,7 +727,7 @@ def _selftest():
         )
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 10
+    total = 11
     status = "PASS" if passed == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

@@ -12,7 +12,10 @@ import re
 import tempfile
 from contextlib import redirect_stderr, redirect_stdout
 
-from memspec import file_lock
+try:
+    from .memspec import file_lock
+except ImportError:  # Direct script execution remains supported.
+    from memspec import file_lock
 
 
 # 2026-09-01 實測事故：傷疤散在常駐檔、索引紅標、教訓卡與工具冊四層，

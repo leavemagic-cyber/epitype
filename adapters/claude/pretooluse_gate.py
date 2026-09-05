@@ -8,6 +8,8 @@ import json
 import os
 from pathlib import Path
 import re
+from re import _constants as _re_constants
+from re import _parser as _re_parser
 import shlex
 import tempfile
 import uuid
@@ -17,7 +19,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from epitype import memspec, narration_meter
+from epitype import memsearch, memspec, narration_meter
 from _hook_common import (
     emit,
     encode_payload,
@@ -33,7 +35,58 @@ _TRIGGER_KEYS = (
     memspec.TRIGGER_INPUT_FIELD,
     memspec.TRIGGER_MATCH_FIELD,
 )
-SHELL_TOOL_NAMES = frozenset(("bash", "powershell", "sh", "cmd"))
+SHELL_TOOL_NAMES = frozenset(
+    ("bash", "powershell", "sh", "cmd", "shell", "shell_command", "exec_command")
+)
+_REPEAT_OPS = frozenset(
+    (
+        _re_constants.MAX_REPEAT,
+        _re_constants.MIN_REPEAT,
+        _re_constants.POSSESSIVE_REPEAT,
+    )
+)
+_GROUPREF_OPS = frozenset(
+    (
+        _re_constants.GROUPREF,
+        _re_constants.GROUPREF_EXISTS,
+        _re_constants.GROUPREF_IGNORE,
+        _re_constants.GROUPREF_LOC_IGNORE,
+        _re_constants.GROUPREF_UNI_IGNORE,
+    )
+)
+
+
+def _validate_regex_tree(items, inside_repeat=False):
+    previous_repeat = False
+    for opcode, argument in items:
+        if opcode in _REPEAT_OPS:
+            if inside_repeat or previous_repeat:
+                raise ValueError("trigger regex has ambiguous repetition")
+            _validate_regex_tree(argument[2], inside_repeat=True)
+            previous_repeat = True
+            continue
+        previous_repeat = False
+        if opcode == _re_constants.BRANCH:
+            if inside_repeat:
+                raise ValueError("trigger regex repeats an alternation")
+            for branch in argument[1]:
+                _validate_regex_tree(branch, inside_repeat=inside_repeat)
+        elif opcode == _re_constants.SUBPATTERN:
+            _validate_regex_tree(argument[-1], inside_repeat=inside_repeat)
+        elif opcode in (_re_constants.ASSERT, _re_constants.ASSERT_NOT):
+            _validate_regex_tree(argument[1], inside_repeat=inside_repeat)
+        elif opcode == getattr(_re_constants, "ATOMIC_GROUP", object()):
+            _validate_regex_tree(argument, inside_repeat=inside_repeat)
+        elif opcode in _GROUPREF_OPS:
+            raise ValueError("trigger regex backreferences are not supported")
+
+
+def _compile_trigger_regex(pattern):
+    if len(pattern) > memspec.TRIGGER_REGEX_MAX_CHARS:
+        raise ValueError("trigger regex exceeds the length limit")
+    parsed = _re_parser.parse(pattern, 0)
+    _validate_regex_tree(parsed)
+    return re.compile(pattern)
 
 
 def _scalar(raw):
@@ -104,7 +157,7 @@ def _frontmatter(path):
     if not lines or lines[0].strip() != "---":
         return None
     for index, line in enumerate(lines[1:], start=1):
-        if line.strip() == "---":
+        if line.strip() in ("---", "..."):
             return lines[1:index]
     raise ValueError("unterminated frontmatter")
 
@@ -166,7 +219,7 @@ def _parse_trigger_card(path):
                         fields[key] = _scalar(raw_value)
                     except (ValueError, json.JSONDecodeError) as exc:
                         problems.append(str(exc))
-            elif key == "name":
+            elif key in ("name", memspec.DECISION_STATUS_FIELD):
                 try:
                     fields[key] = _scalar(raw_value)
                 except (ValueError, json.JSONDecodeError) as exc:
@@ -210,8 +263,13 @@ def _parse_trigger_card(path):
         memspec.TRIGGER_FULLTEXT_MATCH,
     ):
         raise ValueError("trigger match must be command or fulltext when present")
-    tool_regex = re.compile(tool_pattern)
-    input_regex = re.compile(input_pattern)
+    if (
+        fields.get(memspec.DECISION_STATUS_FIELD, "").strip()
+        == memspec.SUPERSEDED_DECISION_STATUS
+    ):
+        return None
+    tool_regex = _compile_trigger_regex(tool_pattern)
+    input_regex = _compile_trigger_regex(input_pattern)
     return {
         "path": path.resolve(),
         "name": fields.get("name", "").strip() or path.stem,
@@ -520,6 +578,48 @@ def _append_parse_defect(vault, path, error, started_at):
     )
 
 
+def _best_effort_audit(callback, *arguments):
+    try:
+        callback(*arguments)
+    except Exception:
+        pass
+
+
+def _deny_value(reason):
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        }
+    }
+
+
+def _bounded_deny(card):
+    source = f" [{card['path']}]"
+    advice = card["advice"]
+    value = _deny_value(advice + source)
+    if len(encode_payload(value).encode("utf-8")) <= memspec.HOOK_MAX_OUTPUT_BYTES:
+        return value
+
+    # Preserve the card source while trimming only the user-authored advice.
+    # JSON escaping is variable-width, so size the final serialized payload.
+    if len(encode_payload(_deny_value(source.strip())).encode("utf-8")) > memspec.HOOK_MAX_OUTPUT_BYTES:
+        source = " [Epitype trigger]"
+    low = 0
+    high = len(advice)
+    best = _deny_value("Epitype trigger matched." + source)
+    while low <= high:
+        middle = (low + high) // 2
+        candidate = _deny_value(advice[:middle].rstrip() + "…" + source)
+        if len(encode_payload(candidate).encode("utf-8")) <= memspec.HOOK_MAX_OUTPUT_BYTES:
+            best = candidate
+            low = middle + 1
+        else:
+            high = middle - 1
+    return best
+
+
 def _sweep_narration_markers(root, now, keep=None):
     """Markers are a same-session dedupe, not a record: drop the aged-out ones."""
     try:
@@ -597,13 +697,15 @@ def _handle(event, started_at):
 
     cards = []
     for vault in config[memspec.CONFIG_VAULTS_FIELD]:
-        for path in sorted(vault.rglob("*.md"), key=lambda item: str(item).casefold()):
+        for path in memsearch.card_files(vault):
             if expired(started_at):
                 return None
             try:
                 card = _parse_trigger_card(path)
             except Exception as exc:
-                _append_parse_defect(vault, path, exc, started_at)
+                _best_effort_audit(
+                    _append_parse_defect, vault, path, exc, started_at
+                )
                 continue
             if card is not None:
                 cards.append((vault, card))
@@ -638,25 +740,17 @@ def _handle(event, started_at):
             break
     if match is None:
         return _narration_context(event, started_at)
-    if expired(started_at):
-        return None
-
     vault, card, fallback, position = match
-    _append_audit(
-        vault, tool_name, card["name"], started_at, fallback, position
+    value = _bounded_deny(card)
+    _best_effort_audit(
+        _append_audit,
+        vault,
+        tool_name,
+        card["name"],
+        started_at,
+        fallback,
+        position,
     )
-    if expired(started_at):
-        return None
-    reason = f"{card['advice']} [{card['path']}]"
-    value = {
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "deny",
-            "permissionDecisionReason": reason,
-        }
-    }
-    if len(encode_payload(value).encode("utf-8")) > memspec.HOOK_MAX_OUTPUT_BYTES:
-        return None
     return value
 
 
@@ -714,6 +808,89 @@ def _selftest():
                     and log_rows[0].get("card") == "synthetic-safety",
                 )
             )
+
+            audit_lock = Path(os.fspath(log_path) + ".lock")
+            audit_lock.write_text("synthetic-busy\n", encoding="ascii")
+            busy_audit = run_synthetic(
+                Path(__file__),
+                {"tool_name": "Bash", "tool_input": {"command": "remove target"}},
+                config,
+            )
+            audit_lock.unlink(missing_ok=True)
+            busy_value = json.loads(busy_audit.stdout) if busy_audit.stdout.strip() else {}
+            checks.append((
+                "matching deny survives a busy audit lock",
+                busy_audit.returncode == 0
+                and busy_value.get("hookSpecificOutput", {}).get("permissionDecision") == "deny",
+            ))
+
+            oversized_vault = root / "oversized-vault"
+            oversized_vault.mkdir()
+            (oversized_vault / "oversized.md").write_text(
+                "---\nname: oversized\ntrigger: {tool: ^Read$, input: dangerous-target}\n"
+                + "advice: " + ("安全替代方案" * 3000) + "\n---\n",
+                encoding="utf-8",
+            )
+            oversized_config = root / "oversized-config.json"
+            write_config(oversized_config, [oversized_vault])
+            oversized = run_synthetic(
+                Path(__file__),
+                {"tool_name": "Read", "tool_input": {"path": "dangerous-target"}},
+                oversized_config,
+            )
+            oversized_value = json.loads(oversized.stdout) if oversized.stdout.strip() else {}
+            checks.append((
+                "oversized advice is truncated without cancelling the deny",
+                oversized.returncode == 0
+                and oversized_value.get("hookSpecificOutput", {}).get("permissionDecision") == "deny"
+                and len(oversized.stdout.encode("utf-8")) <= memspec.HOOK_MAX_OUTPUT_BYTES + 1,
+            ))
+
+            decision_vault = root / "decision-vault"
+            decision_vault.mkdir()
+            (decision_vault / "old.md").write_text(
+                "---\nname: retired gate\nstatus: superseded\nsuperseded_by: current.md\n"
+                "trigger: {tool: ^Read$, input: retired-target}\nadvice: OLD RULE\n...\n",
+                encoding="utf-8",
+            )
+            (decision_vault / "current.md").write_text(
+                "---\nname: current gate\nstatus: active\n"
+                "trigger: {tool: ^Read$, input: current-target}\nadvice: CURRENT RULE\n...\n",
+                encoding="utf-8",
+            )
+            decision_config = root / "decision-config.json"
+            write_config(decision_config, [decision_vault])
+            retired = run_synthetic(
+                Path(__file__),
+                {"tool_name": "Read", "tool_input": {"path": "retired-target"}},
+                decision_config,
+            )
+            current = run_synthetic(
+                Path(__file__),
+                {"tool_name": "Read", "tool_input": {"path": "current-target"}},
+                decision_config,
+            )
+            current_value = json.loads(current.stdout) if current.stdout.strip() else {}
+            checks.append((
+                "only the active decision card can gate and YAML end markers agree",
+                retired.returncode == 0
+                and not retired.stdout.strip()
+                and current.returncode == 0
+                and current_value.get("hookSpecificOutput", {}).get("permissionDecision") == "deny",
+            ))
+
+            unsafe_card = root / "unsafe-regex.md"
+            unsafe_card.write_text(
+                "---\nname: unsafe regex\ntrigger: {tool: ^Read$, input: '(a+)+$'}\n"
+                "advice: Never evaluate catastrophic backtracking.\n---\n",
+                encoding="utf-8",
+            )
+            try:
+                _parse_trigger_card(unsafe_card)
+                unsafe_rejected = False
+            except ValueError:
+                unsafe_rejected = True
+            checks.append(("ambiguous repeated regex is rejected before matching", unsafe_rejected))
 
             def transcript_rows(*rows):
                 path = root / f"narration-{uuid.uuid4().hex}.jsonl"
@@ -897,16 +1074,16 @@ def _selftest():
             )
             for name, match_field, pattern, advice in card_specs:
                 (command_vault / f"{name}.md").write_text(
-                    f"---\nname: {name}\ntrigger: {{tool: ^Bash$, {match_field}input: '{pattern}'}}\nadvice: {advice}\n---\n",
+                    f"---\nname: {name}\ntrigger: {{tool: ^(?:Bash|Shell|shell_command)$, {match_field}input: '{pattern}'}}\nadvice: {advice}\n---\n",
                     encoding="utf-8",
                 )
             command_config = root / "command-config.json"
             write_config(command_config, [command_vault])
 
-            def command_result(command):
+            def command_result(command, tool_name="Bash"):
                 result = run_synthetic(
                     Path(__file__),
-                    {"tool_name": "Bash", "tool_input": {"command": command}},
+                    {"tool_name": tool_name, "tool_input": {"command": command}},
                     command_config,
                 )
                 value = json.loads(result.stdout) if result.stdout.strip() else {}
@@ -944,6 +1121,15 @@ def _selftest():
             for name, command, expected in command_cases:
                 result, decision = command_result(command)
                 checks.append((name, result.returncode == 0 and decision == expected))
+
+            alias_results = [
+                command_result('echo "taskkill /IM claude.exe"', tool_name)[1]
+                for tool_name in ("Shell", "shell_command")
+            ]
+            checks.append((
+                "documented shell aliases use command-aware quoted-text handling",
+                alias_results == [None, None],
+            ))
 
             malformed, malformed_decision = command_result(
                 'echo "taskkill /IM claude.exe'
@@ -984,7 +1170,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 41
+    total = 46
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
@@ -1000,8 +1186,11 @@ def main():
     try:
         event = read_event(sys.stdin)
         value = _handle(event, _STARTED_AT)
-        if value is not None and not expired(_STARTED_AT):
-            emit(value)
+        if value is not None:
+            output = value.get("hookSpecificOutput", {})
+            is_deny = output.get("permissionDecision") == "deny"
+            if is_deny or not expired(_STARTED_AT):
+                emit(value)
     except Exception:
         pass
     return 0

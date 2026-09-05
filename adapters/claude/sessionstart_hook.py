@@ -16,6 +16,7 @@ from _hook_common import (
     bounded_context,
     emit,
     expired,
+    governance_vault,
     load_config,
     native_cwd_vaults,
     payload,
@@ -40,13 +41,10 @@ def _handle(event, started_at):
     # carries no meaning, and a cwd vault that also appears in the configured
     # list must never be dropped (adversarial review 2026-09-03 #3, #7).
     resolved = resolve_vaults(config, event)
-    configured = config[memspec.CONFIG_VAULTS_FIELD]
     native = native_cwd_vaults(event.get("cwd") if isinstance(event, dict) else None)
-    governance = next(
-        (vault for vault in configured if (vault / memspec.WORK_LEDGER_FILENAME).is_file()),
-        None,
-    )
-    if governance is None:
+    governance = governance_vault(config)
+    has_governance_ledger = (governance / memspec.WORK_LEDGER_FILENAME).is_file()
+    if not has_governance_ledger:
         vaults = resolved  # no ledger anywhere: keep the pre-1.1.0 behaviour
     else:
         vaults = [vault for vault in resolved if vault in native or vault == governance]

@@ -5,7 +5,6 @@ import json
 import os
 from pathlib import Path
 import re
-import subprocess
 
 from epitype import memspec
 
@@ -120,6 +119,15 @@ def resolve_vaults(config, event, home=None):
     return vaults
 
 
+def governance_vault(config):
+    """Return the configured ledger holder, falling back to the legacy first vault."""
+    vaults = config[memspec.CONFIG_VAULTS_FIELD]
+    return next(
+        (vault for vault in vaults if (vault / memspec.WORK_LEDGER_FILENAME).is_file()),
+        vaults[0],
+    )
+
+
 def payload(event_name, context):
     return {
         "hookSpecificOutput": {
@@ -161,6 +169,8 @@ def emit(value):
 
 
 def run_synthetic(script, event, config_path, arguments=(), environment=None):
+    import subprocess
+
     environment = {**os.environ, **(environment or {})}
     environment[memspec.EPITYPE_CONFIG_ENV] = os.fspath(config_path)
     environment["PYTHONDONTWRITEBYTECODE"] = "1"

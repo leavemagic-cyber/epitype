@@ -298,13 +298,16 @@ def _replace_array_item(text, node, index, value):
     return text[: item.start] + rendered + text[item.end :]
 
 
-def _hook_template(codex, hooks_root, repo_root=REPO_ROOT):
+def _hook_template(codex, hooks_root, repo_root=REPO_ROOT, python_executable=None):
     path = repo_root / "adapters" / "codex" / "hooks_template.json"
     value = json.loads(path.read_bytes().decode("utf-8-sig"))
     hooks = value.get("hooks")
     if not isinstance(hooks, dict):
         raise InstallError("Codex hook template has no hooks object")
     hooks_text = hooks_root.resolve().as_posix()
+    python_text = Path(python_executable or sys.executable).resolve().as_posix()
+    if '"' in python_text:
+        raise InstallError("Python executable path cannot contain a double quote")
     result = {}
     for event in EVENTS:
         entries = hooks.get(event)
@@ -320,6 +323,7 @@ def _hook_template(codex, hooks_root, repo_root=REPO_ROOT):
             if not isinstance(raw, str):
                 raise InstallError(f"Codex hook template {event} command is malformed")
             raw = raw.replace("{{EPITYPE_HOOKS_ROOT}}", hooks_text)
+            raw = raw.replace("{{PYTHON_EXECUTABLE}}", python_text)
             if not codex:
                 raw = raw.replace(" --codex", "")
             command["command"] = raw
@@ -975,6 +979,9 @@ def _doctor(home, dry_run=False, output=sys.stdout, clear_shim_status=False):
         if clear_shim_status:
             _clear_shim_status(home, True, output)
         print("DRY-RUN hooks: SessionStart, UserPromptSubmit, PreCompact, PreToolUse", file=output)
+        if not hosts:
+            print("DOCTOR FAIL no supported host detected", file=output)
+            return 1
         if records:
             print("DOCTOR FAIL fail-open breadcrumb requires --clear-shim-status", file=output)
             return 1

@@ -9,7 +9,10 @@ from pathlib import Path
 import tempfile
 import threading
 
-from memspec import LOCK_STALE_SECONDS, file_lock
+try:
+    from .memspec import LOCK_STALE_SECONDS, file_lock
+except ImportError:  # Direct script execution remains supported.
+    from memspec import LOCK_STALE_SECONDS, file_lock
 
 
 # 2026-09-01 實測事故：帳本宣稱已記錄但 anchor 靜默未命中，導致補丁未套用

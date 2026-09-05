@@ -1,18 +1,13 @@
 import sys; [getattr(stream, "reconfigure", lambda **_: None)(encoding="utf-8", errors="replace") for stream in (sys.stdout, sys.stderr)]  # cp950 主控台先轉 UTF-8，避免繁中輸出在程式進入點就中斷。
 """Epitype 記憶卡的本機 FTS5 全文與別名搜尋器。"""
 
-import argparse
 import csv
 import json
 import os
 from pathlib import Path
 import posixpath
 import re
-import shutil
 import sqlite3
-import subprocess
-import tempfile
-import threading
 import time
 
 try:
@@ -223,7 +218,7 @@ def _read_card(path):
         if has_frontmatter:
             chunks = []
             for line in stream:
-                if line.strip() == b"---":
+                if line.strip() in (b"---", b"..."):
                     break
                 chunks.append(line)
             frontmatter = b"".join(chunks)
@@ -247,20 +242,40 @@ def card_files(vault):
 
 def _markdown_files(vault):
     files = []
-    # Keep the recursive vault scan, but no private path segment may leak into
-    # the generated index merely because only its directory starts with "_".
-    for path in vault.rglob("*"):
-        try:
-            relative = path.relative_to(vault)
-            if (
-                path.is_file()
-                and path.suffix.lower() == ".md"
-                and path.name != memspec.MEMORY_INDEX_FILENAME
-                and not any(part.startswith("_") for part in relative.parts)
-            ):
-                files.append(path)
-        except OSError:
-            continue
+    # A vault is a privacy boundary. Do not follow file symlinks, directory
+    # symlinks, or Windows junctions: otherwise a card-shaped path inside the
+    # vault can make unrelated files outside it searchable.
+    for directory, names, filenames in os.walk(vault, topdown=True, followlinks=False):
+        parent = Path(directory)
+        kept = []
+        for name in names:
+            child = parent / name
+            try:
+                is_junction = getattr(child, "is_junction", lambda: False)()
+                child.resolve(strict=True).relative_to(vault)
+                if not name.startswith("_") and not child.is_symlink() and not is_junction:
+                    kept.append(name)
+            except (OSError, ValueError):
+                continue
+        names[:] = kept
+
+        for name in filenames:
+            path = parent / name
+            try:
+                relative = path.relative_to(vault)
+                is_junction = getattr(path, "is_junction", lambda: False)()
+                path.resolve(strict=True).relative_to(vault)
+                if (
+                    path.is_file()
+                    and not path.is_symlink()
+                    and not is_junction
+                    and path.suffix.lower() == ".md"
+                    and path.name != memspec.MEMORY_INDEX_FILENAME
+                    and not any(part.startswith("_") for part in relative.parts)
+                ):
+                    files.append(path)
+            except (OSError, ValueError):
+                continue
     return sorted(files, key=lambda item: item.relative_to(vault).as_posix().casefold())
 
 
@@ -414,7 +429,7 @@ def build_index(vault, lock_timeout=0.0):
                     try:
                         stat = path.stat()
                         old = known.get(card_path)
-                        if old and stat.st_mtime_ns <= old[0]:
+                        if old and (stat.st_mtime_ns, stat.st_size) == old:
                             continue
                         stable = _stable_card(path)
                     except OSError:
@@ -507,29 +522,37 @@ def _is_stale(vault, db_path):
             row = connection.execute(
                 "SELECT value FROM search_meta WHERE key = ?", (_FTS_FORMAT_KEY,)
             ).fetchone()
+            known = {
+                item[0]: (item[1], item[2])
+                for item in connection.execute(
+                    "SELECT card_path, mtime_ns, size FROM cards"
+                )
+            }
         finally:
             connection.close()
         if row is None or row[0] != _FTS_FORMAT_VERSION:
             return True
     except sqlite3.Error:
         return True
-    latest = None
-    for path in _markdown_files(vault):
-        try:
-            modified = path.stat().st_mtime
-        except OSError:
-            continue
-        latest = modified if latest is None else max(latest, modified)
-    if latest is None:
-        return False
     try:
         indexed_at = db_path.stat().st_mtime
     except OSError:
         return True
-    # Rate-limit rebuilds by index age, never by card age: a card landing inside
-    # the window is picked up once the window has passed instead of staying
-    # invisible until some later card happens to fall outside it.
-    return latest > indexed_at and time.time() - indexed_at > memspec.FTS_STALE_SECONDS
+    # Keep the hot read path cheap. Once the grace window expires, compare the
+    # complete manifest rather than only the newest mtime: deletions, renames,
+    # backdated additions, and size changes with preserved mtimes must all be
+    # visible after a bounded delay.
+    if time.time() - indexed_at <= memspec.FTS_STALE_SECONDS:
+        return False
+
+    current = {}
+    for path in _markdown_files(vault):
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        current[path.relative_to(vault).as_posix()] = (stat.st_mtime_ns, stat.st_size)
+    return current != known
 
 
 def _hit_fields(row, term):
@@ -878,6 +901,11 @@ def _write_card(path, frontmatter, body):
 
 
 def _selftest():
+    import shutil
+    import subprocess
+    import tempfile
+    import threading
+
     checks = []
 
     def run_cli(*arguments):
@@ -1443,6 +1471,76 @@ def _selftest():
             ))
             shutil.rmtree(grace_vault, ignore_errors=True)
 
+            manifest_vault = Path(tempfile.mkdtemp(prefix="epitype-manifest-")).resolve()
+            manifest_card = manifest_vault / "mutable.md"
+            _write_card(
+                manifest_card,
+                "name: Mutable Card\ndescription: originalmanifestneedle",
+                "originalmanifestneedle",
+            )
+            build_index(manifest_vault)
+            preserved_mtime = manifest_card.stat().st_mtime_ns
+            _write_card(
+                manifest_card,
+                "name: Mutable Card\ndescription: replacementmanifestneedle-longer",
+                "replacementmanifestneedle-longer",
+            )
+            os.utime(manifest_card, ns=(preserved_mtime, preserved_mtime))
+            manifest_db = _db_path(manifest_vault)
+            old_manifest_db = time.time() - memspec.FTS_STALE_SECONDS - 2.0
+            os.utime(manifest_db, (old_manifest_db, old_manifest_db))
+            changed_manifest = query_index(manifest_vault, "replacementmanifestneedle")
+            checks.append((
+                "Manifest notices a size change with a preserved mtime",
+                changed_manifest.get("index_updated") is True
+                and changed_manifest["count"] == 1
+                and query_index(manifest_vault, "originalmanifestneedle")["count"] == 0,
+            ))
+
+            manifest_card.unlink()
+            os.utime(manifest_db, (old_manifest_db, old_manifest_db))
+            deleted_manifest = query_index(manifest_vault, "replacementmanifestneedle")
+            checks.append((
+                "Manifest notices a deleted card",
+                deleted_manifest.get("index_updated") is True
+                and deleted_manifest["count"] == 0,
+            ))
+            shutil.rmtree(manifest_vault, ignore_errors=True)
+
+            yaml_end_vault = Path(tempfile.mkdtemp(prefix="epitype-yaml-end-")).resolve()
+            yaml_end_card = yaml_end_vault / "yaml-end.md"
+            yaml_end_card.write_text(
+                "---\nname: YAML End Card\ndescription: yamlendfrontmatterneedle\n"
+                "status: active\n...\nyamlendbodyneedle\n",
+                encoding="utf-8",
+            )
+            build_index(yaml_end_vault)
+            checks.append((
+                "YAML document end marker closes frontmatter consistently",
+                query_index(yaml_end_vault, "yamlendfrontmatterneedle")["count"] == 1
+                and query_index(yaml_end_vault, "yamlendbodyneedle")["count"] == 1,
+            ))
+            shutil.rmtree(yaml_end_vault, ignore_errors=True)
+
+            outside_card = vault.parent / "outside-symlink-card.md"
+            outside_card.write_text(
+                "---\nname: Outside\ndescription: outsidesymlinkneedle\n---\n",
+                encoding="utf-8",
+            )
+            linked_card = vault / "linked-outside.md"
+            try:
+                linked_card.symlink_to(outside_card)
+                link_supported = True
+            except OSError:
+                link_supported = False
+            checks.append((
+                "vault scan never follows a file symlink outside the vault",
+                not link_supported or linked_card not in _markdown_files(vault),
+            ))
+            if linked_card.is_symlink():
+                linked_card.unlink()
+            outside_card.unlink(missing_ok=True)
+
             other.write_text(other.read_text(encoding="utf-8") + "concurrentwriteproof\n", encoding="utf-8")
             concurrent_mtime = time.time() + 2.0
             os.utime(other, (concurrent_mtime, concurrent_mtime))
@@ -1604,7 +1702,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 32
+    total = 36
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
@@ -1614,13 +1712,14 @@ def _selftest():
     return 0 if status == "PASS" else 1
 
 
-class _JsonArgumentParser(argparse.ArgumentParser):
-    def error(self, message):
-        print(json.dumps({"error": "usage", "message": message}, ensure_ascii=False, separators=(",", ":")))
-        raise SystemExit(2)
-
-
 def _parser():
+    import argparse
+
+    class _JsonArgumentParser(argparse.ArgumentParser):
+        def error(self, message):
+            print(json.dumps({"error": "usage", "message": message}, ensure_ascii=False, separators=(",", ":")))
+            raise SystemExit(2)
+
     parser = _JsonArgumentParser(description=__doc__)
     parser.add_argument("--selftest", action="store_true")
     subparsers = parser.add_subparsers(dest="command")

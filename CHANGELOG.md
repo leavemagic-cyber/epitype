@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+- A matched PreToolUse rule now remains a deny when audit logging is contended or
+  advice exceeds the output ceiling. Advice is truncated to a valid bounded payload,
+  superseded cards are ignored, risky nested-repeat regexes are rejected before use,
+  and documented shell aliases share command-aware matching.
+- FTS freshness now compares the stored file manifest after the grace window, and
+  incremental builds use both mtime and size. Vault scans do not follow symlinks or
+  Windows junctions outside the vault.
+- Decision lint requires one active card per key and validates that replacements are
+  active cards with the same key. YAML `...` frontmatter endings are handled
+  consistently by lint, search, and action gates.
+- Owner captures and compact maps use the same ledger-selected governance vault.
+  Compact recovery maps are session-specific and bounded by age and count.
+- The installed package now provides a unified `epitype` command. CI and publishing
+  build and exercise the installed wheel, and tag publication requires the package
+  version and full source selftests to pass.
+- Codex trust checks now require exactly the four supported registrations; missing or
+  skipped configuration is no longer reported as runnable success.
+
 ## v1.1.0 — 2026-09-03
 
 The token-economy release. Every line Epitype injects is paid for once as output and

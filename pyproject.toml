@@ -21,6 +21,7 @@ classifiers = [
 Repository = "https://github.com/leavemagic-cyber/epitype"
 
 [project.scripts]
+epitype = "epitype.cli:main"
 epitype-graft = "install.graft:main"
 
 [tool.setuptools]

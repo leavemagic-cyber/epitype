@@ -6,8 +6,6 @@ import errno
 import os
 from pathlib import Path
 import re
-import tempfile
-import threading
 import time
 import uuid
 
@@ -111,6 +109,7 @@ SCAR_CORRECTION_PATTERNS = (
 HOOK_TIMEOUT_SECONDS = 3.0
 HOOK_DEFAULT_BUDGET_BYTES = 10 * 1024
 HOOK_MAX_OUTPUT_BYTES = 10 * 1024
+TRIGGER_REGEX_MAX_CHARS = 256
 SESSIONSTART_INDEX_BUDGET_BYTES = 3072
 EPITYPE_CONFIG_ENV = "EPITYPE_CONFIG"
 CONFIG_VAULTS_FIELD = "vaults"
@@ -128,8 +127,13 @@ ADVICE_FIELD = "advice"
 MEMORY_INDEX_FILENAME = "MEMORY.md"
 WORK_LEDGER_FILENAME = "_WORK_LEDGER.md"
 COMPACT_MAP_FILENAME = "_COMPACT_MAP.md"
+COMPACT_MAP_DIRECTORY = "_COMPACT_MAPS"
+COMPACT_MAP_TTL_SECONDS = 30 * 24 * 3600
+COMPACT_MAP_MAX_FILES = 64
 GATE_LOG_FILENAME = "_GATE_LOG.jsonl"
 RECALL_MARKER_DIRECTORY = "epitype_markers"
+RECALL_MARKER_TTL_SECONDS = 7 * 24 * 3600
+RECALL_MARKER_SWEEP_LIMIT = 32
 
 # 2026-09-02 dogfood #22：UserPromptSubmit 可能承載系統注入、subagent 通知、
 # 引文或工具輸出，觸發詞命中本身不能證明是 owner 親口授權。所有捕捉界線集中
@@ -207,6 +211,7 @@ RULING_QUOTED_TEXT_REGEX = re.compile(RULING_QUOTED_TEXT_PATTERN)
 CAPTURE_REJECT_PATTERN = (
     r"(?:(?:api[_-]?key|access[_-]?key|secret|token|password|passwd|pwd|authorization|bearer)"
     r"\s*[:=]\s*\S{8,}"
+    r"|\b(?:authorization\s*:\s*)?(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}"
     r"|\b(?:sk|pk|ghp|gho|ghs|ghu|ghr|xox[abposr])[-_][A-Za-z0-9]{16,}\b"
     r"|-----BEGIN [A-Z ]*PRIVATE KEY-----"
     r"|\b[A-Za-z0-9_\-]{24,}\.[A-Za-z0-9_\-]{16,}\.[A-Za-z0-9_\-]{16,}\b"
@@ -329,11 +334,68 @@ def _lock_path(target):
     return Path(os.fspath(target) + ".lock")
 
 
+def _process_is_alive(pid):
+    if pid == os.getpid():
+        return True
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            open_process = kernel32.OpenProcess
+            open_process.argtypes = (ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong)
+            open_process.restype = ctypes.c_void_p
+            get_exit_code = kernel32.GetExitCodeProcess
+            get_exit_code.argtypes = (
+                ctypes.c_void_p,
+                ctypes.POINTER(ctypes.c_ulong),
+            )
+            get_exit_code.restype = ctypes.c_int
+            close_handle = kernel32.CloseHandle
+            close_handle.argtypes = (ctypes.c_void_p,)
+            close_handle.restype = ctypes.c_int
+            handle = open_process(0x1000, False, pid)
+            if not handle:
+                # Only ERROR_INVALID_PARAMETER proves that no such PID exists.
+                return ctypes.get_last_error() != 87
+            try:
+                exit_code = ctypes.c_ulong()
+                if not get_exit_code(handle, ctypes.byref(exit_code)):
+                    return True
+                return exit_code.value == 259
+            finally:
+                close_handle(handle)
+        except (AttributeError, OSError, ValueError):
+            return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return True
+    return True
+
+
+def _lock_owner_alive(lock_path):
+    try:
+        lines = lock_path.read_text(encoding="ascii", errors="replace").splitlines()
+        raw_pid = next(line.split("=", 1)[1] for line in lines if line.startswith("pid="))
+        return _process_is_alive(int(raw_pid))
+    except (OSError, StopIteration, ValueError):
+        return False
+
+
 def _remove_stale_lock(lock_path):
     """若鎖已逾期，先原子改名再刪除；任何檔案錯誤均視為未搶到。"""
     try:
         age = time.time() - lock_path.stat().st_mtime
         if age <= LOCK_STALE_SECONDS:
+            return False
+        if _lock_owner_alive(lock_path):
             return False
         tombstone = lock_path.with_name(
             lock_path.name + ".stale-" + uuid.uuid4().hex
@@ -435,6 +497,9 @@ def file_lock(target, timeout):
 
 
 def _selftest():
+    import tempfile
+    import threading
+
     checks = []
     try:
         with tempfile.TemporaryDirectory(prefix="memspec-") as temp_dir:
@@ -444,6 +509,15 @@ def _selftest():
             with file_lock(target, 0.5) as first:
                 with file_lock(target, 0.0) as second:
                     checks.append(("lock mutual exclusion", first and not second))
+
+                active_lock = _lock_path(target)
+                expired = time.time() - LOCK_STALE_SECONDS - 1.0
+                os.utime(active_lock, (expired, expired))
+                with file_lock(target, 0.0) as second_after_mtime_change:
+                    checks.append((
+                        "active lock is never stolen only because its mtime is old",
+                        first and not second_after_mtime_change,
+                    ))
 
             with file_lock(target, 0.5) as reacquired:
                 checks.append(("lock reacquire after release", reacquired))
@@ -519,11 +593,23 @@ def _selftest():
                     "stop doing",
                 ),
             ))
+            checks.append((
+                "authorization bearer credentials are rejected from capture",
+                bool(CAPTURE_REJECT_REGEX.search(
+                    "Authorization: Bearer abcdefghijklmnopqrstuvwxyz012345"
+                )),
+            ))
+            checks.append((
+                "bare bearer credentials are rejected from capture",
+                bool(CAPTURE_REJECT_REGEX.search(
+                    "Bearer abcdefghijklmnopqrstuvwxyz012345"
+                )),
+            ))
     except Exception as exc:  # selftest 要輸出可診斷失敗；file_lock 本身仍維持不拋例外。
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 6
+    total = 9
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

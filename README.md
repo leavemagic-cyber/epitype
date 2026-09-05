@@ -50,31 +50,31 @@ Missing indexes, stale indexes, shim failures, malformed cards, and lock content
 
 Requirements: Python 3.11 or newer and a Claude Code or Codex installation with hook support.
 
-Install: `pip install epitype`, then use the `epitype-graft` command in place of `python install/graft.py` below (for example `epitype-graft install --dry-run`).
+Install: `pip install epitype`. The `epitype` command exposes installation, search, lint, exam, and diagnostic tools; `epitype-graft` remains as a compatibility alias for the installer.
 
 The `@hungyu/epitype` package on npm is only a signpost back to this Python project (npm rejects the bare name as too similar to an existing package).
 
-From the repository root, preview the planned changes:
+Preview the planned changes:
 
 ```powershell
-python install/graft.py install --dry-run
+epitype install --dry-run
 ```
 
 If the preview contains only the hosts and paths you expect, install and run the synthetic health check:
 
 ```powershell
-python install/graft.py install
-python install/graft.py doctor
+epitype install
+epitype doctor
 ```
 
-The installer detects existing native vaults. If it finds none, it creates an empty fallback vault. Reinstall preserves a curated vault list; use `python install/graft.py vaults --resync --dry-run` and then rerun without `--dry-run` when you intentionally want to adopt the latest detection result.
+The installer detects existing native vaults. If it finds none, it creates an empty fallback vault. Reinstall preserves a curated vault list; use `epitype vaults --resync --dry-run` and then rerun without `--dry-run` when you intentionally want to adopt the latest detection result.
 
 ### Approve Codex hooks
 
 Codex registration and Codex trust are separate. Check the real trust state after installation:
 
 ```powershell
-python adapters/codex/hook_trust.py check
+epitype trust
 ```
 
 If any Epitype entry is `UNTRUSTED`, `DISABLED`, or `MODIFIED`:
@@ -99,9 +99,9 @@ Start from one of the tracked templates:
 Build a vault's local FTS index, then query it directly or recall against a prompt:
 
 ```powershell
-python epitype/memsearch.py build C:\path\to\vault
-python epitype/memsearch.py query term --vault C:\path\to\vault
-python epitype/memsearch.py recall "natural-language prompt" --vault C:\path\to\vault
+epitype search build C:\path\to\vault
+epitype search query term --vault C:\path\to\vault
+epitype search recall "natural-language prompt" --vault C:\path\to\vault
 ```
 
 The generated database lives at `<vault>/.epitype/memory_fts.sqlite3` and is ignored by Git. Only `build` creates a missing index. Existing indexes refresh incrementally when stale; a missing index is reported separately from a valid zero-result query.
@@ -116,7 +116,7 @@ python tests/privacy_lint.py
 python exam/exam_runner.py --strict
 ```
 
-`tests/run_all.py` currently runs 17 component selftests covering the core tools, hook adapters, installer, exam engine, and privacy gate. The included exam corpus is a small synthetic sample. For this release, the publication gate also passed a strict 300-case behavior corpus and a 15-seed review; those release materials are not part of this repository.
+`tests/run_all.py` currently runs 20 component selftests covering the core tools, hook adapters, package surface, installer, exam engine, and privacy gate. The included exam corpus is a small synthetic sample. For this release, the publication gate also passed a strict 300-case behavior corpus and a 15-seed review; those release materials are not part of this repository.
 
 These checks are regression evidence, not proof that every future host version or every memory failure is covered.
 
@@ -125,14 +125,14 @@ These checks are regression evidence, not proof that every future host version o
 After moving the repository, update the stable shim target and rerun the doctor:
 
 ```powershell
-python install/graft.py relocate --to C:\path\to\new\repo
+epitype relocate --to C:\path\to\new\repo
 ```
 
 Preview uninstall before removing Epitype-owned files:
 
 ```powershell
-python install/graft.py uninstall --dry-run
-python install/graft.py uninstall
+epitype uninstall --dry-run
+epitype uninstall
 ```
 
 Read [Uninstall Epitype](docs/UNINSTALL.md) before restoring a backup manually.

@@ -2,8 +2,12 @@ import sys, time; sys.dont_write_bytecode = True; _STARTED_AT = time.monotonic()
 """Claude PreCompact adapter that persists a bounded transcript recovery map."""
 
 import json
+import hashlib
+import os
 from pathlib import Path
+import re
 import tempfile
+import time
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
@@ -13,6 +17,7 @@ from epitype import compact_map, memspec
 from _hook_common import (
     emit,
     expired,
+    governance_vault,
     load_config,
     payload,
     payload_fits,
@@ -20,6 +25,35 @@ from _hook_common import (
     run_synthetic,
     write_config,
 )
+
+
+def _map_destination(vault, event, transcript):
+    raw_session = event.get("session_id", event.get("sessionId", ""))
+    session = raw_session if isinstance(raw_session, str) else ""
+    component = re.sub(r"[^A-Za-z0-9._-]", "_", session).strip("._-")[:80]
+    if not component:
+        component = "transcript"
+    digest = hashlib.sha256(os.fspath(transcript).encode("utf-8")).hexdigest()[:12]
+    return (vault / memspec.COMPACT_MAP_DIRECTORY / f"{component}-{digest}.md").resolve()
+
+
+def _sweep_maps(directory, keep):
+    try:
+        now = time.time()
+        retained = []
+        for path in directory.glob("*.md"):
+            try:
+                if path != keep and now - path.stat().st_mtime > memspec.COMPACT_MAP_TTL_SECONDS:
+                    path.unlink()
+                elif path != keep:
+                    retained.append(path)
+            except OSError:
+                continue
+        retained.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+        for path in retained[memspec.COMPACT_MAP_MAX_FILES - 1 :]:
+            path.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def _handle(event, started_at):
@@ -33,13 +67,14 @@ def _handle(event, started_at):
     transcript = Path(transcript_value).expanduser().resolve()
     if not transcript.is_file():
         return None
-    vault = config[memspec.CONFIG_VAULTS_FIELD][0]
-    destination = (vault / memspec.COMPACT_MAP_FILENAME).resolve()
+    vault = governance_vault(config)
+    destination = _map_destination(vault, event, transcript)
     compact_map.build_map(
         transcript,
         destination,
         memspec.COMPACT_MAP_DEFAULT_BUDGET_BYTES,
     )
+    _sweep_maps(destination.parent, destination)
     context = f"地圖已落於{destination},壓縮後先讀它按行號回撈原文。"
     budget = config[memspec.CONFIG_BUDGET_BYTES_FIELD]
     if expired(started_at) or not payload_fits("PreCompact", context, budget):
@@ -79,7 +114,7 @@ def _selftest():
                 {"transcript_path": str(transcript)},
                 config,
             )
-            destination = (vault / memspec.COMPACT_MAP_FILENAME).resolve()
+            destination = _map_destination(vault, {}, transcript.resolve())
             checks.append(
                 (
                     "map persisted",
@@ -89,6 +124,31 @@ def _selftest():
                     in destination.read_text(encoding="utf-8"),
                 )
             )
+
+            second_transcript = root / "transcript-b.jsonl"
+            second_transcript.write_text(
+                json.dumps(
+                    {"type": "user", "message": {"content": "Independent session B"}}
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            second_event = {
+                "transcript_path": str(second_transcript),
+                "session_id": "session-b",
+            }
+            second_result = run_synthetic(Path(__file__), second_event, config)
+            second_destination = _map_destination(
+                vault, second_event, second_transcript.resolve()
+            )
+            checks.append((
+                "independent sessions retain independent recovery maps",
+                second_result.returncode == 0
+                and destination.is_file()
+                and second_destination.is_file()
+                and "Synthetic recovery request" in destination.read_text(encoding="utf-8")
+                and "Independent session B" in second_destination.read_text(encoding="utf-8"),
+            ))
             value = json.loads(result.stdout) if result.stdout.strip() else {}
             context = value.get("hookSpecificOutput", {}).get("additionalContext", "")
             checks.append(
@@ -116,6 +176,26 @@ def _selftest():
                 )
             )
 
+            project_vault = root / "aaa-project"
+            project_vault.mkdir()
+            (vault / memspec.WORK_LEDGER_FILENAME).write_text(
+                "governance ledger\n", encoding="utf-8"
+            )
+            destination.unlink()
+            routed_config = root / "routed-config.json"
+            write_config(routed_config, [project_vault, vault])
+            routed = run_synthetic(
+                Path(__file__),
+                {"transcript_path": str(transcript)},
+                routed_config,
+            )
+            checks.append((
+                "compact map follows the governance ledger instead of vault order",
+                routed.returncode == 0
+                and destination.is_file()
+                and not (project_vault / memspec.COMPACT_MAP_DIRECTORY).exists(),
+            ))
+
             bad_config = root / "bad-config.json"
             bad_config.write_text("{broken", encoding="utf-8")
             bad_result = run_synthetic(
@@ -135,7 +215,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 4
+    total = 6
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

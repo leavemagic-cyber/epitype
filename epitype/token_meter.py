@@ -178,13 +178,13 @@ def run_selftest():
     return 0
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(
         description="顯示 Codex rollout 最後一筆 token_count 的當前用量、累計用量、視窗與佔用率。"
     )
     parser.add_argument("rollout", nargs="?", help="rollout JSONL 檔案路徑")
     parser.add_argument("--selftest", action="store_true", help="執行內建合成資料自測")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     if args.selftest:
         if args.rollout:

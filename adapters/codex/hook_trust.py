@@ -32,6 +32,7 @@ REVIEW_HINT = (
     "Codex skips untrusted hooks. In the Codex TUI run /hooks (Desktop app: "
     "the hooks review panel), approve the epitype entries, then rerun this check."
 )
+REQUIRED_EVENTS = ("SessionStart", "UserPromptSubmit", "PreToolUse", "PreCompact")
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -105,11 +106,30 @@ def run_check(home, output=sys.stdout, seen_path=None):
     config_path = home / ".codex" / "config.toml"
     if not hooks_path.is_file() or not config_path.is_file():
         print("CODEX TRUST: SKIP no codex hooks.json/config.toml", file=output)
-        return 0
+        return 1
     positions = _epitype_positions(hooks_path)
     if not positions:
         print("CODEX TRUST: SKIP no epitype registrations", file=output)
-        return 0
+        return 1
+    counts = {event: 0 for event in REQUIRED_EVENTS}
+    unexpected = []
+    for event, _key, _digest in positions:
+        if event in counts:
+            counts[event] += 1
+        else:
+            unexpected.append(event)
+    missing = [event for event, count in counts.items() if count == 0]
+    duplicate = [event for event, count in counts.items() if count > 1]
+    if missing or duplicate or unexpected:
+        details = []
+        if missing:
+            details.append("missing=" + ",".join(missing))
+        if duplicate:
+            details.append("duplicate=" + ",".join(duplicate))
+        if unexpected:
+            details.append("unexpected=" + ",".join(sorted(set(unexpected))))
+        print("CODEX TRUST: FAIL registration set " + " ".join(details), file=output)
+        return 1
     states = _trust_states(config_path)
     seen_path = seen_path or home / ".epitype" / SEEN_FILENAME
     seen = _load_seen(seen_path)
@@ -139,9 +159,15 @@ def _fixture(root, states, hook_command="python x.py"):
     codex.mkdir(parents=True, exist_ok=True)
     hooks = {
         "hooks": {
+            "SessionStart": [
+                {"hooks": [{"type": "command", "command": hook_command + " --session"}], "id": MARKER_VALUE}
+            ],
             "UserPromptSubmit": [
                 {"hooks": [{"type": "command", "command": "other.exe"}]},
                 {"hooks": [{"type": "command", "command": hook_command, "timeout": 3}], "id": MARKER_VALUE},
+            ],
+            "PreToolUse": [
+                {"hooks": [{"type": "command", "command": hook_command + " --gate"}], "id": MARKER_VALUE}
             ],
             "PreCompact": [
                 {"hooks": [{"type": "command", "command": hook_command + " --codex"}], "comment": MARKER_VALUE}
@@ -167,8 +193,10 @@ def _selftest():
     try:
         with tempfile.TemporaryDirectory(prefix=".hook-trust-", dir=_REPO_ROOT) as temp_dir:
             root = Path(temp_dir).resolve()
-            both = {
+            all_four = {
+                "session_start:0:0": {"trusted_hash": "sha256:ss"},
                 "user_prompt_submit:1:0": {"trusted_hash": "sha256:aa"},
+                "pre_tool_use:0:0": {"trusted_hash": "sha256:pp"},
                 "pre_compact:0:0": {"trusted_hash": "sha256:bb"},
             }
 
@@ -179,43 +207,62 @@ def _selftest():
             text = out.getvalue()
             checks.append((
                 "registered but untrusted hooks fail with review hint",
-                code == 1 and text.count(UNTRUSTED) == 2 and "FAIL 2/2" in text and "/hooks" in text,
+                code == 1 and text.count(UNTRUSTED) == 4 and "FAIL 4/4" in text and "/hooks" in text,
             ))
             checks.append((
                 "key follows codex <path>:<snake_event>:<group>:<index> layout",
-                _epitype_positions(hooks_path)[0][1] == f"{hooks_path}:user_prompt_submit:1:0"
-                and _epitype_positions(hooks_path)[1][1] == f"{hooks_path}:pre_compact:0:0",
+                {item[1] for item in _epitype_positions(hooks_path)}
+                == {
+                    f"{hooks_path}:session_start:0:0",
+                    f"{hooks_path}:user_prompt_submit:1:0",
+                    f"{hooks_path}:pre_tool_use:0:0",
+                    f"{hooks_path}:pre_compact:0:0",
+                },
             ))
 
             home = root / "trusted"
-            _fixture(home, both)
+            _fixture(home, all_four)
             out = io.StringIO()
             code = run_check(home, out)
             seen_file = home / ".epitype" / SEEN_FILENAME
             checks.append((
                 "trusted hooks pass and record their digests",
-                code == 0 and "PASS 2/2" in out.getvalue() and len(_load_seen(seen_file)) == 2,
+                code == 0 and "PASS 4/4" in out.getvalue() and len(_load_seen(seen_file)) == 4,
             ))
 
-            _fixture(home, both, hook_command="python relocated.py")
+            _fixture(home, all_four, hook_command="python relocated.py")
             out = io.StringIO()
             code = run_check(home, out)
             checks.append((
                 "hook edited after trust reports MODIFIED",
-                code == 1 and out.getvalue().count(MODIFIED) == 2,
+                code == 1 and out.getvalue().count(MODIFIED) == 4,
             ))
 
             home = root / "disabled"
-            disabled = {key: {**record, "enabled": False} for key, record in both.items()}
+            disabled = {key: {**record, "enabled": False} for key, record in all_four.items()}
             _fixture(home, disabled)
             out = io.StringIO()
             code = run_check(home, out)
-            checks.append(("disabled trust records fail", code == 1 and out.getvalue().count(DISABLED) == 2))
+            checks.append(("disabled trust records fail", code == 1 and out.getvalue().count(DISABLED) == 4))
+
+            home = root / "incomplete"
+            _fixture(home, all_four)
+            incomplete_hooks = home / ".codex" / "hooks.json"
+            incomplete_value = json.loads(incomplete_hooks.read_text(encoding="utf-8"))
+            del incomplete_value["hooks"]["PreToolUse"]
+            del incomplete_value["hooks"]["PreCompact"]
+            incomplete_hooks.write_text(json.dumps(incomplete_value), encoding="utf-8")
+            out = io.StringIO()
+            checks.append((
+                "missing required registrations fail instead of PASS 2/2",
+                run_check(home, out) == 1
+                and "missing=PreToolUse,PreCompact" in out.getvalue(),
+            ))
 
             home = root / "nocodex"
             home.mkdir()
             out = io.StringIO()
-            checks.append(("missing codex host skips cleanly", run_check(home, out) == 0 and "SKIP" in out.getvalue()))
+            checks.append(("missing codex host is not a runnable success", run_check(home, out) == 1 and "SKIP" in out.getvalue()))
 
             cp950_environment = os.environ.copy()
             cp950_environment["PYTHONUTF8"] = "0"
@@ -236,7 +283,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 7
+    total = 8
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

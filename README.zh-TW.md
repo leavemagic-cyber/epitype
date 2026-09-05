@@ -50,31 +50,31 @@ Epitype 把同一組原生 vault 接到四個 host 事件：
 
 需求：Python 3.11 以上，以及支援 hook 的 Claude Code 或 Codex。
 
-安裝：`pip install epitype`，之後用 `epitype-graft` 指令取代下文的 `python install/graft.py`（例如 `epitype-graft install --dry-run`）。
+安裝：`pip install epitype`。`epitype` 統一提供安裝、搜尋、lint、筆試與診斷工具；`epitype-graft` 保留為安裝器的相容別名。
 
 npm 上的 `@hungyu/epitype` 只是指回這個 Python 專案的路標套件（npm 判裸名 `epitype` 與既有套件過於相似，不接受）。
 
-先在 repo 根目錄預覽預計變更：
+先預覽預計變更：
 
 ```powershell
-python install/graft.py install --dry-run
+epitype install --dry-run
 ```
 
 確認輸出只包含預期的 host 與路徑，再安裝並跑合成體檢：
 
 ```powershell
-python install/graft.py install
-python install/graft.py doctor
+epitype install
+epitype doctor
 ```
 
-安裝器會偵測既有原生 vault；找不到時才建立空的 fallback vault。重新安裝會保留已策展的 vault 清單。若確定要改採最新偵測結果，先執行 `python install/graft.py vaults --resync --dry-run`，確認後再拿掉 `--dry-run`。
+安裝器會偵測既有原生 vault；找不到時才建立空的 fallback vault。重新安裝會保留已策展的 vault 清單。若確定要改採最新偵測結果，先執行 `epitype vaults --resync --dry-run`，確認後再拿掉 `--dry-run`。
 
 ### 核准 Codex hooks
 
 Codex 的 hook 註冊與 hook 信任是兩件事。安裝後必須檢查真實信任狀態：
 
 ```powershell
-python adapters/codex/hook_trust.py check
+epitype trust
 ```
 
 若任何 Epitype 項目顯示 `UNTRUSTED`、`DISABLED` 或 `MODIFIED`：
@@ -99,9 +99,9 @@ python adapters/codex/hook_trust.py check
 先建立 vault 的本機 FTS 索引，再用關鍵詞或自然語言 prompt 查詢：
 
 ```powershell
-python epitype/memsearch.py build C:\path\to\vault
-python epitype/memsearch.py query 關鍵詞 --vault C:\path\to\vault
-python epitype/memsearch.py recall "自然語言提示" --vault C:\path\to\vault
+epitype search build C:\path\to\vault
+epitype search query 關鍵詞 --vault C:\path\to\vault
+epitype search recall "自然語言提示" --vault C:\path\to\vault
 ```
 
 資料庫位於 `<vault>/.epitype/memory_fts.sqlite3`，Git 會忽略它。只有 `build` 會建立原本不存在的索引；既有索引過期時會增量更新，缺少索引與合法的零結果則有不同回覆。
@@ -116,7 +116,7 @@ python tests/privacy_lint.py
 python exam/exam_runner.py --strict
 ```
 
-`tests/run_all.py` 目前執行 17 組元件 selftest，涵蓋核心工具、hook adapter、安裝器、筆試引擎與隱私閘。repo 內的筆試題庫是小型合成樣本。本次發布另以嚴格模式通過 300 題行為題庫與 15 筆回顧種子；這兩份發布材料不包含在本 repo。
+`tests/run_all.py` 目前執行 20 組元件 selftest，涵蓋核心工具、hook adapter、套件介面、安裝器、筆試引擎與隱私閘。repo 內的筆試題庫是小型合成樣本。本次發布另以嚴格模式通過 300 題行為題庫與 15 筆回顧種子；這兩份發布材料不包含在本 repo。
 
 這些結果是防回歸證據，不代表未來每個 host 版本或每一種記憶失效都已涵蓋。
 
@@ -125,14 +125,14 @@ python exam/exam_runner.py --strict
 repo 搬家後，更新穩定 shim 的目標並重跑 doctor：
 
 ```powershell
-python install/graft.py relocate --to C:\新的\repo\路徑
+epitype relocate --to C:\新的\repo\路徑
 ```
 
 解除安裝前先預覽：
 
 ```powershell
-python install/graft.py uninstall --dry-run
-python install/graft.py uninstall
+epitype uninstall --dry-run
+epitype uninstall
 ```
 
 手動還原備份前，先讀 [解除安裝說明](docs/UNINSTALL.md)。

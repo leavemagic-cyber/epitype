@@ -33,3 +33,25 @@ jobs:
         run: python tests/run_all.py
       - name: Run privacy lint
         run: python tests/privacy_lint.py
+
+  package:
+    name: Installed wheel smoke test
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Build wheel
+        run: |
+          python -m pip install --upgrade build
+          python -m build
+      - name: Exercise the installed artifact outside the checkout
+        run: |
+          python -m venv "$RUNNER_TEMP/epitype-smoke"
+          "$RUNNER_TEMP/epitype-smoke/bin/python" -m pip install --no-deps dist/*.whl
+          cd "$RUNNER_TEMP"
+          "$RUNNER_TEMP/epitype-smoke/bin/python" -c "import epitype.decision_lint, epitype.ledger_gate, epitype.scar_census"
+          "$RUNNER_TEMP/epitype-smoke/bin/python" -m epitype --version
+          "$RUNNER_TEMP/epitype-smoke/bin/python" -m epitype search --help

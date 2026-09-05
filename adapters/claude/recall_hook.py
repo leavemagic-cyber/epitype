@@ -2,17 +2,12 @@ import sys, time; sys.dont_write_bytecode = True; _STARTED_AT = time.monotonic()
 """Claude UserPromptSubmit adapter for bounded, deduplicated local recall."""
 
 import hashlib
-import contextlib
-import io
 import json
 import os
 from pathlib import Path
 import re
-import shutil
 import sqlite3
-import subprocess
 import tempfile
-import uuid
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
@@ -23,6 +18,7 @@ from _hook_common import (
     bounded_context,
     emit,
     expired,
+    governance_vault,
     load_config,
     payload,
     read_event,
@@ -231,6 +227,31 @@ def _session_component(session_id):
     return component or hashlib.sha256(session_id.encode("utf-8")).hexdigest()
 
 
+def _sweep_recall_markers(root, now, keep=None):
+    try:
+        for index, directory in enumerate(root.iterdir()):
+            if index >= memspec.RECALL_MARKER_SWEEP_LIMIT:
+                break
+            try:
+                is_junction = getattr(directory, "is_junction", lambda: False)()
+                if (
+                    directory == keep
+                    or not directory.is_dir()
+                    or directory.is_symlink()
+                    or is_junction
+                    or now - directory.stat().st_mtime <= memspec.RECALL_MARKER_TTL_SECONDS
+                ):
+                    continue
+                for marker in directory.iterdir():
+                    if marker.is_file() and not marker.is_symlink():
+                        marker.unlink()
+                directory.rmdir()
+            except OSError:
+                continue
+    except OSError:
+        pass
+
+
 def _claim_marker(session_id, block_digest):
     if not session_id:
         return True
@@ -239,6 +260,7 @@ def _claim_marker(session_id, block_digest):
         / memspec.RECALL_MARKER_DIRECTORY
         / _session_component(session_id)
     )
+    _sweep_recall_markers(directory.parent, time.time(), keep=directory)
     directory.mkdir(parents=True, exist_ok=True)
     marker = directory / block_digest
     try:
@@ -257,7 +279,7 @@ def _handle(event, started_at):
     if config is None:
         return None
 
-    capture_vault = config[memspec.CONFIG_VAULTS_FIELD][0]
+    capture_vault = governance_vault(config)
     for kind in CAPTURE_KINDS:
         _capture_owner_sentence(prompt, capture_vault, event, started_at, kind)
     _capture_ruling(prompt, capture_vault, event, started_at)
@@ -338,6 +360,12 @@ def _handle(event, started_at):
 
 
 def _selftest():
+    import contextlib
+    import io
+    import shutil
+    import subprocess
+    import uuid
+
     checks = []
     marker_directory = None
     try:
@@ -412,6 +440,18 @@ def _selftest():
                     and f"V1={vault.resolve()}" in context,
                 )
             )
+
+            sweep_root = root / "recall-marker-sweep"
+            aged_directory = sweep_root / "aged-session"
+            aged_directory.mkdir(parents=True)
+            (aged_directory / "digest").write_text("digest\n", encoding="ascii")
+            aged = time.time() - memspec.RECALL_MARKER_TTL_SECONDS - 60
+            os.utime(aged_directory, (aged, aged))
+            _sweep_recall_markers(sweep_root, time.time())
+            checks.append((
+                "aged recall markers are swept in bounded batches",
+                not aged_directory.exists(),
+            ))
 
             supersession_result = run_synthetic(
                 Path(__file__),
@@ -550,6 +590,31 @@ def _selftest():
                     and not result.stderr
                     and grant_state() == before
                 )
+
+            project_vault = root / "aaa-project-vault"
+            project_vault.mkdir()
+            (grant_vault / memspec.WORK_LEDGER_FILENAME).write_text(
+                "governance ledger\n", encoding="utf-8"
+            )
+            write_config(grant_config, [project_vault, grant_vault])
+            routed_grant = "governance capture 我同意,以後不用再問"
+            routed_result = run_synthetic(
+                Path(__file__),
+                {"prompt": routed_grant, "session_id": uuid.uuid4().hex},
+                grant_config,
+            )
+            routed_digest = _grant_digest(routed_grant)
+            checks.append((
+                "owner capture follows the governance ledger instead of vault order",
+                routed_result.returncode == 0
+                and any(
+                    (grant_vault / memspec.GRANT_DIRECTORY).glob(
+                        f"grant-*-{routed_digest}.md"
+                    )
+                )
+                and not (project_vault / memspec.GRANT_DIRECTORY).exists(),
+            ))
+            write_config(grant_config, [grant_vault])
 
             checks.append(
                 (
@@ -1270,7 +1335,7 @@ def _selftest():
             shutil.rmtree(marker_directory, ignore_errors=True)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 37
+    total = 39
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
