@@ -8,6 +8,7 @@ from pathlib import Path
 import posixpath
 import re
 import sqlite3
+import stat
 import time
 
 try:
@@ -240,43 +241,72 @@ def card_files(vault):
     return _markdown_files(Path(vault).resolve())
 
 
-def _markdown_files(vault):
-    files = []
-    # A vault is a privacy boundary. Do not follow file symlinks, directory
-    # symlinks, or Windows junctions: otherwise a card-shaped path inside the
-    # vault can make unrelated files outside it searchable.
-    for directory, names, filenames in os.walk(vault, topdown=True, followlinks=False):
-        parent = Path(directory)
-        kept = []
-        for name in names:
-            child = parent / name
-            try:
-                is_junction = getattr(child, "is_junction", lambda: False)()
-                child.resolve(strict=True).relative_to(vault)
-                if not name.startswith("_") and not child.is_symlink() and not is_junction:
-                    kept.append(name)
-            except (OSError, ValueError):
-                continue
-        names[:] = kept
+_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
 
-        for name in filenames:
-            path = parent / name
-            try:
-                relative = path.relative_to(vault)
-                is_junction = getattr(path, "is_junction", lambda: False)()
-                path.resolve(strict=True).relative_to(vault)
-                if (
-                    path.is_file()
-                    and not path.is_symlink()
-                    and not is_junction
-                    and path.suffix.lower() == ".md"
-                    and path.name != memspec.MEMORY_INDEX_FILENAME
-                    and not any(part.startswith("_") for part in relative.parts)
-                ):
-                    files.append(path)
-            except (OSError, ValueError):
-                continue
-    return sorted(files, key=lambda item: item.relative_to(vault).as_posix().casefold())
+
+def _is_link(entry, info):
+    # A Windows junction is not a symlink to os.DirEntry; the reparse attribute
+    # from the directory listing catches both without resolving anything.
+    return entry.is_symlink() or bool(getattr(info, "st_file_attributes", 0) & _REPARSE_POINT)
+
+
+def _scan_vault(vault):
+    """Every card-shaped file as (vault-relative posix path, path, mtime_ns, size).
+
+    A vault is a privacy boundary: symlinks, Windows junctions, and any path part
+    starting with '_' or '.' are neither entered nor listed, so a link-shaped
+    entry cannot make files outside the vault searchable. Links are recognised
+    from the directory entry itself; nothing is resolved (2026-09-04 regression:
+    resolving every entry cost 4 s per hook on a loaded machine)."""
+    found = []
+    pending = [(os.fspath(vault), "")]
+    while pending:
+        directory, prefix = pending.pop()
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    name = entry.name
+                    if name.startswith(("_", ".")):
+                        continue
+                    try:
+                        info = entry.stat(follow_symlinks=False)
+                        if _is_link(entry, info):
+                            continue
+                        if entry.is_dir(follow_symlinks=False):
+                            pending.append((entry.path, prefix + name + "/"))
+                            continue
+                        if not entry.is_file(follow_symlinks=False):
+                            continue
+                    except OSError:
+                        continue
+                    if not name.lower().endswith(".md") or name == memspec.MEMORY_INDEX_FILENAME:
+                        continue
+                    found.append((prefix + name, Path(entry.path), info.st_mtime_ns, info.st_size))
+        except OSError:
+            continue
+    found.sort(key=lambda item: item[0].casefold())
+    return found
+
+
+def _markdown_files(vault):
+    return [path for _, path, _, _ in _scan_vault(vault)]
+
+
+def mark_stale(vault):
+    """Age the index so the next reader rebuilds it: for a writer that could not
+    take the index lock but must not let the grace window hide its new card."""
+    db_path = _db_path(_resolve_vault(vault))
+    try:
+        stamp = time.time() - memspec.FTS_STALE_SECONDS - 1
+        os.utime(db_path, (stamp, stamp))
+    except OSError:
+        pass
+
+
+def scan_cards(vault):
+    """Public view of the card scan with its stats, for callers that keep their own
+    manifest cache (the action gate)."""
+    return _scan_vault(Path(vault).resolve())
 
 
 def _ensure_schema(connection):
@@ -401,7 +431,7 @@ def build_index(vault, lock_timeout=0.0):
                 payload["warnings"] = warnings
             return payload
 
-        files = _markdown_files(vault)
+        scan = _scan_vault(vault)
         connection = sqlite3.connect(str(db_path), timeout=5.0)
         try:
             rebuild_fts = _ensure_schema(connection)
@@ -409,7 +439,7 @@ def build_index(vault, lock_timeout=0.0):
                 row[0]: (row[1], row[2])
                 for row in connection.execute("SELECT card_path, mtime_ns, size FROM cards")
             }
-            current_paths = {path.relative_to(vault).as_posix() for path in files}
+            current_paths = {card_path for card_path, _, _, _ in scan}
             scanned = 0
             removed = 0
             with connection:
@@ -424,19 +454,16 @@ def build_index(vault, lock_timeout=0.0):
 
                 # 2026-09-01 實測事故：stale 檢查反覆重掃未變卡片會放大成本；
                 # 規則：全文庫增量維護，未變新的卡不得重掃本文。
-                for path in files:
-                    card_path = path.relative_to(vault).as_posix()
+                for card_path, path, mtime_ns, size in scan:
+                    if known.get(card_path) == (mtime_ns, size):
+                        continue
                     try:
-                        stat = path.stat()
-                        old = known.get(card_path)
-                        if old and (stat.st_mtime_ns, stat.st_size) == old:
-                            continue
                         stable = _stable_card(path)
                     except OSError:
                         continue
                     if stable is None:
                         continue
-                    stat, fields = stable
+                    info, fields = stable
                     connection.execute(
                         """
                         INSERT INTO cards(
@@ -453,8 +480,8 @@ def build_index(vault, lock_timeout=0.0):
                         """,
                         (
                             card_path,
-                            stat.st_mtime_ns,
-                            stat.st_size,
+                            info.st_mtime_ns,
+                            info.st_size,
                             int(fields["is_card"]),
                             fields["name"],
                             fields["description"],
@@ -514,7 +541,9 @@ def build_index(vault, lock_timeout=0.0):
 
 
 def _is_stale(vault, db_path):
-    if not db_path.exists():
+    try:
+        indexed_at = db_path.stat().st_mtime
+    except OSError:
         return True
     try:
         connection = _read_connection(db_path)
@@ -522,6 +551,15 @@ def _is_stale(vault, db_path):
             row = connection.execute(
                 "SELECT value FROM search_meta WHERE key = ?", (_FTS_FORMAT_KEY,)
             ).fetchone()
+            if row is None or row[0] != _FTS_FORMAT_VERSION:
+                return True
+            # Keep the hot read path cheap: inside the grace window neither the
+            # manifest nor the vault is read. Once it expires, compare the complete
+            # manifest rather than only the newest mtime: deletions, renames,
+            # backdated additions, and size changes with preserved mtimes must all
+            # be visible after a bounded delay.
+            if time.time() - indexed_at <= memspec.FTS_STALE_SECONDS:
+                return False
             known = {
                 item[0]: (item[1], item[2])
                 for item in connection.execute(
@@ -530,28 +568,9 @@ def _is_stale(vault, db_path):
             }
         finally:
             connection.close()
-        if row is None or row[0] != _FTS_FORMAT_VERSION:
-            return True
     except sqlite3.Error:
         return True
-    try:
-        indexed_at = db_path.stat().st_mtime
-    except OSError:
-        return True
-    # Keep the hot read path cheap. Once the grace window expires, compare the
-    # complete manifest rather than only the newest mtime: deletions, renames,
-    # backdated additions, and size changes with preserved mtimes must all be
-    # visible after a bounded delay.
-    if time.time() - indexed_at <= memspec.FTS_STALE_SECONDS:
-        return False
-
-    current = {}
-    for path in _markdown_files(vault):
-        try:
-            stat = path.stat()
-        except OSError:
-            continue
-        current[path.relative_to(vault).as_posix()] = (stat.st_mtime_ns, stat.st_size)
+    current = {card_path: (mtime_ns, size) for card_path, _, mtime_ns, size in _scan_vault(vault)}
     return current != known
 
 
@@ -746,8 +765,13 @@ def _guidance_lines(vault, excluded_links, results, indexed_paths):
 
 
 def _result(vault, row, hits):
+    # The vault is already resolved and card_path came from its own listing, so
+    # joining them is the real path; resolving every candidate row again cost
+    # more than the FTS query itself.
+    card_path = row["card_path"]
     return {
-        "path": str((vault / row["card_path"]).resolve()),
+        "path": str(vault / card_path),
+        "card_path": card_path,
         "is_card": bool(row["is_card"]),
         "name": row["name"],
         "description": row["description"],
@@ -1541,6 +1565,81 @@ def _selftest():
                 linked_card.unlink()
             outside_card.unlink(missing_ok=True)
 
+            outside_dir = vault.parent / "outside-linked-dir"
+            outside_dir.mkdir(exist_ok=True)
+            (outside_dir / "leaked.md").write_text(
+                "---\nname: Leaked\ndescription: leakeddirneedle\n---\n", encoding="utf-8"
+            )
+            linked_dir = vault / "linked-dir"
+            dir_link_supported = True
+            try:
+                if os.name == "nt":
+                    import _winapi
+
+                    _winapi.CreateJunction(str(outside_dir), str(linked_dir))
+                else:
+                    linked_dir.symlink_to(outside_dir, target_is_directory=True)
+            except (OSError, AttributeError, ImportError):
+                dir_link_supported = False
+            checks.append((
+                "vault scan never enters a directory junction or symlink",
+                not dir_link_supported
+                or not any(str(path).startswith(str(linked_dir)) for path in _markdown_files(vault)),
+            ))
+            if dir_link_supported:
+                try:
+                    linked_dir.rmdir()
+                except OSError:
+                    linked_dir.unlink()
+            shutil.rmtree(outside_dir, ignore_errors=True)
+
+            hidden_dir = vault / ".tooling"
+            hidden_dir.mkdir()
+            (hidden_dir / "state.md").write_text(
+                "---\nname: State\ndescription: hiddendirneedle\n---\n", encoding="utf-8"
+            )
+            checks.append((
+                "vault scan skips dot-directories, which hold tooling state and never cards",
+                all(".tooling" not in path.parts for path in _markdown_files(vault)),
+            ))
+            shutil.rmtree(hidden_dir, ignore_errors=True)
+
+            scale_vault = Path(tempfile.mkdtemp(prefix="epitype-scale-")).resolve()
+            (scale_vault / "nested").mkdir()
+            for index in range(300):
+                _write_card(
+                    scale_vault / ("nested" if index % 2 else "") / f"card-{index:03d}.md",
+                    f"name: Scale {index}\ndescription: scaleneedle{index:03d}",
+                    f"scale body {index}",
+                )
+            resolve_calls = []
+            original_resolve = Path.resolve
+
+            def counting_resolve(self, *arguments, **keywords):
+                resolve_calls.append(self)
+                return original_resolve(self, *arguments, **keywords)
+
+            Path.resolve = counting_resolve
+            try:
+                scan_started = time.perf_counter()
+                scale_scan = _scan_vault(scale_vault)
+                scan_seconds = time.perf_counter() - scan_started
+            finally:
+                Path.resolve = original_resolve
+            checks.append((
+                "vault scan lists 300 cards without resolving any path and within budget",
+                len(scale_scan) == 300 and not resolve_calls and scan_seconds < 2.0,
+            ))
+            build_index(scale_vault)
+            scale_recall = recall_index(scale_vault, "scaleneedle007")
+            checks.append((
+                "recall results carry the vault-relative card_path beside the absolute path",
+                scale_recall["count"] == 1
+                and scale_recall["results"][0]["card_path"] == "nested/card-007.md"
+                and scale_recall["results"][0]["path"] == str(scale_vault / "nested" / "card-007.md"),
+            ))
+            shutil.rmtree(scale_vault, ignore_errors=True)
+
             other.write_text(other.read_text(encoding="utf-8") + "concurrentwriteproof\n", encoding="utf-8")
             concurrent_mtime = time.time() + 2.0
             os.utime(other, (concurrent_mtime, concurrent_mtime))
@@ -1702,7 +1801,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 36
+    total = 40
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
