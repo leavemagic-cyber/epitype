@@ -46,6 +46,10 @@ inside the interpreter fell from 4.0–4.6 s to about 0.4 s.
   epitype` gains a `__main__` guard; a tag publish requires `package.json` to
   carry the tag version; `tests/run_all.py --jobs N` runs selftests in parallel
   on CI.
+- Recall terms drop particle bigrams and punctuation fragments (「我們」,「的虛」,
+  「——」), which matched every card and pushed the rule card that answered the
+  prompt below the window; a ruling matched only in its body (the assistant's
+  question, not the owner's answer) is an ordinary hit rather than a pinned one.
 - Hook commands are registered without quotes whenever the paths allow it. Codex
   on Windows runs hooks through `cmd.exe /C`, which strips the first and last
   quote of a line that starts with one, so the fully quoted form the

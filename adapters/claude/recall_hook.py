@@ -313,6 +313,13 @@ def _handle(event, started_at):
                 memspec.CORRECTION_DIRECTORY: memspec.CORRECTION_PREFIX,
                 memspec.RULING_DIRECTORY: memspec.RULING_PREFIX,
             }.get(parent)
+            if prefix == memspec.RULING_PREFIX and list(hit.get("hit_fields") or ()) == ["body"]:
+                # A ruling's body holds the assistant's question as well as the
+                # owner's answer, and the answer already sits in the description; a
+                # ruling matched only in its body matched the question, which is not
+                # the owner's word on this prompt and must not take a pinned seat.
+                # A correction's body is the owner's own sentence, so it keeps its seat.
+                prefix = None
             # A card matched only in its body is a weak lexical hit; two per vault
             # is plenty. What the owner corrected or ruled is never weak, so the
             # kind is decided before the cap (adversarial review 2026-09-03 #1).
@@ -1023,6 +1030,36 @@ def _selftest():
                 )
             )
 
+            body_only_ruling = grant_vault / memspec.RULING_DIRECTORY / "ruling-20260905-bodyonly0001.md"
+            body_only_ruling.write_text(
+                "---\nname: ruling-20260905-bodyonly0001\n"
+                "description: owner ruling auto-captured 2026-09-05: 照片先存最清楚的那張\n"
+                f"{memspec.SCOPE_FIELD}: governance-core\n---\n"
+                "問（助理）：bodyonlyneedle 這個要怎麼處理？\n答（owner 逐字）：照片先存最清楚的那張\n",
+                encoding="utf-8",
+            )
+            memsearch.build_index(grant_vault)
+            body_only = run_synthetic(
+                Path(__file__),
+                {"prompt": "find bodyonlyneedle", "session_id": uuid.uuid4().hex},
+                grant_config,
+            )
+            body_only_value = json.loads(body_only.stdout) if body_only.stdout.strip() else {}
+            body_only_lines = [
+                line
+                for line in body_only_value.get("hookSpecificOutput", {}).get("additionalContext", "").splitlines()
+                if "bodyonly0001" in line
+            ]
+            checks.append(
+                (
+                    "a ruling matched only in its body is an ordinary hit, not a pinned owner word",
+                    body_only.returncode == 0
+                    and len(body_only_lines) == 1
+                    and not body_only_lines[0].startswith("- " + memspec.RULING_PREFIX),
+                )
+            )
+            body_only_ruling.unlink()
+
             # Adversarial review 2026-09-03: the caps and the legend are load-bearing.
             caps_vault = root / "caps-vault"
             caps_vault.mkdir()
@@ -1380,7 +1417,7 @@ def _selftest():
             shutil.rmtree(marker_directory, ignore_errors=True)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 40
+    total = 41
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

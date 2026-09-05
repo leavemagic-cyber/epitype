@@ -610,6 +610,25 @@ def _rows_for_term(connection, term):
     ).fetchall()
 
 
+_CJK_FUNCTION_CHARS = frozenset(
+    "的了是在我你他她它們這那有會就都也要把跟不嗎呢什麼怎個很和與及或之其而但又才還於吧啊呀"
+    "讓被為對從以所著過給說來去等些每另此該者哪誰何如若則即已曾將能可應得須只再太更最卻並且因沒無非別請"
+)
+_ALNUM_OR_CJK = re.compile(f"[0-9A-Za-z{_CJK_RANGE}]")
+
+
+def _substantive(term):
+    """Punctuation fragments ('——') and bigrams built on particles ('我們', '的虛')
+    match every card and rank nothing; only content characters make a term
+    (2026-09-05: such fragments filled the window while the rule card that
+    answered the prompt ranked below it)."""
+    if not _ALNUM_OR_CJK.search(term):
+        return False
+    if len(term) == 2 and _CJK_RUN.fullmatch(term):
+        return not any(character in _CJK_FUNCTION_CHARS for character in term)
+    return True
+
+
 def _recall_terms(prompt):
     priority_terms = []
     priority_seen = set()
@@ -618,10 +637,12 @@ def _recall_terms(prompt):
         part = match.group(0)
         if _CJK_RUN.fullmatch(part):
             cjk_terms.extend(
-                part[index : index + 2] for index in range(len(part) - 1)
+                bigram
+                for bigram in (part[index : index + 2] for index in range(len(part) - 1))
+                if _substantive(bigram)
             )
             continue
-        if len(part) < 2:
+        if len(part) < 2 or not _substantive(part):
             continue
         key = part.casefold()
         if key not in priority_seen:
@@ -1638,6 +1659,13 @@ def _selftest():
             ))
             shutil.rmtree(scale_vault, ignore_errors=True)
 
+            hygiene_terms = _recall_terms("我們的虛擬單，怎麼會出現這個？——實單 R 研究")
+            checks.append((
+                "recall terms keep content bigrams and drop particles and punctuation fragments",
+                {"虛擬", "擬單", "出現", "實單", "研究"} <= set(hygiene_terms)
+                and not {"我們", "們的", "的虛", "怎麼", "麼會", "這個", "——", "？"} & set(hygiene_terms),
+            ))
+
             other.write_text(other.read_text(encoding="utf-8") + "concurrentwriteproof\n", encoding="utf-8")
             concurrent_mtime = time.time() + 2.0
             os.utime(other, (concurrent_mtime, concurrent_mtime))
@@ -1799,7 +1827,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 40
+    total = 41
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
