@@ -66,6 +66,33 @@ inside the interpreter fell from 4.0–4.6 s to about 0.4 s.
   maps are per session and bounded; the installed package provides a unified
   `epitype` command and CI exercises the installed wheel; Codex trust requires
   exactly the four supported registrations.
+- The owner-quote capture core moves into `epitype/capture.py`, and
+  `epitype/harvest.py` adds an inventory-plus-replay harvest whose manifest
+  skips files that have not changed. `epitype/card_lint.py` checks
+  required/optional frontmatter fields per card type across 11 types and
+  prints a one-line SessionStart summary.
+- Recall now places a matching current decision card ahead of corrections and
+  rulings, carrying the owner's own words, and SessionStart injects a
+  "current rulings" block per vault (compaction-aware). Flat frontmatter-field
+  reading converges into `memspec.frontmatter_fields`, shared by
+  `decision_lint`, `card_lint`, and all three hooks; the hot hook path no
+  longer loads `decision_lint` or `argparse`.
+- A Stop decision gate (5th hook event, Claude and Codex) compares the turn
+  against the owner's current decision cards before it ends: a forbidden-card
+  hit, or a question repeating the same card's alias twice or more, blocks
+  and asks for a rewrite per the ruling. `stop_hook_active` is never blocked,
+  each card blocks at most once per session, and a block is logged to
+  `_GATE_LOG` with `kind=stop_block`.
+- A 72-card, 51-question synthetic recall regression exam
+  (`tests/recall_regression.py`, threshold 0.882) runs alongside questions
+  against the real local vault. An offline alias batch
+  (`epitype/alias_batch.py`) exports cards missing aliases and applies
+  reviewed aliases back — additions only, NFKC-deduplicated, preserving
+  BOM/CRLF, and a collision with a decision card blocks only that alias.
+- The exam runner gains `stop` (runs the real stop gate), `abstention`
+  (`top_k_empty`), and recall's `pinned_contains` kinds; the sample corpus
+  grows from 12 to 16 questions, and the local 330-question corpus (kept out
+  of the repo) passes in full.
 
 ## v1.1.0 — 2026-09-03
 
