@@ -39,7 +39,7 @@ def _is_pending(line):
     return (
         memspec.PENDING_MARKER_REGEX.search(line) is not None
         and memspec.PENDING_CLOSED_REGEX.search(line) is None
-        and memspec.PENDING_VERIFY_MARKER not in line
+        and memspec.PENDING_VERIFY_MARKER not in line.casefold()
     )
 
 
@@ -47,22 +47,23 @@ def scan_vault(vault, max_age_days=memspec.PENDING_MAX_AGE_DAYS, today=None):
     vault = Path(vault).resolve()
     today = today or datetime.now(timezone.utc).date()
     cards = []
+    oversized = 0
     for path in memsearch.card_files(vault):
         try:
             stat = path.stat()
             if stat.st_size > MAX_CARD_BYTES:
+                oversized += 1
                 continue
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
         zombies = []
-        in_frontmatter = False
-        for number, line in enumerate(text.splitlines(), 1):
-            # Frontmatter describes the card; only body lines can be to-do items.
-            if line.strip() == "---" and (number == 1 or in_frontmatter):
-                in_frontmatter = not in_frontmatter
-                continue
-            if in_frontmatter or not _is_pending(line):
+        lines = text.splitlines()
+        # Frontmatter describes the card; only body lines can be to-do items.
+        frontmatter, closing = memspec.split_frontmatter(text)
+        body_start = 0 if frontmatter is None else (len(lines) if closing is None else closing + 1)
+        for number, line in enumerate(lines[body_start:], body_start + 1):
+            if not _is_pending(line):
                 continue
             age, source = _line_age_days(line, stat.st_mtime, today)
             if age >= max_age_days:
@@ -80,13 +81,14 @@ def scan_vault(vault, max_age_days=memspec.PENDING_MAX_AGE_DAYS, today=None):
         "zombie_cards": len(cards),
         "zombie_lines": sum(len(item["lines"]) for item in cards),
         "oldest_days": max((item["oldest_days"] for item in cards), default=0),
+        "oversized_skipped": oversized,
         "cards": cards,
     }
 
 
 def summary_line(vaults, max_age_days=memspec.PENDING_MAX_AGE_DAYS, today=None):
     """One bounded line for SessionStart, or None when nothing is overdue."""
-    lines = cards = oldest = 0
+    lines = cards = oldest = skipped = 0
     worst = None
     for vault in vaults:
         try:
@@ -95,12 +97,16 @@ def summary_line(vaults, max_age_days=memspec.PENDING_MAX_AGE_DAYS, today=None):
             continue
         lines += report["zombie_lines"]
         cards += report["zombie_cards"]
+        skipped += report["oversized_skipped"]
         if report["oldest_days"] > oldest:
             oldest, worst = report["oldest_days"], report["vault"]
     if not lines:
         return None
+    # A skipped card is said, not hidden: an unscanned card is a card whose
+    # pending lines nobody counted.
+    note = f"，{skipped} 張超過 {MAX_CARD_BYTES // 1024}KB 未掃" if skipped else ""
     return (
-        f"⏳ 殭屍待辦 {lines} 行／{cards} 卡（最舊 {oldest} 天，逾 {max_age_days} 天未收尾）"
+        f"⏳ 殭屍待辦 {lines} 行／{cards} 卡（最舊 {oldest} 天，逾 {max_age_days} 天未收尾{note}）"
         f"→ python epitype/pending_lint.py \"{worst}\""
     )
 

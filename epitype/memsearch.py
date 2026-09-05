@@ -137,16 +137,7 @@ def _no_index_result(vault):
 
 
 def _scalar(raw):
-    value = raw.strip()
-    if len(value) >= 2 and value[0] == value[-1] == '"':
-        try:
-            decoded = json.loads(value)
-            return decoded if isinstance(decoded, str) else str(decoded)
-        except (json.JSONDecodeError, TypeError):
-            return value[1:-1]
-    if len(value) >= 2 and value[0] == value[-1] == "'":
-        return value[1:-1].replace("''", "'")
-    return value.split(" #", 1)[0].strip()
+    return memspec.parse_scalar(raw)[0]
 
 
 def _alias_values(raw):
@@ -169,11 +160,12 @@ def _parse_frontmatter(text):
     block_style = None
     block_lines = []
 
+    seen = set()
+
     def flush_block():
         nonlocal block_key, block_style, block_lines
         if block_key:
-            separator = "\n" if block_style == "|" else " "
-            fields[block_key] = separator.join(part for part in block_lines if part).strip()
+            fields[block_key] = memspec.join_block_scalar(block_style, block_lines)
         block_key = None
         block_style = None
         block_lines = []
@@ -192,7 +184,13 @@ def _parse_frontmatter(text):
                 aliases.extend(_alias_values(raw))
                 if not raw.strip():
                     list_key = key
-            elif raw.strip() in ("|", ">"):
+                continue
+            # A duplicated key keeps its first value, as the lints do; the
+            # index must not call a card superseded that the lint calls active.
+            if key in seen:
+                continue
+            seen.add(key)
+            if raw.strip() in memspec.BLOCK_SCALAR_STYLES:
                 block_key, block_style = key, raw.strip()
             else:
                 fields[key] = _scalar(raw)

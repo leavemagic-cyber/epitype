@@ -19,15 +19,6 @@ CITATION_PATTERN = (
 # 2026-09-01 實測事故：各端自寫 regex 會再次分叉；規則：所有抄寫端與驗證端
 # 必須 import 這個編譯物件。
 CITATION_REGEX = re.compile(CITATION_PATTERN)
-# 2026-09-01 實測事故：說明文字與機器格式分叉會讓人讀規格誤導實作；規則：
-# 人讀規格也必須來自本模組。
-CITATION_DESCRIPTION = (
-    '<verbatim quote> L<line>; delimiters may be 「...」 or "..."; '
-    'verify exact text within the configured line window.'
-)
-# 2026-09-01 實測事故：各驗證端的行號容錯不一致會產生不同判定；規則：
-# transcript 行號前後 2 行容錯收斂成唯一常數。
-CITATION_LINE_TOLERANCE = 2
 
 # 2026-09-01 實測事故：決策曾在不同時點並存且表決門檻被擅自增加，導致現行
 # 裁定遭改寫；規則：決策卡欄名必須同源。
@@ -37,12 +28,6 @@ CURRENT_DECISION_AT_FIELD = "current_decision_at"
 DECIDED_BY_FIELD = "decided_by"
 SUPERSEDED_BY_FIELD = "superseded_by"
 OWNER_QUOTE_FIELD = "owner_quote"
-DECISION_CARD_FIELDS = (
-    DECISION_KEY_FIELD,
-    DECISION_STATUS_FIELD,
-    CURRENT_DECISION_AT_FIELD,
-    DECIDED_BY_FIELD,
-)
 # 2026-09-01 實測事故：各 lint 自訂狀態值會破壞每個 decision_key 恰一張現行卡；
 # 規則：狀態值必須同源。
 ACTIVE_DECISION_STATUS = "active"
@@ -67,21 +52,6 @@ ALIASES_FIELD = "aliases"
 # 2026-09-01 實測事故：角色卡與系統卡混放且歸屬只藏在檔名，導致跨域寫入無法
 # 機器攔截；規則：卡片必須有結構化 scope。
 SCOPE_FIELD = "scope"
-# 2026-09-01 實測事故：把角色佔位誤當封閉列舉會拒絕合法擴充；規則：
-# <member-name> 是規格佔位，實際存註冊角色名，整個值域可擴充。
-SCOPE_VALUES = ("<member-name>", "governance-core", "data", "infra")
-
-# 2026-09-01 實測事故：通用索引每場注入 7.6KB 且持續膨脹，會侵蝕有效上下文；
-# 規則：120 行是第一道硬上限。
-INDEX_MAX_LINES = 120
-# 2026-09-01 實測事故：原生注入接近 32KiB 時可能靜默截斷；規則：索引以
-# 22KiB 留出包裝餘裕。
-INDEX_MAX_BYTES = 22 * 1024
-# 2026-09-01 實測事故：工作記憶檔曾膨脹到 95KB 且混入跨域待辦，導致注入截斷
-# 與舊任務復活；規則：每本限 12KiB。
-WORKING_MEMORY_MAX_BYTES = 12 * 1024
-# 2026-09-01 實測事故：只控 bytes 仍會容納大量短行噪音；規則：另設 150 行上限。
-WORKING_MEMORY_MAX_LINES = 150
 
 # 機械地圖只讀 transcript 尾窗，所有上限集中在共用地基。
 COMPACT_MAP_DEFAULT_BUDGET_BYTES = 2048
@@ -130,7 +100,6 @@ TRIGGER_FULLTEXT_MATCH = "fulltext"
 ADVICE_FIELD = "advice"
 MEMORY_INDEX_FILENAME = "MEMORY.md"
 WORK_LEDGER_FILENAME = "_WORK_LEDGER.md"
-COMPACT_MAP_FILENAME = "_COMPACT_MAP.md"
 COMPACT_MAP_DIRECTORY = "_COMPACT_MAPS"
 COMPACT_MAP_TTL_SECONDS = 30 * 24 * 3600
 COMPACT_MAP_MAX_FILES = 64
@@ -241,6 +210,11 @@ RECALL_TOTAL_MAX_LINES = 8
 # never be seen. Three times the ordinary window.
 RECALL_PINNED_SCAN_LIMIT = 15
 RECALL_LEGEND_PREFIX = "vaults: "
+# The capture label is already said by the line's marker and directory; only
+# the date is kept in the injected description.
+CAPTURE_LABEL_REGEX = re.compile(r"^owner (?:grant|correction|ruling) auto-captured (?=\d{4}-\d{2}-\d{2}: )")
+# When a budget cuts the injected context, the cut is said, never silent.
+CONTEXT_TRUNCATED_SUFFIX = "…（超出預算，餘 {dropped} 段未注入）"
 
 # 2026-09-03 owner:「你在過程一直讀這種跟寫出這種有必要嗎?很浪費token吧」。工具呼叫之間的
 # 旁白(「改成 C:/… 重跑一次」)輸出一次、之後每輪當 context 重讀一次;36 小時內全機 7797 段
@@ -290,6 +264,74 @@ LOCK_STALE_SECONDS = 120.0
 # 2026-09-01 實測事故：競爭端忙迴圈會耗盡 CPU；規則：短暫排隊的輪詢間隔
 # 統一為 10ms。
 LOCK_POLL_SECONDS = 0.01
+
+
+FRONTMATTER_BOUNDARY = "---"
+YAML_DOCUMENT_END = "..."
+BLOCK_SCALAR_STYLES = ("|", ">", "|-", ">-", "|+", ">+")
+
+
+def split_frontmatter(text):
+    """(frontmatter lines, index of the closing line) of a card's text.
+
+    (None, None) when the text has no frontmatter; (lines, None) when the
+    opening boundary is never closed, so the caller decides whether that is a
+    defect. One rule for every reader — index, lints, action gate — so a card
+    cannot be a decision to one tool and prose to another: the BOM and CRLF are
+    tolerated, and `...` closes the frontmatter exactly like `---`."""
+    lines = text.lstrip("﻿").splitlines()
+    if not lines or lines[0].strip() != FRONTMATTER_BOUNDARY:
+        return None, None
+    for index in range(1, len(lines)):
+        if lines[index].strip() in (FRONTMATTER_BOUNDARY, YAML_DOCUMENT_END):
+            return lines[1:index], index
+    return lines[1:], None
+
+
+def strip_inline_comment(value):
+    """Drop a plain scalar's trailing YAML comment; a '#' inside quotes stays."""
+    quote = None
+    escaped = False
+    for index, character in enumerate(value):
+        if escaped:
+            escaped = False
+            continue
+        if quote == '"' and character == "\\":
+            escaped = True
+            continue
+        if character in ("'", '"'):
+            if quote is None:
+                quote = character
+            elif quote == character:
+                quote = None
+            continue
+        if character == "#" and quote is None and (index == 0 or value[index - 1].isspace()):
+            return value[:index].rstrip()
+    return value.rstrip()
+
+
+def parse_scalar(raw_value):
+    """(value, problem) for one frontmatter scalar. Quoted forms keep their
+    text; only the escapes a card actually needs (\\" and \\\\) are decoded."""
+    value = strip_inline_comment(raw_value).strip()
+    if not value:
+        return "", None
+    if value[0] == "'":
+        if len(value) < 2 or value[-1] != "'":
+            return "", "單引號字串未閉合"
+        return value[1:-1].replace("''", "'"), None
+    if value[0] == '"':
+        if len(value) < 2 or value[-1] != '"':
+            return "", "雙引號字串未閉合"
+        return value[1:-1].replace('\\"', '"').replace("\\\\", "\\"), None
+    return value, None
+
+
+def join_block_scalar(style, lines):
+    """Literal styles keep line breaks; folded styles join with spaces."""
+    if style.startswith("|"):
+        return "\n".join(lines).strip()
+    return " ".join(line for line in lines if line).strip()
 
 
 def slim_index(body, budget, full_path):

@@ -29,8 +29,8 @@ OWNER_QUOTE_FIELD = _memspec.OWNER_QUOTE_FIELD
 SUPERSEDED_BY_FIELD = _memspec.SUPERSEDED_BY_FIELD
 SUPERSEDED_DECISION_STATUS = _memspec.SUPERSEDED_DECISION_STATUS
 
-FRONTMATTER_BOUNDARY = "---"
-YAML_DOCUMENT_END = "..."
+FRONTMATTER_BOUNDARY = _memspec.FRONTMATTER_BOUNDARY
+YAML_DOCUMENT_END = _memspec.YAML_DOCUMENT_END
 TOP_LEVEL_FIELD = re.compile(r"^([A-Za-z_][A-Za-z0-9_-]*)\s*:\s*(.*)$")
 
 
@@ -61,49 +61,7 @@ class LintReport:
         return 1 if self.failures else 0
 
 
-def _strip_inline_comment(value):
-    """移除 plain scalar 的 YAML 行尾註解，保留引號內的井字號。"""
-    quote = None
-    escaped = False
-    for index, character in enumerate(value):
-        if escaped:
-            escaped = False
-            continue
-        if quote == '"' and character == "\\":
-            escaped = True
-            continue
-        if character in ("'", '"'):
-            if quote is None:
-                quote = character
-            elif quote == character:
-                quote = None
-            continue
-        if character == "#" and quote is None and (
-            index == 0 or value[index - 1].isspace()
-        ):
-            return value[:index].rstrip()
-    return value.rstrip()
-
-
-def _parse_scalar(raw_value):
-    value = _strip_inline_comment(raw_value).strip()
-    if not value:
-        return "", None
-    if value[0] == "'":
-        if len(value) < 2 or value[-1] != "'":
-            return "", "單引號字串未閉合"
-        return value[1:-1].replace("''", "'"), None
-    if value[0] == '"':
-        if len(value) < 2 or value[-1] != '"':
-            return "", "雙引號字串未閉合"
-        try:
-            # 決策欄位只需 scalar；unicode_escape 不適合中文，因此只處理常見 YAML 跳脫。
-            inner = value[1:-1]
-            inner = inner.replace("\\\"", '"').replace("\\\\", "\\")
-            return inner, None
-        except ValueError:
-            return "", "雙引號字串無法解析"
-    return value, None
+_parse_scalar = _memspec.parse_scalar
 
 
 def _parse_frontmatter(path):
@@ -113,15 +71,9 @@ def _parse_frontmatter(path):
     except (OSError, UnicodeError) as exc:
         return {}, f"無法以 UTF-8 讀取 frontmatter：{type(exc).__name__}"
 
-    lines = text.splitlines()
-    if not lines or lines[0].strip() != FRONTMATTER_BOUNDARY:
+    front_lines, closing_index = _memspec.split_frontmatter(text)
+    if front_lines is None:
         return {}, None
-
-    closing_index = None
-    for index in range(1, len(lines)):
-        if lines[index].strip() in (FRONTMATTER_BOUNDARY, YAML_DOCUMENT_END):
-            closing_index = index
-            break
     if closing_index is None:
         return {}, "frontmatter 缺少結束界線"
 
@@ -129,18 +81,20 @@ def _parse_frontmatter(path):
     problems = []
     active_container_indent = None
     block_field = None
+    block_style = None
     block_indent = None
     block_lines = []
 
     def finish_block():
-        nonlocal block_field, block_indent, block_lines
+        nonlocal block_field, block_style, block_indent, block_lines
         if block_field is not None:
-            fields[block_field] = "\n".join(block_lines).strip()
+            fields[block_field] = _memspec.join_block_scalar(block_style, block_lines)
         block_field = None
+        block_style = None
         block_indent = None
         block_lines = []
 
-    for line_number, raw_line in enumerate(lines[1:closing_index], start=2):
+    for line_number, raw_line in enumerate(front_lines, start=2):
         if not raw_line.strip() or raw_line.lstrip().startswith("#"):
             if block_field is not None:
                 block_lines.append("")
@@ -176,8 +130,9 @@ def _parse_frontmatter(path):
             problems.append(f"L{line_number} 重複欄位 {key}")
             continue
         stripped = raw_value.strip()
-        if stripped in ("|", ">", "|-", ">-", "|+", ">+"):
+        if stripped in _memspec.BLOCK_SCALAR_STYLES:
             block_field = key
+            block_style = stripped
             block_indent = None
             block_lines = []
             continue
@@ -311,13 +266,12 @@ def lint_vault(vault, audit=False):
     groups = {}
     for card in report.cards:
         decision_key = card.fields.get(DECISION_KEY_FIELD, "").strip()
-        groups.setdefault(decision_key, []).append(card)
-
         if not decision_key:
             report.failures.append(
                 Finding("FAIL", str(card.path), "1", "decision_key 不得空白")
             )
             continue
+        groups.setdefault(decision_key, []).append(card)
 
         status = card.fields.get(DECISION_STATUS_FIELD, "").strip()
         if status not in DECISION_STATUS_VALUES:

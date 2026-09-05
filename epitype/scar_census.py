@@ -13,17 +13,19 @@ import tempfile
 from contextlib import redirect_stderr, redirect_stdout
 
 try:
-    from .memspec import file_lock
+    from . import memspec as _memspec
 except ImportError:  # Direct script execution remains supported.
-    from memspec import file_lock
+    import memspec as _memspec
+
+file_lock = _memspec.file_lock
 
 
 # 2026-09-01 實測事故：傷疤散在常駐檔、索引紅標、教訓卡與工具冊四層，
 # 未系統性盤點會讓記憶式摘要產生錯數；規則：摘要只能從檔案即時生成，
 # 禁止手寫第二份副本。
 
-FRONTMATTER_BOUNDARY = "---"
-YAML_DOCUMENT_END = "..."
+FRONTMATTER_BOUNDARY = _memspec.FRONTMATTER_BOUNDARY
+YAML_DOCUMENT_END = _memspec.YAML_DOCUMENT_END
 SUPPORTED_MODES = frozenset(("sections", "cards", "marked_lines"))
 SECTION_HEADING = re.compile(r"^##[ \t]+(.+?)[ \t]*$")
 FENCE_OPEN = re.compile(r"^[ ]{0,3}(?P<fence>`{3,}|~{3,}).*$")
@@ -105,42 +107,13 @@ def _defect(path, exc, *, filename=None):
     return CensusDefect(filename=filename or path.name, reason=reason)
 
 
-def _strip_inline_comment(value):
-    """只為 frontmatter scalar 移除引號外的 YAML 行尾註解。"""
-    quote = None
-    escaped = False
-    for index, character in enumerate(value):
-        if escaped:
-            escaped = False
-            continue
-        if quote == '"' and character == "\\":
-            escaped = True
-            continue
-        if character in ("'", '"'):
-            if quote is None:
-                quote = character
-            elif quote == character:
-                quote = None
-            continue
-        if character == "#" and quote is None and (
-            index == 0 or value[index - 1].isspace()
-        ):
-            return value[:index].rstrip()
-    return value.rstrip()
+_strip_inline_comment = _memspec.strip_inline_comment
 
 
 def _parse_scalar(raw_value, path, line_number):
-    value = _strip_inline_comment(raw_value).strip()
-    if not value:
-        return ""
-    if value[0] == "'":
-        if len(value) < 2 or value[-1] != "'":
-            raise CensusError(f"{path}:L{line_number} frontmatter 單引號未閉合")
-        return value[1:-1].replace("''", "'")
-    if value[0] == '"':
-        if len(value) < 2 or value[-1] != '"':
-            raise CensusError(f"{path}:L{line_number} frontmatter 雙引號未閉合")
-        return value[1:-1].replace('\\"', '"').replace("\\\\", "\\")
+    value, problem = _memspec.parse_scalar(raw_value)
+    if problem:
+        raise CensusError(f"{path}:L{line_number} frontmatter {problem}")
     return value
 
 
@@ -199,24 +172,16 @@ def _frontmatter_fields(path):
         raise CensusError(f"無法以 UTF-8 讀取卡片 {path}: {type(exc).__name__}") from exc
 
     lines = text.splitlines()
-    if not lines or lines[0].strip() != FRONTMATTER_BOUNDARY:
+    front_lines, closing_index = _memspec.split_frontmatter(text)
+    if front_lines is None:
         return {}, text
-
-    closing_index = next(
-        (
-            index
-            for index in range(1, len(lines))
-            if lines[index].strip() in (FRONTMATTER_BOUNDARY, YAML_DOCUMENT_END)
-        ),
-        None,
-    )
     if closing_index is None:
         raise CensusError(f"{path}: frontmatter 缺少結束界線")
 
     fields = {}
     metadata_indent = None
     metadata_child_indent = None
-    for line_number, raw_line in enumerate(lines[1:closing_index], start=2):
+    for line_number, raw_line in enumerate(front_lines, start=2):
         if not raw_line.strip() or raw_line.lstrip().startswith("#"):
             continue
         leading = raw_line[: len(raw_line) - len(raw_line.lstrip())]

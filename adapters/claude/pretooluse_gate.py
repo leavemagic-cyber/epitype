@@ -94,17 +94,9 @@ def _compile_trigger_regex(pattern):
 
 
 def _scalar(raw):
-    value = raw.strip()
-    if len(value) >= 2 and value[0] == value[-1] == '"':
-        try:
-            decoded = json.loads(value)
-        except json.JSONDecodeError:
-            return value[1:-1]
-        if not isinstance(decoded, str):
-            raise ValueError("frontmatter scalar must be text")
-        return decoded
-    if len(value) >= 2 and value[0] == value[-1] == "'":
-        return value[1:-1].replace("''", "'")
+    value, problem = memspec.parse_scalar(raw)
+    if problem:
+        raise ValueError(problem)
     return value
 
 
@@ -156,14 +148,10 @@ def _inline_mapping(raw):
 
 
 def _frontmatter(path):
-    text = path.read_text(encoding="utf-8")
-    lines = text.lstrip("\ufeff").splitlines()
-    if not lines or lines[0].strip() != "---":
-        return None
-    for index, line in enumerate(lines[1:], start=1):
-        if line.strip() in ("---", "..."):
-            return lines[1:index]
-    raise ValueError("unterminated frontmatter")
+    lines, closing = memspec.split_frontmatter(path.read_text(encoding="utf-8"))
+    if lines is not None and closing is None:
+        raise ValueError("unterminated frontmatter")
+    return lines
 
 
 _TRIGGER_CACHE_FILENAME = "gate_triggers.json"
