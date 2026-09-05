@@ -59,6 +59,16 @@ The interceptor tests the scar-card form, bounded deny response, alternative adv
 python adapters/claude/pretooluse_gate.py --selftest
 ```
 
+## Waking and dreaming
+
+Epitype splits memory governance into two regimes. Waking runs inside hooks: deterministic, latency-bounded, no model calls. Dreaming is an offline consolidation pass — it may use a model, but every dream produces a review packet that a human or another model applies; nothing a dream proposes lands in the vault by itself.
+
+`epitype/dream.py` is the deterministic half of dreaming: a read-only inventory across one or more vaults (missing aliases, card-lint FAIL/WARN, zombie pending lines, open AI commitments, unreviewed drafts under `_drafts/`, the decision-card supersession chain, aging event cards, and cards added in the last 7 days), rendered as a numbered review packet with example rows and the existing CLI command that acts on each finding. It calls no model and writes nothing to the vaults it scans; a failure in one section is reported inline and does not stop the rest of the packet. Unreviewed drafts and the live event directories (`grants`/`corrections`/`rulings`) both re-judge against today's capture rules through `epitype/harvest.py --reevaluate` — forward, promoting a passing draft back under the vault, or reversed with `--quarantine-drops`, sweeping a vault's own event cards and moving the ones that no longer pass out to a quarantine directory — always apply-gated and never deleting a card.
+
+```powershell
+python epitype/dream.py --selftest
+```
+
 ## Source-of-authority rules
 
 1. **Higher law outranks lower law.** Host safety and instruction-priority rules cannot be amended by memory.
