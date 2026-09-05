@@ -234,6 +234,16 @@ def _check_card(path, relative, today):
     return card_type, findings
 
 
+def check_card(path, relative, today=None):
+    """單張卡的內容檢查，回 (型別, findings)——與 scan_vault 逐卡走的是同一條路徑。
+
+    寫檔內容閘要在落盤前對「寫入後的內容」跑同一套規則；沒有這個入口的話，閘門就得
+    自己再寫一份必填欄位判定，同一張卡兩端會判成不同結果。`relative` 是卡在 vault 內
+    的相對路徑（型別判定要看目錄與檔名），可以與 `path` 指向的實體檔不同。
+    """
+    return _check_card(path, relative, today or datetime.now(timezone.utc).date())
+
+
 def scan_vault(vault, today=None, deadline=None):
     """唯讀掃描一個 vault；deadline 是 time.monotonic() 上限，逾時就標記並停手。"""
     vault = Path(vault).resolve()

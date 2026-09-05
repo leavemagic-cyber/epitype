@@ -26,6 +26,7 @@ from _hook_common import (
     expired,
     load_config,
     read_event,
+    resolve_vaults,
     run_synthetic,
     session_component,
     write_config,
@@ -744,14 +745,276 @@ def _narration_context(event, started_at):
     return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": context}}
 
 
-def _allow_context(event, started_at, defects):
+def _write_target(tool_input, cwd):
+    """Absolute path this call is about to write, or None when it names none."""
+    for field in memspec.WRITE_GATE_PATH_FIELDS:
+        raw = tool_input.get(field)
+        if not isinstance(raw, str) or not raw.strip():
+            continue
+        try:
+            path = Path(raw)
+            if not path.is_absolute() and isinstance(cwd, str) and cwd.strip():
+                path = Path(cwd) / path
+            return path.resolve()
+        except (OSError, TypeError, ValueError):
+            return None
+    return None
+
+
+def _edit_items(tool_name, tool_input):
+    """(old, new, replace_all) triples this call would apply, in order."""
+    if tool_name.casefold() in memspec.WRITE_GATE_MULTI_EDIT_TOOLS:
+        raw_edits = tool_input.get(memspec.WRITE_GATE_EDITS_FIELD)
+        edits = raw_edits if isinstance(raw_edits, list) else []
+    else:
+        edits = [tool_input]
+    return [
+        (
+            edit.get(memspec.WRITE_GATE_OLD_FIELD),
+            edit.get(memspec.WRITE_GATE_NEW_FIELD),
+            bool(edit.get(memspec.WRITE_GATE_REPLACE_ALL_FIELD)),
+        )
+        for edit in edits
+        if isinstance(edit, dict)
+    ]
+
+
+def _prospective_write(tool_name, tool_input, target):
+    """(the new text this call adds, the full text the file would then hold).
+
+    The second element is None whenever the result cannot be known exactly — an
+    oversized or unreadable file, an `old_string` that is not in the current text.
+    A gate that guessed the post-write text would judge a card nobody wrote; the
+    new text alone is still checked against the settled rulings."""
+    if tool_name.casefold() in memspec.WRITE_GATE_CONTENT_TOOLS:
+        content = tool_input.get(memspec.WRITE_GATE_CONTENT_FIELD)
+        if not isinstance(content, str):
+            return [], None
+        return [content], content
+
+    items = _edit_items(tool_name, tool_input)
+    additions = [new for _old, new, _all in items if isinstance(new, str) and new]
+    if not items or any(
+        not isinstance(old, str) or not isinstance(new, str) for old, new, _all in items
+    ):
+        return additions, None
+    try:
+        if target.stat().st_size > memspec.WRITE_GATE_MAX_CONTENT_BYTES:
+            return additions, None
+        text = target.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return additions, None
+    for old, new, replace_all in items:
+        if not old or old not in text:
+            return additions, None
+        text = text.replace(old, new) if replace_all else text.replace(old, new, 1)
+    return additions, text
+
+
+def _forbidden_write(event, config, additions, started_at, notices):
+    """(vault, decision key, reason) for the first settled ruling this text violates.
+
+    The decision cards, their `forbidden` patterns, and the pattern validator are
+    the Stop gate's own: a ruling the model may not restate at the end of a turn is
+    the same ruling it may not write into a file, and two readings of one card would
+    drift. An unusable pattern is named to the model, never silently dropped."""
+    import stop_gate
+
+    for vault in stop_gate._vaults(config, event):
+        if expired(started_at):
+            return None
+        for decision in stop_gate._decisions(vault, started_at):
+            for index, text in enumerate(additions):
+                # Defects are collected from the first text only; the same broken
+                # pattern repeated once per edit would say nothing new.
+                fragment = stop_gate._forbidden_fragment(
+                    decision, text, notices if index == 0 else []
+                )
+                if fragment is None:
+                    continue
+                return (
+                    vault,
+                    decision.key,
+                    memspec.WRITE_GATE_FORBIDDEN_REASON.format(
+                        decision=stop_gate._named(decision),
+                        quote=decision.quote,
+                        fragment=fragment[: memspec.WRITE_GATE_FRAGMENT_MAX_CHARS],
+                    ),
+                )
+    return None
+
+
+def _vault_card_path(target, vaults):
+    """(vault, vault-relative posix path) when the target is a card of a registered
+    vault, by memsearch's own card filter: a '_'/'.' prefixed part, a non-.md name
+    and the memory index are not cards, so writing them carries no card contract."""
+    for vault in vaults:
+        try:
+            relative = target.relative_to(vault)
+        except ValueError:
+            continue
+        parts = relative.parts
+        if not parts or any(part.startswith(("_", ".")) for part in parts):
+            return None
+        if not parts[-1].lower().endswith(".md") or parts[-1] == memspec.MEMORY_INDEX_FILENAME:
+            return None
+        return vault, relative.as_posix()
+    return None
+
+
+def _card_review(relative, text):
+    """(deny reason, advice line) for the card this write would leave on disk.
+
+    card_lint.check_card is the single reading of the type contract — a second
+    required-field table here would let one card pass the gate and fail the lint.
+    It reads a path, so the prospective text is staged in the temp directory: the
+    vault must not hold a card the model has not actually written yet."""
+    from epitype import card_lint
+
+    handle, name = tempfile.mkstemp(prefix="epitype-write-", suffix=".md")
+    staging = Path(name)
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8", newline="") as stream:
+            stream.write(text)
+        card_type, findings = card_lint.check_card(staging, relative)
+    finally:
+        try:
+            staging.unlink()
+        except OSError:
+            pass
+
+    fails = [reason for level, _rule, reason in findings if level == card_lint.FAIL]
+    warns = [reason for level, _rule, reason in findings if level == card_lint.WARN]
+    advice = (
+        memspec.WRITE_GATE_CARD_ADVICE.format(
+            card_type=card_type, path=relative, problems="；".join(warns)
+        )
+        if warns
+        else None
+    )
+    if not fails:
+        return None, advice
+    problems = "；".join(fails)
+    examples = [
+        example
+        for field, example in memspec.WRITE_GATE_FIELD_EXAMPLES.items()
+        if field in problems
+    ]
+    reason = memspec.WRITE_GATE_CARD_REASON.format(
+        card_type=card_type,
+        path=relative,
+        problems=problems,
+        example="；".join(examples[: memspec.GATE_DEFECT_MAX_LINES]) or "見 docs/ARCHITECTURE.md 卡片型別表",
+    )
+    return reason[: memspec.WRITE_GATE_REASON_MAX_CHARS], advice
+
+
+def _write_marker(session_id, rule, target, text):
+    """Same-session dedupe keyed by (rule, file, content digest): a model that
+    cannot satisfy a ruling would otherwise be denied the same write forever."""
+    digest = hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
+    return _narration_marker(
+        session_id, f"{memspec.WRITE_GATE_LOG_KIND}\0{rule}\0{target}\0{digest}"
+    )
+
+
+def _append_write_block(vault, rule, subject, target, started_at):
+    """Audit a blocked write by rule, subject, and filename only — the content is
+    exactly the material a ruling is about and does not belong in the ledger."""
+    _append_gate_log(
+        vault,
+        {
+            "kind": memspec.WRITE_GATE_LOG_KIND,
+            "rule": rule,
+            "filename": target.name,
+            **subject,
+        },
+        started_at,
+    )
+
+
+def _write_review(event, tool_name, tool_input, config, started_at):
+    """(deny value, advice lines) for a call about to write file content.
+
+    Rule A: new content that re-states what the owner already ruled out is blocked
+    against the Stop gate's decision cards. Rule B: a card written into a registered
+    vault must satisfy card_lint's contract for its own type — FAIL blocks, WARN only
+    advises. Anything else proceeds untouched: a non-file tool, a re-entrant hook run,
+    a path outside every vault, content past the size cap, or a post-write text that
+    cannot be known exactly. Bash redirections never reach this gate at all
+    (docs/FAILURE_MODES.md §11)."""
+    if tool_name.casefold() not in memspec.WRITE_GATE_TOOL_NAMES:
+        return None, []
+    if not isinstance(tool_input, dict) or event.get("stop_hook_active"):
+        return None, []
+    target = _write_target(tool_input, event.get("cwd"))
+    if target is None or expired(started_at):
+        return None, []
+    additions, prospective = _prospective_write(tool_name, tool_input, target)
+
+    def oversized(text):
+        return len(text.encode("utf-8", errors="replace")) > memspec.WRITE_GATE_MAX_CONTENT_BYTES
+
+    if any(oversized(text) for text in additions):
+        return None, []
+    if prospective is not None and oversized(prospective):
+        prospective = None
+
+    notices = []
+    session_id = event.get("session_id")
+    found = _forbidden_write(event, config, additions, started_at, notices)
+    if found is not None:
+        vault, decision_key, reason = found
+        if not _write_marker(
+            session_id, memspec.WRITE_GATE_FORBIDDEN_RULE, target, "\0".join(additions)
+        ):
+            return None, notices
+        _best_effort_audit(
+            _append_write_block,
+            vault,
+            memspec.WRITE_GATE_FORBIDDEN_RULE,
+            {"decision": decision_key},
+            target,
+            started_at,
+        )
+        return _deny_value(reason[: memspec.WRITE_GATE_REASON_MAX_CHARS]), []
+
+    if prospective is None or expired(started_at):
+        return None, notices
+    card = _vault_card_path(target, resolve_vaults(config, event))
+    if card is None:
+        return None, notices
+    vault, relative = card
+    reason, advice = _card_review(relative, prospective)
+    if reason is None:
+        if advice:
+            notices.append(advice)
+        return None, notices
+    if not _write_marker(session_id, memspec.WRITE_GATE_CARD_RULE, target, prospective):
+        return None, notices
+    _best_effort_audit(
+        _append_write_block,
+        vault,
+        memspec.WRITE_GATE_CARD_RULE,
+        {"card_path": relative},
+        target,
+        started_at,
+    )
+    return _deny_value(reason), []
+
+
+def _allow_context(event, started_at, defects, notices=()):
     """Context for a call the gate lets through: trigger cards it could not use
     are named once per session (a scar that silently stopped applying is the
-    failure the gate exists to prevent), then any narration notice."""
+    failure the gate exists to prevent), then the write gate's own advice, then
+    any narration notice."""
     lines = []
     session_id = event.get("session_id")
     for name, reason in defects[: memspec.GATE_DEFECT_MAX_LINES]:
         notice = memspec.GATE_DEFECT_NOTICE.format(name=name, reason=reason)
+        if _narration_marker(session_id, notice):
+            lines.append(notice)
+    for notice in list(dict.fromkeys(notices))[: memspec.GATE_DEFECT_MAX_LINES]:
         if _narration_marker(session_id, notice):
             lines.append(notice)
     narration = _narration_context(event, started_at)
@@ -829,7 +1092,18 @@ def _handle(event, started_at):
             match = (vault, card, fallback, position)
             break
     if match is None:
-        return _allow_context(event, started_at, defects)
+        # Scar cards first: they are the owner's own trigger regexes and cheaper
+        # than reading every decision card, so the write gate only sees calls no
+        # card already stopped.
+        try:
+            write_value, notices = _write_review(
+                event, tool_name, tool_input, config, started_at
+            )
+        except Exception:
+            write_value, notices = None, ()
+        if write_value is not None:
+            return write_value
+        return _allow_context(event, started_at, defects, notices)
     vault, card, fallback, position = match
     value = _bounded_deny(card)
     _best_effort_audit(
@@ -1345,6 +1619,266 @@ def _selftest():
                 "executable", "argument", "wrapper"
             }.issubset({row.get("position") for row in command_rows})))
 
+            write_root = root / "write-gate"
+            write_vault = write_root / "vault"
+            write_vault.mkdir(parents=True)
+            (write_vault / "mirror.md").write_text(
+                "---\nname: 虛擬盤鏡像裁定\ndescription: 2026-08-13 虛擬盤與實盤參數一致\n"
+                f"{memspec.DECISION_KEY_FIELD}: virtual-mirrors-live\n"
+                f"{memspec.DECISION_STATUS_FIELD}: {memspec.ACTIVE_DECISION_STATUS}\n"
+                f"{memspec.CURRENT_DECISION_AT_FIELD}: 2026-08-13\n"
+                f"{memspec.DECIDED_BY_FIELD}: {memspec.OWNER_EXPLICIT_DECIDER}\n"
+                f"{memspec.OWNER_QUOTE_FIELD}: 虛擬必須鏡像實盤\n"
+                f"{memspec.ALIASES_FIELD}: [虛擬盤, 鏡像實盤]\n"
+                f"{memspec.FORBIDDEN_FIELD}: [兩套參數]\n---\nbody\n",
+                encoding="utf-8",
+            )
+            (write_vault / "retired.md").write_text(
+                "---\nname: 舊制\ndescription: 2026-01-01 已作廢\n"
+                f"{memspec.DECISION_KEY_FIELD}: retired-write-rule\n"
+                f"{memspec.DECISION_STATUS_FIELD}: {memspec.SUPERSEDED_DECISION_STATUS}\n"
+                f"{memspec.SUPERSEDED_BY_FIELD}: mirror.md\n"
+                f"{memspec.CURRENT_DECISION_AT_FIELD}: 2026-01-01\n"
+                f"{memspec.DECIDED_BY_FIELD}: {memspec.OWNER_EXPLICIT_DECIDER}\n"
+                f"{memspec.OWNER_QUOTE_FIELD}: 舊制原話\n"
+                f"{memspec.ALIASES_FIELD}: [退休甲, 退休乙]\n"
+                f"{memspec.FORBIDDEN_FIELD}: [退休禁詞]\n---\nbody\n",
+                encoding="utf-8",
+            )
+            write_config_path = root / "write-config.json"
+            write_config(write_config_path, [write_vault])
+
+            def write_call(tool_name, tool_input, session=None, extra=None):
+                event = {
+                    "session_id": session or f"write-{uuid.uuid4().hex}",
+                    "tool_name": tool_name,
+                    "tool_input": tool_input,
+                    "cwd": os.fspath(write_root),
+                }
+                event.update(extra or {})
+                result = run_synthetic(Path(__file__), event, write_config_path)
+                value = json.loads(result.stdout) if result.stdout.strip() else {}
+                return result, value.get("hookSpecificOutput", {})
+
+            forbidden_write, forbidden_out = write_call(
+                "Write",
+                {
+                    "file_path": os.fspath(write_root / "plan.txt"),
+                    "content": "我打算讓虛擬盤用兩套參數各自最佳化。",
+                },
+            )
+            forbidden_reason = forbidden_out.get("permissionDecisionReason", "")
+            checks.append((
+                "Write 的內容命中現行裁定的 forbidden 就擋，理由帶裁定鍵、日期、owner 原話與命中片段",
+                forbidden_write.returncode == 0
+                and forbidden_out.get("permissionDecision") == "deny"
+                and "virtual-mirrors-live，2026-08-13" in forbidden_reason
+                and "虛擬必須鏡像實盤" in forbidden_reason
+                and "兩套參數" in forbidden_reason,
+            ))
+            write_log = write_vault / memspec.GATE_LOG_FILENAME
+            write_rows = [
+                json.loads(line)
+                for line in write_log.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ] if write_log.is_file() else []
+            checks.append((
+                "擋下的寫入以 write_block 入帳，只記規則、裁定鍵與檔名，不記內容",
+                any(
+                    row.get("kind") == memspec.WRITE_GATE_LOG_KIND
+                    and row.get("rule") == memspec.WRITE_GATE_FORBIDDEN_RULE
+                    and row.get("decision") == "virtual-mirrors-live"
+                    and row.get("filename") == "plan.txt"
+                    and "兩套參數" not in json.dumps(row, ensure_ascii=False)
+                    for row in write_rows
+                ),
+            ))
+
+            edit_target = write_root / "notes.txt"
+            edit_target.write_text("原本這裡寫著舊做法。\n", encoding="utf-8")
+            _edit_result, edit_out = write_call(
+                "Edit",
+                {
+                    "file_path": os.fspath(edit_target),
+                    "old_string": "舊做法",
+                    "new_string": "兩套參數",
+                },
+            )
+            _multi_result, multi_out = write_call(
+                "MultiEdit",
+                {
+                    "file_path": os.fspath(edit_target),
+                    "edits": [
+                        {"old_string": "原本", "new_string": "現在"},
+                        {"old_string": "舊做法", "new_string": "兩套參數"},
+                    ],
+                },
+            )
+            checks.append((
+                "Edit 的 new_string 與 MultiEdit 其中一項命中 forbidden 都擋",
+                edit_out.get("permissionDecision") == "deny"
+                and multi_out.get("permissionDecision") == "deny",
+            ))
+            _stale_result, stale_out = write_call(
+                "Edit",
+                {
+                    "file_path": os.fspath(edit_target),
+                    "old_string": "這個字串不在檔案裡",
+                    "new_string": "無害替代文字",
+                },
+            )
+            checks.append((
+                "Edit 找不到 old_string 時不判寫入後內容，放行",
+                _stale_result.returncode == 0 and not _stale_result.stdout.strip(),
+            ))
+
+            _superseded_result, superseded_out = write_call(
+                "Write",
+                {
+                    "file_path": os.fspath(write_root / "old.txt"),
+                    "content": "退休禁詞照舊寫進來。",
+                },
+            )
+            checks.append((
+                "superseded 的決策卡不再擋寫入",
+                _superseded_result.returncode == 0 and not superseded_out,
+            ))
+
+            _outside_result, outside_out = write_call(
+                "Write",
+                {
+                    "file_path": os.fspath(root / "outside-any-vault.md"),
+                    "content": "---\nname: 沒有必填欄位的卡\n---\nbody\n",
+                },
+            )
+            checks.append((
+                "落在所有已登記 vault 之外的 .md 不做規則 B",
+                _outside_result.returncode == 0 and not _outside_result.stdout.strip(),
+            ))
+
+            _card_result, card_out = write_call(
+                "Write",
+                {
+                    "file_path": os.fspath(write_vault / "new-decision.md"),
+                    "content": "---\nname: 新裁定\ndescription: 2026-09-06 只寫了一半\n"
+                    f"{memspec.DECISION_KEY_FIELD}: k-new\n---\nbody\n",
+                },
+            )
+            card_reason = card_out.get("permissionDecisionReason", "")
+            checks.append((
+                "寫進 vault 的決策卡缺必填欄位就擋，理由列出缺哪些欄位並附可照抄的一行範例",
+                card_out.get("permissionDecision") == "deny"
+                and all(
+                    field in card_reason
+                    for field in (
+                        memspec.DECISION_STATUS_FIELD,
+                        memspec.CURRENT_DECISION_AT_FIELD,
+                        memspec.DECIDED_BY_FIELD,
+                        memspec.ALIASES_FIELD,
+                    )
+                )
+                and memspec.WRITE_GATE_FIELD_EXAMPLES[memspec.DECISION_STATUS_FIELD] in card_reason,
+            ))
+            card_rows = [
+                json.loads(line)
+                for line in write_log.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            checks.append((
+                "規則 B 的攔阻入帳記 card_path，不記卡片內容",
+                any(
+                    row.get("rule") == memspec.WRITE_GATE_CARD_RULE
+                    and row.get("card_path") == "new-decision.md"
+                    for row in card_rows
+                ),
+            ))
+
+            _warn_result, warn_out = write_call(
+                "Write",
+                {
+                    "file_path": os.fspath(write_vault / "reference-dated.md"),
+                    "content": "---\nname: reference-dated\ndescription: english only reference card\n"
+                    f"{memspec.LAST_VERIFIED_AT_FIELD}: 2026-09-01\n"
+                    f"{memspec.ALIASES_FIELD}: [alias only in english]\n"
+                    "metadata:\n  type: reference\n---\nbody\n",
+                },
+            )
+            checks.append((
+                "WARN 級只在 additionalContext 提示，不擋寫入",
+                _warn_result.returncode == 0
+                and "permissionDecision" not in warn_out
+                and memspec.WRITE_GATE_CARD_ADVICE[:6] in warn_out.get("additionalContext", "")
+                and "reference-dated.md" in warn_out.get("additionalContext", ""),
+            ))
+
+            repeat_session = "write-repeat-" + uuid.uuid4().hex
+            repeat_input = {
+                "file_path": os.fspath(write_root / "again.txt"),
+                "content": "還是兩套參數。",
+            }
+            _first_result, first_out = write_call("Write", repeat_input, session=repeat_session)
+            second_result, second_out = write_call("Write", repeat_input, session=repeat_session)
+            checks.append((
+                "同 session 同規則同檔案同內容只擋一次，AI 修不動時不會無限卡死",
+                first_out.get("permissionDecision") == "deny"
+                and second_result.returncode == 0
+                and not second_out,
+            ))
+
+            _codex_result, codex_out = write_call(
+                "write_file",
+                {
+                    "path": os.fspath(write_root / "codex.txt"),
+                    "content": "改成兩套參數再說。",
+                },
+                extra={"transcript_path": os.fspath(root / "codex-synthetic.jsonl")},
+            )
+            checks.append((
+                "Codex 形狀的檔案寫入工具走同一道閘",
+                _codex_result.returncode == 0
+                and codex_out.get("permissionDecision") == "deny",
+            ))
+
+            oversized_content = "兩套參數" + "填充" * 70000
+            _big_result, big_out = write_call(
+                "Write",
+                {
+                    "file_path": os.fspath(write_root / "big.txt"),
+                    "content": oversized_content,
+                },
+            )
+            checks.append((
+                "超過內容上限就放行（fail-open，不在 hook deadline 內跑大字串）",
+                len(oversized_content.encode("utf-8")) > memspec.WRITE_GATE_MAX_CONTENT_BYTES
+                and _big_result.returncode == 0
+                and not big_out,
+            ))
+
+            (write_vault / "broken-forbidden.md").write_text(
+                "---\nname: 壞禁詞\ndescription: 2026-09-06 禁詞正則寫壞了\n"
+                f"{memspec.DECISION_KEY_FIELD}: k-broken-forbidden\n"
+                f"{memspec.DECISION_STATUS_FIELD}: {memspec.ACTIVE_DECISION_STATUS}\n"
+                f"{memspec.CURRENT_DECISION_AT_FIELD}: 2026-09-06\n"
+                f"{memspec.DECIDED_BY_FIELD}: {memspec.OWNER_EXPLICIT_DECIDER}\n"
+                f"{memspec.OWNER_QUOTE_FIELD}: 這條的禁詞寫壞了\n"
+                f"{memspec.ALIASES_FIELD}: [壞甲, 壞乙]\n"
+                f"{memspec.FORBIDDEN_FIELD}: ['(a+)+$']\n---\nbody\n",
+                encoding="utf-8",
+            )
+            _broken_result, broken_out = write_call(
+                "Write",
+                {
+                    "file_path": os.fspath(write_root / "probe.txt"),
+                    "content": "a" * 24,
+                },
+            )
+            checks.append((
+                "無法使用的 forbidden 正則被忽略而非擋下，並向模型點名",
+                _broken_result.returncode == 0
+                and "permissionDecision" not in broken_out
+                and "k-broken-forbidden" in broken_out.get("additionalContext", ""),
+            ))
+
             missing_config = root / "missing-config.json"
             missing = run_synthetic(
                 Path(__file__),
@@ -1363,7 +1897,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 52
+    total = 65
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

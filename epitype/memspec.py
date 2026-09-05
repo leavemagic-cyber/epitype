@@ -130,9 +130,19 @@ GRANT_REJECT_MARKERS = (
     "<function_results",
 )
 GRANT_FENCED_CODE_MARKER = "```"
+# 2026-09-06 精準度實測（254 張真實事件卡逐張標記，kind 正確 110 張＝43%）：裸詞
+# 「隨你｜照你」把「依照你建議辦理」這種空殼附和抓成授權 18 例，「直接(做|修|…)」
+# 把一次性指令抓成授權，而「不用問我」型的免問句 owner 自己標成裁定不是授權。
+# 規則：授權觸發只留明示的授權動詞（同意／授權／你可以＋動作／准／批准／允許），
+# 免問語移到 CAPTURE_STANDING_PATTERN（裁定的常規性證據），空殼附和交給
+# CAPTURE_HOLLOW_PATTERN 在子句層剔除。
 GRANT_TRIGGER_PATTERN = (
-    r"(?:我同意|同意過|我授權|授權你|你可以(?:操作|使用|用|直接|動|改|刪|執行|做|開|關|讀|寫)"
-    r"|准你|准了|批准|允許你|不用問我|不必問我|直接(?:做|修|改|動|刪|執行)|隨你|照你"
+    # 「你可以X」後面必須真的接到受詞：「你可以使用」（句尾）、「你可以做，」（逗號）
+    # 是在描述能力或閒聊，不是在准什麼；「你可以操作chrome」「你可以用到 7 個核心」才是。
+    r"(?:我同意|同意過|我授權|授權你"
+    r"|你可以(?:操作|使用|用|直接|動|改|刪|執行|做|開|關|讀|寫)(?![，,、。．！!？?；;]|\s*$)"
+    # 裸「准了」實測只命中「我又核准了，請再確認一次」這種一次性核可，移出。
+    r"|准你|批准|允許你|授權給你"
     r"|\bI\s+(?:agree|authori[sz]e|approve|consent)\b|\byou\s+(?:may|are\s+allowed\s+to|have\s+my\s+permission)\b"
     r"|\bgo\s+ahead\b|\bpermission\s+granted\b|\bdon'?t\s+ask\s+me\b)"
 )
@@ -154,11 +164,19 @@ GRANT_NEWLINE_REGEX = re.compile(GRANT_NEWLINE_PATTERN)
 CORRECTION_DIRECTORY = "corrections"
 CORRECTION_PREFIX = "⚠ owner 曾糾正："
 CORRECTION_TRIGGER_PATTERN = (
-    r"(?:我(?:不是)?說過|說過(?:幾|很多|好多)次|不是這樣|錯了|不要亂|別再|別亂|不是叫你"
-    r"|不要再|怎麼還|你還是|我糾正|更正一下"
+    # 2026-09-06：裸「別再｜別亂」會被「特別再放一份」這種詞中片段命中；限定「別」
+    # 前面不是「特／分／差／個／性」，才是命令式的「別」。
+    r"(?:我(?:不是)?說過|說過(?:幾|很多|好多)次|不是這樣|錯了(?=[!！。，,]|\s|$)|不要亂|(?<![特分差個性])別[再亂]|不是叫你"
+    # 2026-09-06：裸「你還是」實測 4 例全是一次性任務抱怨、0 例長效糾正，移出。
+    r"|不要再|我糾正|更正一下"
     # 2026-09-02 QUORUM 合約階段事故:三句糾正「我怎麼不知道有這個設定」「不是指微型…我很清楚」
     # 「不是!只有6s是標準合約」全不在上列;句首「不是!」「不對，」與定義式「不是指」是強糾正訊號。
     r"|^\s*不是[!！]|^\s*不對[,，!！。]|我怎麼不知道|我很清楚|不是指|你(?:搞|弄|理解|想|看)錯"
+    # 2026-09-06 精準度實測：裸「錯了」把 owner 自認錯（「我錯了」「我說錯了」）抓成糾正，
+    # 「怎麼還」把催促疑問（「怎麼還在驗證?」）抓成糾正。兩者移出觸發集：自認錯由
+    # CAPTURE_SELF_ERROR_PATTERN 剔除、催促由 CAPTURE_URGE_PATTERN 剔除。真糾正裡
+    # 「我明明就有裁定」這種重申既有裁定的句型原本一條都不命中，補進來。
+    r"|明明|又犯"
     r"|\bI\s+(?:already\s+)?told\s+you\b|\bI\s+said\b|\bstop\s+doing\b|\bdon'?t\s+do\s+that\b|\bnot\s+like\s+that\b)"
 )
 CORRECTION_TRIGGER_REGEX = re.compile(CORRECTION_TRIGGER_PATTERN, re.IGNORECASE)
@@ -182,6 +200,88 @@ RULING_QUOTED_TEXT_PATTERN = (
     GRANT_QUOTED_TEXT_PATTERN + r"|```[^`]*```|`[^`\r\n]*`"
 )
 RULING_QUOTED_TEXT_REGEX = re.compile(RULING_QUOTED_TEXT_PATTERN)
+
+# 2026-09-06 精準度實測（254 張真實事件卡逐張人工標記：kind 正確 110／值得長期
+# 記住 100）：八類誤抓的共同根因是「整句命中就收」——觸發詞落在附和空殼、疑問句、
+# owner 自認錯、催促句，或落在 owner 貼回來的助理長段分析上，都照樣寫卡；裁定更只
+# 靠助理上一句命中 RULING_QUESTION 就把 owner 下一句整句存起來（27/94 是純疑問句）。
+# 規則：捕捉在子句層取證——先切子句，反問子句與空殼／自認錯／催促片段不算證據，
+# 剩下的子句必須自己帶決定性內容；裁定另需常規性語（以後／一律／不用問我…）或助理
+# 確有裁決請求。真裁定常把反問嵌在多子句裡（「不是!只有…是標準合約…這樣了解嗎?」），
+# 所以見問號不能整句一刀切：問號子句再按逗號切，只丟帶疑問詞的那半。
+CAPTURE_CLAUSE_SPLIT_PATTERN = r"([。．！!？?；;]+|\r\n|[\r\n])"
+CAPTURE_SUBCLAUSE_SPLIT_PATTERN = r"[，,、：:]+"
+# owner 的回話習慣：貼一段助理原文，再用 <- / <= / 《 接自己的話。標記後那半才是
+# owner 說的，觸發詞與長度／數字密度都只能看那半，否則助理的字會替 owner 作證。
+CAPTURE_REPLY_MARKER_PATTERN = r"<[-=]+|《|<(?=[㐀-鿿])"
+# 子句自身是疑問：問號，或句尾語助詞。疑問詞另立一表，只用在問號子句的逗號級再篩——
+# 拿疑問詞判整個子句會誤殺陳述句（「才知道是哪個好」「這些資料哪來」都不是在問）。
+CAPTURE_CLAUSE_QUESTION_PATTERN = r"[？?]|(?:嗎|呢)[\s!！～~]*$|(?:為什麼|為何|難道)"
+CAPTURE_QUESTION_WORD_PATTERN = (
+    r"[？?]|(?:嗎|呢)[\s!！～~]*$"
+    r"|(?:為什麼|為何|怎麼|如何|到底|難道|哪個|哪一|哪些|哪來|哪裡|誰|有沒有|要不要"
+    r"|是不是|可不可以|能不能|多少|幾個|什麼)"
+)
+# 空殼附和：「依照你的建議處理」本身不是決定，決定在助理那一句裡。
+CAPTURE_HOLLOW_PATTERN = r"(?:依|按|照|如|同)照?你(?:的)?(?:建議|意見|方案|說法|判斷)"
+# owner 自認錯不是對 agent 的糾正。
+CAPTURE_SELF_ERROR_PATTERN = r"我(?:剛剛|之前|自己|好像|可能)?(?:說|講|寫|弄|搞|判斷|記|想)?錯(?:了|過)"
+# 催促（「怎麼還…？」）是進度質問，不是規則。
+CAPTURE_URGE_PATTERN = r"怎麼還|怎麼又|還沒(?:好|完|做完|處理|修|改)|到底"
+# 溝通方式要求（「白話跟我說」）不是治理決定；只在該片段沒有其他決定性內容時剔除。
+CAPTURE_STYLE_REQUEST_PATTERN = r"(?:跟|對|和)我說|告訴我|白話|說明給我|解釋給我"
+CAPTURE_VETO_PATTERN = (
+    rf"(?:{CAPTURE_HOLLOW_PATTERN}|{CAPTURE_SELF_ERROR_PATTERN}"
+    rf"|{CAPTURE_URGE_PATTERN}|{CAPTURE_STYLE_REQUEST_PATTERN})"
+)
+# 決定性內容：三類卡都要求 owner 句本身帶得出「怎麼做／不做什麼」。刻意不收
+# 「規定｜標準｜預設」這類名詞（「請確認手冊規定」是指令不是裁定），也不收裸
+# 「應該｜我認為」（意見不是決定）。
+CAPTURE_DECISIVE_PATTERN = (
+    # 不可(?!能)：「這不可能」是驚訝，不是規則。
+    r"(?:不用|不要|不准|不許|不能|不可(?!能)|不得|不必|不做|不送|不改|不加|不放|不建議"
+    r"|不接受|不同意|不需要|禁止|別再|別亂|沒必要|沒有必要|沒意見"
+    r"|一律|一概|通案|以後|今後|之後都|每次|每筆|都要|都不|只准|只能|只有|只做|只留"
+    r"|只跑|只提|只要|至少|不少於|上限|下限"
+    r"|必須|一定要|應該要|原則|優先|為主|才對|(?<!設)定為|改成|改用|改回|維持|保留|沿用"
+    r"|不是這樣|不是指|不是叫"
+    # 「就好」實測只出現在一次性交辦（「先這樣放著就好」），真裁定裡它旁邊一定另有
+    # 決定性詞，所以不必自己入表。
+    r"|直接|就用|就是|就送"
+    # 授權動詞只留「明說是我在准」的第一人稱形；裸「你可以」交給 GRANT_TRIGGER
+    # 本身當證據（is_decisive 的旁路），否則「你可以深度查找」這種指令也算決定。
+    r"|我同意|同意過|我接受|我核准|我授權"
+    r"|我要|我希望|我決定|我裁定|我不要|我沒意見"
+    r"|\b(?:must|never|always|only|do\s+not|don'?t|stop|keep|use|may|approved?|agree)\b)"
+)
+# 常規性語：裁定不再只靠助理上一句成立，改為「助理確有裁決請求」或「owner 句自帶
+# 長效範圍」二者之一。
+CAPTURE_STANDING_PATTERN = (
+    r"(?:以後|今後|之後都|每次|每筆|每回|一律|一概|通案|原則|預設|長期|永遠"
+    r"|都要|都不要|都不用|不用問我|不必問我|不用再問|不必再問|不用等我|免問"
+    r"|我(?:不是)?說過|說過(?:幾|很多|好多)次|維持|禁止|不准"
+    r"|\b(?:always|never|from\s+now\s+on|by\s+default|policy)\b)"
+)
+CAPTURE_CLAUSE_SPLIT_REGEX = re.compile(CAPTURE_CLAUSE_SPLIT_PATTERN)
+CAPTURE_SUBCLAUSE_SPLIT_REGEX = re.compile(CAPTURE_SUBCLAUSE_SPLIT_PATTERN)
+CAPTURE_REPLY_MARKER_REGEX = re.compile(CAPTURE_REPLY_MARKER_PATTERN)
+CAPTURE_CLAUSE_QUESTION_REGEX = re.compile(CAPTURE_CLAUSE_QUESTION_PATTERN)
+CAPTURE_QUESTION_WORD_REGEX = re.compile(CAPTURE_QUESTION_WORD_PATTERN)
+CAPTURE_VETO_REGEX = re.compile(CAPTURE_VETO_PATTERN)
+CAPTURE_DECISIVE_REGEX = re.compile(CAPTURE_DECISIVE_PATTERN, re.IGNORECASE)
+CAPTURE_STANDING_REGEX = re.compile(CAPTURE_STANDING_PATTERN, re.IGNORECASE)
+# 一詞式無範圍應答（「我同意」「核准了」）喚回時佔置頂卻沒有可執行內容；四字是實測
+# 分水嶺——短過它的真裁定都靠常規性語留下（「那就不做」保得住，「我同意」保不住）。
+CAPTURE_ACK_MIN_CHARS = 4
+# 沒有助理提問、也沒有常規性語時，裁定要靠子句數量自證：一個決定性詞是一次性指令
+# （「直接刪」），兩個以上才是在描述做法（「品牌是優先才對…先以這個為主」）。
+CAPTURE_RULING_MIN_DECISIVE = 2
+CAPTURE_RULING_MIN_CHARS = 16
+# 助理自己的長段分析被 owner 貼回來時會被當 owner 句：>200 字，或每 20 字 ≥3 個
+# 數字（實測助理的量測報告都在這個形狀），一律不入卡。
+CAPTURE_OWNER_MAX_CHARS = 200
+CAPTURE_DIGIT_WINDOW_CHARS = 20
+CAPTURE_DIGIT_MAX_PER_WINDOW = 3
 
 # 2026-09-03 對抗審查 #5：捕捉卡是持久檔並進索引，之後還會被注入；憑證形狀的
 # 內容一律拒收（fail-closed），原句仍留在 transcript。家目錄路徑不列入，否則本機
@@ -417,6 +517,62 @@ STOP_GATE_QUESTION_REASON_UNDATED = "此事 owner 已裁定：{quote}。不得�
 STOP_GATE_PATTERN_DEFECT = "⚠ Epitype 回合閘：裁定 {decision} 的 forbidden「{pattern}」無法使用（{reason}），這一項暫不生效。"
 STOP_GATE_MARKER_PREFIX = "stop-"
 STOP_GATE_LOG_KIND = "stop_block"
+
+# 2026-09-06 U52：Stop 閘只看回合最後說出口的話，動作閘只看 Bash 指令字串；「模型把
+# 已裁定的做法寫進檔案」與「寫出一張缺必填欄位的記憶卡」兩條路都沒有任何一道閘。規則：
+# 檔案寫入工具在落盤前，先看要寫進去的內容——命中現行裁定的 forbidden 就擋（規則 A），
+# 落在已登記 vault 內的卡就對「寫入後的內容」跑 card_lint 單卡檢查（規則 B，FAIL 擋、
+# WARN 只提示）。工具名照 SHELL_TOOL_NAMES 的作法一併列出 Codex 的對應名；
+# apply_patch 這類只給 diff 字串的工具不在此列（見 docs/FAILURE_MODES.md §11）。
+WRITE_GATE_CONTENT_TOOLS = frozenset(("write", "write_file", "create_file"))
+WRITE_GATE_EDIT_TOOLS = frozenset(("edit", "edit_file", "str_replace_editor"))
+WRITE_GATE_MULTI_EDIT_TOOLS = frozenset(("multiedit", "multi_edit", "apply_edits"))
+WRITE_GATE_TOOL_NAMES = (
+    WRITE_GATE_CONTENT_TOOLS | WRITE_GATE_EDIT_TOOLS | WRITE_GATE_MULTI_EDIT_TOOLS
+)
+WRITE_GATE_PATH_FIELDS = ("file_path", "path", "filePath")
+WRITE_GATE_CONTENT_FIELD = "content"
+WRITE_GATE_OLD_FIELD = "old_string"
+WRITE_GATE_NEW_FIELD = "new_string"
+WRITE_GATE_REPLACE_ALL_FIELD = "replace_all"
+WRITE_GATE_EDITS_FIELD = "edits"
+# 單檔本文的既有上限（FTS_BODY_SCAN_BYTES）同一個數字：超過就不是卡，也不值得為它
+# 在 hook 的 deadline 內跑正則。
+WRITE_GATE_MAX_CONTENT_BYTES = FTS_BODY_SCAN_BYTES
+WRITE_GATE_FRAGMENT_MAX_CHARS = STOP_GATE_FRAGMENT_MAX_CHARS
+WRITE_GATE_REASON_MAX_CHARS = 2000
+WRITE_GATE_FORBIDDEN_REASON = (
+    "⚖ 已裁定（{decision}）：{quote}。寫入內容含「{fragment}」，請依裁定改寫"
+)
+WRITE_GATE_CARD_REASON = (
+    "🧾 記憶卡型別檢查（{card_type}）：{path} 寫入後仍不合格——{problems}。範例：{example}"
+)
+WRITE_GATE_CARD_ADVICE = "🧾 記憶卡建議（{card_type}）：{path} {problems}"
+WRITE_GATE_FORBIDDEN_RULE = "forbidden"
+WRITE_GATE_CARD_RULE = "card_contract"
+WRITE_GATE_LOG_KIND = "write_block"
+# 缺欄位要能照抄一行就補好，否則模型只知道缺、不知道長什麼樣。
+WRITE_GATE_FIELD_EXAMPLES = {
+    NAME_FIELD: "name: 虛擬盤鏡像裁定",
+    DESCRIPTION_FIELD: "description: 2026-09-06 一句話說這張卡講什麼",
+    DECISION_KEY_FIELD: "decision_key: virtual-mirrors-live",
+    DECISION_STATUS_FIELD: "status: active",
+    CURRENT_DECISION_AT_FIELD: "current_decision_at: 2026-09-06",
+    DECIDED_BY_FIELD: "decided_by: owner-explicit",
+    OWNER_QUOTE_FIELD: "owner_quote: 虛擬必須鏡像實盤",
+    ALIASES_FIELD: "aliases: [虛擬盤, 鏡像實盤]",
+    FORBIDDEN_FIELD: "forbidden: [兩套參數]",
+    TRIGGER_TOOL_PATH: "trigger: {tool: ^Bash$}",
+    TRIGGER_INPUT_PATH: "trigger: {input: rm\\s+-rf}",
+    ADVICE_FIELD: "advice: 改用 Write 落檔",
+    INCIDENT_FIELD: "incident: 2026-09-06 三個 session 各踩一次",
+    CAPTURED_AT_FIELD: "captured_at: 2026-09-06T00:00:00Z",
+    SESSION_FIELD: "session_id: 這場 session 的 id",
+    PENDING_OWNER_FIELD: "owner: owner",
+    VERIFY_FIELD: "verify: python epitype/card_lint.py <vault>",
+    PENDING_EXIT_FIELD: "exit: owner 回覆後標記已辦",
+    LAST_VERIFIED_AT_FIELD: "last_verified_at: 2026-09-06",
+}
 
 
 def split_frontmatter(text):
@@ -924,3 +1080,63 @@ def _selftest():
 
 if __name__ == "__main__":
     raise SystemExit(_selftest() if "--selftest" in sys.argv[1:] else 0)
+
+
+# ── U53 承諾落待辦（append-only 常數區塊；實作在 epitype/commitments.py）──────
+# 2026-09-06 owner 痛點：AI 在回合裡說「我等一下會…」「等 X 回報後我會…」，compaction
+# 或換 session 之後沒人記得，owner 得自己追。承諾句偵測比照 capture.py 的原話捕捉：
+# 句型表、引用排除、digest 去重都只在這裡寫一次，線上 hook 與 CLI 讀同一份規格。
+COMMITMENT_LEDGER_FILENAME = "commitments.jsonl"
+COMMITMENT_LOCK_SECONDS = 0.2
+COMMITMENT_MAX_SENTENCE_CHARS = 200   # 超長句截斷後才入帳，digest 才穩定
+COMMITMENT_MAX_PER_TURN = 5           # 一回合最多記幾條，避免長篇報告把帳本灌爆
+COMMITMENT_LEDGER_MAX_ROWS = 500      # 重寫時保留的最新列數（closed 先被丟）
+COMMITMENT_SETTLE_PREFIX_CHARS = 20   # 收尾比對用的關鍵片段長度
+COMMITMENT_SUMMARY_CHARS = 60         # SessionStart 一行裡的摘錄長度
+COMMITMENT_SESSIONSTART_MAX = 20      # 一行最多統計幾條 open，超過標 N+
+COMMITMENT_PRECOMPACT_MAX = 5         # 壓縮前快照塞幾條 open 承諾
+COMMITMENT_OPEN_STATUS = "open"
+COMMITMENT_CLOSED_STATUS = "closed"
+COMMITMENT_SENTENCE_TERMINATORS = "。！？!?；;.\r\n"
+# 承諾句型表：中英文各一組。裸「會」「稍後」不入表（「稍後會很忙」不是承諾）；
+# 「我不會」不含子串「我會」，故否定式天然落選。
+COMMITMENT_TRIGGER_PATTERN = (
+    r"(?:我(?:待會|等一下|等等|稍後|之後|接下來|接著|隨後|再|馬上|立刻)?會"
+    r"|我(?:等一下|待會|稍後|之後|接著|接下來)"
+    r"|稍後(?:我|再|會)"
+    r"|之後(?:我)?(?:會|再)"
+    r"|接著我|接下來我"
+    r"|下一步"
+    r"|等[^。！？!?；;\r\n]{0,20}回報後"
+    r"|回報後(?:我|再)"
+    r"|它回報後"
+    r"|\bI\s+will\b|\bI['’]ll\b|\bnext\s+I\b"
+    r"|\bafter\b[^.!?;\r\n]{0,40}\bI\s*(?:['’]ll|will)\b"
+    r"|\bthen\s+I\s*(?:['’]ll|will)\b)"
+)
+COMMITMENT_TRIGGER_REGEX = re.compile(COMMITMENT_TRIGGER_PATTERN, re.IGNORECASE)
+# 覆述 owner 指令不是承諾：句中把主詞指給別人的，一律不記。
+COMMITMENT_ATTRIBUTION_PATTERN = (
+    # 動詞窄到「轉述」為止：裸「要」與「裁」會把真承諾「等 owner 裁決後我會…」連坐，
+    # 而那正是 owner 點名最容易蒸發的句型，所以兩者不入表。
+    r"(?:owner\s*(?:說|要求|指示|交代|交待|叫)"
+    r"|你(?:說|要求|指示|叫我|交代|交待)"
+    r"|使用者說|上面說|規格說"
+    # 「下一步由 owner 決定」是交棒，不是承諾。只認「由 owner」「owner 自行」這兩個
+    # 窄形——「等 owner 裁決後我會…」仍是真承諾，不能被 owner 兩字連坐。
+    r"|由\s*owner|owner\s*自行"
+    r"|\bthe\s+owner\s+(?:said|wants|asked)\b|\byou\s+(?:said|asked|want)\b)"
+)
+COMMITMENT_ATTRIBUTION_REGEX = re.compile(COMMITMENT_ATTRIBUTION_PATTERN, re.IGNORECASE)
+# 已完成式不是待辦。裸「已」太寬（「用已有的資料」），只認已＋動詞與明確完成詞。
+COMMITMENT_DONE_PATTERN = (
+    r"(?:已(?:經)?(?:完成|做完|跑完|改|寫|加|修|建|驗|落|記|同步|處理|更新|補|刪|移)"
+    r"|完成了|做完了|搞定"
+    r"|\bdone\b|\balready\b|\bcompleted\b|\bfinished\b|\bhas\s+been\s+(?:done|added|fixed)\b)"
+)
+COMMITMENT_DONE_REGEX = re.compile(COMMITMENT_DONE_PATTERN, re.IGNORECASE)
+COMMITMENT_SESSIONSTART_LINE = (
+    "⏳ AI 未兌現承諾 {count} 條（最近：{excerpt}…）"
+    "→ python epitype/commitments.py \"{vault}\" --list"
+)
+COMMITMENT_PRECOMPACT_HEADING = "## 未兌現承諾（壓縮前 open 快照）"

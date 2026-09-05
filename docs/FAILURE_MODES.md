@@ -250,3 +250,151 @@ python adapters/codex/hook_trust.py check
 ```
 
 Codex will not run a newly registered hook until the owner trusts it again in the Codex app; `hook_trust check` is the only step that reports that state as a failure rather than as green.
+
+## 11. The gate reads commands, and the violation is written to a file
+
+### Symptom
+
+Two shapes, one hole. The owner has settled a question and the assistant does not say the ruled-out thing out loud — it writes it into a plan, a report, or a card, where the Stop gate never looks because the turn ends with prose about the file rather than the file's text. And a memory card lands in the vault missing the fields its own type requires: `card_lint` names it afterwards, on the next scan, once the card is already the vault's answer to a query.
+
+### Why it happens
+
+The action gate matched on the Bash command string, so a file written through `Write`/`Edit` was never inspected at all; the Stop gate matched on the last assistant message, which is a summary of the write, not the write. `card_lint` is a scan, not a gate: it reports a malformed card, it does not stop one from being created. Between them, the content of a write was the one thing nothing read.
+
+### Epitype countermeasure
+
+`PreToolUse` inspects the text a file-writing call is about to put on disk — `Write`'s `content`, `Edit`'s `new_string`, each `new_string` of a `MultiEdit`, and the equivalents of the Codex-shaped tool names.
+
+Rule A blocks new content matching any `forbidden` pattern of an active decision card in the cwd vault or the governance vault, quoting the owner and the matched fragment. The decision cards, the pattern validator, and the manifest cache are the Stop gate's own, so a ruling cannot be enforced at the end of a turn and ignored mid-turn.
+
+Rule B applies when the target is a card of a registered vault — `.md`, no `_`/`.` prefixed path part, not the memory index, by the same filter `memsearch` uses. The prospective post-write text is checked by `card_lint.check_card`, the same single-card check the CLI scan runs: FAIL (a missing required field for the card's type, broken frontmatter) blocks and names the missing fields with a line to copy; WARN only advises through `additionalContext`. For an `Edit`, the post-write text is the current file with one `old_string`→`new_string` substitution applied; when `old_string` is not in the file, nothing is judged and the call proceeds — a guessed result would block a card nobody wrote.
+
+A block is audited to `_GATE_LOG.jsonl` as `write_block` with the rule and either the `decision` key or the `card_path`, never the content itself. One `(rule, file, content digest)` blocks once per session, so an assistant that cannot satisfy a ruling is not denied the same write forever.
+
+### What it still does not catch
+
+- **A shell redirection or heredoc** (`echo … > card.md`, `python - <<PY`) writes a file without any file-writing tool, so this gate never sees it. That path is covered by the `no-bare-redirect` scar card on the action gate's command matching, not here.
+- **Diff-shaped tools.** A tool that takes only a patch body (`apply_patch`) is not in `WRITE_GATE_TOOL_NAMES`: a diff's context and removed lines would match `forbidden` patterns the write never adds.
+- **Content past `WRITE_GATE_MAX_CONTENT_BYTES` (256 KiB)**, an unreadable target file, and an oversized target all fail open rather than spend the hook's deadline.
+- **Rule B judges the text, not the intent**: content that already FAILs stays writable if the write does not change that (an `Edit` whose post-write text cannot be determined is not judged), and a card that was already malformed is not repaired by the gate.
+
+### Self-verification
+
+```powershell
+python adapters/claude/pretooluse_gate.py --selftest
+python epitype/card_lint.py "<vault>"
+```
+
+The second command is the population this rule will act on: every card it reports as FAIL today is a card whose next `Edit` is blocked unless the edit leaves it passing.
+
+## 12. The assistant's own promise is the one thing nobody tracks
+
+### Symptom
+
+Mid-turn the assistant says「我等一下會把測試補上」or「等 verifier 回報後我會改」. The turn ends, compaction runs or the session is replaced, and the promise is gone from both sides: the model has no memory of making it, and the owner is the only party still holding the thread — so the owner has to chase it. Everything the owner said is captured (grants, corrections, rulings); the sentence the assistant volunteered is not.
+
+### Why it happens
+
+Every capture path in Epitype watches the owner's words, because that is where authority lives. But a to-do can also be opened by the assistant, and that one has no author to defend it: the model that made the promise is the same model whose context window is about to be discarded. Injection cannot help either — there is nothing on disk to inject.
+
+### Epitype countermeasure
+
+The `Stop` hook, after it has finished deciding whether to block the turn, reads the same last assistant message twice more: `commitments.settle` closes any open promise the message reports as finished, and `commitments.extract` + `record` writes the new ones. The ledger is `<governance vault>/.epitype/commitments.jsonl` (`ts`, `session`, `digest`, `text`, `status`) — deliberately not a card: this is not an owner to-do, it must not be recalled as memory, and `pending_lint` must never name it as a zombie owner item. `SessionStart` prints one line (`⏳ AI 未兌現承諾 N 條（最近：…）`) under the owner's pending line, including `source: compact`, which is exactly the moment the promise would otherwise evaporate; `PreCompact` appends the newest five open rows to the recovery map. The trigger table, the exclusions, and the digest dedupe all live in memspec's `COMMITMENT_*` block, so the hook and the CLI judge a sentence the same way.
+
+Detection is a sentence-pattern table, not a model, so its two error directions are known and bounded:
+
+- **False positives.** The assistant restating an owner instruction («owner 說我會…»), a conditional or hypothetical that happens to contain a trigger word, and a promise nested inside a longer clause are the shapes most likely to be mis-recorded. Quoted triggers, attribution phrases, questions, and completed forms are excluded, but a novel restatement shape will still land in the ledger. The cost is one line the owner can close with `--close`; the ledger is never treated as authority over what was actually agreed.
+- **False negatives.** A promise with no trigger word at all ("補完測試再回報") is not recorded, and no pattern table will catch it. The ledger is therefore a floor, not a guarantee: it catches the phrasings that recur, and `CORE-0.3A` still binds the turn.
+- **Settlement is heuristic.** A row closes when the message names its digest, or when the promise's first 20 characters appear in the part of the message that is *not* itself a commitment — restating a promise never closes it. A completion report that paraphrases instead of restating leaves the row open, which is the safe direction: a stale open row is visible, a wrongly closed one is not.
+
+### Self-verification
+
+```powershell
+python epitype/commitments.py --selftest
+python adapters/claude/stop_gate.py --selftest
+python epitype/commitments.py "<governance vault>" --list
+```
+
+## 13. 事件捕捉精準度：量測方法與已知盲點
+
+### Symptom
+
+The vault fills with grants, corrections and rulings the owner never meant as rules.
+A ruling card is injected at the top of every prompt, so a wrong one is not dead
+weight — it is contamination: a measured recall regression (48 → 47) traced back to
+mis-captured ruling cards competing for the pinned seats.
+
+### Why it happens
+
+Capture used to ask one question per kind: does a trigger phrase appear anywhere in
+the prompt? Hand-labelling 254 real event cards (176 replayed offline, 78 written
+live) showed that question is wrong 57% of the time — only 110 cards carried the
+right kind and only 100 were worth keeping. Eight shapes account for the misses:
+
+1. a bare 附和 phrase (「依照你的建議處理」) read as an authorization — 18 cards;
+2. a ruling created purely because the *assistant's* previous turn asked for a
+   decision, whatever the owner then said — 27 of 94 ruling cards are pure questions;
+3. a permission question (「你可以…嗎？」) read as permission granted;
+4. the owner admitting their own mistake (「我說錯了」) read as a correction of the agent;
+5. a request about communication style (「白話跟我說」) read as a ruling;
+6. assistant prose the owner pasted back into the prompt read as the owner's words;
+7. a scopeless one-word acknowledgement (「我同意」) pinned on every later recall;
+8. an urging question (「怎麼還…？」) read as a correction.
+
+### Epitype countermeasure
+
+`capture.classify` is now the single judgment for the live hook, the offline replay
+and the harness, and it works at clause level:
+
+- `owner_reply` keeps only what follows the owner's last quote marker (`<-`/`<=`/`《`),
+  so pasted assistant text cannot supply the trigger;
+- `_segments` splits on 。！？；and newlines, drops interrogative clauses, and — because
+  a real ruling often embeds its rhetorical question mid-sentence — re-splits a
+  question clause on commas and drops only the interrogative half;
+- `CAPTURE_VETO_REGEX` deletes hollow acknowledgement, self-blame, urging and
+  style-request phrases from what remains, so they can never be the evidence;
+- what survives must match `CAPTURE_DECISIVE_PATTERN` (or a standing-scope or trigger
+  phrase) before any card is written;
+- `looks_generated` rejects a candidate over 200 characters or with 3+ digits per
+  20 characters — the measured shape of an assistant's own analysis;
+- a ruling no longer stands on the assistant's question alone: the owner's sentence
+  must itself be decisive, *and* either the assistant did ask for a decision or the
+  sentence carries standing scope (以後／一律／不用問我) or several decisive clauses.
+
+`tests/capture_precision.py` is the measuring台: `--selftest` runs 33 synthetic checks
+(two counter-examples per failure shape, four multi-clause true rulings, three positives
+per kind), `--local <json>` scores a labelled real-sentence set that lives outside the
+repo. Measured on the 254-card set: precision (right kind among captured) 0.436 → 0.807,
+retention of the 100 keep-worthy cards 0.91 → 0.85.
+
+### 已知盲點
+
+- **Retention, not true recall.** Every row in the labelled set is a card the *old*
+  rules captured, so the set contains no example of a sentence the old rules missed.
+  The reported recall is retention of previously-captured keepers; it cannot detect a
+  shape neither judgment ever saw.
+- **The assistant's question is only stored on ruling cards.** A grant or correction
+  card keeps the owner sentence alone, so on replay those rows can only reach the
+  standing-scope route. Their measured recall is a lower bound.
+- **correction ⇄ ruling is a genuinely soft boundary.** 8 of the remaining errors are
+  sentences that carry an explicit correction trigger (我說過／不要亂) but were labelled
+  rulings because they read as standing decisions. No lexical rule fully separates them;
+  correction now yields to ruling only when the assistant's prior turn actually asked
+  for a decision (`ruling_question` hits) and `ruling_body` accepts the owner's reply —
+  with no question pending, correction still wins so a proactive「我說過」is never
+  demoted (2026-09-06 measurement: fixes 1 of the 8, trades it for 1 new miss on an
+  unrelated correction that happened to sit beside an unrelated question — precision
+  and retention held at 0.807/0.760, did not improve).
+- **A one-off order that looks like a rule still gets in.** 「不要再讀檔、不要呼叫工具」
+  is scoped to one turn but is lexically indistinguishable from a standing rule.
+- **Value is not kind.** 0.71 of captured cards are worth keeping long-term; a
+  correctly-kinded one-off correction is still noise on recall. Card triage, not
+  capture, is the place to fix that.
+
+### Self-verification
+
+```powershell
+python tests/capture_precision.py --selftest
+python tests/capture_precision.py --local <labelled set outside the repo>
+python epitype/harvest.py --reevaluate <quarantine directory>
+```
