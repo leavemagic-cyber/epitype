@@ -2,23 +2,55 @@
 
 ## Unreleased
 
-- A matched PreToolUse rule now remains a deny when audit logging is contended or
-  advice exceeds the output ceiling. Advice is truncated to a valid bounded payload,
-  superseded cards are ignored, risky nested-repeat regexes are rejected before use,
-  and documented shell aliases share command-aware matching.
-- FTS freshness now compares the stored file manifest after the grace window, and
-  incremental builds use both mtime and size. Vault scans do not follow symlinks or
-  Windows junctions outside the vault.
-- Decision lint requires one active card per key and validates that replacements are
-  active cards with the same key. YAML `...` frontmatter endings are handled
-  consistently by lint, search, and action gates.
-- Owner captures and compact maps use the same ledger-selected governance vault.
-  Compact recovery maps are session-specific and bounded by age and count.
-- The installed package now provides a unified `epitype` command. CI and publishing
-  build and exercise the installed wheel, and tag publication requires the package
-  version and full source selftests to pass.
-- Codex trust checks now require exactly the four supported registrations; missing or
-  skipped configuration is no longer reported as runnable success.
+The hot-path release. Measured on a machine at 100% CPU with two real vaults
+(158 + 294 cards): a recall or gate call that took 4.5–5.5 s — past both the
+host's and its own 3 s deadline, so it silently injected nothing and let a
+destructive command through — now takes 1.2–1.7 s end to end, and the work
+inside the interpreter fell from 4.0–4.6 s to about 0.4 s.
+
+- The vault scan reads directory entries and never resolves a path: symlinks and
+  Windows junctions are recognised from the entry's own attributes, and `_`- or
+  `.`-prefixed parts are never entered. Inside its grace window the stale check
+  reads nothing; after it, the stored path/mtime/size manifest is compared, so
+  deletions, renames, backdated additions, and size changes cannot stay hidden.
+  Results carry `card_path`, so no caller resolves the vault again. The selftest
+  lists 300 cards and asserts that no path is resolved.
+- The action gate finds trigger cards through a manifest cache
+  (`<vault>/.epitype/gate_triggers.json`) and re-reads only cards that changed.
+  Its regex validator rejects only shapes that can backtrack exponentially
+  (nested unbounded repetition, alternation under repetition, backreferences);
+  adjacent repetitions and bounded groups are accepted and the length limit is
+  1024. A card the gate cannot use is named to the model once per session rather
+  than skipped silently. A matched rule stays a deny when audit logging is
+  contended or the advice exceeds the output ceiling.
+- Recall lines say each fact once: a name the path already spells and the
+  "owner … auto-captured" label are dropped (about 40% fewer bytes per pinned
+  line). The advisory and vault legend are sent once per session per distinct
+  legend; compaction clears the session's recall markers, so they — and any
+  correction or ruling injected before it — return afterwards. A capture that
+  cannot take the index lock ages the index so the next prompt rebuilds it.
+  Every injected block that a budget cuts ends with the count of pieces left
+  out instead of silently skipping middle pieces.
+- One frontmatter reading for the index, the lints, and the gate
+  (`memspec.split_frontmatter`, `parse_scalar`, `join_block_scalar`): the BOM,
+  CRLF, `...` document ends, duplicated keys (first wins), `|-`/`>-` block
+  scalars, and a quoted `#` now read the same everywhere;
+  `tests/frontmatter_consistency.py` proves it card by card.
+- Decision lint: a key whose every card is retired warns rather than fails,
+  keeping the exam contract; supersession chains are valid unless they loop; a
+  replacement must share the decision key.
+- Installer: doctor accepts a `python` on PATH or any existing interpreter in a
+  registration instead of the exact path of the interpreter running doctor;
+  host-file backups keep only the newest three; `hook_trust` prints
+  `UNVERIFIED` (exit 1) instead of a `SKIP` that read as green; `python -m
+  epitype` gains a `__main__` guard; a tag publish requires `package.json` to
+  carry the tag version; `tests/run_all.py --jobs N` runs selftests in parallel
+  on CI.
+- From the 2026-09-04 batch, kept as found: incremental index builds use mtime
+  and size; owner captures and compact maps share the governance vault; compact
+  maps are per session and bounded; the installed package provides a unified
+  `epitype` command and CI exercises the installed wheel; Codex trust requires
+  exactly the four supported registrations.
 
 ## v1.1.0 — 2026-09-03
 

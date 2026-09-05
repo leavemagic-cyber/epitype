@@ -198,3 +198,27 @@ python adapters/claude/recall_hook.py --selftest
 python adapters/claude/sessionstart_hook.py --selftest
 python epitype/pending_lint.py <vault> --strict
 ```
+
+## 9. The hook is present, healthy, and too slow to answer
+
+### Symptom
+
+Doctor passes, every selftest is green, and every prompt and tool call still injects nothing; a command a scar card should have denied goes through. Nothing errors: the hook returned exit 0 with empty output.
+
+### Why it happens
+
+A hook must answer within the host's timeout and within its own deadline (three seconds each). Work that grows with the vault — resolving every directory entry to detect junctions, reading every card on every tool call, the interpreter's own start-up on a saturated CPU — can cross that line without any single step failing, and the deadline then does exactly what it was built to do: fail open, silently. A 2026-09-04 change that resolved every vault entry cost four seconds per call on a machine at 100% CPU; selftests with vaults of one to five cards could not see it.
+
+### Epitype countermeasure
+
+The vault scan lists directories with `os.scandir` and recognises symlinks and junctions from the entry's own attributes; nothing is resolved, and `_`- and `.`-prefixed parts are never entered. The stale check reads nothing inside its grace window. The action gate keeps a manifest cache of which cards declare a trigger (`<vault>/.epitype/gate_triggers.json`) and re-reads only cards that changed; a card whose trigger cannot be compiled is named to the model once per session rather than dropped. The memsearch selftest lists 300 cards and asserts that no path is resolved.
+
+### Self-verification
+
+```powershell
+python epitype/memsearch.py --selftest
+python adapters/claude/pretooluse_gate.py --selftest
+python install/graft.py doctor
+```
+
+Doctor's HEALTH step runs each hook once against a synthetic event; on a loaded machine, compare its wall time with the three-second timeout in the host registration — a hook that answers in two seconds there has little margin left.
