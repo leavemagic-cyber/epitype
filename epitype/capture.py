@@ -95,10 +95,115 @@ CAPTURE_KINDS = {
 }
 
 
+def owner_reply(text):
+    """owner 自己說的那半。
+
+    owner 常貼一段助理原文再用 `<-`／`<=`／`《` 接自己的話；標記前那半是助理的字，
+    拿它當觸發詞或長度證據等於讓助理替 owner 作證（實測 7 例助理長段分析被存成
+    owner 事件卡）。標記後沒有字時整句都是引文，回空字串。
+    """
+    matches = list(memspec.CAPTURE_REPLY_MARKER_REGEX.finditer(text or ""))
+    if not matches:
+        return (text or "").strip()
+    return text[matches[-1].end():].strip()
+
+
+def _segments(text):
+    """子句層取證：反問子句丟掉，其餘保留原樣（含結尾標點，句首型觸發詞才認得）。
+
+    問號子句不整句丟——真裁定常把反問嵌在多子句裡（「不是!只有…是標準合約…這樣
+    了解嗎?」）；問號子句再按逗號切，只丟帶疑問詞的那半。
+    """
+    kept = []
+    parts = memspec.CAPTURE_CLAUSE_SPLIT_REGEX.split(text)
+    for index in range(0, len(parts), 2):
+        clause = parts[index] + (parts[index + 1] if index + 1 < len(parts) else "")
+        if not clause.strip():
+            continue
+        if memspec.CAPTURE_CLAUSE_QUESTION_REGEX.search(clause):
+            kept.extend(
+                piece for piece in memspec.CAPTURE_SUBCLAUSE_SPLIT_REGEX.split(clause)
+                if piece.strip() and not memspec.CAPTURE_QUESTION_WORD_REGEX.search(piece)
+            )
+        else:
+            kept.append(clause)
+    return kept
+
+
+def evidence_text(text):
+    """The part of an owner utterance that may prove a decision, veto phrases removed.
+
+    Veto phrases are deleted rather than dropping the whole segment: 「不要再跟我說
+    沒有資料」 is a standing rule that merely contains a communication-style phrase,
+    while 「白話跟我說明」 is nothing but the phrase and must not survive.
+    """
+    stripped = (memspec.CAPTURE_VETO_REGEX.sub("", piece) for piece in _segments(owner_reply(text)))
+    return " ".join(piece for piece in stripped if piece.strip())
+
+
+def is_decisive(evidence):
+    """True when the evidence says what to do (or not do), or names a standing rule.
+
+    Restating a standing rule (「我說過了，執行到完」) is itself the decision, so the
+    standing table counts here too — without it a third of the measured real
+    corrections read as content-free.
+    """
+    return bool(
+        memspec.CAPTURE_DECISIVE_REGEX.search(evidence)
+        or memspec.CAPTURE_STANDING_REGEX.search(evidence)
+        # 「你可以用到 7 個核心」的授權句只有觸發詞本身是證據；觸發詞不算決定性的話，
+        # 具體範圍的真授權會整批掉出去。
+        or memspec.GRANT_TRIGGER_REGEX.search(evidence)
+        # 同理，「你搞錯了，那欄是給 A 用的，不是給 B」的決定就在糾正詞本身。
+        or memspec.CORRECTION_TRIGGER_REGEX.search(evidence)
+    )
+
+
+def looks_generated(text):
+    """True when the candidate has the shape of assistant prose, not an owner line."""
+    body = one_line(text)
+    if len(body) > memspec.CAPTURE_OWNER_MAX_CHARS:
+        return True
+    digits = sum(character.isdigit() for character in body)
+    return (
+        len(body) >= memspec.CAPTURE_DIGIT_WINDOW_CHARS
+        and digits * memspec.CAPTURE_DIGIT_WINDOW_CHARS
+        >= memspec.CAPTURE_DIGIT_MAX_PER_WINDOW * len(body)
+    )
+
+
+def hollow_answer(text):
+    """A one-word acknowledgement with no scope: pinned on recall, says nothing."""
+    reply = owner_reply(text)
+    return len(reply) < memspec.CAPTURE_ACK_MIN_CHARS and not memspec.CAPTURE_STANDING_REGEX.search(reply)
+
+
+def candidate_shape(prompt):
+    """(ok, reason) for the shape checks every kind shares, before any trigger."""
+    reply = owner_reply(prompt)
+    if not reply:
+        return False, "quoted-assistant-text-only"
+    if looks_generated(reply):
+        return False, "assistant-prose-shape"
+    if hollow_answer(prompt):
+        return False, "scopeless-acknowledgement"
+    if not is_decisive(evidence_text(prompt)):
+        return False, "no-decisive-clause"
+    return True, "decisive-owner-clause"
+
+
 def matched_sentence(prompt, trigger):
+    """The sentence to store: the trigger has to sit in that sentence's own evidence.
+
+    Searching the raw sentence is what let a trigger inside a question, an empty
+    acknowledgement, or pasted assistant text write a card (2026-09-06 measurement).
+    """
     for sentence in memspec.GRANT_SENTENCE_SPLIT_REGEX.split(prompt):
         candidate = sentence.strip()
-        if candidate and trigger.search(without_quoted_text(candidate)):
+        if not candidate:
+            continue
+        evidence = evidence_text(without_quoted_text(candidate))
+        if trigger.search(evidence) and is_decisive(evidence):
             return candidate
     return None
 
@@ -118,12 +223,14 @@ def existing_capture(vault, directory_name, kind, digest):
 
 def capture_owner_sentence(prompt, vault, event, started_at, kind, replay=None):
     directory_name, trigger, label = CAPTURE_KINDS[kind]
-    owner_utterance, _reason = is_owner_utterance(prompt, trigger)
-    if not owner_utterance or expired(started_at):
+    if expired(started_at):
         return None
-    sentence = matched_sentence(prompt, trigger)
-    if sentence is None:
+    # One utterance earns one card: routing through classify() is what stops the
+    # same sentence landing in grants/ and corrections/ (two seats on recall).
+    found = classify(prompt)
+    if found is None or found[0] != kind:
         return None
+    sentence = found[1]
     return write_capture(
         vault, directory_name, kind, grant_digest(sentence), label, sentence, event, started_at, replay=replay
     )
@@ -246,16 +353,16 @@ def _answer_shape(prompt):
     return owner_utterance and len(prompt.strip()) >= memspec.RULING_MIN_ANSWER_CHARS
 
 
-def ruling_body(prompt, question):
-    """(body, summary) when the owner's answer follows an explicit request for a
-    ruling, else None. The question-window rule lives here so the online hook and
-    the offline replay judge the same pair the same way."""
-    if not _answer_shape(prompt) or not question:
+def ruling_question(question):
+    """The window around an explicit request for a decision, or None.
+
+    Quoted phrases are the assistant talking *about* requests (「請你裁決」in a
+    report), not making one: a match inside quotes does not count. A live
+    request sits at the end of the turn; keep only the window around it.
+    """
+    if not question:
         return None
     flat = one_line(question)
-    # Quoted phrases are the assistant talking *about* requests (「請你裁決」in a
-    # report), not making one: a match inside quotes does not count. A live
-    # request sits at the end of the turn; keep only the window around it.
     quoted = [(m.start(), m.end()) for m in memspec.RULING_QUOTED_TEXT_REGEX.finditer(flat)]
     matches = [
         m for m in memspec.RULING_QUESTION_REGEX.finditer(flat)
@@ -265,9 +372,80 @@ def ruling_body(prompt, question):
         return None
     hit = matches[-1]
     window = memspec.RULING_QUESTION_WINDOW_CHARS
-    asked = flat[max(0, hit.start() - window): hit.end() + window].strip()
+    return flat[max(0, hit.start() - window): hit.end() + window].strip()
+
+
+def ruling_body(prompt, question):
+    """(body, summary) when the owner's own sentence carries a ruling, else None.
+
+    2026-09-06: the assistant's request alone used to be the whole trigger, so any
+    next prompt — a bare question included — became a ruling (27 of 94 measured
+    rulings were pure questions). Now the owner's sentence must itself hold a
+    decisive clause, and the ruling stands either because the assistant did ask for
+    a decision or because the sentence carries standing scope (以後／一律／不用問我).
+    """
+    if not _answer_shape(prompt):
+        return None
+    shaped, _reason = candidate_shape(prompt)
+    if not shaped:
+        return None
+    asked = ruling_question(question)
     answer = prompt.strip()
-    return f"問（助理）：{asked}\n答（owner 逐字）：{answer}", answer
+    if asked:
+        return f"問（助理）：{asked}\n答（owner 逐字）：{answer}", answer
+    evidence = evidence_text(prompt)
+    # No request on the wire: the sentence has to carry the ruling on its own —
+    # either standing scope (以後／一律／我說過), or several decisive clauses, which
+    # is what separates a rule the owner is laying down from a one-off order
+    # (「直接刪」 has one decisive word and nothing else; a ruling states a shape).
+    if memspec.CAPTURE_STANDING_REGEX.search(evidence):
+        return answer, answer
+    if (
+        len(memspec.CAPTURE_DECISIVE_REGEX.findall(evidence)) >= memspec.CAPTURE_RULING_MIN_DECISIVE
+        and len(one_line(evidence)) >= memspec.CAPTURE_RULING_MIN_CHARS
+    ):
+        return answer, answer
+    return None
+
+
+def classify(prompt, question=None):
+    """(kind, body, summary, digest) for the one card this utterance earns, or None.
+
+    Online capture, offline replay, and the precision harness must judge a sentence
+    identically; a second copy of this ordering is how the replayed history stopped
+    matching what the live hook writes.
+
+    2026-09-06: a correction trigger (不要再／etc.) sitting inside the owner's answer
+    to the assistant's own decision question was always filed as correction, so
+    「就用第二案，以後都不要再問這件事」 answering 「請你確認要用哪個」 never reached
+    ruling_body. correction only yields to ruling when the assistant's prior turn
+    itself asked for a decision (ruling_question) — no question on the wire keeps
+    correction first, so an owner-initiated correction like 「不是！只有第一種算正式
+    合約…」 said with no request pending stays correction.
+    """
+    for kind in ("correction", "grant"):
+        directory, trigger, _label = CAPTURE_KINDS[kind]
+        owner_utterance, _reason = is_owner_utterance(prompt, trigger)
+        if not owner_utterance:
+            continue
+        shaped, _reason = candidate_shape(prompt)
+        if not shaped:
+            continue
+        sentence = matched_sentence(prompt, trigger)
+        if sentence is not None:
+            if kind == "correction" and ruling_question(question) is not None:
+                found = ruling_body(prompt, question)
+                if found is not None:
+                    body, summary = found
+                    return "ruling", body, summary, prompt
+            return kind, sentence, None, sentence
+    owner_utterance, _reason = is_owner_utterance(prompt, memspec.NEVER_MATCH_REGEX)
+    if owner_utterance:
+        found = ruling_body(prompt, question)
+        if found is not None:
+            body, summary = found
+            return "ruling", body, summary, prompt
+    return None
 
 
 def capture_ruling(prompt, vault, event, started_at, question=None, replay=None):
@@ -279,12 +457,20 @@ def capture_ruling(prompt, vault, event, started_at, question=None, replay=None)
     """
     if expired(started_at) or not _answer_shape(prompt):
         return None
+    # A sentence that already earned a grant or a correction card is done; asking
+    # first costs a few regex passes and saves reading the transcript tail.
+    settled = classify(prompt)
+    if settled is not None and settled[0] != "ruling":
+        return None
+    shaped, _reason = candidate_shape(prompt)
+    if not shaped:
+        return None
     if question is None:
         question = last_assistant_text(event.get("transcript_path"))
-    found = ruling_body(prompt, question)
-    if found is None:
+    found = classify(prompt, question)
+    if found is None or found[0] != "ruling":
         return None
-    body, answer = found
+    _kind, body, answer, _digest = found
     return write_capture(
         vault, memspec.RULING_DIRECTORY, "ruling", grant_digest(prompt), "owner ruling auto-captured", body, event, started_at,
         summary=answer,
