@@ -17,7 +17,7 @@ Epitype 目前支援 Claude Code 與 Codex，只使用 Python 標準函式庫，
 
 ## 運作方式
 
-Epitype 把同一組原生 vault 接到四個 host 事件：
+Epitype 把同一組原生 vault 接到五個 host 事件：
 
 | 事件 | Epitype 的動作 |
 |---|---|
@@ -25,6 +25,7 @@ Epitype 把同一組原生 vault 接到四個 host 事件：
 | `UserPromptSubmit` | 在共用輸出預算內，從每個已解析的 vault 取回最多五張相關卡片。簡短的 owner 授權語句會逐字保存、去重並立即進索引；捕捉當下不替原話加上解釋。 |
 | `PreToolUse` | 用工具與輸入比對傷疤卡 trigger。命中時回傳有界拒絕、較安全的做法與一列稽核紀錄。 |
 | `PreCompact` | 在 context 壓縮前，從 transcript 尾端製作小型復原地圖。 |
+| `Stop` | 回合結束決策閘：回覆若再提已否決選項或再問已裁定的事就擋下。 |
 
 注入的記憶只是參考資料，不能推翻 system 或 developer 指令、繞過 host 權限，也不能自行授予工具操作權。每次 hook 輸出最多 10 KiB，執行超過十秒就 fail open，避免記憶層卡住宿主流程。
 
@@ -80,9 +81,9 @@ epitype trust
 若任何 Epitype 項目顯示 `UNTRUSTED`、`DISABLED` 或 `MODIFIED`：
 
 - 終端機介面輸入 `/hooks`，面板出現後按 `t` 信任全部，再按 `esc`。
-- Desktop app 開啟 **hooks need review** 或 **Hooks** 面板，核准標記為 Epitype 的 `SessionStart`、`UserPromptSubmit`、`PreToolUse`、`PreCompact` 四筆項目。
+- Desktop app 開啟 **hooks need review** 或 **Hooks** 面板，核准標記為 Epitype 的 `SessionStart`、`UserPromptSubmit`、`PreToolUse`、`PreCompact`、`Stop` 五筆項目。
 
-核准後再跑一次檢查。只有印出 `CODEX TRUST: PASS 4/4` 才表示 Codex 端可執行。`doctor` 驗證的是註冊與合成執行，不能取代這項信任檢查。
+核准後再跑一次檢查。只有印出 `CODEX TRUST: PASS 5/5` 才表示 Codex 端可執行。`doctor` 驗證的是註冊與合成執行，不能取代這項信任檢查。
 
 ### 選擇 vault 版型
 
@@ -116,7 +117,7 @@ python tests/privacy_lint.py
 python exam/exam_runner.py --strict
 ```
 
-`tests/run_all.py` 目前執行 20 組元件 selftest，涵蓋核心工具、hook adapter、套件介面、安裝器、筆試引擎與隱私閘。repo 內的筆試題庫是小型合成樣本。本次發布另以嚴格模式通過 300 題行為題庫與 15 筆回顧種子；這兩份發布材料不包含在本 repo。
+`tests/run_all.py` 目前執行 22 組元件 selftest，涵蓋核心工具、hook adapter、套件介面、安裝器、筆試引擎與隱私閘。repo 內的筆試題庫是小型合成樣本。本次發布另以嚴格模式通過 300 題行為題庫與 15 筆回顧種子；這兩份發布材料不包含在本 repo。
 
 這些結果是防回歸證據，不代表未來每個 host 版本或每一種記憶失效都已涵蓋。
 

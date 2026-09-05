@@ -224,3 +224,29 @@ python install/graft.py doctor
 ```
 
 Doctor's HEALTH step runs each hook once against a synthetic event and prints its wall time beside the verdict, warning when a hook used more than half of the time the host registration allows. It also warns when `repo_root` has uncommitted changes: the live hooks run whatever is in that tree, and the 2026-09-04 batch ran live for a day precisely because an unfinished change needs no release to take effect.
+
+## 10. The ruling is injected, and the turn re-opens it anyway
+
+### Symptom
+
+The owner settled a question weeks ago. The session opens with that ruling listed in the owner's own words, recall pins it again mid-session, and the assistant still ends a turn by offering the ruled-out option as a live choice, or by putting the settled question back to the owner. Nothing failed: every injection worked, and the model simply wrote past it.
+
+### Why it happens
+
+Injection is advice, not enforcement. `SessionStart` and `UserPromptSubmit` both write into the context window and then hand control back to the model; nothing reads what the model actually produced. A rule enforced only by the attention of the party it constrains is not enforced. The 2026-09-05 incident is the shape of it: a decision the owner had ruled on 08-13 came back as an option in the same session that opened with that decision on screen, and the owner asked why it keeps happening.
+
+### Epitype countermeasure
+
+The `Stop` hook compares the turn's last assistant message against the active decision cards of the cwd vault and the governance vault before the turn is allowed to end. A card's `forbidden` sequence — regular expressions or literals, validated by the same rejection rules the action gate uses, so a card cannot hang the turn it guards — blocks the turn and quotes the owner back. A question sentence naming one card by two of its `aliases` blocks it as well: putting a settled matter back to the owner is the same failure as proposing it. A block emits `{"decision": "block", "reason": ...}` and is audited to `_GATE_LOG.jsonl` as `stop_block`. The host re-runs `Stop` after a block, so `stop_hook_active` is never blocked twice, and one `(decision, message)` pair blocks once per session — the marker lives in the recall marker directory, so compaction clears it with the rest.
+
+Every other path fails open: a missing or unreadable config, an unusable pattern (named on stderr, never silently dropped), a vault with no decision cards, or the hook's own deadline all let the turn end.
+
+### Self-verification
+
+```powershell
+python adapters/claude/stop_gate.py --selftest
+python install/graft.py doctor
+python adapters/codex/hook_trust.py check
+```
+
+Codex will not run a newly registered hook until the owner trusts it again in the Codex app; `hook_trust check` is the only step that reports that state as a failure rather than as green.

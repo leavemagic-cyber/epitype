@@ -17,7 +17,7 @@ Epitype currently supports Claude Code and Codex. It uses only the Python standa
 
 ## How it works
 
-Epitype connects the same native vaults to four host events:
+Epitype connects the same native vaults to five host events:
 
 | Event | What Epitype does |
 |---|---|
@@ -25,6 +25,7 @@ Epitype connects the same native vaults to four host events:
 | `UserPromptSubmit` | Recalls up to five relevant cards from each resolved vault within the shared output budget. Short owner-grant statements are stored verbatim, deduplicated, and indexed; their meaning is not inferred during capture. |
 | `PreToolUse` | Matches scar-card triggers against the tool and its input. A match returns a bounded denial, safer advice, and an audit row. |
 | `PreCompact` | Builds a small recovery map from the transcript tail before context compaction. |
+| `Stop` | Round-end decision gate: blocks a reply that re-proposes a rejected option or re-asks a ruled question. |
 
 Injected memory remains advisory. It cannot override system or developer instructions, bypass host permissions, or grant a tool authority by itself. Hook output is capped at 10 KiB and each hook has a ten-second fail-open deadline.
 
@@ -80,9 +81,9 @@ epitype trust
 If any Epitype entry is `UNTRUSTED`, `DISABLED`, or `MODIFIED`:
 
 - In the terminal UI, enter `/hooks`, press `t` to trust all entries in the panel, then press `esc`.
-- In the Desktop app, open **hooks need review** or the **Hooks** panel and approve the Epitype entries for `SessionStart`, `UserPromptSubmit`, `PreToolUse`, and `PreCompact`.
+- In the Desktop app, open **hooks need review** or the **Hooks** panel and approve the Epitype entries for `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PreCompact`, and `Stop`.
 
-Run the check again. Codex is ready only when it prints `CODEX TRUST: PASS 4/4`. `doctor` verifies registration and synthetic execution; it does not replace this trust check.
+Run the check again. Codex is ready only when it prints `CODEX TRUST: PASS 5/5`. `doctor` verifies registration and synthetic execution; it does not replace this trust check.
 
 ### Choose a vault layout
 
@@ -116,7 +117,7 @@ python tests/privacy_lint.py
 python exam/exam_runner.py --strict
 ```
 
-`tests/run_all.py` currently runs 20 component selftests covering the core tools, hook adapters, package surface, installer, exam engine, and privacy gate. The included exam corpus is a small synthetic sample. For this release, the publication gate also passed a strict 300-case behavior corpus and a 15-seed review; those release materials are not part of this repository.
+`tests/run_all.py` currently runs 22 component selftests covering the core tools, hook adapters, package surface, installer, exam engine, and privacy gate. The included exam corpus is a small synthetic sample. For this release, the publication gate also passed a strict 300-case behavior corpus and a 15-seed review; those release materials are not part of this repository.
 
 These checks are regression evidence, not proof that every future host version or every memory failure is covered.
 

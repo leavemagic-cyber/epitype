@@ -21,7 +21,7 @@ import tomllib
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MARKER_VALUE = "epitype"
 MARKER_FIELDS = ("id", "comment")
-EVENTS = ("SessionStart", "UserPromptSubmit", "PreCompact", "PreToolUse")
+EVENTS = ("SessionStart", "UserPromptSubmit", "PreCompact", "PreToolUse", "Stop")
 STATE_VERSION = 1
 CONFIG_DIRECTORY = ".epitype"
 CONFIG_FILENAME = "config.json"
@@ -38,13 +38,18 @@ HOOK_SPECS = {
     "UserPromptSubmit": ("recall.py", "recall_hook.py"),
     "PreCompact": ("precompact.py", "precompact_hook.py"),
     "PreToolUse": ("pretooluse.py", "pretooluse_gate.py"),
+    "Stop": ("stop.py", "stop_gate.py"),
 }
 SHIM_NAMES = tuple(shim_name for shim_name, _ in HOOK_SPECS.values())
-U12_SHIM_SHA256 = {
-    "sessionstart.py": "49932f9dff4d80ebc14045dd619289246afee9ba319bb37f3a786fbdaf746001",
-    "recall.py": "06d81067cd22c3a38c74980e13155d9b38eac5393677959d8ec5fedfdfe29085",
-    "precompact.py": "22386bf486c9e305d0439fe3cfb814a1e980fe3e96ef88a7769c987e8d416d99",
-    "pretooluse.py": "9c2cdb7d145eeba56e532a3ceae639375ae8952960d3f6d56191f79b03673ff2",
+# Re-pinned when the Stop shim joined the set: the template's own SHIM_NAMES tuple is
+# what lets one shim preserve another's fail-open breadcrumb, so adding stop.py there
+# changed every rendered shim's bytes. Any other drift is still a selftest failure.
+SHIM_SHA256 = {
+    "sessionstart.py": "7a3463ab75febddd012bb8fd0d6b4870775ca1366616d43737cd631c22225792",
+    "recall.py": "41602ee307220427decd7158c0bbb77c2463d377039709059f8eb4cdee8f6db3",
+    "precompact.py": "d5cd5572658ef2a832a32bc6588a97e7a69711d835593ee5ef6855426a99025b",
+    "pretooluse.py": "334da4668c893cb05bdeba142adacd272d63da2fc7dde9b1590e03e9f1916d27",
+    "stop.py": "11c7eabf78e710fa8705b8eb8774de11781f0dacfe98e3f2152d85c2d0cef582",
 }
 SHIM_REASON_CODES = frozenset((
     "config_missing",
@@ -1044,6 +1049,9 @@ def _synthetic_health(home, repo_root, output):
         ("UserPromptSubmit", "recall.py", {"prompt": "synthetic doctor probe"}, ()),
         ("PreCompact", "precompact.py", {"transcript_path": ""}, ("--codex",)),
         ("PreToolUse", "pretooluse.py", {"tool_name": "SyntheticRead", "tool_input": {"path": "synthetic.txt"}}, ()),
+        # A Stop probe must never look like a real turn: an empty message reaches the
+        # gate, exercises the adapter, and cannot match a card.
+        ("Stop", "stop.py", {"stop_hook_active": False, "last_assistant_message": ""}, ()),
     )
     passed = 0
     hooks_root = home / CONFIG_DIRECTORY / HOOK_DIRECTORY
@@ -1108,7 +1116,7 @@ def _doctor(home, dry_run=False, output=sys.stdout, clear_shim_status=False):
         _report_shim_status(records, output)
         if clear_shim_status:
             _clear_shim_status(home, True, output)
-        print("DRY-RUN hooks: SessionStart, UserPromptSubmit, PreCompact, PreToolUse", file=output)
+        print("DRY-RUN hooks: " + ", ".join(EVENTS), file=output)
         if not hosts:
             print("DOCTOR FAIL no supported host detected", file=output)
             return 1
@@ -1136,7 +1144,10 @@ def _doctor(home, dry_run=False, output=sys.stdout, clear_shim_status=False):
             shim_path = hooks_root / shim_name
             if not shim_path.is_file() or shim_path.read_bytes() != expected:
                 raise ValueError(f"shim is missing or stale: {shim_path}")
-        print(f"SHIM RESOLUTION: PASS 4/4 repo_root={repo_root}", file=output)
+        print(
+            f"SHIM RESOLUTION: PASS {len(shim_payloads)}/{len(SHIM_NAMES)} repo_root={repo_root}",
+            file=output,
+        )
         dirty = _uncommitted_changes(repo_root)
         if dirty:
             # The live hooks run whatever is in repo_root, committed or not
@@ -1162,7 +1173,7 @@ def _doctor(home, dry_run=False, output=sys.stdout, clear_shim_status=False):
             ]
             if mismatches:
                 raise ValueError(f"{name} shim registration mismatch: {', '.join(mismatches)}")
-            print(f"REGISTRATION {name}: PASS 4/4", file=output)
+            print(f"REGISTRATION {name}: PASS {len(EVENTS)}/{len(EVENTS)}", file=output)
         health_ok = _synthetic_health(home, repo_root, output)
         final_records = _read_shim_status(home)
         _report_shim_status(final_records, output, previous=initial_records)
@@ -1262,7 +1273,7 @@ def _install(home, dry_run=False, apply_billing_guard=False, output=sys.stdout, 
 
         if dry_run:
             print(f"DRY-RUN write {state_path}: install ownership metadata", file=output)
-            print("DRY-RUN health: feed synthetic stdin to four hooks", file=output)
+            print(f"DRY-RUN health: feed synthetic stdin to {len(EVENTS)} hooks", file=output)
             print("DRY-RUN complete; no files changed.", file=output)
             return 0
 
@@ -1458,10 +1469,10 @@ def _selftest():
             )
             shim_payloads = _shim_payloads(old_repo)
             checks.append((
-                "rendered shims are byte-identical to U12",
-                set(shim_payloads) == set(U12_SHIM_SHA256)
+                "rendered shims are byte-identical to their pins",
+                set(shim_payloads) == set(SHIM_SHA256)
                 and all(
-                    hashlib.sha256(payload).hexdigest() == U12_SHIM_SHA256[shim_name]
+                    hashlib.sha256(payload).hexdigest() == SHIM_SHA256[shim_name]
                     for shim_name, payload in shim_payloads.items()
                 ),
             ))
@@ -1494,7 +1505,7 @@ def _selftest():
                 and config_value.get("vaults") == [os.fspath(fallback.resolve())]
                 and config_value.get("repo_root") == os.fspath(old_repo.resolve())
                 and all(f"HOOK {event}: PASS" in first_output.getvalue() for event in EVENTS)
-                and "HEALTH PASS 4/4" in first_output.getvalue(),
+                and f"HEALTH PASS {len(EVENTS)}/{len(EVENTS)}" in first_output.getvalue(),
             ))
             claude_value = json.loads(claude.read_text(encoding="utf-8"))
             codex_value = json.loads(codex_hooks.read_text(encoding="utf-8"))
@@ -1817,7 +1828,7 @@ def _selftest():
                 clear_code == 0
                 and not status_path.exists()
                 and "SHIM STATUS CLEARED:" in clear_output.getvalue()
-                and "HEALTH PASS 4/4" in clear_output.getvalue(),
+                and f"HEALTH PASS {len(EVENTS)}/{len(EVENTS)}" in clear_output.getvalue(),
             ))
 
             missing_adapter = old_repo / "adapters" / "claude" / "pretooluse_gate.py"
@@ -1837,7 +1848,7 @@ def _selftest():
                 missing_adapter_code == 1
                 and "HOOK PreToolUse: FAIL" in missing_adapter_text
                 and "REASON PreToolUse: no-trace" in missing_adapter_text
-                and "HEALTH FAIL 3/4" in missing_adapter_text
+                and f"HEALTH FAIL {len(EVENTS) - 1}/{len(EVENTS)}" in missing_adapter_text
                 and recovered_code == 0,
             ))
 
@@ -1879,13 +1890,13 @@ def _selftest():
             )
             relocate_text = relocate_output.getvalue()
             checks.append((
-                "moved repo relocates through config and all four shims pass",
+                "moved repo relocates through config and every shim passes",
                 relocate_code == 0
                 and relocated_config.get("repo_root") == os.fspath(moved_repo.resolve())
                 and before_relocate_hosts == (claude.read_bytes(), codex_hooks.read_bytes())
                 and all(f"HOOK {event}: PASS" in relocate_text for event in EVENTS)
-                and "SHIM RESOLUTION: PASS 4/4" in relocate_text
-                and "HEALTH PASS 4/4" in relocate_text
+                and f"SHIM RESOLUTION: PASS {len(SHIM_NAMES)}/{len(SHIM_NAMES)}" in relocate_text
+                and f"HEALTH PASS {len(EVENTS)}/{len(EVENTS)}" in relocate_text
                 and "HOST CONFIG: UNCHANGED" in relocate_text,
             ))
 

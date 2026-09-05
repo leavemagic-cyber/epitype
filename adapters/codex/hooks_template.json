@@ -45,6 +45,17 @@
           }
         ]
       }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{{PYTHON_EXECUTABLE}} {{EPITYPE_HOOKS_ROOT}}/stop.py",
+            "timeout": 10
+          }
+        ]
+      }
     ]
   }
 }

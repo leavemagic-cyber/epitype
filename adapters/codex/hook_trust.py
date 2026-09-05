@@ -32,7 +32,7 @@ REVIEW_HINT = (
     "Codex skips untrusted hooks. In the Codex TUI run /hooks (Desktop app: "
     "the hooks review panel), approve the epitype entries, then rerun this check."
 )
-REQUIRED_EVENTS = ("SessionStart", "UserPromptSubmit", "PreToolUse", "PreCompact")
+REQUIRED_EVENTS = ("SessionStart", "UserPromptSubmit", "PreToolUse", "PreCompact", "Stop")
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -174,6 +174,9 @@ def _fixture(root, states, hook_command="python x.py"):
             "PreCompact": [
                 {"hooks": [{"type": "command", "command": hook_command + " --codex"}], "comment": MARKER_VALUE}
             ],
+            "Stop": [
+                {"hooks": [{"type": "command", "command": hook_command + " --stop"}], "id": MARKER_VALUE}
+            ],
         }
     }
     (codex / "hooks.json").write_text(json.dumps(hooks), encoding="utf-8")
@@ -195,12 +198,14 @@ def _selftest():
     try:
         with tempfile.TemporaryDirectory(prefix=".hook-trust-", dir=_REPO_ROOT) as temp_dir:
             root = Path(temp_dir).resolve()
-            all_four = {
+            every_event = {
                 "session_start:0:0": {"trusted_hash": "sha256:ss"},
                 "user_prompt_submit:1:0": {"trusted_hash": "sha256:aa"},
                 "pre_tool_use:0:0": {"trusted_hash": "sha256:pp"},
                 "pre_compact:0:0": {"trusted_hash": "sha256:bb"},
+                "stop:0:0": {"trusted_hash": "sha256:tt"},
             }
+            expected = len(REQUIRED_EVENTS)
 
             home = root / "untrusted"
             hooks_path = _fixture(home, {"user_prompt_submit:0:0": {"trusted_hash": "sha256:00"}})
@@ -209,7 +214,10 @@ def _selftest():
             text = out.getvalue()
             checks.append((
                 "registered but untrusted hooks fail with review hint",
-                code == 1 and text.count(UNTRUSTED) == 4 and "FAIL 4/4" in text and "/hooks" in text,
+                code == 1
+                and text.count(UNTRUSTED) == expected
+                and f"FAIL {expected}/{expected}" in text
+                and "/hooks" in text,
             ))
             checks.append((
                 "key follows codex <path>:<snake_event>:<group>:<index> layout",
@@ -219,46 +227,52 @@ def _selftest():
                     f"{hooks_path}:user_prompt_submit:1:0",
                     f"{hooks_path}:pre_tool_use:0:0",
                     f"{hooks_path}:pre_compact:0:0",
+                    f"{hooks_path}:stop:0:0",
                 },
             ))
 
             home = root / "trusted"
-            _fixture(home, all_four)
+            _fixture(home, every_event)
             out = io.StringIO()
             code = run_check(home, out)
             seen_file = home / ".epitype" / SEEN_FILENAME
             checks.append((
                 "trusted hooks pass and record their digests",
-                code == 0 and "PASS 4/4" in out.getvalue() and len(_load_seen(seen_file)) == 4,
+                code == 0
+                and f"PASS {expected}/{expected}" in out.getvalue()
+                and len(_load_seen(seen_file)) == expected,
             ))
 
-            _fixture(home, all_four, hook_command="python relocated.py")
+            _fixture(home, every_event, hook_command="python relocated.py")
             out = io.StringIO()
             code = run_check(home, out)
             checks.append((
                 "hook edited after trust reports MODIFIED",
-                code == 1 and out.getvalue().count(MODIFIED) == 4,
+                code == 1 and out.getvalue().count(MODIFIED) == expected,
             ))
 
             home = root / "disabled"
-            disabled = {key: {**record, "enabled": False} for key, record in all_four.items()}
+            disabled = {key: {**record, "enabled": False} for key, record in every_event.items()}
             _fixture(home, disabled)
             out = io.StringIO()
             code = run_check(home, out)
-            checks.append(("disabled trust records fail", code == 1 and out.getvalue().count(DISABLED) == 4))
+            checks.append((
+                "disabled trust records fail",
+                code == 1 and out.getvalue().count(DISABLED) == expected,
+            ))
 
             home = root / "incomplete"
-            _fixture(home, all_four)
+            _fixture(home, every_event)
             incomplete_hooks = home / ".codex" / "hooks.json"
             incomplete_value = json.loads(incomplete_hooks.read_text(encoding="utf-8"))
             del incomplete_value["hooks"]["PreToolUse"]
-            del incomplete_value["hooks"]["PreCompact"]
+            del incomplete_value["hooks"]["Stop"]
             incomplete_hooks.write_text(json.dumps(incomplete_value), encoding="utf-8")
             out = io.StringIO()
             checks.append((
-                "missing required registrations fail instead of PASS 2/2",
+                "missing required registrations fail instead of a partial PASS",
                 run_check(home, out) == 1
-                and "missing=PreToolUse,PreCompact" in out.getvalue(),
+                and "missing=PreToolUse,Stop" in out.getvalue(),
             ))
 
             home = root / "nocodex"

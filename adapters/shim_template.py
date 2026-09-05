@@ -9,7 +9,7 @@ import subprocess
 
 
 ADAPTER_FILENAME = "__EPITYPE_ADAPTER_FILENAME__"
-SHIM_NAMES = ("sessionstart.py", "recall.py", "precompact.py", "pretooluse.py")
+SHIM_NAMES = ("sessionstart.py", "recall.py", "precompact.py", "pretooluse.py", "stop.py")
 SHIM_REASON_CODES = (
     "config_missing",
     "config_unreadable",

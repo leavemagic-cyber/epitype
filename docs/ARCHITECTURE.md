@@ -71,6 +71,6 @@ These rules govern selection; they do not let memory override the host's system,
 
 ## Shared contract across hosts
 
-Supported Claude Code and Codex registrations use the same four event names: `SessionStart`, `UserPromptSubmit`, `PreCompact`, and `PreToolUse`. They also share the vault list and limits from `epitype/memspec.py`. Host adapters translate the event envelope; they do not fork the memory format.
+Supported Claude Code and Codex registrations use the same five event names: `SessionStart`, `UserPromptSubmit`, `PreCompact`, `PreToolUse`, and `Stop`. They also share the vault list and limits from `epitype/memspec.py`. Host adapters translate the event envelope; they do not fork the memory format.
 
 This is a two-host implementation boundary. Future hosts and future host upgrades require their own integration tests before they can be described as supported.

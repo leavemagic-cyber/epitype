@@ -29,7 +29,7 @@ Preview every affected file and JSON location without writing anything:
 python install/graft.py uninstall --dry-run
 ```
 
-The command edits `~/.claude/settings.json` and `~/.codex/hooks.json` only when marked Epitype entries exist. It then removes `~/.epitype/`, including the four generated launchers under `~/.epitype/hooks/`, `config.json`, and the bounded fail-open breadcrumb file `shim_status.json`. It does not delete `~/.epitype-vault`, `~/.codex/memories`, Claude project memory directories, or any card file. Timestamped backups remain beside every edited host file.
+The command edits `~/.claude/settings.json` and `~/.codex/hooks.json` only when marked Epitype entries exist. It then removes `~/.epitype/`, including the five generated launchers under `~/.epitype/hooks/`, `config.json`, and the bounded fail-open breadcrumb file `shim_status.json`. It does not delete `~/.epitype-vault`, `~/.codex/memories`, Claude project memory directories, or any card file. Timestamped backups remain beside every edited host file.
 
 A legacy generated index at `<vault>/.cairn/` is renamed to `<vault>/.epitype/` on the first read when the current index directory is absent. These per-vault index directories are separate from the user-level `~/.epitype/` configuration directory described above.
 
@@ -38,7 +38,7 @@ A legacy generated index at `<vault>/.cairn/` is renamed to `<vault>/.epitype/` 
 Use this route only if the automated command cannot run.
 
 1. Back up `~/.claude/settings.json` and `~/.codex/hooks.json` before editing.
-2. In each file's top-level `hooks` object, inspect `SessionStart`, `UserPromptSubmit`, `PreCompact`, and `PreToolUse`.
+2. In each file's top-level `hooks` object, inspect `SessionStart`, `UserPromptSubmit`, `PreCompact`, `PreToolUse`, and `Stop`.
 3. Remove only array entries whose own `id` or `comment` field equals `epitype`. Preserve every other array entry and field.
 4. Remove an event key only if it was created for Epitype and its array is now empty. Remove the top-level `hooks` key only if Epitype created it and it is now empty. When uncertain, leave the empty object in place.
 5. Do not edit Claude's `permissions` or `deny` sections. Do not disable native memory, recall, or history settings.
