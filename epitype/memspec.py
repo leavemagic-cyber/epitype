@@ -109,7 +109,11 @@ SCAR_CORRECTION_PATTERNS = (
 HOOK_TIMEOUT_SECONDS = 3.0
 HOOK_DEFAULT_BUDGET_BYTES = 10 * 1024
 HOOK_MAX_OUTPUT_BYTES = 10 * 1024
-TRIGGER_REGEX_MAX_CHARS = 256
+TRIGGER_REGEX_MAX_CHARS = 1024
+# A trigger card the gate cannot use is named to the model once per session:
+# a scar that silently stopped applying is the failure the gate exists to prevent.
+GATE_DEFECT_NOTICE = "⚠ Epitype 動作閘：卡片 {name} 的 trigger 無法使用（{reason}），這條傷疤暫不生效；修正卡片後自動恢復。"
+GATE_DEFECT_MAX_LINES = 3
 SESSIONSTART_INDEX_BUDGET_BYTES = 3072
 EPITYPE_CONFIG_ENV = "EPITYPE_CONFIG"
 CONFIG_VAULTS_FIELD = "vaults"

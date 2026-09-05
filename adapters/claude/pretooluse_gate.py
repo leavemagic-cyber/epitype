@@ -27,6 +27,7 @@ from _hook_common import (
     load_config,
     read_event,
     run_synthetic,
+    session_component,
     write_config,
 )
 
@@ -57,16 +58,19 @@ _GROUPREF_OPS = frozenset(
 
 
 def _validate_regex_tree(items, inside_repeat=False):
-    previous_repeat = False
+    """Reject the shapes that can backtrack exponentially on a crafted tool input:
+    a repetition or an alternation nested inside an unbounded repetition, and
+    backreferences. A hung gate is killed by the host and the call proceeds, so
+    such a card would be a bypass. Adjacent repetitions (`\\s+\\S+`) and anything
+    under a bounded `?` stay accepted: at worst polynomial, and real cards use
+    them; the rejection itself is surfaced by the caller, never silent."""
     for opcode, argument in items:
         if opcode in _REPEAT_OPS:
-            if inside_repeat or previous_repeat:
-                raise ValueError("trigger regex has ambiguous repetition")
-            _validate_regex_tree(argument[2], inside_repeat=True)
-            previous_repeat = True
-            continue
-        previous_repeat = False
-        if opcode == _re_constants.BRANCH:
+            unbounded = argument[1] > 1
+            if unbounded and inside_repeat:
+                raise ValueError("trigger regex nests one repetition inside another")
+            _validate_regex_tree(argument[2], inside_repeat=inside_repeat or unbounded)
+        elif opcode == _re_constants.BRANCH:
             if inside_repeat:
                 raise ValueError("trigger regex repeats an alternation")
             for branch in argument[1]:
@@ -160,6 +164,79 @@ def _frontmatter(path):
         if line.strip() in ("---", "..."):
             return lines[1:index]
     raise ValueError("unterminated frontmatter")
+
+
+_TRIGGER_CACHE_FILENAME = "gate_triggers.json"
+_TRIGGER_CACHE_VERSION = 1
+
+
+def _declares_trigger(path):
+    lines = _frontmatter(path)
+    return lines is not None and any(
+        ":" in line and line[:1] not in " \t" and line.split(":", 1)[0].strip() == memspec.TRIGGER_FIELD
+        for line in lines
+    )
+
+
+def _write_trigger_cache(cache_path, manifest, triggers):
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        staging = cache_path.with_name(f".{cache_path.name}.tmp-{os.getpid()}")
+        staging.write_text(
+            json.dumps(
+                {"version": _TRIGGER_CACHE_VERSION, "manifest": manifest, "triggers": triggers},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            encoding="utf-8",
+        )
+        os.replace(staging, cache_path)
+    except OSError:
+        pass
+
+
+def _trigger_card_paths(vault):
+    """Cards whose frontmatter declares a trigger.
+
+    A manifest cache under the vault's index directory means a tool call re-reads
+    only the cards that changed since the previous call, not every card in the
+    vault; an unreadable or stale cache falls back to classifying the changed
+    cards and is rewritten. Cards whose frontmatter cannot be parsed stay listed
+    so the parse defect is still audited by the caller."""
+    vault = Path(vault).resolve()
+    scan = memsearch.scan_cards(vault)
+    manifest = {card_path: [mtime_ns, size] for card_path, _, mtime_ns, size in scan}
+    paths = {card_path: path for card_path, path, _, _ in scan}
+    cache_path = vault / memspec.FTS_INDEX_DIRECTORY / _TRIGGER_CACHE_FILENAME
+    cached = {}
+    try:
+        loaded = json.loads(cache_path.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict) and loaded.get("version") == _TRIGGER_CACHE_VERSION:
+            cached = loaded
+    except (OSError, ValueError):
+        pass
+    old_manifest = cached.get("manifest")
+    if not isinstance(old_manifest, dict):
+        old_manifest = {}
+    old_triggers = set(cached.get("triggers") or ())
+    if manifest == old_manifest:
+        return [paths[card_path] for card_path in sorted(old_triggers) if card_path in paths]
+    triggers = []
+    for card_path, path, _, _ in scan:
+        if old_manifest.get(card_path) == manifest[card_path]:
+            if card_path in old_triggers:
+                triggers.append(card_path)
+            continue
+        try:
+            declares = _declares_trigger(path)
+        except OSError:
+            continue
+        except ValueError:
+            declares = True
+        if declares:
+            triggers.append(card_path)
+    _write_trigger_cache(cache_path, manifest, triggers)
+    return [paths[card_path] for card_path in triggers]
 
 
 def _parse_trigger_card(path):
@@ -643,9 +720,8 @@ def _sweep_narration_markers(root, now, keep=None):
 
 def _narration_marker(session_id, text):
     digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
-    component = re.sub(r"[^A-Za-z0-9._-]", "_", str(session_id or "nosession"))[:128] or "nosession"
     root = Path(tempfile.gettempdir()) / memspec.NARRATION_MARKER_DIRECTORY
-    directory = root / component
+    directory = root / session_component(session_id)
     try:
         _sweep_narration_markers(root, time.time(), keep=directory)
         directory.mkdir(parents=True, exist_ok=True)
@@ -680,6 +756,24 @@ def _narration_context(event, started_at):
     return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": context}}
 
 
+def _allow_context(event, started_at, defects):
+    """Context for a call the gate lets through: trigger cards it could not use
+    are named once per session (a scar that silently stopped applying is the
+    failure the gate exists to prevent), then any narration notice."""
+    lines = []
+    session_id = event.get("session_id")
+    for name, reason in defects[: memspec.GATE_DEFECT_MAX_LINES]:
+        notice = memspec.GATE_DEFECT_NOTICE.format(name=name, reason=reason)
+        if _narration_marker(session_id, notice):
+            lines.append(notice)
+    narration = _narration_context(event, started_at)
+    if narration is not None:
+        lines.append(narration["hookSpecificOutput"]["additionalContext"])
+    if not lines:
+        return None
+    return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": "\n".join(lines)}}
+
+
 def _handle(event, started_at):
     tool_name = event.get("tool_name")
     if not isinstance(tool_name, str) or not tool_name:
@@ -696,13 +790,21 @@ def _handle(event, started_at):
         return None
 
     cards = []
+    defects = []
     for vault in config[memspec.CONFIG_VAULTS_FIELD]:
-        for path in memsearch.card_files(vault):
+        if expired(started_at):
+            return None
+        try:
+            trigger_paths = _trigger_card_paths(vault)
+        except OSError:
+            continue
+        for path in trigger_paths:
             if expired(started_at):
                 return None
             try:
                 card = _parse_trigger_card(path)
             except Exception as exc:
+                defects.append((path.stem, f"{type(exc).__name__}: {exc}"))
                 _best_effort_audit(
                     _append_parse_defect, vault, path, exc, started_at
                 )
@@ -739,7 +841,7 @@ def _handle(event, started_at):
             match = (vault, card, fallback, position)
             break
     if match is None:
-        return _narration_context(event, started_at)
+        return _allow_context(event, started_at, defects)
     vault, card, fallback, position = match
     value = _bounded_deny(card)
     _best_effort_audit(
@@ -891,6 +993,109 @@ def _selftest():
             except ValueError:
                 unsafe_rejected = True
             checks.append(("ambiguous repeated regex is rejected before matching", unsafe_rejected))
+
+            def regex_accepted(pattern):
+                try:
+                    _compile_trigger_regex(pattern)
+                except (ValueError, re.error):
+                    return False
+                return True
+
+            checks.append((
+                "adjacent repetitions, bounded groups, and long patterns are accepted",
+                regex_accepted(r"git\s+add\s+(?:-A|--all|\.)\s*$")
+                and regex_accepted(r"rm(?:\s+-\w+)?\s+-rf\b")
+                and regex_accepted(r"(?:\s+-\w+(?:\s+\S+)?)?\s*>")
+                and regex_accepted("|".join(f"(?:token{index}\\s*)" for index in range(60))),
+            ))
+            checks.append((
+                "repeated alternations, nested repetitions, and backreferences are rejected",
+                not regex_accepted(r"(?:ab|cd)+$")
+                and not regex_accepted(r"(?:\s+\S+)*x")
+                and not regex_accepted(r"(a)\1")
+                and not regex_accepted("a" * (memspec.TRIGGER_REGEX_MAX_CHARS + 1)),
+            ))
+
+            cache_vault = root / "cache-vault"
+            cache_vault.mkdir()
+            for index in range(40):
+                (cache_vault / f"plain-{index:02d}.md").write_text(
+                    f"---\nname: plain {index}\ndescription: no trigger here\n---\nbody {index}\n",
+                    encoding="utf-8",
+                )
+            (cache_vault / "guard.md").write_text(
+                "---\nname: guard\ntrigger: {tool: ^Bash$, input: 'cachedeny'}\n"
+                "advice: cached trigger card denies.\n---\n",
+                encoding="utf-8",
+            )
+            cache_config = root / "cache-config.json"
+            write_config(cache_config, [cache_vault])
+            parse_calls = []
+            original_parse = _parse_trigger_card
+            globals()["_parse_trigger_card"] = lambda path: parse_calls.append(path) or original_parse(path)
+            previous_config = os.environ.get(memspec.EPITYPE_CONFIG_ENV)
+            os.environ[memspec.EPITYPE_CONFIG_ENV] = os.fspath(cache_config)
+            try:
+                def gate(command, session="cache-session"):
+                    return _handle(
+                        {"session_id": session, "tool_name": "Bash", "tool_input": {"command": command}},
+                        time.monotonic(),
+                    )
+
+                def decision(value):
+                    return (value or {}).get("hookSpecificOutput", {}).get("permissionDecision")
+
+                first = decision(gate("echo cachedeny"))
+                first_parses = len(parse_calls)
+                cache_file = cache_vault / memspec.FTS_INDEX_DIRECTORY / _TRIGGER_CACHE_FILENAME
+                second = decision(gate("echo cachedeny"))
+                checks.append((
+                    "trigger cards come from a manifest cache: only trigger cards are parsed per call",
+                    first == "deny" and second == "deny" and first_parses == 1
+                    and len(parse_calls) == 2 and cache_file.is_file(),
+                ))
+                (cache_vault / "late.md").write_text(
+                    "---\nname: late\ntrigger: {tool: ^Bash$, input: 'latedeny'}\n"
+                    "advice: a card added later denies too.\n---\n",
+                    encoding="utf-8",
+                )
+                late = decision(gate("echo latedeny"))
+                (cache_vault / "guard.md").write_text(
+                    "---\nname: guard\ndescription: trigger removed\n---\n", encoding="utf-8"
+                )
+                removed = decision(gate("echo cachedeny"))
+                checks.append((
+                    "a changed manifest re-reads only the changed cards: added trigger denies, removed one allows",
+                    late == "deny" and removed is None,
+                ))
+                cache_file.write_text("{not json", encoding="utf-8")
+                corrupted = decision(gate("echo latedeny"))
+                checks.append((
+                    "an unreadable trigger cache is rebuilt, never trusted",
+                    corrupted == "deny" and json.loads(cache_file.read_text(encoding="utf-8"))["version"] == _TRIGGER_CACHE_VERSION,
+                ))
+                (cache_vault / "broken-trigger.md").write_text(
+                    "---\nname: broken-trigger\ntrigger: {tool: ^Bash$, input: '(a+)+$'}\n"
+                    "advice: never used.\n---\n",
+                    encoding="utf-8",
+                )
+                defect_session = f"defect-{uuid.uuid4().hex}"
+                noticed = gate("echo harmless", session=defect_session)
+                noticed_text = (noticed or {}).get("hookSpecificOutput", {}).get("additionalContext", "")
+                repeated = gate("echo harmless", session=defect_session)
+                checks.append((
+                    "an unusable trigger card is named to the model once per session, not silently skipped",
+                    "broken-trigger" in noticed_text
+                    and memspec.GATE_DEFECT_NOTICE[:12] in noticed_text
+                    and decision(noticed) is None
+                    and repeated is None,
+                ))
+            finally:
+                globals()["_parse_trigger_card"] = original_parse
+                if previous_config is None:
+                    os.environ.pop(memspec.EPITYPE_CONFIG_ENV, None)
+                else:
+                    os.environ[memspec.EPITYPE_CONFIG_ENV] = previous_config
 
             def transcript_rows(*rows):
                 path = root / f"narration-{uuid.uuid4().hex}.jsonl"
@@ -1170,7 +1375,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 46
+    total = 52
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
