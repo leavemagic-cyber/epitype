@@ -26,6 +26,7 @@ CLAUDE_TRANSCRIPT_GLOB = ("projects", "*", "*.jsonl")
 CODEX_TRANSCRIPT_GLOB = ("sessions", "*", "*", "*", "rollout-*.jsonl")
 MANIFEST_SUBPATH = (".epitype", "harvest_manifest.json")
 DRAFT_SUBPATH = ("_drafts", "decisions")
+DUPLICATES_SUBPATH = ("_drafts", "duplicates")
 EVENT_DIRECTORIES = (memspec.GRANT_DIRECTORY, memspec.CORRECTION_DIRECTORY, memspec.RULING_DIRECTORY)
 DOC_SUFFIXES = (".md", ".markdown", ".txt")
 # 粗篩只認角色字串本身，不認 '"type":"user"' 整段：不同寫入端的分隔符空白不一，
@@ -34,6 +35,11 @@ ROLE_MARKERS = (b'"user"', b'"assistant"')
 # 文件裡的 owner 裁定句：只挖明確標記 owner 裁定或 owner 原話引號的行，其餘留給人。
 DOC_RULING_REGEX = re.compile(r"owner\s*(?:已)?裁(?:定|示|決)|owner[:：]\s*[「\"]", re.IGNORECASE)
 DECISION_KEY_REGEX = re.compile(rf"^{re.escape(memspec.DECISION_KEY_FIELD)}:\s*(\S.*)$", re.MULTILINE)
+# capture.write_capture's format is "description: {label} {date}: {summary}";
+# stripping label+date lets a grant card and a correction card for the same
+# owner sentence compare equal (the "一句兩卡" duplicate case) even though the
+# label differs.
+CARD_SUMMARY_REGEX = re.compile(r"^description:.*?\d{4}-\d{2}-\d{2}:\s*(.*)$", re.MULTILINE)
 DATE_REGEX = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 FRONTMATTER_SCAN_BYTES = 8 * 1024
 INDEX_LOCK_SECONDS = 0.5
@@ -466,9 +472,21 @@ def reevaluate(directory, vault, apply=False, quarantine_drops=None):
 
     Either direction, --apply gates every move; without it this only prints what
     would happen, and every move that does happen is an os.replace.
+
+    A keeper's destination can already be occupied — an older bug once wrote
+    the same owner sentence under two kinds ("一句兩卡"), or (reverse mode) a
+    card is being reclassified into a kind another card already holds under
+    that digest. `_move_card` resolves that itself (duplicate vs "-2" rename);
+    see its docstring. Forward-mode successes count as `moved`; reverse-mode
+    reclassifications (kind changed, card already lived in the vault) count
+    separately as `reclassified` so a live-vault sweep can tell "swept out"
+    from "renamed in place" apart.
     """
     lines = []
-    counts = {"cards": 0, "keep": 0, "drop": 0, "moved": 0, "unreadable": 0}
+    counts = {
+        "cards": 0, "keep": 0, "drop": 0, "moved": 0, "unreadable": 0,
+        "duplicates": 0, "reclassified": 0,
+    }
     if quarantine_drops is not None:
         scan = [(kind, Path(directory) / dirname) for kind, dirname in CARD_DIRECTORIES.items()]
     else:
@@ -495,10 +513,22 @@ def reevaluate(directory, vault, apply=False, quarantine_drops=None):
             counts["keep"] += 1
             moved = ""
             if quarantine_drops is None and apply:
-                target = _move_card(path, vault, kind, capture.grant_digest(digest_source))
-                if target is not None:
-                    counts["moved"] += 1
+                outcome, target = _move_card(path, vault, kind, capture.grant_digest(digest_source), counts)
+                if outcome == "duplicate":
+                    lines.append(f"DUPLICATE {path} == {target}")
+                elif outcome == "renamed":
+                    lines.append(f"RENAMED {path} -> {target}")
                     moved = f" -> {target}"
+                elif outcome == "moved":
+                    moved = f" -> {target}"
+            elif quarantine_drops is not None and apply and kind != was:
+                outcome, target = _move_card(
+                    path, vault, kind, capture.grant_digest(digest_source), counts, counter="reclassified",
+                )
+                if outcome == "duplicate":
+                    lines.append(f"DUPLICATE {path} == {target}")
+                elif outcome in ("moved", "renamed"):
+                    lines.append(f"RECLASS {path} -> {target}")
             lines.append(f"KEEP  {was:<10} -> {kind:<10} {path}{moved}")
     lines.append(
         "REEVALUATE " + " ".join(f"{key}={value}" for key, value in counts.items())
@@ -523,19 +553,69 @@ def _quarantine_drop(path, kind, quarantine_drops, apply, counts):
     return f" -> {target}"
 
 
-def _move_card(path, vault, kind, digest):
+def _card_summary(path):
+    """Owner-sentence summary from a capture card's `description:` field, with
+    the kind label and date stripped off — so a grant card and a correction
+    card written for the same owner sentence compare equal regardless of which
+    kind captured it first."""
+    try:
+        with Path(path).open("rb") as stream:
+            head = stream.read(FRONTMATTER_SCAN_BYTES)
+    except OSError:
+        return ""
+    text = head.decode("utf-8", errors="replace").lstrip("﻿")
+    match = CARD_SUMMARY_REGEX.search(text)
+    return match.group(1).strip() if match else ""
+
+
+def _move_card(path, vault, kind, digest, counts, counter="moved"):
     """Move one passing card under vault/<kind>/, renaming it when the kind changed.
 
     The filename carries the kind and the digest, and `name:` has to match the
     filename or every lint that reads the card disagrees with the index.
+
+    The destination can already be taken by a card with the same digest — same
+    owner sentence, different kind (a "一句兩卡" leftover), or a reclassify
+    landing on a kind another card already claimed. Compare the two cards'
+    owner-sentence summaries before touching either file:
+    - same sentence -> `path` is a duplicate; it moves intact (never deleted)
+      to vault/_drafts/duplicates/<kind>/, `counts["duplicates"]` gets +1, and
+      the caller prints `DUPLICATE <src> == <dst>`.
+    - different sentence (digest coincidence) -> the destination name gets a
+      "-2" suffix so both cards keep their own file.
+
+    Returns (outcome, target) where outcome is "moved", "renamed", "duplicate",
+    or None (an OSError, or a collision on the "-2" name too — the source is
+    left exactly where it was, same as the pre-fix behaviour).
     """
     stamp = path.name.split("-")[1] if path.name.count("-") >= 2 else ""
     if not (len(stamp) == 8 and stamp.isdigit()):
         stamp = time.strftime("%Y%m%d", time.gmtime())
     name = f"{kind}-{stamp}-{digest}"
     target = Path(vault) / CARD_DIRECTORIES[kind] / f"{name}.md"
-    if target.exists():
-        return None
+    outcome = "moved"
+    if target.exists() and target.resolve() != path.resolve():
+        if _card_summary(path) == _card_summary(target):
+            existing = target  # the already-landed card `path` duplicates
+            duplicate_dir = Path(vault).joinpath(*DUPLICATES_SUBPATH, kind)
+            destination = duplicate_dir / path.name
+            if destination.exists():
+                return None, None  # already quarantined once; leave the source alone
+            try:
+                duplicate_dir.mkdir(parents=True, exist_ok=True)
+                os.replace(path, destination)
+            except OSError:
+                return None, None
+            counts["duplicates"] += 1
+            # Report what `path` duplicates (the existing vault card), not where
+            # it physically landed — the filesystem move is a bookkeeping detail,
+            # the equivalence with `existing` is what the caller's message needs.
+            return "duplicate", existing
+        name = f"{name}-2"
+        target = target.with_name(f"{name}.md")
+        outcome = "renamed"
+        if target.exists():
+            return None, None
     try:
         text = path.read_text(encoding="utf-8-sig")
         text = CARD_NAME_REGEX.sub(f"name: {name}", text, count=1)
@@ -546,8 +626,9 @@ def _move_card(path, vault, kind, digest):
         os.replace(temporary, target)
         path.unlink()
     except OSError:
-        return None
-    return target
+        return None, None
+    counts[counter] += 1
+    return outcome, target
 
 
 def render_inventory(home, vaults, docs=()):
@@ -842,7 +923,8 @@ def _selftest():
             moved_card = vault / memspec.RULING_DIRECTORY / f"ruling-20260801-{capture.grant_digest(stale_correction)}.md"
             checks.append((
                 "reevaluate keeps the decisive card, leaves the empty answer where it is",
-                reeval_counts == {"cards": 2, "keep": 1, "drop": 1, "moved": 1, "unreadable": 0}
+                reeval_counts == {"cards": 2, "keep": 1, "drop": 1, "moved": 1, "unreadable": 0,
+                                  "duplicates": 0, "reclassified": 0}
                 and reeval_lines[-1].startswith("REEVALUATE ")
                 and (quarantine / "ruling-20260801-deadbeef0001.md").exists()
                 and not (quarantine / "ruling-20260801-deadbeef0002.md").exists()
@@ -874,7 +956,8 @@ def _selftest():
             expected_total = 4 + ruling_count_before + 1
             checks.append((
                 "--quarantine-drops dry-run reports the drop but moves nothing",
-                dry_reeval_counts == {"cards": expected_total, "keep": expected_total - 1, "drop": 1, "moved": 0, "unreadable": 0}
+                dry_reeval_counts == {"cards": expected_total, "keep": expected_total - 1, "drop": 1, "moved": 0, "unreadable": 0,
+                                      "duplicates": 0, "reclassified": 0}
                 and any(text.startswith("DROP") and "ruling-20260801-deadbeef0003.md" in text for text in dry_reeval_lines)
                 and stale_ruling.exists()
                 and not quarantine_target.exists(),
@@ -883,12 +966,114 @@ def _selftest():
             quarantined_card = quarantine_target / "ruling" / "ruling-20260801-deadbeef0003.md"
             checks.append((
                 "--quarantine-drops apply moves the drop to <dir>/<kind>/ and leaves keeps in place",
-                apply_reeval_counts == {"cards": expected_total, "keep": expected_total - 1, "drop": 1, "moved": 1, "unreadable": 0}
+                apply_reeval_counts == {"cards": expected_total, "keep": expected_total - 1, "drop": 1, "moved": 1, "unreadable": 0,
+                                        "duplicates": 0, "reclassified": 0}
                 and not stale_ruling.exists()
                 and quarantined_card.exists()
                 and len(sorted((vault / memspec.GRANT_DIRECTORY).glob("*.md"))) == 2
                 and len(sorted((vault / memspec.CORRECTION_DIRECTORY).glob("*.md"))) == 2
                 and len(sorted((vault / memspec.RULING_DIRECTORY).glob("*.md"))) == ruling_count_before,
+            ))
+
+            # 撞名（一句兩卡）：舊 bug 把同一句話存成兩個 kind；forward-mode --apply
+            # 把一張改判為別的 kind 時，目的地已經有真卡。同句 -> 進 duplicates（不刪）。
+            dup_pile = root / "dup_pile"
+            dup_pile.mkdir()
+            dup_source = dup_pile / "grant-20260801-placeholder002.md"
+            dup_source.write_text(
+                f"---\nname: grant-20260801-placeholder002\n"
+                f"description: owner grant auto-captured 2026-08-01: {correction}\n---\n{correction}\n",
+                encoding="utf-8",
+            )
+            existing_correction_card = next(
+                (vault / memspec.CORRECTION_DIRECTORY).glob(f"correction-*-{capture.grant_digest(correction)}.md")
+            )
+            dup_reeval_counts, dup_reeval_lines = reevaluate(dup_pile, vault, apply=True)
+            duplicate_landing = vault.joinpath(*DUPLICATES_SUBPATH, "correction", dup_source.name)
+            checks.append((
+                "reevaluate --apply files a same-sentence collision as a duplicate, not a clobber",
+                dup_reeval_counts == {"cards": 1, "keep": 1, "drop": 0, "moved": 0, "unreadable": 0,
+                                      "duplicates": 1, "reclassified": 0}
+                and any(
+                    text.startswith("DUPLICATE ") and os.fspath(dup_source) in text
+                    and os.fspath(existing_correction_card) in text
+                    for text in dup_reeval_lines
+                )
+                and not dup_source.exists()
+                and duplicate_landing.exists()
+                and existing_correction_card.exists(),
+            ))
+
+            # 撞名但不同句（digest 巧合）：目的地保留原檔，來源改名 -2 落地，兩張都留著。
+            rename_pile = root / "rename_pile"
+            rename_pile.mkdir()
+            rename_source_sentence = "你不要再改那個顏色設定了"
+            rename_digest = capture.grant_digest(rename_source_sentence)
+            rename_source = rename_pile / "grant-20260801-placeholder003.md"
+            rename_source.write_text(
+                f"---\nname: grant-20260801-placeholder003\n"
+                f"description: owner grant auto-captured 2026-08-01: {rename_source_sentence}\n---\n"
+                f"{rename_source_sentence}\n",
+                encoding="utf-8",
+            )
+            collision_target = vault / memspec.CORRECTION_DIRECTORY / f"correction-20260801-{rename_digest}.md"
+            collision_target.write_text(
+                f"---\nname: correction-20260801-{rename_digest}\n"
+                "description: owner correction auto-captured 2026-08-01: 完全不同的另一句話\n---\n"
+                "完全不同的另一句話\n",
+                encoding="utf-8",
+            )
+            rename_reeval_counts, rename_reeval_lines = reevaluate(rename_pile, vault, apply=True)
+            renamed_target = vault / memspec.CORRECTION_DIRECTORY / f"correction-20260801-{rename_digest}-2.md"
+            checks.append((
+                "reevaluate --apply resolves a same-digest, different-sentence collision with a -2 rename",
+                rename_reeval_counts == {"cards": 1, "keep": 1, "drop": 0, "moved": 1, "unreadable": 0,
+                                         "duplicates": 0, "reclassified": 0}
+                and any(
+                    text.startswith("RENAMED ") and os.fspath(rename_source) in text and os.fspath(renamed_target) in text
+                    for text in rename_reeval_lines
+                )
+                and not rename_source.exists()
+                and renamed_target.exists()
+                and f"name: {renamed_target.stem}" in renamed_target.read_text(encoding="utf-8")
+                and collision_target.exists(),
+            ))
+
+            # --quarantine-drops + --apply：一張 KEEP 但今天規則會改判 kind 的卡，
+            # 之前只印訊息不搬；dry-run 仍不搬，--apply 才真的搬到新 kind 目錄。
+            reclass_sentence = "你不要再放大那個字級了"
+            reclass_digest = capture.grant_digest(reclass_sentence)
+            misfiled_grant = vault / memspec.GRANT_DIRECTORY / f"grant-20260801-{reclass_digest}.md"
+            misfiled_grant.write_text(
+                f"---\nname: grant-20260801-{reclass_digest}\n"
+                f"description: owner grant auto-captured 2026-08-01: {reclass_sentence}\n---\n{reclass_sentence}\n",
+                encoding="utf-8",
+            )
+            reclassed_target = vault / memspec.CORRECTION_DIRECTORY / f"correction-20260801-{reclass_digest}.md"
+            quarantine_reclass = root / "quarantine_drops_reclass"
+            dry_reclass_counts, dry_reclass_lines = reevaluate(
+                vault, vault, apply=False, quarantine_drops=quarantine_reclass
+            )
+            checks.append((
+                "--quarantine-drops dry-run reports no reclass moves for a KEEP-but-reclassified card",
+                dry_reclass_counts["reclassified"] == 0
+                and misfiled_grant.exists()
+                and not reclassed_target.exists()
+                and not any(text.startswith("RECLASS ") for text in dry_reclass_lines),
+            ))
+            apply_reclass_counts, apply_reclass_lines = reevaluate(
+                vault, vault, apply=True, quarantine_drops=quarantine_reclass
+            )
+            checks.append((
+                "--quarantine-drops --apply actually moves a KEEP-but-reclassified card to its new kind directory",
+                apply_reclass_counts["reclassified"] == 1
+                and not misfiled_grant.exists()
+                and reclassed_target.exists()
+                and f"name: {reclassed_target.stem}" in reclassed_target.read_text(encoding="utf-8")
+                and any(
+                    text.startswith("RECLASS ") and os.fspath(misfiled_grant) in text and os.fspath(reclassed_target) in text
+                    for text in apply_reclass_lines
+                ),
             ))
 
             completeness = next(text for text in first_lines if text.startswith("COMPLETENESS "))
@@ -900,7 +1085,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 14
+    total = 18
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
