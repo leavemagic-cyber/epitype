@@ -9,6 +9,7 @@ import subprocess
 SELFTESTS = (
     Path("epitype") / "memspec.py",
     Path("epitype") / "memsearch.py",
+    Path("epitype") / "card_lint.py",
     Path("epitype") / "decision_lint.py",
     Path("epitype") / "ledger_gate.py",
     Path("epitype") / "compact_map.py",
@@ -16,10 +17,13 @@ SELFTESTS = (
     Path("epitype") / "token_meter.py",
     Path("epitype") / "pending_lint.py",
     Path("epitype") / "narration_meter.py",
+    Path("epitype") / "harvest.py",
+    Path("epitype") / "alias_batch.py",
     Path("adapters") / "claude" / "recall_hook.py",
     Path("adapters") / "claude" / "sessionstart_hook.py",
     Path("adapters") / "claude" / "precompact_hook.py",
     Path("adapters") / "claude" / "pretooluse_gate.py",
+    Path("adapters") / "claude" / "stop_gate.py",
     Path("adapters") / "codex" / "config_guard.py",
     Path("adapters") / "codex" / "hook_trust.py",
     Path("install") / "graft.py",
@@ -28,6 +32,7 @@ SELFTESTS = (
     Path("tests") / "privacy_lint.py",
     Path("tests") / "package_smoke.py",
     Path("tests") / "frontmatter_consistency.py",
+    Path("tests") / "recall_regression.py",
 )
 
 

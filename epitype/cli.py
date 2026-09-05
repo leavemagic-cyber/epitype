@@ -8,6 +8,7 @@ from . import __version__
 
 _COMMANDS = {
     "search": ("epitype.memsearch", "main", ()),
+    "cards": ("epitype.card_lint", "main", ()),
     "decisions": ("epitype.decision_lint", "main", ()),
     "ledger": ("epitype.ledger_gate", "main", ()),
     "compact-map": ("epitype.compact_map", "main", ()),
@@ -17,6 +18,8 @@ _COMMANDS = {
     "token-meter": ("epitype.token_meter", "main", ()),
     "exam": ("exam.exam_runner", "main", ()),
     "trust": ("adapters.codex.hook_trust", "main", ("check",)),
+    "harvest": ("epitype.harvest", "main", ()),
+    "aliases": ("epitype.alias_batch", "main", ()),
     "install": ("install.graft", "main", ("install",)),
     "uninstall": ("install.graft", "main", ("uninstall",)),
     "doctor": ("install.graft", "main", ("doctor",)),
