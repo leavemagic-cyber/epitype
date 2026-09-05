@@ -93,6 +93,24 @@ inside the interpreter fell from 4.0–4.6 s to about 0.4 s.
   (`top_k_empty`), and recall's `pinned_contains` kinds; the sample corpus
   grows from 12 to 16 questions, and the local 330-question corpus (kept out
   of the repo) passes in full.
+- PreToolUse 寫檔內容閘——Write/Edit/MultiEdit（含 Codex 對應工具）的寫入內容命中
+  現行決策卡 `forbidden` 即 deny 並附裁定原話；寫進記憶庫的卡若缺該型別必填欄位即
+  deny 並列出欄位＋範例；WARN 只提示；同 session 同內容只擋一次；>256 KiB 放行；
+  `_GATE_LOG` kind=write_block；FAILURE_MODES §11。
+- AI 承諾帳本——Stop hook 從回合結尾訊息抽「我會／稍後／下一步／I'll…」承諾句寫入
+  `<治理 vault>/.epitype/commitments.jsonl`（排除轉述、疑問、已完成；digest 去重；
+  每回合 ≤5）；SessionStart／PreCompact 顯示未兌現承諾；`epitype commitments <vault>
+  --list|--close|--purge-closed`；FAILURE_MODES §12。
+- `epitype dream <vault>…`——不呼叫模型的離線整理審核包：缺別名卡、卡片型別 FAIL/WARN、
+  殭屍待辦、AI 未兌現承諾、草稿待審、裁定鏈（superseded／缺 owner_quote／缺 forbidden）、
+  事件卡老化、近 7 天新增，末尾依規則排「下一步」與指令；寫到
+  `<vault>/.epitype/dream_pack_<日期>.md`（`--dry-run`／`--json`／`--since`）。
+- owner 事件捕捉精準度——判定改為子句層（先切子句、去掉反問子句，其餘子句須有決定性內容）、
+  `classify` 為線上／回放共用的唯一判定、一句一張卡；移除「依照你建議」「怎麼還」「你可以…嗎」
+  「我錯了」「跟我說／白話」、一詞式應答與助理長段分析的誤抓；`tests/capture_precision.py`（合成句
+  selftest＋本機真句量測：254 句 precision 0.44→0.81、保留率 0.85）；`harvest --reevaluate <dir>
+  [--apply]` 重評隔離卡（正向：草稿放回）；加 `--quarantine-drops` 反向模式，把線上已收的
+  drop 隔離到 `_drafts/captured_dropped`；兩者皆 `--apply` 門控、不刪；FAILURE_MODES §13。
 
 ## v1.1.0 — 2026-09-03
 
