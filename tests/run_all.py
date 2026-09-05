@@ -27,6 +27,7 @@ SELFTESTS = (
     Path("exam") / "exam_runner.py",
     Path("tests") / "privacy_lint.py",
     Path("tests") / "package_smoke.py",
+    Path("tests") / "frontmatter_consistency.py",
 )
 
 
@@ -49,41 +50,59 @@ def _unresolved_fixture_roots(repo_root):
     return offenders
 
 
-def main():
+def _run_selftest(repo_root, relative_path, environment):
+    tool = repo_root / relative_path
+    if not tool.is_file():
+        return None, "missing tool"
+    try:
+        return subprocess.run(
+            [sys.executable, str(tool), "--selftest"],
+            cwd=repo_root,
+            env=environment,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        ), None
+    except OSError as exc:
+        return None, f"{type(exc).__name__}: {exc}"
+
+
+def main(argv=None):
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Run every component selftest.")
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        default=1,
+        help="selftests to run at once; each uses its own temp directory, so CI runs several (default 1)",
+    )
+    options = parser.parse_args(argv)
     repo_root = Path(__file__).resolve().parents[1]
     environment = os.environ.copy()
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
     passed = 0
 
-    for relative_path in SELFTESTS:
-        tool = repo_root / relative_path
-        name = relative_path.as_posix()
-        print(f"=== {name} ===")
-        if not tool.is_file():
-            print(f"RESULT FAIL {name}: missing tool", file=sys.stderr)
-            continue
-        try:
-            result = subprocess.run(
-                [sys.executable, str(tool), "--selftest"],
-                cwd=repo_root,
-                env=environment,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                check=False,
-            )
-        except OSError as exc:
-            print(f"RESULT FAIL {name}: {type(exc).__name__}: {exc}", file=sys.stderr)
-            continue
+    from concurrent.futures import ThreadPoolExecutor
 
-        _emit(result.stdout, sys.stdout)
-        _emit(result.stderr, sys.stderr)
-        if result.returncode == 0:
-            passed += 1
-            print(f"RESULT PASS {name}")
-        else:
-            print(f"RESULT FAIL {name}: exit {result.returncode}", file=sys.stderr)
+    with ThreadPoolExecutor(max_workers=max(1, options.jobs)) as pool:
+        futures = [pool.submit(_run_selftest, repo_root, relative_path, environment) for relative_path in SELFTESTS]
+        for relative_path, future in zip(SELFTESTS, futures):
+            name = relative_path.as_posix()
+            print(f"=== {name} ===")
+            result, failure = future.result()
+            if result is None:
+                print(f"RESULT FAIL {name}: {failure}", file=sys.stderr)
+                continue
+            _emit(result.stdout, sys.stdout)
+            _emit(result.stderr, sys.stderr)
+            if result.returncode == 0:
+                passed += 1
+                print(f"RESULT PASS {name}")
+            else:
+                print(f"RESULT FAIL {name}: exit {result.returncode}", file=sys.stderr)
 
     offenders = _unresolved_fixture_roots(repo_root)
     if offenders:

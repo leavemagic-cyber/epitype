@@ -30,7 +30,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Run component selftests
-        run: python tests/run_all.py
+        run: python tests/run_all.py --jobs 4
       - name: Run privacy lint
         run: python tests/privacy_lint.py
 

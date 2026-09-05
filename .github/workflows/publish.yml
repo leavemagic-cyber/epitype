@@ -22,7 +22,7 @@ jobs:
       - name: Require a matching version and a green source tree
         run: |
           python -c "import epitype, json, os, sys; expected = os.environ['GITHUB_REF_NAME'].removeprefix('v'); npm = json.load(open('package.json', encoding='utf-8'))['version']; sys.exit(0 if epitype.__version__ == expected == npm else f'tag {expected} != package {epitype.__version__} / package.json {npm}')"
-          python tests/run_all.py
+          python tests/run_all.py --jobs 4
       - name: Build sdist and wheel
         run: python -m build
       - name: Validate and exercise the exact wheel
