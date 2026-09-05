@@ -1551,7 +1551,7 @@ def _selftest():
             try:
                 for arguments in (
                     ("init", "-q"),
-                    ("config", "user.email", "selftest@example.invalid"),
+                    ("config", "user.email", "selftest"),
                     ("config", "user.name", "selftest"),
                 ):
                     subprocess.run(["git", "-C", os.fspath(dirty_repo), *arguments], check=True, capture_output=True, timeout=30)
