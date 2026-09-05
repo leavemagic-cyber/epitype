@@ -17,7 +17,9 @@
       },
       "input": "Which synthetic note explains the blue boarding token?",
       "expect": {
-        "top_k_contains": ["notes/harbor.md"]
+        "top_k_contains": [
+          "notes/harbor.md"
+        ]
       }
     },
     {
@@ -37,7 +39,9 @@
       },
       "input": "哪張合成卡說明綠色標籤與茶杯？",
       "expect": {
-        "top_k_contains": ["cards/tea.md"]
+        "top_k_contains": [
+          "cards/tea.md"
+        ]
       }
     },
     {
@@ -53,7 +57,9 @@
       },
       "input": "Locate violet telescope calibration",
       "expect": {
-        "top_k_excludes": ["notes/orange.md"]
+        "top_k_excludes": [
+          "notes/orange.md"
+        ]
       }
     },
     {
@@ -132,7 +138,9 @@
           }
         ]
       },
-      "input": ["decisions/format.md"],
+      "input": [
+        "decisions/format.md"
+      ],
       "expect": {
         "exit_code": 0,
         "violations": []
@@ -153,10 +161,15 @@
           }
         ]
       },
-      "input": ["decisions/layout-a.md", "decisions/layout-b.md"],
+      "input": [
+        "decisions/layout-a.md",
+        "decisions/layout-b.md"
+      ],
       "expect": {
         "exit_code": 1,
-        "violations": ["decision_key=layout-choice 有 2 張現行卡"]
+        "violations": [
+          "decision_key=layout-choice 有 2 張現行卡"
+        ]
       }
     },
     {
@@ -170,10 +183,14 @@
           }
         ]
       },
-      "input": ["decisions/date.md"],
+      "input": [
+        "decisions/date.md"
+      ],
       "expect": {
         "exit_code": 1,
-        "violations": ["current_decision_at 不是可解析 ISO 日期：next-week"]
+        "violations": [
+          "current_decision_at 不是可解析 ISO 日期：next-week"
+        ]
       }
     },
     {
@@ -192,11 +209,16 @@
         ]
       },
       "input": {
-        "cards": ["decisions/color-old.md", "decisions/color-current.md"],
+        "cards": [
+          "decisions/color-old.md",
+          "decisions/color-current.md"
+        ],
         "query": "load the colorprotocolmarker decision"
       },
       "expect": {
-        "current_only": ["decisions/color-current.md"]
+        "current_only": [
+          "decisions/color-current.md"
+        ]
       }
     },
     {
@@ -215,11 +237,16 @@
         ]
       },
       "input": {
-        "cards": ["decisions/ticket-old.md", "decisions/ticket-current.md"],
+        "cards": [
+          "decisions/ticket-old.md",
+          "decisions/ticket-current.md"
+        ],
         "query": "請找出合成票券規則"
       },
       "expect": {
-        "current_only": ["decisions/ticket-current.md"]
+        "current_only": [
+          "decisions/ticket-current.md"
+        ]
       }
     },
     {
@@ -238,11 +265,126 @@
         ]
       },
       "input": {
-        "cards": ["decisions/channel-old.md", "decisions/channel-current.md"],
+        "cards": [
+          "decisions/channel-old.md",
+          "decisions/channel-current.md"
+        ],
         "query": "Which archivechannelmarker card is 現行?"
       },
       "expect": {
-        "current_only": ["decisions/channel-current.md"]
+        "current_only": [
+          "decisions/channel-current.md"
+        ]
+      }
+    },
+    {
+      "id": "stop-zh-block",
+      "category": "stop",
+      "setup": {
+        "vault_cards": [
+          {
+            "path": "decisions/mirror.md",
+            "content": "---\nname: 合成鏡像裁定\ndescription: 合成練習：兩份設定必須一致\ndecision_key: synthetic-mirror\nstatus: active\ncurrent_decision_at: 2026-06-01\ndecided_by: owner-explicit\nowner_quote: 合成練習的兩份設定必須一致\naliases:\n  - 合成甲盤\n  - 合成鏡像\nforbidden:\n  - 兩份設定各自調\n---\n合成回合閘示例。\n"
+          }
+        ]
+      },
+      "input": {
+        "last_assistant_message": "我建議兩份設定各自調，跑一週再看結果。",
+        "stop_hook_active": false
+      },
+      "expect": {
+        "decision": "block",
+        "reason_contains": "合成練習的兩份設定必須一致"
+      }
+    },
+    {
+      "id": "stop-zh-allow",
+      "category": "stop",
+      "setup": {
+        "vault_cards": [
+          {
+            "path": "decisions/mirror.md",
+            "content": "---\nname: 合成鏡像裁定\ndescription: 合成練習：兩份設定必須一致\ndecision_key: synthetic-mirror\nstatus: active\ncurrent_decision_at: 2026-06-01\ndecided_by: owner-explicit\nowner_quote: 合成練習的兩份設定必須一致\naliases:\n  - 合成甲盤\n  - 合成鏡像\nforbidden:\n  - 兩份設定各自調\n---\n合成回合閘示例。\n"
+          }
+        ]
+      },
+      "input": {
+        "last_assistant_message": "已依裁定把合成甲盤設成合成鏡像，兩份設定一致。",
+        "stop_hook_active": false
+      },
+      "expect": {
+        "decision": "allow"
+      }
+    },
+    {
+      "id": "abstention-zh-empty",
+      "category": "abstention",
+      "setup": {
+        "vault_cards": [
+          {
+            "path": "notes/batch.md",
+            "content": "---\nname: 夜間批次卡\ndescription: 合成夜間批次的重試次數說明\nscope: data\n---\n合成示例：夜間批次重試三次。\n"
+          },
+          {
+            "path": "notes/labels.md",
+            "content": "---\nname: 紙牌標籤卡\ndescription: 合成紙牌標籤排序\nscope: data\n---\n合成示例：紙牌依標籤排序。\n"
+          }
+        ]
+      },
+      "input": "紫色望遠鏡的鏡片校正流程是什麼？",
+      "expect": {
+        "top_k_empty": true
+      }
+    },
+    {
+      "id": "recall-zh-pinned",
+      "category": "recall",
+      "setup": {
+        "vault_cards": [
+          {
+            "path": "decisions/pinboard.md",
+            "content": "---\nname: 合成置頂裁定\ndescription: 合成練習的置頂示例\ndecision_key: synthetic-pinboard\nstatus: active\ncurrent_decision_at: 2026-07-01\ndecided_by: owner-explicit\nowner_quote: 合成置頂卡要帶原話\nscope: data\n---\n本卡正文提到 pinboardmarker，用於合成置頂練習。\n"
+          },
+          {
+            "path": "notes/strong-1.md",
+            "content": "---\nname: Pinboard Strong 1\ndescription: pinboardmarker strong sample 1\nscope: data\n---\nOne neutral synthetic line.\n"
+          },
+          {
+            "path": "notes/strong-2.md",
+            "content": "---\nname: Pinboard Strong 2\ndescription: pinboardmarker strong sample 2\nscope: data\n---\nOne neutral synthetic line.\n"
+          },
+          {
+            "path": "notes/strong-3.md",
+            "content": "---\nname: Pinboard Strong 3\ndescription: pinboardmarker strong sample 3\nscope: data\n---\nOne neutral synthetic line.\n"
+          },
+          {
+            "path": "notes/strong-4.md",
+            "content": "---\nname: Pinboard Strong 4\ndescription: pinboardmarker strong sample 4\nscope: data\n---\nOne neutral synthetic line.\n"
+          },
+          {
+            "path": "notes/strong-5.md",
+            "content": "---\nname: Pinboard Strong 5\ndescription: pinboardmarker strong sample 5\nscope: data\n---\nOne neutral synthetic line.\n"
+          },
+          {
+            "path": "notes/weak-1.md",
+            "content": "---\nname: Weak Card 1\ndescription: Neutral synthetic sample\nscope: data\n---\nThis body line mentions pinboardmarker only.\n"
+          },
+          {
+            "path": "notes/weak-2.md",
+            "content": "---\nname: Weak Card 2\ndescription: Neutral synthetic sample\nscope: data\n---\nThis body line mentions pinboardmarker only.\n"
+          },
+          {
+            "path": "notes/weak-3.md",
+            "content": "---\nname: Weak Card 3\ndescription: Neutral synthetic sample\nscope: data\n---\nThis body line mentions pinboardmarker only.\n"
+          }
+        ]
+      },
+      "input": "pinboardmarker 的現行做法是什麼？",
+      "expect": {
+        "pinned_contains": [
+          "⚖ 裁定：synthetic-pinboard（2026-07-01）",
+          "合成置頂卡要帶原話"
+        ]
       }
     }
   ]
