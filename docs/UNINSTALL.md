@@ -29,7 +29,9 @@ Preview every affected file and JSON location without writing anything:
 python install/graft.py uninstall --dry-run
 ```
 
-The command edits `~/.claude/settings.json` and `~/.codex/hooks.json` only when marked Epitype entries exist. It then removes `~/.epitype/`, including the five generated launchers under `~/.epitype/hooks/`, `config.json`, and the bounded fail-open breadcrumb file `shim_status.json`. It does not delete `~/.epitype-vault`, `~/.codex/memories`, Claude project memory directories, or any card file. Timestamped backups remain beside every edited host file.
+The command edits `~/.claude/settings.json` and `~/.codex/hooks.json` only when marked Epitype entries exist. It then removes `~/.epitype/`, including the five generated launchers under `~/.epitype/hooks/` (`SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PreCompact`, and `Stop`), `config.json` (including its `dream` block), and the bounded fail-open breadcrumb file `shim_status.json`. It does not delete `~/.epitype-vault`, `~/.codex/memories`, Claude project memory directories, or any card file. Timestamped backups remain beside every edited host file.
+
+If `config.json`'s `dream.mode` is `nightly`, uninstall also unregisters the scheduled task before removing the config directory: `schtasks /Delete /TN Epitype\Dream /F` on Windows, or the crontab line marked `# epitype-dream` elsewhere. `piggyback` and `off` modes have no system-level schedule to remove.
 
 A legacy generated index at `<vault>/.cairn/` is renamed to `<vault>/.epitype/` on the first read when the current index directory is absent. These per-vault index directories are separate from the user-level `~/.epitype/` configuration directory described above.
 
@@ -42,7 +44,8 @@ Use this route only if the automated command cannot run.
 3. Remove only array entries whose own `id` or `comment` field equals `epitype`. Preserve every other array entry and field.
 4. Remove an event key only if it was created for Epitype and its array is now empty. Remove the top-level `hooks` key only if Epitype created it and it is now empty. When uncertain, leave the empty object in place.
 5. Do not edit Claude's `permissions` or `deny` sections. Do not disable native memory, recall, or history settings.
-6. Delete `~/.epitype/`, which contains the Epitype config, install ownership metadata, generated `hooks/` shim directory, and `shim_status.json` fail-open breadcrumbs. Keep all vault directories and card files.
+6. Delete `~/.epitype/`, which contains the Epitype config (including its `dream` block), install ownership metadata, generated `hooks/` shim directory, and `shim_status.json` fail-open breadcrumbs. Keep all vault directories and card files.
+7. Before deleting the config, check `dream.mode` in `~/.epitype/config.json`. If it is `nightly`, also remove the scheduled task the automated path would have unregistered: `schtasks /Delete /TN Epitype\Dream /F` on Windows, or delete the crontab line marked `# epitype-dream` (`crontab -l`, edit, `crontab -` the result) elsewhere. Skip this step for `piggyback` or `off`.
 
 If installation used `--apply-billing-guard`, the two Codex context-limit settings in `~/.codex/config.toml` were an explicit, separate change. Restore them only if you intend to undo that choice; ordinary hook removal does not alter them.
 

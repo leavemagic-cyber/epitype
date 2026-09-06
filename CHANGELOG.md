@@ -161,6 +161,31 @@ inside the interpreter fell from 4.0–4.6 s to about 0.4 s.
   （`COMMITMENT_STALE_DAYS`）自動標 `expired` 並不再計數；開場那行改印最多 3 條摘要
   （各 ≤60 字）。新增 `commitments.py <vault> --requalify --dry-run` 用現行規則重評既有
   帳本並逐條印 keep/drop（只印不套用），以及 `--expire-stale`。
+- 新增 `epitype gates <vault> [--since Nd|YYYY-MM-DD] [--json] [--by kind|decision|session|day]`
+  （`epitype/gates_report.py`）：把 `_GATE_LOG.jsonl` 唯讀整理成擋下報告——依 kind／決策卡
+  或傷疤卡／天／session 分、每類最近 3 筆、同一 session 同一卡連擋 ≥3 次的疑似誤擋清單，
+  用來證明治理閘門確實擋下過動作，而不只是設定上存在。
+- U59 泛詞洞的英文半邊：2026-09-06 真機實測「how do I tie a bow tie」注入 2073
+  bytes／27 張候選卡，全是 `tie` 撞進 `tier`／`tiered`／`service_tier` 的字首巧合；
+  英文詞 ≤3 字母改認詞尾邊界（`term + \b`，`memsearch._short_latin_pattern`），
+  `bug` 仍吃得到 `debug` 的字尾（回歸題庫 titan-log-over-screenshot 要的真命中），
+  `tie` 吃不到 `tier` 的字首，同一批詞的單一實詞命中也比照中文二元組加身分欄門檻；
+  該句真機注入歸零，真庫 56 題回歸 48/56、合成 51 題 45/51、`memsearch --selftest`
+  43→47（新增 4 題）皆不退。`capital` 撞見同庫高頻多義詞留在原地未修：試過把身分欄
+  門檻推廣到全體英文實詞，`memsearch --selftest` 的 body-only 真命中案例直接斷言
+  失敗（獨特詞只在 body 出現也該找得到，跟 capital 撞高頻詞是两回事，字數分不出
+  來），診斷視窗仍有 ~24 張候選，但真機 `FTS_TOP_K=5` 頂帽本來就把實際注入壓到 5
+  張（詳見 FAILURE_MODES §15 Known limits）。
+- U61 治理日誌灌量：2026-09-06 真機實測，同一批壞掉的傷疤卡（那批已在 U60 前修好，
+  是舊卡片內容遺留）讓 `_GATE_LOG.jsonl` 三天內灌到 13,061 列，其中 12,784 列是同一張
+  卡每次 PreToolUse 都重寫一次的 `parse_defect`。`parse_defect` 現在每 (卡, 日) 只記一次
+  （`<vault>/.epitype/gate_parse_defect_seen.json` manifest，`_append_parse_defect`）；
+  三個 gate 日誌寫入點（動作閘的 `_append_audit`／`_append_parse_defect`／
+  `_append_write_block`、Stop 閘的 `_audit`）統一從 stdin 事件帶 `session_id`，沒有就省略
+  這欄，`gates_report.py` 既有的 `--by session` 與同 session 同卡連擋 ≥3 疑似誤擋清單因此
+  可用；`_GATE_LOG.jsonl` 超過 `_GATE_LOG_MAX_BYTES`（2 MiB）時整份改名成
+  `_GATE_LOG.jsonl.1`（保留一份，不刪，不接力鏈）。`pretooluse_gate --selftest` 69→72、
+  `stop_gate --selftest` 16→17。
 
 ## v1.1.0 — 2026-09-03
 

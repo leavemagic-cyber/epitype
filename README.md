@@ -51,6 +51,8 @@ The offline inventory pass ("the dream") does not wait to be remembered. By defa
 
 Missing indexes, stale indexes, shim failures, malformed cards, and lock contention have distinct outcomes. The hooks fail open when they cannot safely finish, and the installer doctor reports recorded shim outages instead of treating silence as health.
 
+`epitype gates <vault> [--since Nd|YYYY-MM-DD] [--json] [--by kind|decision|session|day]` turns a vault's `_GATE_LOG.jsonl` into a read-only report of what the gates actually blocked, by kind, decision or scar card, day, and session, plus a same-session-same-card ≥3 hint for suspected false positives.
+
 ## Quickstart
 
 Requirements: Python 3.11 or newer and a Claude Code or Codex installation with hook support.
@@ -110,6 +112,38 @@ epitype search recall "natural-language prompt" --vault C:\path\to\vault
 ```
 
 The generated database lives at `<vault>/.epitype/memory_fts.sqlite3` and is ignored by Git. Only `build` creates a missing index. Existing indexes refresh incrementally when stale; a missing index is reported separately from a valid zero-result query.
+
+## Command reference
+
+`epitype <command> --help` prints the full option list for any command below.
+
+### Everyday
+
+| Command | What it does |
+|---|---|
+| `epitype doctor [--home HOME] [--dry-run] [--clear-shim-status]` | Synthetic health check for hook registration and shim execution; run after install or whenever something looks broken. |
+| `epitype dream [vaults...] [--since SINCE] [--dry-run] [--scheduled] [--json]` | Read-only offline tidy inventory (missing aliases, card-lint findings, zombie pending lines, open commitments, aging event cards) rendered as a numbered review packet; applies nothing itself. Scheduling is `dream.mode` in config — `piggyback` (default: a detached background run at session start), `nightly` (an OS-scheduled task), or `off` — switched with `epitype install --dream {piggyback,nightly,off} [--at HH:MM]` (nightly default `03:30`). |
+| `epitype gates <vault> [--since Nd\|YYYY-MM-DD] [--json] [--by kind\|decision\|session\|day]` | Turns `_GATE_LOG.jsonl` into a report of what the action gates actually blocked, e.g. `epitype gates C:\path\to\vault --since 2d`. |
+| `epitype cards <vault> [--strict] [--verbose] [--json] [--fix-dates [--dry-run]]` | Type-checks memory cards against their required fields. `--fix-dates` is the only flag that writes: it backfills a derived `last_verified_at:` line; preview the exact writes first with `--fix-dates --dry-run`. |
+| `epitype aliases {export,apply}` | `export` lists cards missing aliases as a JSON worklist; `apply` writes reviewed `suggested` aliases back, additive only. |
+| `epitype commitments <vault> [--list] [--close DIGEST] [--expire-stale] [--requalify --dry-run] [--json]` | Lists and manages the AI's own open "I'll do X later" commitments recorded during sessions. |
+| `epitype search {build,query,recall}` | Builds the local FTS index and queries it by keyword or natural-language prompt; see [Search the local vault](#search-the-local-vault) above. |
+
+### Maintenance and batch
+
+| Command | What it does |
+|---|---|
+| `epitype decisions [vault] [--audit] [--selftest]` | Read-only lint of decision cards: uniqueness per key, supersession chain, decider field; `--audit` lists current decisions that are not `owner-explicit`. |
+| `epitype ledger append --ledger PATH --entry TEXT --evidence PATH::SUBSTRING [--check-only]` | Verifies each evidence claim actually appears in the named file's bytes before appending the ledger entry; `--check-only` validates without writing. |
+| `epitype harvest [--inventory] [--docs DOCS] [--since SINCE] [--reevaluate DIR [--apply]] [--quarantine-drops [DIR]]` | Zero-model replay of the capture rules over historical transcripts and documents for first-time backfill; also re-judges drafts or a vault's own event cards against today's rules. |
+| `epitype narration <target> [--hours HOURS] [--json]` | Measures mid-turn narration (assistant text between tool calls) in one transcript, or every transcript under a projects directory modified within N hours. |
+| `epitype token-meter [rollout] [--selftest]` | Reads a Codex rollout JSONL and prints its last current and cumulative token usage against the context window. |
+| `epitype scar-census build` | Builds the machine-generated view of the four-layer scar census. |
+| `epitype compact-map build` | Builds a bounded compact-recovery map, the same kind `PreCompact` writes per session. |
+| `epitype pending <vault> [--max-age-days N] [--strict] [--json]` | Lints for zombie pending lines: a todo marker with no closing text, no runnable `verify:`, and past the age threshold. |
+| `epitype exam [corpus] [--strict] [--selftest]` | Runs the exam engine against a behavior-question corpus. |
+| `epitype trust [--home HOME]` | Checks Codex's real hook trust state; see [Approve Codex hooks](#approve-codex-hooks) above. |
+| `epitype install \| uninstall \| vaults \| relocate` | Installer, removal, vault resync, and repository relocation; see [Quickstart](#quickstart) and [Moving or removing Epitype](#moving-or-removing-epitype) below. |
 
 ## Verify this checkout
 

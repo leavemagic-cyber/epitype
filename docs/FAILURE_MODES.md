@@ -470,6 +470,10 @@ python epitype/harvest.py --reevaluate <quarantine directory>
 - 查詢端把泛詞排除在「命中」之外（`memspec.RECALL_GENERIC_TERMS`：時間詞、量詞、
   填充詞、英文虛詞；裸數字不入切詞），一句話若沒有任何實詞命中就整份不注入；單一
   中文二元組只認卡的身分欄（name／aliases），碰到描述或本文要第二個實詞背書。
+  單一英文詞比照辦理，但只收在≤3字母（原因見下方 Known limits）：碰到 body 不算，
+  也要身分欄或第二個實詞背書。
+- 英文詞 ≤3 字母只認詞尾邊界（`memsearch._short_latin_pattern`：`term + \b`），
+  不再任何位置的子字串都算；≥4 字母維持子字串比對，規格未變。
 - 開場一條裁定只列 `decision_key｜日期`，並只列近 `SESSIONSTART_DECISION_RECENT_DAYS`
   天的、或帶 `forbidden`（會擋人）的那些，其餘用一行說還有幾條與看全部的命令。
 - 承諾只從訊息結尾那一段抽（過程段不算）、執行旁白詞（`COMMITMENT_NOISE_PATTERN`）
@@ -480,10 +484,18 @@ python epitype/harvest.py --reevaluate <quarantine directory>
 
 - **詞面碰撞不是切詞錯誤。** 「熱帶魚缸的水草照明週期」碰到「週期」、「台北到高雄」
   碰到「台北」、「what is the capital of Portugal」碰到 capital——這些詞在該庫的別名裡
-  是本業詞彙。無關問句題庫 20 題只到 15 題棄答，剩下 5 題全是這一類；修法在語意層
+  是本業詞彙。無關問句題庫 20 題到 16 題棄答，剩下 4 題全是這一類；修法在語意層
   （向量或模型），不在查詢端。
-- **短拉丁詞的子字串命中留著。** tie 會命中 tier，但 bug 命中 debug 是回歸題庫要的；
-  兩側都要求詞界會換掉一題真命中，所以維持子字串。
+- **短拉丁詞（≤3 字母）2026-09-06 改認詞尾邊界，字首巧合已擋。** `bug\b` 吃得到
+  debug 的字尾（真字根，回歸題庫 titan-log-over-screenshot 要的那個命中）；
+  `tie\b` 吃不到 tier／tiered／service_tier 的字首（純巧合）——「how do I tie a bow
+  tie」注入從 2073 bytes／27 張候選卡歸零。同一道身分欄門檻（單一實詞只碰 body 不
+  算）也收進≤3 字母這批，理由：試過推廣到所有英文實詞（不分長短），
+  `memsearch --selftest` 的「body-only 真命中」案例（`ordinarynostatusneedle`）直接
+  斷言失敗——那是既有正確行為（獨特詞只出現在 body 也該找得到），跟 capital 撞見
+  高頻多義詞是兩回事，光靠字數或身分欄分不出來。**capital 因此留在原地**：診斷視窗
+  （200 候選）仍有 ~24 張，但真機 `recall_hook.py` 的 `FTS_TOP_K=5` 頂帽（跟這次修的
+  洞無關、原本就有）本來就把實際注入壓到 5 張。
 - **開場是預算飽和的。** 開場注入本來就頂到 `budget_bytes`，所以裁定清單省下的
   1.6 KB 不會讓總位元組變小，而是把原本被丟掉的帳本／索引段落換進來（實測掉段
   42→35、行數 61→103）。要讓總量下降只能調 `budget_bytes`。

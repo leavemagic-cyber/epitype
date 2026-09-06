@@ -51,6 +51,8 @@ Epitype 把同一組原生 vault 接到五個 host 事件：
 
 索引不存在、索引過期、shim 故障、卡片格式錯誤與寫鎖競爭都有不同結果。hook 無法安全完成時會 fail open；installer doctor 也會把已記錄的 shim 下線事件報出來，不會把沒有聲音誤判成健康。
 
+`epitype gates <vault> [--since Nd|YYYY-MM-DD] [--json] [--by kind|decision|session|day]` 把 vault 的 `_GATE_LOG.jsonl` 唯讀整理成閘門實際擋下什麼的報告——依 kind、決策卡或傷疤卡、天、session 分，並列出同一 session 同一卡連擋 ≥3 次的疑似誤擋提示。
+
 ## 快速開始
 
 需求：Python 3.11 以上，以及支援 hook 的 Claude Code 或 Codex。
@@ -110,6 +112,38 @@ epitype search recall "自然語言提示" --vault C:\path\to\vault
 ```
 
 資料庫位於 `<vault>/.epitype/memory_fts.sqlite3`，Git 會忽略它。只有 `build` 會建立原本不存在的索引；既有索引過期時會增量更新，缺少索引與合法的零結果則有不同回覆。
+
+## 指令參考
+
+`epitype <指令> --help` 會印出下表任一指令的完整選項。
+
+### 日常會用
+
+| 指令 | 做什麼 |
+|---|---|
+| `epitype doctor [--home HOME] [--dry-run] [--clear-shim-status]` | 對已安裝的 hook 註冊與 shim 執行做合成體檢；安裝後或懷疑哪裡壞了時執行。 |
+| `epitype dream [vaults...] [--since SINCE] [--dry-run] [--scheduled] [--json]` | 唯讀離線整理盤點（缺別名、卡片 lint 結果、殭屍待辦、還沒兌現的承諾、老化事件卡），整理成一份編號審核包；本身不套用任何建議。排程模式是 config 的 `dream.mode`——`piggyback`（預設：開場時起一個脫鉤背景程序）、`nightly`（系統排程）、`off`；用 `epitype install --dream {piggyback,nightly,off} [--at HH:MM]` 切換（nightly 預設 `03:30`）。 |
+| `epitype gates <vault> [--since Nd\|YYYY-MM-DD] [--json] [--by kind\|decision\|session\|day]` | 把 `_GATE_LOG.jsonl` 整理成閘門實際擋下什麼的報告，例如 `epitype gates C:\path\to\vault --since 2d`。 |
+| `epitype cards <vault> [--strict] [--verbose] [--json] [--fix-dates [--dry-run]]` | 依必填欄位檢查記憶卡。`--fix-dates` 是唯一會寫檔的旗標：把推得的日期補成一行 `last_verified_at:`；先用 `--fix-dates --dry-run` 預覽會寫什麼。 |
+| `epitype aliases {export,apply}` | `export` 把缺別名的卡片列成 JSON 工作清單；`apply` 把審核過的 `suggested` 別名寫回卡片，只新增不刪改。 |
+| `epitype commitments <vault> [--list] [--close DIGEST] [--expire-stale] [--requalify --dry-run] [--json]` | 列出並管理 AI 在對話中開出、還沒兌現的「等一下我會…」承諾帳目。 |
+| `epitype search {build,query,recall}` | 建立本機 FTS 索引，並用關鍵詞或自然語言查詢；詳見上方〈搜尋本機 vault〉。 |
+
+### 維護／批次
+
+| 指令 | 做什麼 |
+|---|---|
+| `epitype decisions [vault] [--audit] [--selftest]` | 唯讀掃描決策卡：每個 key 是否唯一、取代鏈是否完整、決定者欄位；`--audit` 列出非 `owner-explicit` 的現行決策。 |
+| `epitype ledger append --ledger PATH --entry TEXT --evidence PATH::SUBSTRING [--check-only]` | 追加帳目前，先逐條確認每筆證據真的出現在指定檔案的 bytes 裡；`--check-only` 只驗證不寫入。 |
+| `epitype harvest [--inventory] [--docs DOCS] [--since SINCE] [--reevaluate DIR [--apply]] [--quarantine-drops [DIR]]` | 零模型回放捕捉規則到歷史 transcript 與文件，做第一次大整理的補課；也能用現行規則重新評斷草稿或 vault 自己的事件卡。 |
+| `epitype narration <target> [--hours HOURS] [--json]` | 量測單一 transcript，或 projects 目錄下 N 小時內異動過的所有 transcript 的旁白（工具呼叫之間的助理文字）份量。 |
+| `epitype token-meter [rollout] [--selftest]` | 讀 Codex rollout JSONL，印出最後一筆當前與累計 token 用量對照視窗大小。 |
+| `epitype scar-census build` | 建立四層傷疤普查的機器生成視圖。 |
+| `epitype compact-map build` | 建立有界的壓縮復原地圖，與 `PreCompact` 每場自動寫的是同一種。 |
+| `epitype pending <vault> [--max-age-days N] [--strict] [--json]` | 找殭屍待辦：有待辦標記、沒收尾字樣、沒有可跑的 `verify:`、且超過年齡門檻的行。 |
+| `epitype exam [corpus] [--strict] [--selftest]` | 對行為題庫跑筆試引擎。 |
+| `epitype trust [--home HOME]` | 檢查 Codex 真實的 hook 信任狀態；詳見上方〈核准 Codex hooks〉。 |
+| `epitype install \| uninstall \| vaults \| relocate` | 安裝器、解除安裝、vault 重新偵測與 repo 搬遷；詳見上方〈快速開始〉與下方〈搬移或移除 Epitype〉。 |
 
 ## 驗證這份 checkout
 
