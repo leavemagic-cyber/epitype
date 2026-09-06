@@ -82,6 +82,13 @@ SCAR_CORRECTION_PATTERNS = (
 # hook); the hook's own deadline stays inside that so a late answer is still
 # delivered rather than killed.
 HOOK_TIMEOUT_SECONDS = 9.0
+# 2026-09-06 事故：Codex 場開場逾 10 s 被宿主砍掉（"SessionStart Failed"），因為
+# 上面那個期限只在「段與段之間」被檢查——任何一段自己沒有期限，就能把整場預算吃光。
+# SessionStart 因此另有一個更緊的自用天花板：每一段都必須在剩餘預算內完成，否則整段
+# 省略。開場少一行摘要，比整場注入被砍掉好。
+SESSIONSTART_BUDGET_SECONDS = 5.0
+# 剩不到這個時間就不再起新的一段：一段起了跑不完，等於白付。
+SESSIONSTART_SEGMENT_FLOOR_SECONDS = 0.25
 HOOK_DEFAULT_BUDGET_BYTES = 10 * 1024
 HOOK_MAX_OUTPUT_BYTES = 10 * 1024
 TRIGGER_REGEX_MAX_CHARS = 1024
@@ -349,6 +356,9 @@ PENDING_MARKER_PATTERN = r"(?:未辦|待辦|⏳|\bTODO\b|待\s*owner|owner\s*自
 PENDING_CLOSED_PATTERN = r"(?:^\s*[-*]?\s*~~|作廢|已完成|已辦|已處理|已收案|✅|superseded)"
 PENDING_VERIFY_MARKER = "verify:"
 PENDING_MAX_AGE_DAYS = 14
+# 這一行也是全庫磁碟掃描，和 card_lint 同樣要有自己的期限：2026-09-06 之前它是
+# SessionStart 唯一一段完全無界的掃描，兩庫實測 2.8 s，冷快取沒有上限。
+PENDING_LINT_HOOK_BUDGET_SECONDS = 1.0
 PENDING_MARKER_REGEX = re.compile(PENDING_MARKER_PATTERN, re.IGNORECASE)
 PENDING_CLOSED_REGEX = re.compile(PENDING_CLOSED_PATTERN, re.IGNORECASE)
 PENDING_DATE_REGEX = re.compile(r"(20\d\d)-(\d\d)-(\d\d)")
@@ -476,7 +486,7 @@ CARD_OPTIONAL_FIELDS = {
     CARD_TYPE_HABIT: (ALIASES_FIELD,),
 }
 # SessionStart 只給一行；lint 是磁碟掃描，超過這個時間就不印，開場不能被它拖住。
-CARD_LINT_HOOK_BUDGET_SECONDS = 2.0
+CARD_LINT_HOOK_BUDGET_SECONDS = 1.0
 CARD_LINT_NOTICE = '🧾 卡片型別檢查：FAIL {fail}／WARN {warn} → python epitype/card_lint.py "{vault}"'
 
 # 2026-09-01 實測事故：別名查無時缺少全文兜底，會讓既存卡片完全不可達；

@@ -27,6 +27,25 @@ from _hook_common import (
 )
 
 
+def _soft_remaining(started_at):
+    """這場開場還剩多少自用預算（秒）。
+
+    2026-09-06 事故：Codex 把 SessionStart 記成 Failed，因為整場跑超過宿主的 10 s
+    才被砍掉——而 `expired()` 只在段與段之間被問到，段內沒有上限的掃描（當時的
+    pending_lint）可以一路吃到宿主砍人為止。所以開場另立一個更緊的天花板，且每一段
+    都拿「剩餘預算」當自己的期限，不是拿宿主的期限當自己的期限。
+    """
+    return memspec.SESSIONSTART_BUDGET_SECONDS - (time.monotonic() - started_at)
+
+
+def _segment_budget(started_at, want):
+    """這一段能拿到的秒數；剩太少就回 None＝整段省略（半段的數字是錯的數字）。"""
+    remaining = _soft_remaining(started_at)
+    if remaining < memspec.SESSIONSTART_SEGMENT_FLOOR_SECONDS:
+        return None
+    return min(want, remaining)
+
+
 def _frontmatter_fields(path):
     """Top-level frontmatter scalars for one card, discarding the diagnostics.
 
@@ -55,7 +74,7 @@ def _active_decisions(vault, started_at):
     except Exception:
         return None
     for path in paths:
-        if expired(started_at):
+        if _soft_remaining(started_at) <= 0:
             return None
         try:
             fields = _frontmatter_fields(path)
@@ -117,8 +136,7 @@ def _dream_spawn(settings, governance, started_at=None, launcher=None, source=No
     if settings.get(memspec.DREAM_MODE_FIELD) != memspec.DREAM_MODE_PIGGYBACK:
         return False
     if started_at is not None:
-        remaining = memspec.HOOK_TIMEOUT_SECONDS - (time.monotonic() - started_at)
-        if remaining < memspec.DREAM_SPAWN_RESERVE_SECONDS:
+        if _soft_remaining(started_at) < memspec.DREAM_SPAWN_RESERVE_SECONDS:
             return False
     completed = _dream_state(governance).get(memspec.DREAM_STATE_COMPLETED_EPOCH_FIELD)
     hours = settings.get(
@@ -165,13 +183,22 @@ def _dream_notice(governance, source, settings):
 
 
 def _dream_mark_notified(governance, state, completed):
+    """標記寫成暫存檔再 os.replace：`write_text` 先截斷再寫，宿主在那一瞬間砍掉
+    hook（2026-09-06 Codex 逾時事故）就留下一個 0 byte 的 dream_state.json——夢的
+    完成時間、headline、pack 路徑一起消失，而且沒有任何一段會發現它消失了。"""
     path = governance / memspec.DREAM_DIRECTORY / memspec.DREAM_STATE_FILENAME
+    temporary = path.with_name(path.name + f".tmp{os.getpid()}")
     try:
         value = dict(state)
         value[memspec.DREAM_STATE_NOTIFIED_FIELD] = completed
-        path.write_text(json.dumps(value, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+        temporary.write_text(json.dumps(value, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+        os.replace(temporary, path)
         return True
     except OSError:
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
         return False
 
 
@@ -209,7 +236,7 @@ def _handle(event, started_at):
 
     source = event.get("source") if isinstance(event, dict) else None
     dream = config.get(memspec.DREAM_CONFIG_FIELD) or {}
-    if not expired(started_at):
+    if _soft_remaining(started_at) > 0:
         try:
             _dream_spawn(dream, governance, started_at, source=source)
         except Exception:
@@ -217,14 +244,15 @@ def _handle(event, started_at):
 
     # One line, first, so the budget cannot drop it: pending items with an entry
     # and no exit are exactly what resurfaces as wrong memory later.
-    if not expired(started_at):
-        overdue = pending_lint.summary_line(vaults)
+    seconds = _segment_budget(started_at, memspec.PENDING_LINT_HOOK_BUDGET_SECONDS)
+    if seconds is not None:
+        overdue = pending_lint.summary_line(vaults, time_budget=seconds)
         if overdue:
             pieces.append(overdue)
 
     # U53：AI 自己開的承諾（「我等一下會…」）沒有任何人在追，而 compaction 正是它蒸發
     # 的時刻——所以 source: compact 也印。這不是 owner 的待辦，帳本另放，一行帶最近一條。
-    if not expired(started_at):
+    if _soft_remaining(started_at) >= memspec.SESSIONSTART_SEGMENT_FLOOR_SECONDS:
         promised = commitments.summary_line(vaults, memspec.COMMITMENT_SESSIONSTART_MAX)
         if promised:
             pieces.append(promised)
@@ -233,8 +261,9 @@ def _handle(event, started_at):
     # hand over half-true. One line, and only when the scan finished inside its
     # own budget: half a vault's numbers are worse than no numbers.
     # 同一趟掃描也餵下面那行順手任務：掃兩次就是同一份預算付兩次。
-    if not expired(started_at):
-        reports = card_lint.scan_vaults(vaults)
+    seconds = _segment_budget(started_at, memspec.CARD_LINT_HOOK_BUDGET_SECONDS)
+    if seconds is not None:
+        reports = card_lint.scan_vaults(vaults, time_budget=seconds)
         malformed = card_lint.summary_line(vaults, reports=reports)
         if malformed:
             pieces.append(malformed)
@@ -253,7 +282,7 @@ def _handle(event, started_at):
     pieces.append(memspec.CARD_SELF_CORRECT_NOTICE)
 
     # 夢的一行跟其他一行摘要放在一起，排在裁定之前：它是狀態，不是規則。
-    if not expired(started_at):
+    if _soft_remaining(started_at) > 0:
         try:
             notice = _dream_notice(governance, source, dream)
         except Exception:
@@ -266,7 +295,7 @@ def _handle(event, started_at):
     # resumes after a compaction — opens with the vault's active decisions, in the
     # owner's own words, before any index.
     for vault, label in zip(vaults, _vault_labels(vaults)):
-        if expired(started_at):
+        if _soft_remaining(started_at) <= 0:
             break
         block = _decision_block(vault, label, started_at)
         if block:
@@ -825,6 +854,59 @@ def _selftest():
                 )
             )
 
+            # 2026-09-06 事故：Codex 把 SessionStart 記成 Failed。宿主砍 hook 的兩個
+            # 理由只有「逾時」與「stdout 不是它認得的 JSON」，所以這兩件事各釘一次，
+            # 而且釘在一個大到會讓無界掃描現形的庫上（300 卡）。
+            bulk_vault = root / "bulk-vault"
+            bulk_vault.mkdir()
+            (bulk_vault / memspec.MEMORY_INDEX_FILENAME).write_text(
+                "# Bulk\nbulk index detail\n", encoding="utf-8"
+            )
+            for number in range(300):
+                (bulk_vault / f"feedback-bulk-{number:03d}.md").write_text(
+                    f"---\nname: bulk-{number:03d}\ndescription: 合成卡 {number}\n---\n"
+                    "- 2026-01-01 待辦：合成殭屍待辦，沒有出口\n"
+                    "本文一行。\n",
+                    encoding="utf-8",
+                )
+            bulk_config = root / "bulk-config.json"
+            write_config(bulk_config, [bulk_vault])
+            bulk_started = time.monotonic()
+            bulk_result = run_synthetic(
+                Path(__file__),
+                {
+                    "hook_event_name": "SessionStart",
+                    "session_id": "selftest-codex",
+                    "cwd": os.fspath(root),
+                    "source": "startup",
+                },
+                bulk_config,
+                # Codex 的事件帶 cwd，而 cwd 的每一層祖先都會去 home 底下找同名的原生
+                # 庫；不改 home 的話這一項會把跑測試那台機器的真實庫拌進來。
+                environment={"USERPROFILE": os.fspath(root), "HOME": os.fspath(root)},
+            )
+            bulk_elapsed = time.monotonic() - bulk_started
+            bulk_value = json.loads(bulk_result.stdout) if bulk_result.stdout.strip() else {}
+            bulk_inner = bulk_value.get("hookSpecificOutput") if isinstance(bulk_value, dict) else None
+            checks.append(
+                (
+                    "the Codex-shaped event answers with exactly the two keys the host accepts",
+                    bulk_result.returncode == 0
+                    and set(bulk_value) == {"hookSpecificOutput"}
+                    and isinstance(bulk_inner, dict)
+                    and set(bulk_inner) == {"hookEventName", "additionalContext"}
+                    and bulk_inner["hookEventName"] == "SessionStart"
+                    and "bulk index detail" in bulk_inner["additionalContext"],
+                )
+            )
+            # 上限＝開場自用預算＋子程序啟動與 import 的固定成本，仍遠低於宿主的 10 s。
+            checks.append(
+                (
+                    "a 300-card vault still answers inside the SessionStart budget",
+                    bulk_elapsed <= memspec.SESSIONSTART_BUDGET_SECONDS + 4.0,
+                )
+            )
+
             bad_config = root / "bad-config.json"
             bad_config.write_text("{broken", encoding="utf-8")
             bad_result = run_synthetic(
@@ -844,7 +926,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 26
+    total = 28
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import time
 
 try:
     from . import memsearch, memspec
@@ -43,12 +44,21 @@ def _is_pending(line):
     )
 
 
-def scan_vault(vault, max_age_days=memspec.PENDING_MAX_AGE_DAYS, today=None):
+def scan_vault(vault, max_age_days=memspec.PENDING_MAX_AGE_DAYS, today=None, deadline=None):
+    """唯讀掃描一個 vault；deadline 是 time.monotonic() 上限，逾時就標記並停手。
+
+    CLI 不傳 deadline（完整報告要完整掃描）；hook 一定要傳，否則這一段沒有上限，
+    宿主的 hook timeout 就是它唯一的煞車——而那個煞車是「整場注入被砍掉」。
+    """
     vault = Path(vault).resolve()
     today = today or datetime.now(timezone.utc).date()
     cards = []
     oversized = 0
+    timed_out = False
     for path in memsearch.card_files(vault):
+        if deadline is not None and time.monotonic() >= deadline:
+            timed_out = True
+            break
         try:
             stat = path.stat()
             if stat.st_size > MAX_CARD_BYTES:
@@ -82,19 +92,31 @@ def scan_vault(vault, max_age_days=memspec.PENDING_MAX_AGE_DAYS, today=None):
         "zombie_lines": sum(len(item["lines"]) for item in cards),
         "oldest_days": max((item["oldest_days"] for item in cards), default=0),
         "oversized_skipped": oversized,
+        "timed_out": timed_out,
         "cards": cards,
     }
 
 
-def summary_line(vaults, max_age_days=memspec.PENDING_MAX_AGE_DAYS, today=None):
-    """One bounded line for SessionStart, or None when nothing is overdue."""
+def summary_line(
+    vaults,
+    max_age_days=memspec.PENDING_MAX_AGE_DAYS,
+    today=None,
+    time_budget=memspec.PENDING_LINT_HOOK_BUDGET_SECONDS,
+):
+    """One bounded line for SessionStart, or None when nothing is overdue.
+
+    逾時回 None，與 card_lint 同一條規則：半個庫的數字比不點名更糟。
+    """
+    deadline = None if time_budget is None else time.monotonic() + time_budget
     lines = cards = oldest = skipped = 0
     worst = None
     for vault in vaults:
         try:
-            report = scan_vault(vault, max_age_days, today)
+            report = scan_vault(vault, max_age_days, today, deadline)
         except OSError:
             continue
+        if report["timed_out"]:
+            return None
         lines += report["zombie_lines"]
         cards += report["zombie_cards"]
         skipped += report["oversized_skipped"]

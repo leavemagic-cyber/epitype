@@ -225,6 +225,12 @@ python install/graft.py doctor
 
 Doctor's HEALTH step runs each hook once against a synthetic event and prints its wall time beside the verdict, warning when a hook used more than half of the time the host registration allows. It also warns when `repo_root` has uncommitted changes: the live hooks run whatever is in that tree, and the 2026-09-04 batch ran live for a day precisely because an unfinished change needs no release to take effect.
 
+### The deadline only guards the gaps between segments
+
+Checking `expired(started_at)` between segments is not the same as bounding each segment. A single unbounded segment — the 2026-09-06 incident was `SessionStart`'s pending-lint summary doing a full vault scan, 2.8 s warm across two vaults and unbounded cold — can by itself burn through the host's 10 s kill window before the next check ever runs. The host then reports the whole hook `Failed` and every piece of context that segment's siblings had already assembled is lost with it, not just the slow line.
+
+The fix is a soft per-segment budget, not a single top-level deadline: `SESSIONSTART_BUDGET_SECONDS` bounds the whole session-start handler, and each disk-scanning segment gets its own `*_HOOK_BUDGET_SECONDS` slice of whatever remains. A segment that cannot finish inside its slice is omitted — its one line is dropped, nothing else is — rather than being allowed to run unbounded and take the entire injection down with it. Any state file such a segment writes is written to a temp path and moved into place with `os.replace`; a kill mid-write then leaves the previous good file in place instead of a truncated or 0-byte one.
+
 ## 10. The ruling is injected, and the turn re-opens it anyway
 
 ### Symptom

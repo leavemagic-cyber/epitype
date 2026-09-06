@@ -111,6 +111,11 @@ inside the interpreter fell from 4.0–4.6 s to about 0.4 s.
   selftest＋本機真句量測：254 句 precision 0.44→0.81、保留率 0.85）；`harvest --reevaluate <dir>
   [--apply]` 重評隔離卡（正向：草稿放回）；加 `--quarantine-drops` 反向模式，把線上已收的
   drop 隔離到 `_drafts/captured_dropped`；兩者皆 `--apply` 門控、不刪；FAILURE_MODES §13。
+- SessionStart 開場段預算——2026-09-06 Codex 端首場 SessionStart 被宿主記成 Failed：
+  `expired()` 只在段與段之間被檢查，段內無界的全庫掃描（當時是待辦摘要）能單獨吃光
+  10 s 才被砍，整場注入一起消失。改為每段軟預算：待辦摘要與型別摘要各 1 s、開場總
+  預算 5 s，超時整段省略而非整場失敗；`_dream_mark_notified` 狀態檔改寫暫存檔再
+  `os.replace`，砍在中途不留 0 byte。FAILURE_MODES §9。
 
 - 夢的三種模式——`piggyback`（預設：SessionStart 順路起一個脫鉤的低優先權背景程序，
   距上次完成超過 `interval_hours` 才起，開場預算剩不到 `DREAM_SPAWN_RESERVE_SECONDS`
