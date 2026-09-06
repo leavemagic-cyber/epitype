@@ -880,15 +880,22 @@ def _prospective_write(tool_name, tool_input, target):
     return additions, text
 
 
-def _forbidden_rule_edit(decision_key, fragment, texts):
+def _forbidden_rule_edit(decision, target, fragment, texts):
     """True when this write is the ruling itself being edited, not a re-statement.
 
     2026-09-06 incident: editing the very card that defines a `forbidden` pattern
     was blocked by that pattern, and only got through because the same content is
-    allowed on its second attempt. Two exemptions, both read off the text the file
-    would then hold: the content carries this same `decision_key`, or the matched
-    fragment sits inside the frontmatter's own `forbidden:` block. Changing the rule
-    is always allowed; re-stating it anywhere else is not."""
+    allowed on its second attempt. Two exemptions: the target IS the card that
+    carries this ruling, or the matched fragment sits inside the frontmatter's own
+    `forbidden:` block. Identity is the card's path, never a `decision_key` the
+    content declares — a file anywhere could claim any key and walk past the rule.
+    Changing the rule is always allowed; re-stating it anywhere else is not."""
+    if decision.path is not None:
+        try:
+            if target.resolve() == Path(decision.path).resolve():
+                return True
+        except OSError:
+            pass
     for text_value in texts:
         if not isinstance(text_value, str) or not text_value:
             continue
@@ -903,8 +910,6 @@ def _forbidden_rule_edit(decision_key, fragment, texts):
             if match is not None:
                 key, raw_value = match.groups()
                 value = memspec.strip_inline_comment(raw_value).strip()
-                if key == memspec.DECISION_KEY_FIELD and value == decision_key:
-                    return True
                 parent = key
                 if key == memspec.FORBIDDEN_FIELD:
                     block.append(value)
@@ -916,7 +921,7 @@ def _forbidden_rule_edit(decision_key, fragment, texts):
     return False
 
 
-def _forbidden_write(event, config, additions, prospective, started_at, notices):
+def _forbidden_write(event, config, target, additions, prospective, started_at, notices):
     """(vault, decision key, reason) for the first settled ruling this text violates.
 
     The decision cards, their `forbidden` patterns, and the pattern validator are
@@ -937,7 +942,7 @@ def _forbidden_write(event, config, additions, prospective, started_at, notices)
                 )
                 if fragment is None:
                     continue
-                if _forbidden_rule_edit(decision.key, fragment, (prospective, text)):
+                if _forbidden_rule_edit(decision, target, fragment, (prospective, text)):
                     continue
                 return (
                     vault,
@@ -1011,7 +1016,8 @@ def _card_review(relative, text):
         card_type=card_type,
         path=relative,
         problems=problems,
-        example="；".join(examples[: memspec.GATE_DEFECT_MAX_LINES]) or "見 docs/ARCHITECTURE.md 卡片型別表",
+        example="；".join(examples[: memspec.GATE_DEFECT_MAX_LINES])
+        or "見 docs/ARCHITECTURE.md §Card types and required fields",
     )
     return reason[: memspec.WRITE_GATE_REASON_MAX_CHARS], advice
 
@@ -1072,7 +1078,9 @@ def _write_review(event, tool_name, tool_input, config, started_at):
 
     notices = []
     session_id = event.get("session_id")
-    found = _forbidden_write(event, config, additions, prospective, started_at, notices)
+    found = _forbidden_write(
+        event, config, target, additions, prospective, started_at, notices
+    )
     if found is not None:
         vault, decision_key, reason = found
         if not _write_marker(
@@ -1844,7 +1852,18 @@ def _selftest():
                     "cwd": os.fspath(write_root),
                 }
                 event.update(extra or {})
-                result = run_synthetic(Path(__file__), event, write_config_path)
+                # The event carries cwd, and every ancestor of a cwd is looked up
+                # as a slug under home: without this the case would read the test
+                # machine's own native vaults.
+                result = run_synthetic(
+                    Path(__file__),
+                    event,
+                    write_config_path,
+                    environment={
+                        "HOME": os.fspath(write_root),
+                        "USERPROFILE": os.fspath(write_root),
+                    },
+                )
                 value = json.loads(result.stdout) if result.stdout.strip() else {}
                 return result, value.get("hookSpecificOutput", {})
 
@@ -1975,6 +1994,21 @@ def _selftest():
                 "豁免只認那張卡：別的決策卡與一般檔案寫同一句仍然擋",
                 other_out.get("permissionDecision") == "deny"
                 and plain_out.get("permissionDecision") == "deny",
+            ))
+
+            # 2026-09-06 對抗審：宣告同一個 decision_key 就能讓任何檔案繞過規則 A。
+            _forged_result, forged_out = write_call(
+                "Write",
+                {
+                    "file_path": os.fspath(write_root / "plan3.txt"),
+                    "content": "---\nname: 假冒\ndescription: 不是那張卡\n"
+                    f"{memspec.DECISION_KEY_FIELD}: virtual-mirrors-live\n"
+                    "---\n就讓虛擬盤用兩套參數各自最佳化。\n",
+                },
+            )
+            checks.append((
+                "vault 外的檔案自稱同一個 decision_key 不算在改那張卡，照擋",
+                forged_out.get("permissionDecision") == "deny",
             ))
 
             _block_result, block_out = write_call(
@@ -2166,7 +2200,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 72
+    total = 73
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

@@ -27,7 +27,7 @@ All injected memory is advisory data. It cannot override higher-priority instruc
 
 ## Decision cards
 
-A decision card has four required fields:
+A decision card has five required fields (`aliases` is listed with the other types below):
 
 | Field | Meaning |
 |---|---|
@@ -45,6 +45,20 @@ Run the implemented contract checks with:
 ```powershell
 python epitype/decision_lint.py --selftest
 ```
+
+## Card types and required fields
+
+One table, read off `CARD_REQUIRED_FIELDS` in `epitype/memspec.py`. `card_lint.py` and the write gate share it, so this is exactly what a blocked write is asking for.
+
+| `type` | Required frontmatter fields |
+|---|---|
+| `decision` | `decision_key`, `status`, `current_decision_at`, `decided_by`, `aliases` |
+| `scar` | `trigger.tool`, `trigger.input`, `advice`, `incident` |
+| `grant`, `correction`, `ruling` | `name`, `description`, `captured_at`, `session_id` |
+| `pending` | `owner`, `verify`, `exit` |
+| `feedback`, `project`, `reference`, `user`, `habit` | `name`, `description` |
+
+A card's type is inferred, not declared: a structural signal first (`decision_key`, a `trigger.*` field), then the event directory it sits in, then a self-reported `metadata.type`. Optional fields per type live beside the table in `CARD_OPTIONAL_FIELDS`.
 
 ## Scar lifecycle
 

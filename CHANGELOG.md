@@ -63,13 +63,13 @@ inside the interpreter fell from 4.0–4.6 s to about 0.4 s.
   `repo_root` has uncommitted changes.
 - Hook registrations allow ten seconds instead of three (owner ruling
   2026-09-05); the hook's own deadline is nine. Existing installs pick this up
-  by re-running `install`, and Codex hosts then need the four hooks trusted
+  by re-running `install`, and Codex hosts then need the five hooks trusted
   again because their definition changed.
 - From the 2026-09-04 batch, kept as found: incremental index builds use mtime
   and size; owner captures and compact maps share the governance vault; compact
   maps are per session and bounded; the installed package provides a unified
   `epitype` command and CI exercises the installed wheel; Codex trust requires
-  exactly the four supported registrations.
+  exactly the five supported registrations.
 - SessionStart 開場段預算——2026-09-06 Codex 端首場 SessionStart 被宿主記成 Failed：
   `expired()` 只在段與段之間被檢查，段內無界的全庫掃描（當時是待辦摘要）能單獨吃光
   10 s 才被砍，整場注入一起消失。改為每段軟預算：待辦摘要與型別摘要各 1 s、開場總

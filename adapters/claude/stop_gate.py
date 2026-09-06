@@ -49,7 +49,7 @@ _KEY = "key"
 _DECIDED_AT = "decided_at"
 _QUOTE = "quote"
 
-_Decision = namedtuple("_Decision", "key decided_at quote forbidden aliases")
+_Decision = namedtuple("_Decision", "key decided_at quote forbidden aliases path")
 
 
 def _one_line(value):
@@ -252,6 +252,7 @@ def _decisions(vault, started_at):
                 _one_line(ruling.get(_QUOTE))[: memspec.STOP_GATE_QUOTE_MAX_CHARS],
                 tuple(_strings(ruling.get(memspec.FORBIDDEN_FIELD))),
                 tuple(_strings(ruling.get(memspec.ALIASES_FIELD))),
+                vault / card_path,
             )
         )
     return found
@@ -528,7 +529,15 @@ def _selftest():
                     "last_assistant_message": message,
                 }
                 event.update(extra or {})
-                result = run_synthetic(Path(__file__), event, config)
+                # An event carrying cwd makes every ancestor look for a same-slug
+                # native vault under home; without this the run would pull the
+                # test machine's real vaults into a synthetic case.
+                result = run_synthetic(
+                    Path(__file__),
+                    event,
+                    config,
+                    environment={"HOME": os.fspath(root), "USERPROFILE": os.fspath(root)},
+                )
                 value = json.loads(result.stdout) if result.stdout.strip() else {}
                 return result, value, session_id
 
@@ -790,6 +799,14 @@ def _selftest():
                 and commitments.digest(rerun_promise)
                 not in [row.get("digest") for row in commitments.open_items(vault)],
             ))
+
+            blown = time.monotonic() - memspec.HOOK_TIMEOUT_SECONDS - 1
+            checks.append((
+                "期限在 marker 寫下之後才到：block 照樣送出，不會只留帳不擋",
+                _emits({"decision": "block", "reason": "x"}, blown)
+                and not _emits(None, time.monotonic())
+                and not _emits({"decision": "approve"}, blown),
+            ))
     except Exception as exc:
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
     finally:
@@ -797,7 +814,7 @@ def _selftest():
             clear_recall_markers(session_id)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 17
+    total = 18
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
@@ -805,6 +822,18 @@ def _selftest():
             if not ok:
                 print(f"FAILED: {name}", file=sys.stderr)
     return 0 if status == "PASS" else 1
+
+
+def _emits(value, started_at):
+    """A block reaches the host even past the deadline.
+
+    `_verdict` claims the same-session dedupe marker and appends the audit row
+    before it returns, so a deadline crossed in between used to drop the block
+    while leaving the ruling on the ledger and unable to fire again this session
+    (2026-09-06 review). The action gate's `main` has the same shape."""
+    return value is not None and (
+        value.get("decision") == "block" or not expired(started_at)
+    )
 
 
 def main():
@@ -816,7 +845,7 @@ def main():
         value = _handle(event, _STARTED_AT, defects)
         for line in defects[: memspec.GATE_DEFECT_MAX_LINES]:
             print(line, file=sys.stderr)
-        if value is not None and not expired(_STARTED_AT):
+        if _emits(value, _STARTED_AT):
             emit(value)
     except Exception:
         pass

@@ -992,11 +992,47 @@ def _selftest():
             checks.append(("--lock-held releases the caller's lock at exit; a held lock makes the next scheduled run a no-op", (
                 lock_released and blocked_code == 0 and blocked_state == scheduled_state
             )))
+            checks.append(("狀態檔換名寫入：讀得到完整 JSON，旁邊不留 .tmp", (
+                json.loads(scheduled_state)[memspec.DREAM_STATE_COMPLETED_FIELD]
+                and not state_file.with_name(state_file.name + ".tmp").exists()
+            )))
+
+            # 2026-09-06 覆審：設定階段的例外走 `return 2`，繞過釋放 lock 的 finally，
+            # 呼叫端交接過來的 lock 就留在原地擋掉之後每一場夢。
+            saved_dream_root = dream_root
+            root_calls = []
+
+            def _dream_root_fails_first(governance):
+                root_calls.append(governance)
+                if len(root_calls) == 1:
+                    raise OSError("governance path unavailable")
+                return saved_dream_root(governance)
+
+            os.environ[memspec.EPITYPE_CONFIG_ENV] = os.fspath(scheduled_config)
+            try:
+                acquire_lock(gov)
+                globals()["dream_root"] = _dream_root_fails_first
+                setup_code = main(
+                    [memspec.DREAM_SCHEDULED_FLAG, memspec.DREAM_LOCK_HELD_FLAG],
+                    output=io.StringIO(),
+                )
+            finally:
+                globals()["dream_root"] = saved_dream_root
+                release_lock(gov)
+                if saved_env is None:
+                    os.environ.pop(memspec.EPITYPE_CONFIG_ENV, None)
+                else:
+                    os.environ[memspec.EPITYPE_CONFIG_ENV] = saved_env
+            checks.append(("設定階段拋例外：回 2，交接來的 lock 仍然釋放", (
+                setup_code == 2
+                and len(root_calls) == 2
+                and not (gov / memspec.DREAM_DIRECTORY / memspec.DREAM_LOCK_FILENAME).exists()
+            )))
     except Exception as exc:
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 28
+    total = 30
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
@@ -1035,31 +1071,36 @@ def main(argv=None, output=sys.stdout):
     started = time.monotonic()
     deadline = started + parsed.time_budget_seconds if parsed.time_budget_seconds > 0 else None
     governance = None
+    owns_lock = False
     out_path = parsed.out.resolve() if parsed.out else None
     json_out_path = parsed.json_out.resolve() if parsed.json_out else None
     state_path = parsed.state.resolve() if parsed.state else None
     try:
-        if parsed.scheduled:
-            vaults = configured_vaults()
-            governance = governance_vault(vaults)
-            root = dream_root(governance)
-            out_path = out_path or root / memspec.DREAM_PACK_FILENAME
-            json_out_path = json_out_path or root / memspec.DREAM_PACK_JSON_FILENAME
-            state_path = state_path or root / memspec.DREAM_STATE_FILENAME
-            if not parsed.lock_held and not acquire_lock(governance):
-                log(governance, "skipped: another dream holds the lock")
-                return 0
-        else:
-            if not parsed.vaults:
-                parser.error("vaults are required unless " + memspec.DREAM_SCHEDULED_FLAG + " is given")
-            vaults = [memsearch._resolve_vault(raw) for raw in parsed.vaults]
-    except SystemExit:
-        raise
-    except Exception as exc:
-        print(f"ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
-        return 2
+        try:
+            if parsed.scheduled:
+                vaults = configured_vaults()
+                governance = governance_vault(vaults)
+                # 交接進來的 lock 從這一刻起歸這個程序負責，設定階段就出事也要放掉。
+                owns_lock = parsed.lock_held
+                root = dream_root(governance)
+                out_path = out_path or root / memspec.DREAM_PACK_FILENAME
+                json_out_path = json_out_path or root / memspec.DREAM_PACK_JSON_FILENAME
+                state_path = state_path or root / memspec.DREAM_STATE_FILENAME
+                if not owns_lock:
+                    if not acquire_lock(governance):
+                        log(governance, "skipped: another dream holds the lock")
+                        return 0
+                    owns_lock = True
+            else:
+                if not parsed.vaults:
+                    parser.error("vaults are required unless " + memspec.DREAM_SCHEDULED_FLAG + " is given")
+                vaults = [memsearch._resolve_vault(raw) for raw in parsed.vaults]
+        except SystemExit:
+            raise
+        except Exception as exc:
+            print(f"ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
+            return 2
 
-    try:
         today = parsed.today or datetime.now(timezone.utc).date()
         since_date = parsed.since or (today - timedelta(days=DEFAULT_EVENT_AGING_DAYS))
         report = build_report(vaults, today=today, since_date=since_date, deadline=deadline)
@@ -1085,8 +1126,10 @@ def main(argv=None, output=sys.stdout):
         print(f"DREAM PACK {out_path}", file=output)
         return 0
     finally:
-        # lock 只在這個程序負責時才放：手動跑的夢不得把背景那場的 lock 掃掉。
-        if governance is not None and (parsed.lock_held or parsed.scheduled):
+        # lock 只在這個程序負責時才放：手動跑的夢、以及「別人正握著」而略過的那一輪，
+        # 都不得把別人的 lock 掃掉。config 讀不出治理庫時 governance 還是 None，那份
+        # 交接來的 lock 只能等 DREAM_LOCK_STALE_SECONDS 逾時被覆蓋。
+        if governance is not None and owns_lock:
             release_lock(governance)
 
 
@@ -1113,7 +1156,11 @@ def _write_run_state(path, report, out_path, elapsed):
         else None,
     }
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(value, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    # 先寫旁邊再換名：截斷式寫入被砍在中間（機器休眠、程序被 kill）會留下半個 JSON，
+    # 而開場那一行與「距上次多久」只讀這一份，讀不動就當夢從沒跑過。
+    staging = path.with_name(path.name + ".tmp")
+    staging.write_text(json.dumps(value, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    os.replace(staging, path)
 
 
 if __name__ == "__main__":

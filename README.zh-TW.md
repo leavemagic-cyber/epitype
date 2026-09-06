@@ -155,7 +155,7 @@ python tests/privacy_lint.py
 python exam/exam_runner.py --strict
 ```
 
-`tests/run_all.py` 目前執行 22 組元件 selftest，涵蓋核心工具、hook adapter、套件介面、安裝器、筆試引擎與隱私閘。repo 內的筆試題庫是小型合成樣本。本次發布另以嚴格模式通過 300 題行為題庫與 15 筆回顧種子；這兩份發布材料不包含在本 repo。
+`tests/run_all.py` 目前執行 30 組元件 selftest，涵蓋核心工具、hook adapter、套件介面、安裝器、筆試引擎與隱私閘。repo 內的筆試題庫是小型合成樣本。本次發布另以嚴格模式通過 300 題行為題庫與 15 筆回顧種子；這兩份發布材料不包含在本 repo。
 
 這些結果是防回歸證據，不代表未來每個 host 版本或每一種記憶失效都已涵蓋。
 

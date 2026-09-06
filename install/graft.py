@@ -51,6 +51,7 @@ DREAM_MODE_ENV = "EPITYPE_DREAM_MODE"
 DREAM_SCRIPT_PARTS = ("epitype", "dream.py")
 DREAM_TASK_NAME = r"Epitype\Dream"             # schtasks /TN
 DREAM_CRON_MARKER = "# epitype-dream"          # crontab 只認自己這一行
+CRONTAB_UNREADABLE_WARN = "WARN nightly dream {action} skipped: crontab -l unreadable, existing crontab left untouched"
 SHIM_ADAPTER_TOKEN = "__EPITYPE_ADAPTER_FILENAME__"
 SHIM_TRACE_ENV = "EPITYPE_SHIM_TRACE"
 HOOK_SPECS = {
@@ -1207,8 +1208,15 @@ def _schedule_argv(repo_root, at, python_executable=None):
 
 
 def _crontab_without_dream(runner):
+    """現有 crontab 去掉自己那一行，讀不到就回 None。
+
+    `crontab -l` 非零有兩種：使用者本來沒有 crontab（第一次安裝，stdout 空的），
+    或一次暫時性失敗。2026-09-06 覆審：兩種一律當空表，暫時性失敗就會把整份
+    crontab 換成我們這一行。有印出內容卻又非零＝讀得不完整，寧可放棄註冊。"""
     listed = runner(["crontab", "-l"], None)
-    body = listed.stdout if getattr(listed, "returncode", 1) == 0 else ""
+    body = getattr(listed, "stdout", "") or ""
+    if getattr(listed, "returncode", 1) != 0 and body.strip():
+        return None
     return [line for line in body.splitlines() if DREAM_CRON_MARKER not in line]
 
 
@@ -1227,6 +1235,9 @@ def _register_nightly(repo_root, at, dry_run, output, runner=None, python_execut
         if dry_run:
             return
         kept = _crontab_without_dream(runner)
+        if kept is None:
+            print(CRONTAB_UNREADABLE_WARN.format(action="schedule"), file=output)
+            return
         result = runner(["crontab", "-"], "\n".join([*kept, line]) + "\n")
     if getattr(result, "returncode", 1) != 0:
         detail = (getattr(result, "stderr", "") or "").strip().splitlines()
@@ -1246,6 +1257,9 @@ def _unregister_nightly(dry_run, output, runner=None):
     if dry_run:
         return
     kept = _crontab_without_dream(runner)
+    if kept is None:
+        print(CRONTAB_UNREADABLE_WARN.format(action="unschedule"), file=output)
+        return
     runner(["crontab", "-"], ("\n".join(kept) + "\n") if kept else "")
 
 
@@ -2280,6 +2294,21 @@ def _selftest():
                 and uninstall_argv == expected_unschedule,
             ))
 
+            def _crontab_runner(returncode, stdout):
+                return lambda argv, stdin_text=None: subprocess.CompletedProcess(
+                    list(argv), returncode, stdout, ""
+                )
+
+            checks.append((
+                "crontab -l 非零又印了內容＝讀不完整，放棄註冊而不是把整份 crontab 換掉",
+                _crontab_without_dream(_crontab_runner(1, "0 5 * * * backup\n")) is None
+                and _crontab_without_dream(_crontab_runner(1, "")) == []
+                and _crontab_without_dream(
+                    _crontab_runner(0, f"0 5 * * * backup\n1 2 * * * old {DREAM_CRON_MARKER}\n")
+                )
+                == ["0 5 * * * backup"],
+            ))
+
             if os.fspath(REPO_ROOT) not in sys.path:
                 sys.path.insert(0, os.fspath(REPO_ROOT))
             from epitype import memspec as _memspec
@@ -2434,7 +2463,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 39
+    total = 40
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
