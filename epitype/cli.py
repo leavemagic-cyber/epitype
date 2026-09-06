@@ -17,6 +17,7 @@ _COMMANDS = {
     "commitments": ("epitype.commitments", "main", ()),
     "narration": ("epitype.narration_meter", "main", ()),
     "token-meter": ("epitype.token_meter", "main", ()),
+    "gates": ("epitype.gates_report", "main", ()),
     "exam": ("exam.exam_runner", "main", ()),
     "trust": ("adapters.codex.hook_trust", "main", ("check",)),
     "harvest": ("epitype.harvest", "main", ()),
