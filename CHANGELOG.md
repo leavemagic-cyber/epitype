@@ -112,6 +112,28 @@ inside the interpreter fell from 4.0–4.6 s to about 0.4 s.
   [--apply]` 重評隔離卡（正向：草稿放回）；加 `--quarantine-drops` 反向模式，把線上已收的
   drop 隔離到 `_drafts/captured_dropped`；兩者皆 `--apply` 門控、不刪；FAILURE_MODES §13。
 
+- 夢的三種模式——`piggyback`（預設：SessionStart 順路起一個脫鉤的低優先權背景程序，
+  距上次完成超過 `interval_hours` 才起，開場預算剩不到 `DREAM_SPAWN_RESERVE_SECONDS`
+  就不起，夢晚一場勝過記憶注入掉一場）／`nightly`（交給系統排程，`graft install
+  --dream nightly [--dream-at HH:MM]` 註冊 schtasks 或 crontab，避免同一天跑兩次）／
+  `off`；夢跑完由下一場開場印一行（四個數字＋pack 路徑，只印一次，壓縮續場不印）。
+  `source: compact` 兩邊都不做：不印那一行，也不起夢——壓縮續場不是新的一場，長回合
+  壓縮幾次就會起幾支背景程序搶走這場正在用的 CPU。
+- 卡片 lint 的語意修正——缺別名的 WARN 指向離線別名批次而不是只點名；授權卡沒有到期日
+  改判 INFO（owner 可能就是要它永久有效，不進開場那一行的 WARN 數）；缺日期先找六處
+  （欄位、正文、檔名、git 首次提交…）再判 FAIL，推得的日期是 WARN date-derived；
+  `--fix-dates`（先 `--dry-run`）只補一行 `last_verified_at:`，BOM／CRLF 原樣。
+- 沒中文別名的卡由 AI 自己補，不再問 owner（owner 2026-09-06 裁定「你自主翻譯就好了…
+  如果與卡片不同，你就主動修正」）——`no-chinese` 由 WARN 降成 INFO；開場改派一行順手
+  任務（`🈳 順手補中文別名（本場 ≤3 張）`），以 `<治理 vault>/.epitype/
+  no_chinese_cursor.json` 游標每場輪替不同的卡，壓縮續場不派；開場同時說一次「喚回的卡
+  若與現況不符：直接修卡（舊內容標 superseded、不刪），不問 owner」。寫檔閘規則 A 加
+  自我豁免：寫入後內容帶同一個 `decision_key`，或命中片段落在該內容自己的 frontmatter
+  `forbidden:` 區塊裡，都不擋——改規則本身永遠允許。`card_lint` 對裸名詞 forbidden 項
+  印 WARN `forbidden-bare-term`（要寫「再提議」的句形，裸名詞會連「為什麼不採用 X」的
+  說明一起擋掉；FAILURE_MODES §10）。nightly 排程在 Windows 改用旁邊的 `pythonw.exe`，
+  凌晨不再閃一個主控台黑窗。
+
 ## v1.1.0 — 2026-09-03
 
 The token-economy release. Every line Epitype injects is paid for once as output and
