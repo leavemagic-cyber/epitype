@@ -135,6 +135,7 @@ epitype search recall "自然語言提示" --vault C:\path\to\vault
 |---|---|
 | `epitype decisions [vault] [--audit] [--selftest]` | 唯讀掃描決策卡：每個 key 是否唯一、取代鏈是否完整、決定者欄位；`--audit` 列出非 `owner-explicit` 的現行決策。 |
 | `epitype ledger append --ledger PATH --entry TEXT --evidence PATH::SUBSTRING [--check-only]` | 追加帳目前，先逐條確認每筆證據真的出現在指定檔案的 bytes 裡；`--check-only` 只驗證不寫入。 |
+| `epitype capture-route <vault> [--audit] [--apply] [--home HOME] [--json]` | 用落點規則盤點一個庫裡自動捕捉的事件卡：卡屬於它 `cwd` 指到的專案庫，所以治理庫裡其實屬於別的庫的卡會列成 `MISROUTED <卡> -> <庫>`。`--audit` 唯讀；`--apply` 才真的搬（`os.replace`、同名加 `-2`、永不刪），並在卡的正文補一行歸戶註記。 |
 | `epitype harvest [--inventory] [--docs DOCS] [--since SINCE] [--reevaluate DIR [--apply]] [--quarantine-drops [DIR]]` | 零模型回放捕捉規則到歷史 transcript 與文件，做第一次大整理的補課；也能用現行規則重新評斷草稿或 vault 自己的事件卡。 |
 | `epitype narration <target> [--hours HOURS] [--json]` | 量測單一 transcript，或 projects 目錄下 N 小時內異動過的所有 transcript 的旁白（工具呼叫之間的助理文字）份量。 |
 | `epitype token-meter [rollout] [--selftest]` | 讀 Codex rollout JSONL，印出最後一筆當前與累計 token 用量對照視窗大小。 |

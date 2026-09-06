@@ -409,6 +409,11 @@ NAME_FIELD = "name"
 DESCRIPTION_FIELD = "description"
 CAPTURED_AT_FIELD = "captured_at"
 SESSION_FIELD = "session_id"
+# 2026-09-06 實測事故：自動捕捉的事件卡一律落治理庫，專案對話裡明講該專案的裁定與
+# 糾正被寫進通用庫（實測 132 張事件卡有 74 張的 cwd 指向別的已登記專案庫）；卡上的
+# cwd 是事後唯一能判斷「這句話屬於哪個專案」的欄位，落點（epitype/capture_route.py）
+# 與歸戶稽核讀的必須是同一個欄名。
+CWD_FIELD = "cwd"
 INCIDENT_FIELD = "incident"
 FORBIDDEN_FIELD = "forbidden"
 VERIFY_FIELD = "verify"

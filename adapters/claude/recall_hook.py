@@ -28,9 +28,9 @@ from epitype.capture import (
 )
 from _hook_common import (
     bounded_context,
+    capture_vault as _capture_vault,
     emit,
     expired,
-    governance_vault,
     load_config,
     payload,
     read_event,
@@ -130,7 +130,10 @@ def _handle(event, started_at):
     if config is None:
         return None
 
-    capture_vault = governance_vault(config)
+    # 落點依「這場對話屬於哪個專案」決定（_hook_common.capture_vault）：專案的卡
+    # 進專案庫，cwd 不屬於任何已登記專案庫時才落治理庫。2026-09-06 之前一律落治理
+    # 庫，所以專案對話裡的裁定與糾正全被寫進通用庫（實測 132 張裡 74 張屬於別的庫）。
+    capture_vault = _capture_vault(config, event)
     for kind in CAPTURE_KINDS:
         _capture_owner_sentence(prompt, capture_vault, event, started_at, kind)
     _capture_ruling(prompt, capture_vault, event, started_at)
@@ -535,6 +538,40 @@ def _selftest():
                 and not (project_vault / memspec.GRANT_DIRECTORY).exists(),
             ))
             write_config(grant_config, [grant_vault])
+
+            # 落點（U65）：cwd 屬於已登記的專案庫時，卡進那個專案庫，治理庫不收。
+            # 2026-09-06 之前一律落治理庫，專案對話裡的授權全被寫進通用庫。
+            native_home = root / "capture-home"
+            native_project = root / "capture-work" / "proj"
+            native_project.mkdir(parents=True)
+            native_capture = (
+                native_home / ".claude" / "projects"
+                / re.sub(r"[^A-Za-z0-9]", "-", str(native_project)) / "memory"
+            )
+            native_capture.mkdir(parents=True)
+            (native_capture / "seed.md").write_text(
+                "---\nname: seed\ndescription: a registered project vault\n---\nbody\n",
+                encoding="utf-8",
+            )
+            project_grant = "專案落點 我同意,以後不用再問"
+            project_routed = run_synthetic(
+                Path(__file__),
+                {"prompt": project_grant, "session_id": uuid.uuid4().hex,
+                 "cwd": os.fspath(native_project)},
+                grant_config,
+                environment={"HOME": os.fspath(native_home), "USERPROFILE": os.fspath(native_home)},
+            )
+            project_grant_digest = _grant_digest(project_grant)
+            checks.append((
+                "a captured sentence lands in the cwd's registered project vault, not governance",
+                project_routed.returncode == 0
+                and any(
+                    (native_capture / memspec.GRANT_DIRECTORY).glob(f"grant-*-{project_grant_digest}.md")
+                )
+                and not any(
+                    (grant_vault / memspec.GRANT_DIRECTORY).glob(f"grant-*-{project_grant_digest}.md")
+                ),
+            ))
 
             checks.append(
                 (
@@ -1357,7 +1394,7 @@ def _selftest():
             shutil.rmtree(marker_directory, ignore_errors=True)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 44
+    total = 45
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

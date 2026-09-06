@@ -7,10 +7,12 @@ from pathlib import Path
 import re
 import tempfile
 
-from epitype import memspec
+from epitype import capture_route, memspec
 
-NATIVE_PROJECTS_SUBPATH = (".claude", "projects")
-_SLUG_PATTERN = re.compile(r"[^A-Za-z0-9]")
+# 原生庫的解析規則搬到 epitype.capture_route：喚回（resolve_vaults）與捕捉落點
+# （capture_vault）必須讀同一份清單，各寫一份就會出現「喚回看得到、卡卻寫到別的庫」。
+NATIVE_PROJECTS_SUBPATH = capture_route.NATIVE_PROJECTS_SUBPATH
+native_cwd_vaults = capture_route.native_cwd_vaults
 
 
 def session_component(session_id, limit=128):
@@ -116,47 +118,6 @@ def dream_settings(value):
     }
 
 
-def _holds_cards(vault):
-    try:
-        if (vault / memspec.MEMORY_INDEX_FILENAME).is_file():
-            return True
-        return any(
-            item.suffix.lower() == ".md" and not item.name.startswith("_")
-            for item in vault.iterdir()
-        )
-    except OSError:
-        return False
-
-
-def native_cwd_vaults(cwd, home=None):
-    """Claude Code auto-creates one memory directory per cwd slug; cards written
-    there must be recallable without editing config, so the cwd and each ancestor
-    join the vault list whenever their directory already holds an index or a card.
-    Empty auto-created shells are skipped so no index is planted in them."""
-    if not isinstance(cwd, str) or not cwd.strip():
-        return []
-    projects = (home or Path.home()).joinpath(*NATIVE_PROJECTS_SUBPATH)
-    try:
-        start = Path(cwd)
-        bases = (start, *start.parents)
-    except (TypeError, ValueError):
-        return []
-    found = []
-    for base in bases:
-        texts = {str(base)}
-        try:
-            texts.add(str(base.resolve()))
-        except OSError:
-            pass
-        for text in sorted(texts):
-            candidate = projects / _SLUG_PATTERN.sub("-", text) / "memory"
-            if candidate.is_dir() and _holds_cards(candidate):
-                resolved = candidate.resolve()
-                if resolved not in found:
-                    found.append(resolved)
-    return found
-
-
 def resolve_vaults(config, event, home=None):
     """Closest native cwd vault first, then the configured vaults, deduplicated."""
     vaults = native_cwd_vaults(event.get("cwd") if isinstance(event, dict) else None, home)
@@ -172,6 +133,17 @@ def governance_vault(config):
     return next(
         (vault for vault in vaults if (vault / memspec.WORK_LEDGER_FILENAME).is_file()),
         vaults[0],
+    )
+
+
+def capture_vault(config, event, home=None):
+    """自動捕捉的落點：這場對話屬於哪個專案，卡就進那個專案的記憶庫。
+
+    規則在 epitype.capture_route（離線回放與歸戶稽核共用同一份）；治理庫只在 cwd
+    不屬於任何已登記專案庫時接手。
+    """
+    return capture_route.capture_vault(
+        event.get("cwd") if isinstance(event, dict) else None, governance_vault(config), home
     )
 
 
@@ -228,9 +200,15 @@ def run_synthetic(script, event, config_path, arguments=(), environment=None):
     import subprocess
 
     # 合成測試永遠不得起背景夢：預設關掉，呼叫端要測通知行時再自己開回來。
+    # 家目錄同理預設隔離：落點與喚回都會把 cwd 的原生專案庫算進來，而真機上 `C:\`
+    # 是每個暫存 cwd 的祖先且它的原生庫就是治理庫——沒有這道隔離，一次 selftest
+    # 就會把捕捉到的卡寫進 owner 的真庫。要測原生庫的呼叫端自己傳 HOME。
+    isolated_home = os.fspath(Path(config_path).resolve().parent / "_synthetic_home")
     environment = {
         **os.environ,
         memspec.DREAM_MODE_ENV: memspec.DREAM_MODE_OFF,
+        "HOME": isolated_home,
+        "USERPROFILE": isolated_home,
         **(environment or {}),
     }
     environment[memspec.EPITYPE_CONFIG_ENV] = os.fspath(config_path)

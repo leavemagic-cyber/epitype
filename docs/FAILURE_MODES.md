@@ -551,3 +551,46 @@ python adapters/claude/stop_gate.py --selftest
 python adapters/claude/pretooluse_gate.py --selftest
 python epitype/memspec.py --selftest
 ```
+
+## 17. 捕捉落點：專案的進專案庫
+
+### Symptom
+
+owner 在某個專案的對話裡下裁定、做糾正——話裡就明講了那個專案的名字——自動捕捉卻把卡
+寫進通用（治理）庫。結果是：在那個專案裡開新場時，屬於它的裁定不在它的庫裡；而通用庫
+被別的專案的細節塞滿，喚回時每一則都要先判「這條是不是在講我現在這個專案」。
+2026-09-06 實測：治理庫 132 張自動捕捉的事件卡裡，74 張的 `cwd` 指向另一個已登記的專案庫。
+
+### Why it happens
+
+落點與「哪個庫負責治理」被當成同一個問題。捕捉端只知道一個答案——治理庫（帳本持有者）
+——因為那是 hook 唯一算過的庫；`cwd` 雖然一直被寫進卡的 frontmatter，卻沒有任何一段
+程式讀它來決定要寫哪裡。喚回端相反：它早就會把 cwd 對應的原生專案庫排在最前面，所以
+「讀得到專案庫、卻永遠不往專案庫寫」這個不對稱可以長期存在而不報錯。
+
+### Epitype countermeasure
+
+落點規則集中在 `epitype/capture_route.py`，線上 hook（`_hook_common.capture_vault`）、
+離線回放（`epitype/harvest.py`）與稽核工具共用同一份：`cwd` 自己或它的任一層祖先若對應
+到**已登記**的原生記憶庫（已有索引或至少一張卡，`holds_cards`），卡就落最相關（最深）的
+那一個；都沒有才落治理庫。宿主替每個 cwd 開的空目錄不算庫——往空殼寫第一張卡等於替
+owner 決定在那裡開庫，所以未登記一律退回治理庫，並在卡上留下 `cwd`（`memspec.CWD_FIELD`）
+供事後歸戶。Codex 的 `cwd` 只在開場的 `session_meta` 出現一次，回放時補到每一筆紀錄上，
+否則那批卡沒有來源專案可判（實測 40 張如此）。
+
+跨專案通用的長效規則仍該進治理庫，但那是人立卡時的判斷，自動捕捉判不了；所以自動捕捉
+一律照 cwd 落點，通用化留給人。既有的誤置卡不由捕捉端搬：
+`python epitype/capture_route.py <vault> --audit` 唯讀列出 `MISROUTED <卡> -> <庫>` 與統計，
+`--apply` 才真的搬（`os.replace` 原子改名、同名加 `-2`、永不刪、永不覆蓋），搬到的卡正文
+補一行歸戶註記，兩邊的索引都標舊讓下一個讀者重建。
+
+卡上的 `scope: governance-core` 沒有跟著改：那是索引裡的搜尋欄位，改它等於新增一套
+scope 詞彙，超出本次修正的範圍——落點的證據看 `cwd`，不看 `scope`。
+
+### Self-verification
+
+```powershell
+python epitype/capture_route.py --selftest
+python adapters/claude/recall_hook.py --selftest
+python epitype/harvest.py --selftest
+```

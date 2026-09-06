@@ -15,9 +15,10 @@ import re
 import time
 
 try:
-    from . import capture, memsearch, memspec
+    from . import capture, capture_route, memsearch, memspec
 except ImportError:  # Direct script execution keeps the CLI contract.
     import capture
+    import capture_route
     import memsearch
     import memspec
 
@@ -32,6 +33,11 @@ DOC_SUFFIXES = (".md", ".markdown", ".txt")
 # 粗篩只認角色字串本身，不認 '"type":"user"' 整段：不同寫入端的分隔符空白不一，
 # 認整段會讓真 transcript 過篩、合成 transcript 落篩（或反過來）。
 ROLE_MARKERS = (b'"user"', b'"assistant"')
+# Codex 只在開場的 session_meta 寫一次 cwd，那一行沒有角色字串；不放它過粗篩，
+# 回放出來的 Codex 卡就永遠沒有來源專案（實測治理庫 40 張卡的 cwd 是空的）。
+SESSION_META_TYPE = "session_meta"
+SESSION_META_MARKER = b'"session_meta"'
+SCAN_MARKERS = (*ROLE_MARKERS, SESSION_META_MARKER)
 # 文件裡的 owner 裁定句：只挖明確標記 owner 裁定或 owner 原話引號的行，其餘留給人。
 DOC_RULING_REGEX = re.compile(r"owner\s*(?:已)?裁(?:定|示|決)|owner[:：]\s*[「\"]", re.IGNORECASE)
 DECISION_KEY_REGEX = re.compile(rf"^{re.escape(memspec.DECISION_KEY_FIELD)}:\s*(\S.*)$", re.MULTILINE)
@@ -137,6 +143,7 @@ def utterances(path):
     record, exactly as the online tail reader stops walking back at one.
     """
     pending = []
+    session_cwd = ""
     try:
         stream = Path(path).open("rb")
     except OSError:
@@ -146,13 +153,19 @@ def utterances(path):
             raw = raw.rstrip(b"\r\n")
             if len(raw) > memspec.COMPACT_MAP_MAX_LINE_BYTES:
                 continue  # a 2MB line is a pasted payload, not a sentence
-            if not any(marker in raw for marker in ROLE_MARKERS):
+            if not any(marker in raw for marker in SCAN_MARKERS):
                 continue
             try:
                 item = json.loads(raw.decode("utf-8"))
             except (UnicodeDecodeError, ValueError):
                 continue  # a truncated or half-written line ends nothing
             if not isinstance(item, dict):
+                continue
+            if item.get("type") == SESSION_META_TYPE:
+                # Claude writes cwd on every record; Codex writes it once, here.
+                meta = item.get("payload")
+                if isinstance(meta, dict) and isinstance(meta.get("cwd"), str):
+                    session_cwd = meta["cwd"]
                 continue
             text = capture.assistant_text(item)
             if text is not None:
@@ -165,6 +178,9 @@ def utterances(path):
             pending = []
             owner = owner_text(item)
             if owner:
+                if session_cwd and not isinstance(item.get("cwd"), str):
+                    # 補在紀錄上，落點與卡上的 cwd 欄位就與線上捕捉同一個來源。
+                    item["cwd"] = session_cwd
                 yield number, owner, question, item
 
 
@@ -363,12 +379,18 @@ def _write_draft(vault, source, sentence, counts, dry_run):
 
 
 def harvest(home, vaults, docs=(), since=None, limit=None, dry_run=False):
-    """Replay the online capture rules over every transcript and document."""
+    """Replay the online capture rules over every transcript and document.
+
+    落點與線上捕捉同一份規則（capture_route）：一句話屬於哪個專案，卡就進那個專案
+    的記憶庫；治理庫只收 cwd 不屬於任何已登記專案庫的話，並繼續持有 manifest、
+    草稿與盤點數字。
+    """
     vault = governance_vault(vaults)
     counts = {key: 0 for key in ("files", "utterances", "grants", "corrections", "rulings", "duplicates", "rejected", "drafts")}
     manifest = load_manifest(vault)
     seen = dict(manifest)
-    written = 0
+    landed = {}
+    routes = {}
     now = _utc_stamp()
 
     for path in [*claude_transcripts(home), *codex_transcripts(home)]:
@@ -388,30 +410,49 @@ def harvest(home, vaults, docs=(), since=None, limit=None, dry_run=False):
         session_id = path.stem
         for number, text, question, item in utterances(path):
             counts["utterances"] += 1
+            found = candidates(text, question)
+            if not found:
+                continue
             source = f"{key}:{number}"
-            for kind, directory, digest, label, body, summary in candidates(text, question):
+            event = _record_event(item, session_id)
+            # 落點按 cwd 算一次就快取：一場對話幾百句話算的是同一個答案，而每次算都要
+            # 去問檔案系統「這個庫登記了嗎」。
+            if event["cwd"] not in routes:
+                routes[event["cwd"]] = capture_route.capture_vault(event["cwd"], vault, home)
+            target = routes[event["cwd"]]
+            for kind, directory, digest, label, body, summary in found:
                 if memspec.CAPTURE_REJECT_REGEX.search(body):
                     counts["rejected"] += 1
                     continue
-                if capture.existing_capture(vault, directory, kind, digest) is not None:
+                # 一句話一張卡：治理庫也要問，否則 2026-09-06 之前落在治理庫的同一
+                # 句話會在專案庫裡再長出一張。
+                if any(
+                    capture.existing_capture(item_vault, directory, kind, digest) is not None
+                    for item_vault in dict.fromkeys((target, vault))
+                ):
                     counts["duplicates"] += 1
                     continue
                 if dry_run:
                     stamp = _record_stamp(item, fallback)
-                    print(f"WOULD WRITE {directory}/{kind}-{stamp[:10].replace('-', '')}-{digest}.md {source}")
+                    landing = "" if target == vault else f" -> {os.fspath(target)}"
+                    print(
+                        f"WOULD WRITE {directory}/{kind}-{stamp[:10].replace('-', '')}-{digest}.md "
+                        f"{source}{landing}"
+                    )
                     counts[f"{kind}s"] += 1
+                    landed[target] = landed.get(target, 0) + 1
                     continue
                 replay = capture.Replay(
                     stamp=_record_stamp(item, fallback),
                     fields=(("source", source), ("harvested_at", now)),
                 )
                 capture.write_capture(
-                    vault, directory, kind, digest, label, body,
-                    _record_event(item, session_id), None, summary=summary, replay=replay,
+                    target, directory, kind, digest, label, body,
+                    event, None, summary=summary, replay=replay,
                 )
                 if replay.status == capture.STATUS_WRITTEN:
                     counts[f"{kind}s"] += 1
-                    written += 1
+                    landed[target] = landed.get(target, 0) + 1
                 elif replay.status == capture.STATUS_DUPLICATE:
                     counts["duplicates"] += 1
                 else:
@@ -425,9 +466,12 @@ def harvest(home, vaults, docs=(), since=None, limit=None, dry_run=False):
     if not dry_run:
         save_manifest(vault, seen)
         # 新卡必須立刻可喚回；索引鎖被別人拿著就把索引標舊，讓下一個讀者重建。
-        if written and memsearch.build_index(vault, lock_timeout=INDEX_LOCK_SECONDS).get("status") != "built":
-            memsearch.mark_stale(vault)
-    return counts, vault
+        # 卡可能落在好幾個專案庫，每個寫過的庫都要重建自己的索引。
+        for target in landed:
+            if memsearch.build_index(target, lock_timeout=INDEX_LOCK_SECONDS).get("status") != "built":
+                memsearch.mark_stale(target)
+    routed = {os.fspath(target): count for target, count in landed.items() if target != vault}
+    return counts, vault, routed
 
 
 CARD_QUESTION_PREFIX = "問（助理）："
@@ -1076,6 +1120,73 @@ def _selftest():
                 ),
             ))
 
+            # 落點（U65）：一句話屬於哪個專案，回放出來的卡就進那個專案的記憶庫。
+            # 自帶一組獨立 fixture，才不會動到上面每一條對治理庫張數的斷言。
+            route_home = root / "route-home"
+            route_vault = (root / "route-vault").resolve()
+            route_vault.mkdir()
+            (route_vault / memspec.WORK_LEDGER_FILENAME).write_text("# ledger\n", encoding="utf-8")
+            route_project = root / "route-work" / "proj"
+            route_project.mkdir(parents=True)
+            route_native = (
+                route_home / ".claude" / "projects"
+                / capture_route.project_slug(route_project) / "memory"
+            )
+            route_native.mkdir(parents=True)
+            (route_native / "seed.md").write_text(
+                "---\nname: seed\ndescription: a registered project vault\n---\nbody\n",
+                encoding="utf-8",
+            )
+            route_directory = route_home / ".claude" / "projects" / "C--Route"
+            route_directory.mkdir(parents=True)
+            route_sentence = "你可以直接改那個路由設定檔"
+            (route_directory / "route-session.jsonl").write_text(
+                line({"type": "user", "timestamp": "2026-08-02T10:00:00.000Z",
+                      "sessionId": "sess-route-1", "cwd": os.fspath(route_project),
+                      "message": {"role": "user", "content": route_sentence}}) + "\n",
+                encoding="utf-8",
+            )
+            route_counts, route_governance, route_routed = harvest(route_home, [route_vault])
+            route_cards = sorted((route_native / memspec.GRANT_DIRECTORY).glob("*.md"))
+            checks.append((
+                "an offline replay files the card in the cwd's project vault, not the governance vault",
+                route_counts["grants"] == 1
+                and len(route_cards) == 1
+                and route_sentence in route_cards[0].read_text(encoding="utf-8")
+                and not (route_vault / memspec.GRANT_DIRECTORY).exists()
+                and route_routed == {os.fspath(route_native.resolve()): 1}
+                and route_governance == route_vault,
+            ))
+
+            # Codex 的 cwd 只在開場那一行，補上之後回放的卡才有來源專案可判。
+            codex_route_directory = route_home / ".codex" / "sessions" / "2026" / "09" / "05"
+            codex_route_directory.mkdir(parents=True)
+            codex_route_sentence = "你可以直接改那個回放設定檔"
+            (codex_route_directory / "rollout-2026-09-05T09-00-00-routeone.jsonl").write_text(
+                "\n".join([
+                    line({"type": "session_meta",
+                          "payload": {"id": "sess-codex-route", "cwd": os.fspath(route_project)}}),
+                    line({"timestamp": "2026-09-05T09:00:00Z", "type": "response_item",
+                          "payload": {"type": "message", "role": "user",
+                                      "content": [{"type": "input_text", "text": codex_route_sentence}]}}),
+                ]) + "\n",
+                encoding="utf-8",
+            )
+            codex_counts, _codex_governance, codex_routed = harvest(route_home, [route_vault])
+            codex_card = next(
+                (path for path in sorted((route_native / memspec.GRANT_DIRECTORY).glob("*.md"))
+                 if codex_route_sentence in path.read_text(encoding="utf-8")),
+                None,
+            )
+            checks.append((
+                "a Codex session's cwd comes from session_meta, so its card routes and records it",
+                codex_counts["grants"] == 1
+                and codex_card is not None
+                and f"{memspec.CWD_FIELD}: {os.fspath(route_project)}" in codex_card.read_text(encoding="utf-8")
+                and codex_routed == {os.fspath(route_native.resolve()): 1}
+                and not (route_vault / memspec.GRANT_DIRECTORY).exists(),
+            ))
+
             completeness = next(text for text in first_lines if text.startswith("COMPLETENESS "))
             checks.append((
                 "the harvest reports the first three completeness numbers",
@@ -1085,7 +1196,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 18
+    total = 20
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
@@ -1145,10 +1256,13 @@ def main(argv=None):
             print(text)
         return 0
 
-    counts, vault = harvest(
+    counts, vault, routed = harvest(
         home, vaults, docs=options.docs, since=options.since, limit=options.limit, dry_run=options.dry_run
     )
     print("HARVEST " + " ".join(f"{key}={value}" for key, value in counts.items()))
+    # 治理庫之外還有別的庫收到卡，說出來；只印 HARVEST 那行會看不見它們。
+    for target, count in sorted(routed.items(), key=lambda pair: (-pair[1], pair[0])):
+        print(f"ROUTED cards={count} -> {target}")
     stats = vault_stats(vault)
     print(f"COMPLETENESS events={stats['events']} decisions={stats['decisions']} "
           f"unaliased={stats['unaliased']}/{stats['cards']}")

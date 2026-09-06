@@ -21,6 +21,7 @@ _COMMANDS = {
     "exam": ("exam.exam_runner", "main", ()),
     "trust": ("adapters.codex.hook_trust", "main", ("check",)),
     "harvest": ("epitype.harvest", "main", ()),
+    "capture-route": ("epitype.capture_route", "main", ()),
     "dream": ("epitype.dream", "main", ()),
     "aliases": ("epitype.alias_batch", "main", ()),
     "install": ("install.graft", "main", ("install",)),

@@ -265,7 +265,8 @@ def write_capture(vault, directory_name, kind, digest, label, body, event, start
             f"description: {label} {stamp[:10]}: {summary}\n"
             f"{memspec.SCOPE_FIELD}: governance-core\n"
             f"captured_at: {stamp}\n"
-            f"cwd: {one_line(event.get('cwd'))}\n"
+            # cwd 是落點的證據，也是事後歸戶（capture_route）唯一能依據的來源專案。
+            f"{memspec.CWD_FIELD}: {one_line(event.get('cwd'))}\n"
             f"session_id: {one_line(event.get('session_id', event.get('sessionId')))}\n"
             f"{provenance}"
             "---\n"

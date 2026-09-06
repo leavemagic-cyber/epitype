@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- U65 捕捉落點：專案的進專案庫。2026-09-06 稽核實證：自動捕捉的 owner 事件卡
+  （`grants/ corrections/ rulings/`）一律落治理庫，所以在專案對話裡講、話裡明講該專案的
+  裁定與糾正被寫進通用庫——治理庫 132 張事件卡裡 74 張的 `cwd` 指向另一個已登記的專案庫。
+  規則改成依「這場對話屬於哪個專案」落點：`cwd` 或其任一層祖先對應到已登記的原生記憶庫
+  （已有索引或卡）就落最相關的那一個，都沒有才落治理庫；宿主開的空殼不算庫（卡退回治理庫
+  但仍記 `cwd`）。落點規則集中在新的 `epitype/capture_route.py`，線上 hook
+  （`_hook_common.capture_vault`，原生庫解析也搬到同一處）與離線回放（`harvest`）共用一份；
+  回放另補 Codex 的 `cwd`（只在開場 `session_meta` 出現一次，實測 40 張卡因此沒有來源專案），
+  並為每個寫過的庫各自重建索引、同句話在治理庫已有卡就不再於專案庫長第二張。既有誤置卡不由
+  捕捉端搬：`epitype capture-route <vault> --audit` 唯讀列出 `MISROUTED <卡> -> <庫>` 與統計，
+  `--apply` 才搬（`os.replace`、同名加 `-2`、永不刪，並在正文補一行歸戶註記）。跨專案通用的
+  長效規則仍該進治理庫，但那是人立卡的判斷，自動捕捉不猜。合成測試的家目錄一併隔離
+  （`run_synthetic` 預設把 HOME 指到暫存路徑）：真機上 `C:\` 是每個暫存 cwd 的祖先且它的原生庫
+  就是治理庫，沒有這道隔離，一次 selftest 就會把卡寫進真庫。`capture_route --selftest` 11、
+  `recall_hook --selftest` 44→45、`harvest --selftest` 18→20。詳見 FAILURE_MODES.md §17。
+
 - U64 引用不算再提議：2026-09-06 owner 回報閘門實測表時引用一句已判 `forbidden` 的話
   當測試案例的證據，被 Stop 閘當成又端回去而擋下整份報告；同一天為同一條 `forbidden`
   寫驗證腳本，腳本裡的禁詞字串常值也被寫檔閘規則 A 擋下。規則：`forbidden` 命中若整段
