@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- U64 引用不算再提議：2026-09-06 owner 回報閘門實測表時引用一句已判 `forbidden` 的話
+  當測試案例的證據，被 Stop 閘當成又端回去而擋下整份報告；同一天為同一條 `forbidden`
+  寫驗證腳本，腳本裡的禁詞字串常值也被寫檔閘規則 A 擋下。規則：`forbidden` 命中若整段
+  落在引用區段內（中文引號「」『』、直角＋彎雙引號、彎單引號、單行反引號／```圍籬```、
+  Markdown 引用行 `>`）不算再提議；區段外仍有命中——含同訊息引用一次、另一處裸提
+  一次——照擋。兩道閘共用 `stop_gate._forbidden_fragment`，改一處兩邊都好；規則 A
+  「只豁免定義該裁定的卡本身」（U63）未動。ASCII 直引號沿用既有排除
+  （2026-09-03 對抗審查 #5：英文縮寫會配假引號區間）。`stop_gate --selftest` 18→23、
+  `pretooluse_gate --selftest` 73→75。詳見 FAILURE_MODES.md §16。
+
 ## v1.2.0 (2026-09-06)
 
 The hot-path release. Measured on a machine at 100% CPU with two real vaults

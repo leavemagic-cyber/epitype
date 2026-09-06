@@ -2182,6 +2182,33 @@ def _selftest():
                 and "k-broken-forbidden" in broken_out.get("additionalContext", ""),
             ))
 
+            # U64: 規則 A 走 stop_gate._forbidden_fragment，引號豁免同一處修好兩邊都有。
+            quoted_write_result, quoted_write_out = write_call(
+                "Write",
+                {
+                    "file_path": os.fspath(write_root / "check_forbidden.py"),
+                    "content": 'FORBIDDEN_PHRASE = "兩套參數"\nassert FORBIDDEN_PHRASE not in reply\n',
+                },
+            )
+            checks.append((
+                "forbidden 落在寫入內容的引號字串字面值內是引用／驗證腳本，不擋",
+                quoted_write_result.returncode == 0
+                and "permissionDecision" not in quoted_write_out,
+            ))
+
+            bare_write_result, bare_write_out = write_call(
+                "Write",
+                {
+                    "file_path": os.fspath(write_root / "check_forbidden2.py"),
+                    "content": 'FORBIDDEN_PHRASE = "兩套參數"\n# 這裡直接寫兩套參數，沒加引號。\n',
+                },
+            )
+            checks.append((
+                "同一份內容除了引號內的引用還有裸禁詞，裸的那份照擋",
+                bare_write_result.returncode == 0
+                and bare_write_out.get("permissionDecision") == "deny",
+            ))
+
             missing_config = root / "missing-config.json"
             missing = run_synthetic(
                 Path(__file__),
@@ -2200,7 +2227,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 73
+    total = 75
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

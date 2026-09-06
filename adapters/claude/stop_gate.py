@@ -262,14 +262,40 @@ def _strings(value):
     return [item for item in value if isinstance(item, str) and item] if isinstance(value, list) else []
 
 
+def _quoted_spans(message):
+    """Character ranges of `message` that cite something rather than propose it:
+    the owner's own quoting conventions (memspec.STOP_GATE_QUOTE_TEXT_REGEX) plus a
+    Markdown blockquote line in full.
+
+    U64: a Stop-gate report that cites a blocked phrase as evidence, or a
+    write-gate script that defines it as a string literal, is not the model
+    re-opening the ruling. Spans are merged so a hit is judged against one
+    contiguous range rather than accidentally straddling two adjacent ones."""
+    if not memspec.STOP_GATE_QUOTE_MASK_ENABLED:
+        return []
+    spans = [match.span() for match in memspec.STOP_GATE_QUOTE_TEXT_REGEX.finditer(message)]
+    spans.extend(match.span() for match in memspec.STOP_GATE_BLOCKQUOTE_LINE_REGEX.finditer(message))
+    merged = []
+    for start, end in sorted(spans):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
 def _forbidden_fragment(decision, message, defects):
-    """The matched fragment of the first usable `forbidden` pattern that fires.
+    """The matched fragment of the first usable `forbidden` pattern that fires
+    outside a quoted citation (U64: see _quoted_spans) — a hit fully inside a
+    quoted span is a citation, not a restatement; one outside still blocks,
+    including a second, unquoted occurrence of a pattern already cited once.
 
     A pattern the shared validator rejects is dropped and named on stderr, never
     silently: an unusable pattern is a ruling that stopped being enforced, and the
     turn still ends rather than being blocked by a card nobody can fix."""
     from pretooluse_gate import _compile_trigger_regex
 
+    quoted = _quoted_spans(message)
     for pattern in decision.forbidden:
         try:
             regex = _compile_trigger_regex(pattern)
@@ -282,8 +308,9 @@ def _forbidden_fragment(decision, message, defects):
                 )
             )
             continue
-        found = regex.search(message)
-        if found is not None:
+        for found in regex.finditer(message):
+            if any(start <= found.start() and found.end() <= end for start, end in quoted):
+                continue
             return _one_line(found.group(0)) or _one_line(pattern)
     return None
 
@@ -579,6 +606,58 @@ def _selftest():
                 and not forbidden_result.stderr,
             ))
 
+            # U64: citing a forbidden phrase as evidence is not re-proposing it.
+            quoted_result, quoted_value, _ = run(
+                "實測表：「虛擬盤先用不同參數」是被擋下的例子，僅供舉例說明。"
+            )
+            checks.append((
+                "forbidden 落在中文引號「」內是引用，不算再提議",
+                quoted_result.returncode == 0
+                and not quoted_result.stdout.strip()
+                and not quoted_value,
+            ))
+
+            backtick_result, backtick_value, _ = run(
+                "程式碼片段：`兩套參數` 只是這裡的變數命名範例，不是提議。"
+            )
+            checks.append((
+                "forbidden 落在反引號內是引用，不算再提議",
+                backtick_result.returncode == 0
+                and not backtick_result.stdout.strip()
+                and not backtick_value,
+            ))
+
+            blockquote_result, blockquote_value, _ = run(
+                "引用回顧：\n> 虛擬盤先用不同參數跑一週再說\n以上是先前被擋下的話，現在已經照裁定改了。"
+            )
+            checks.append((
+                "forbidden 整行落在 > 引用行內是引用，不算再提議",
+                blockquote_result.returncode == 0
+                and not blockquote_result.stdout.strip()
+                and not blockquote_value,
+            ))
+
+            table_result, table_value, _ = run(
+                "| 案例 | 結果 |\n| --- | --- |\n| 「虛擬盤先用不同參數」 | 擋下 |\n"
+            )
+            checks.append((
+                "forbidden 落在表格儲存格的引號內是引用，不算再提議",
+                table_result.returncode == 0
+                and not table_result.stdout.strip()
+                and not table_value,
+            ))
+
+            mixed_result, mixed_value, _ = run(
+                "owner 說過「虛擬盤先用不同參數」不行，但我還是想虛擬盤先用不同參數看看。"
+            )
+            checks.append((
+                "同訊息一次加引號、一次沒加：沒加引號那次仍照擋",
+                mixed_result.returncode == 0
+                and mixed_value.get("decision") == "block"
+                and "虛擬必須鏡像實盤" in mixed_value.get("reason", "")
+                and "虛擬盤先用不同參數" in mixed_value.get("reason", ""),
+            ))
+
             question_result, question_value, _ = run(
                 "先講結論。虛擬盤要不要改成鏡像實盤，還是維持現狀？"
             )
@@ -814,7 +893,7 @@ def _selftest():
             clear_recall_markers(session_id)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 18
+    total = 23
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

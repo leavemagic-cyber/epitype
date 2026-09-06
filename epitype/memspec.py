@@ -1313,3 +1313,22 @@ COMMITMENT_NOISE_PATTERN = (
     r"|背景|子代理|正在跑|跑完|驗收官|派工)"
 )
 COMMITMENT_NOISE_REGEX = re.compile(COMMITMENT_NOISE_PATTERN, re.IGNORECASE)
+
+# ── U64 引用不是再提議（append-only 常數區塊；實作在 stop_gate._forbidden_fragment，
+# pretooluse_gate 的規則 A 經 stop_gate._forbidden_fragment 共用同一份，改一處兩邊都好）
+# ─────────────────────────────────────────────────────────────────────────
+# 2026-09-06 事故：owner 要求的閘門實測表裡引用禁詞當測試案例的證據（「要不要我修復
+# 這個錯誤」→ 擋下），被 Stop 閘判定成又把已裁定的事端回去，整段報告被擋；為同一條
+# forbidden 寫驗證腳本時，腳本裡的禁詞字面值（字串常值）也被寫檔閘規則 A 擋下，只能
+# 用字串拼接繞過。規則：forbidden 命中若整段落在引用區段內，不算再提議；區段外仍有
+# 命中——包含同一則訊息裡引用一次、另一處裸提一次——照擋。引用區段沿用既有的
+# RULING_QUOTED_TEXT_PATTERN（「」『』、直角＋彎雙引號、彎單引號、單行反引號與
+# ```圍籬```），另加 Markdown 引用行（開頭 `>`，整行遮罩）。ASCII 直引號 '…' 沿用
+# RULING_QUOTED_TEXT_PATTERN 既有的排除，不在此重新收錄——2026-09-03 對抗審查 #5 已
+# 記錄原因：英文縮寫 don't 的單一撇號會配對出假引號區間，這條規則本身就是同一個地雷
+# 的前車之鑑。啟用旗標留給 owner 一鍵關閉，不必改程式碼。
+STOP_GATE_QUOTE_TEXT_PATTERN = RULING_QUOTED_TEXT_PATTERN
+STOP_GATE_QUOTE_TEXT_REGEX = re.compile(STOP_GATE_QUOTE_TEXT_PATTERN)
+STOP_GATE_BLOCKQUOTE_LINE_PATTERN = r"^[ \t]*>.*$"
+STOP_GATE_BLOCKQUOTE_LINE_REGEX = re.compile(STOP_GATE_BLOCKQUOTE_LINE_PATTERN, re.MULTILINE)
+STOP_GATE_QUOTE_MASK_ENABLED = True

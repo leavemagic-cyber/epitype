@@ -511,3 +511,43 @@ python epitype/commitments.py --selftest
 python tests/recall_regression.py --selftest
 python epitype/commitments.py "<vault>" --requalify --dry-run
 ```
+
+## 16. U64：引用禁詞當證據，被當成又提議一次
+
+### Symptom
+
+owner 要 Stop 閘的「閘門實測表」報告，表格裡引用一句已被判 `forbidden` 的話當測試
+案例（例：一格寫著「要不要我修復這個錯誤」→ 擋下）。這段報告本身沒有再提議任何事，
+卻被 Stop 閘判定成模型又把已裁定的事端回去，整份報告被擋下。同一天，為同一條
+`forbidden` 寫驗證腳本時，腳本裡定義該禁詞的字串常值也被寫檔閘規則 A 擋下——只能
+用字串拼接繞過，寫不出一份直接了當的腳本。
+
+### Why it happens
+
+`stop_gate._forbidden_fragment`（§10）與寫檔閘規則 A（§11）都只是對整段文字跑
+`forbidden` 正則，命中就擋；正則不知道命中的字落在引號裡還是裸露在外，「引用一句
+被否決的話當證據」與「把被否決的話當提議再講一次」在字面上是同一件事。兩道閘共用
+同一個 `_forbidden_fragment`，這個盲點兩邊都有。
+
+### Epitype countermeasure
+
+`_forbidden_fragment` 在跑 `forbidden` 正則之前，先算出訊息裡「引用區段」的字元範圍
+（`stop_gate._quoted_spans`）：owner 既有的 `memspec.RULING_QUOTED_TEXT_PATTERN`
+（中文引號「」『』、直角＋彎雙引號、彎單引號、單行反引號與```圍籬```）,另加 Markdown
+引用行（開頭 `>`，整行算引用）。命中的字若整段落在某個引用區段內，不算再提議；只要
+有一部分落在區段外，仍然照擋——同一則訊息裡引用一次、另一處又裸提一次，裸的那次
+一樣擋。寫檔閘規則 A 經同一個函式，兩邊同一處修好；規則 A「只豁免定義該裁定的卡
+本身」（§10 末段、U63）完全沒動，引用豁免與那條豁免各自成立、互不放寬。
+
+ASCII 直引號 `'…'` 沿用 `RULING_QUOTED_TEXT_PATTERN` 既有的排除，不在此重新收錄：
+英文縮寫 don't 的單一撇號會配對出假引號區間（2026-09-03 對抗審查 #5 的教訓），把它
+納入等於在寫檔閘（腳本語言常見單引號字串）重新踩一次同一個地雷。啟用旗標
+`memspec.STOP_GATE_QUOTE_MASK_ENABLED` 留給 owner 一鍵關閉。
+
+### Self-verification
+
+```powershell
+python adapters/claude/stop_gate.py --selftest
+python adapters/claude/pretooluse_gate.py --selftest
+python epitype/memspec.py --selftest
+```
