@@ -241,6 +241,17 @@ The `Stop` hook compares the turn's last assistant message against the active de
 
 Every other path fails open: a missing or unreadable config, an unusable pattern (named on stderr, never silently dropped), a vault with no decision cards, or the hook's own deadline all let the turn end.
 
+### How to write a `forbidden` pattern
+
+Write the shape of the sentence that re-opens the ruling, not the name of the thing that was ruled out. A bare noun blocks every mention of it — including the one sentence the owner most needs to read: "here is why we are *not* adopting X". That is the 2026-09-06 incident: explaining a rejected option back to the owner was blocked as if it were a fresh proposal.
+
+- Write this: `(建議|要不要|是否|應該).{0,12}(納入|採用|改成)X` — the proposing verb is inside the pattern, so only a fresh proposal matches.
+- Not this: `X` — every explanation, every retrospective, and every edit of the card that defines the rule matches too.
+
+`card_lint` warns `forbidden-bare-term` on an item that carries no proposing verb, is at most `memspec.FORBIDDEN_BARE_TERM_MAX_CHARS` (8) characters long, and contains no regex metacharacter — the three signals a machine can read off a bare noun. WARN, not FAIL: a short pattern that does carry a verb is legitimate, and a literal may be exactly what the owner wants.
+
+The rule has to stay editable, so `PreToolUse` rule A (§11) exempts two shapes from blocking: a write whose post-write text carries the same `decision_key` as the pattern that fired, and one whose matched fragment sits inside that text's own frontmatter `forbidden:` block. Changing a rule is always allowed; re-stating it anywhere else is not.
+
 ### Self-verification
 
 ```powershell
@@ -265,9 +276,9 @@ The action gate matched on the Bash command string, so a file written through `W
 
 `PreToolUse` inspects the text a file-writing call is about to put on disk — `Write`'s `content`, `Edit`'s `new_string`, each `new_string` of a `MultiEdit`, and the equivalents of the Codex-shaped tool names.
 
-Rule A blocks new content matching any `forbidden` pattern of an active decision card in the cwd vault or the governance vault, quoting the owner and the matched fragment. The decision cards, the pattern validator, and the manifest cache are the Stop gate's own, so a ruling cannot be enforced at the end of a turn and ignored mid-turn.
+Rule A blocks new content matching any `forbidden` pattern of an active decision card in the cwd vault or the governance vault, quoting the owner and the matched fragment. The decision cards, the pattern validator, and the manifest cache are the Stop gate's own, so a ruling cannot be enforced at the end of a turn and ignored mid-turn. Editing the rule itself is exempt: a hit is ignored when the post-write text carries the same `decision_key` as the card that fired, or when the matched fragment sits inside that text's own frontmatter `forbidden:` block — otherwise the card defining a pattern is the one file that pattern makes unwritable (2026-09-06 incident; §10 covers how to write the pattern so this comes up less).
 
-Rule B applies when the target is a card of a registered vault — `.md`, no `_`/`.` prefixed path part, not the memory index, by the same filter `memsearch` uses. The prospective post-write text is checked by `card_lint.check_card`, the same single-card check the CLI scan runs: FAIL (a missing required field for the card's type, broken frontmatter) blocks and names the missing fields with a line to copy; WARN only advises through `additionalContext`. For an `Edit`, the post-write text is the current file with one `old_string`→`new_string` substitution applied; when `old_string` is not in the file, nothing is judged and the call proceeds — a guessed result would block a card nobody wrote.
+Rule B applies when the target is a card of a registered vault — `.md`, no `_`/`.` prefixed path part, not the memory index, by the same filter `memsearch` uses. The prospective post-write text is checked by `card_lint.check_card`, the same single-card check the CLI scan runs: FAIL (a missing required field for the card's type, broken frontmatter) blocks and names the missing fields with a line to copy; WARN only advises through `additionalContext`. For an `Edit`, the post-write text is the current file with one `old_string`→`new_string` substitution applied; when `old_string` is not in the file, nothing is judged and the call proceeds — a guessed result would block a card nobody wrote. A generic card whose frontmatter carries no date is not blocked when the date can be read out of its body or its filename, since that is the same derivation the CLI scan applies; the git-history source is not available here, because the gate judges text that is not on disk yet.
 
 A block is audited to `_GATE_LOG.jsonl` as `write_block` with the rule and either the `decision` key or the `card_path`, never the content itself. One `(rule, file, content digest)` blocks once per session, so an assistant that cannot satisfy a ruling is not denied the same write forever.
 
@@ -315,7 +326,36 @@ python adapters/claude/stop_gate.py --selftest
 python epitype/commitments.py "<governance vault>" --list
 ```
 
-## 13. 事件捕捉精準度：量測方法與已知盲點
+## 13. The tidy-up pass exists and never runs
+
+### Symptom
+
+The vault has an offline inventory command that names everything needing attention — cards failing their type contract, cards with no aliases, zombie pending lines, unsettled promises, unreviewed drafts, aging event cards. Nobody runs it. Months later the numbers are large enough that nobody wants to start, and the memory system is quietly degrading while every hook still reports green.
+
+### Why it happens
+
+The command is correct and the schedule is a person. A tool that must be remembered competes with the work it was supposed to protect, and it loses. The usual fix — "run it nightly" — assumes the operator's machine, timezone, and habits, which a shared repository cannot assume: a cron line installed on someone else's laptop is an unrequested background job.
+
+### Epitype countermeasure
+
+`dream.mode` decides who remembers. The default, `piggyback`, needs no scheduler and no habit: `SessionStart` compares `dream_state.json`'s last completion against `dream.interval_hours`, and when the gap is wide enough it starts `epitype/dream.py --scheduled` as a detached, low-priority process and returns immediately — the session never waits, and a pid-bearing lock (stale after 30 minutes) keeps concurrent sessions from starting a second one. Operators who prefer a real schedule use `graft install --dream nightly [--at HH:MM]`, which registers one daily system task and stops the piggyback trigger so the same day is not swept twice; `graft doctor` prints the mode and the last completion, and `graft uninstall` unregisters the task. `off` disables both.
+
+The failure directions are bounded on purpose:
+
+- **The dream must not become a second failure surface.** The background run reads vaults and writes only `<governance vault>/.epitype/` (pack, JSON pack, state, log). It gives itself ten minutes and marks the sections it did not reach; any exception lands in `dream.log`. A hook that cannot find a Python executable, or whose spawn fails, logs one line and skips — `SessionStart` injection is never affected.
+- **It reports, it does not apply.** A pack is a review packet; every suggestion names the existing CLI command that would act on it, and no model is called. An installed Epitype never spends model budget on its own.
+- **Announcing it must not become noise.** The next session prints exactly one line — the four headline numbers and the pack path — and marks it announced; a session resumed by compaction prints nothing, because it is not a new day. A dream that found nothing still prints a short line, since silence cannot be distinguished from a dream that never ran.
+
+### Self-verification
+
+```powershell
+python epitype/dream.py --selftest
+python adapters/claude/sessionstart_hook.py --selftest
+python install/graft.py --selftest
+python install/graft.py install --home <disposable home> --dream nightly --dry-run
+```
+
+## 14. 事件捕捉精準度：量測方法與已知盲點
 
 ### Symptom
 

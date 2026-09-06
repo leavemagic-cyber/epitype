@@ -95,6 +95,86 @@ def _decision_block(vault, label, started_at):
     return "\n".join(lines)
 
 
+def _dream_state(governance):
+    """狀態檔本身，不 import epitype.dream：那條 import 每一場開場都要付 ~35 ms，
+    而開場真正需要的只是「上次幾點跑完」這個數字。"""
+    path = governance / memspec.DREAM_DIRECTORY / memspec.DREAM_STATE_FILENAME
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _dream_spawn(settings, governance, started_at=None, launcher=None, source=None):
+    """順路做：距上次完成超過 interval_hours 就起一個脫鉤的低優先權背景夢，hook 不等
+    它跑完。nightly 交給系統排程（否則同一天會跑兩次），off 什麼都不做。
+    開場預算剩不到 DREAM_SPAWN_RESERVE_SECONDS 就不起——夢晚一場沒關係，記憶注入
+    掉一場才是真的損失。壓縮續場同理不起：那不是新的一場，而長回合裡壓縮幾次就起幾次
+    背景程序，剛好搶走這場正在用的 CPU。"""
+    if isinstance(source, str) and source == "compact":
+        return False
+    if settings.get(memspec.DREAM_MODE_FIELD) != memspec.DREAM_MODE_PIGGYBACK:
+        return False
+    if started_at is not None:
+        remaining = memspec.HOOK_TIMEOUT_SECONDS - (time.monotonic() - started_at)
+        if remaining < memspec.DREAM_SPAWN_RESERVE_SECONDS:
+            return False
+    completed = _dream_state(governance).get(memspec.DREAM_STATE_COMPLETED_EPOCH_FIELD)
+    hours = settings.get(
+        memspec.DREAM_INTERVAL_HOURS_FIELD, memspec.DREAM_DEFAULT_INTERVAL_HOURS
+    )
+    if not isinstance(completed, bool) and isinstance(completed, (int, float)):
+        if (time.time() - completed) < hours * 3600:
+            return False
+    from epitype import dream  # 只有到期的那一場付這個 import 的錢
+
+    return dream.spawn(governance, launcher=launcher)
+
+
+def _dream_notice(governance, source, settings):
+    """夢跑完後的下一場開場印一行，只印一次。壓縮續場不印——那不是新的一場。
+    沒有待處理項也印一行短的：不然「夢跑完但乾淨」與「夢從沒跑」長得一樣。"""
+    if settings.get(memspec.DREAM_MODE_FIELD) == memspec.DREAM_MODE_OFF:
+        return None
+    if isinstance(source, str) and source == "compact":
+        return None
+    state = _dream_state(governance)
+    completed = state.get(memspec.DREAM_STATE_COMPLETED_FIELD)
+    if not isinstance(completed, str) or not completed:
+        return None
+    if state.get(memspec.DREAM_STATE_NOTIFIED_FIELD) == completed:
+        return None
+    headline = state.get(memspec.DREAM_STATE_HEADLINE_FIELD)
+    headline = headline if isinstance(headline, dict) else {}
+    numbers = {}
+    for field in memspec.DREAM_HEADLINE_FIELDS:
+        value = headline.get(field)
+        numbers[field] = value if isinstance(value, int) and not isinstance(value, bool) else 0
+    # 標記失敗就不印：印不掉的通知會每一場重複，而重複的開場行比漏一行更糟。
+    if not _dream_mark_notified(governance, state, completed):
+        return None
+    when = state.get(memspec.DREAM_STATE_DATE_FIELD)
+    when = when if isinstance(when, str) and when else completed[:10]
+    if not any(numbers.values()):
+        return memspec.DREAM_NOTICE_CLEAN_LINE.format(date=when)
+    pack = state.get(memspec.DREAM_STATE_PACK_FIELD)
+    return memspec.DREAM_NOTICE_LINE.format(
+        date=when, pack=pack if isinstance(pack, str) and pack else "-", **numbers
+    )
+
+
+def _dream_mark_notified(governance, state, completed):
+    path = governance / memspec.DREAM_DIRECTORY / memspec.DREAM_STATE_FILENAME
+    try:
+        value = dict(state)
+        value[memspec.DREAM_STATE_NOTIFIED_FIELD] = completed
+        path.write_text(json.dumps(value, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+        return True
+    except OSError:
+        return False
+
+
 def _vault_labels(vaults):
     """Directory names, falling back to the full path where a name repeats: every
     native cwd vault is called `memory`, so the short name alone can be a lie."""
@@ -127,6 +207,14 @@ def _handle(event, started_at):
     else:
         vaults = [vault for vault in resolved if vault in native or vault == governance]
 
+    source = event.get("source") if isinstance(event, dict) else None
+    dream = config.get(memspec.DREAM_CONFIG_FIELD) or {}
+    if not expired(started_at):
+        try:
+            _dream_spawn(dream, governance, started_at, source=source)
+        except Exception:
+            pass  # 夢起不來絕不影響開場注入
+
     # One line, first, so the budget cannot drop it: pending items with an entry
     # and no exit are exactly what resurfaces as wrong memory later.
     if not expired(started_at):
@@ -144,10 +232,34 @@ def _handle(event, started_at):
     # A card missing its type's required fields is a card the recall side will
     # hand over half-true. One line, and only when the scan finished inside its
     # own budget: half a vault's numbers are worse than no numbers.
+    # 同一趟掃描也餵下面那行順手任務：掃兩次就是同一份預算付兩次。
     if not expired(started_at):
-        malformed = card_lint.summary_line(vaults)
+        reports = card_lint.scan_vaults(vaults)
+        malformed = card_lint.summary_line(vaults, reports=reports)
         if malformed:
             pieces.append(malformed)
+
+        # owner 2026-09-06 裁定：卡沒有中文別名不是給 owner 的決定題，是本場 AI 順手
+        # 補的事。壓縮續場不印——那不是新的一場，翻譯任務也不該在同一場派兩次。
+        if source != "compact":
+            try:
+                translate = card_lint.no_chinese_line(reports, governance)
+            except Exception:
+                translate = None
+            if translate:
+                pieces.append(translate)
+
+    # 同一裁定的另一半，一場說一次：喚回的卡與現況不符就直接改，不要端回來問。
+    pieces.append(memspec.CARD_SELF_CORRECT_NOTICE)
+
+    # 夢的一行跟其他一行摘要放在一起，排在裁定之前：它是狀態，不是規則。
+    if not expired(started_at):
+        try:
+            notice = _dream_notice(governance, source, dream)
+        except Exception:
+            notice = None
+        if notice:
+            pieces.append(notice)
 
     # 2026-09-05 事故：owner 08-13 親裁的事被端回來當選項。A standing ruling the model
     # cannot see is a ruling it re-opens, so every session — including the one that
@@ -310,6 +422,60 @@ def _selftest():
                     and "card index detail" in broken_context
                     and "🧾" not in clean_context
                     and "card index detail" in clean_context,
+                )
+            )
+
+            # owner 2026-09-06：沒中文別名的卡不是 WARN，是本場的順手任務，每場換人。
+            translate_vault = root / "translate-vault"
+            translate_vault.mkdir()
+            (translate_vault / memspec.MEMORY_INDEX_FILENAME).write_text(
+                "# Translate\ntranslate index detail\n", encoding="utf-8"
+            )
+            for letter in "abcd":
+                (translate_vault / f"english-{letter}.md").write_text(
+                    f"---\nname: english-{letter}\ndescription: english only card {letter}\n"
+                    f"{memspec.LAST_VERIFIED_AT_FIELD}: 2026-09-01\n"
+                    f"{memspec.ALIASES_FIELD}:\n  - english alias {letter}\n"
+                    "metadata:\n  type: reference\n---\nbody\n",
+                    encoding="utf-8",
+                )
+            translate_config = root / "translate-config.json"
+            write_config(translate_config, [translate_vault])
+
+            def translate_run(source="startup"):
+                done = run_synthetic(Path(__file__), {"source": source}, translate_config)
+                value = json.loads(done.stdout) if done.stdout.strip() else {}
+                return done, value.get("hookSpecificOutput", {}).get("additionalContext", "")
+
+            first_run, first_context = translate_run()
+            second_run, second_context = translate_run()
+            _compact_run, compact_translate_context = translate_run("compact")
+            checks.append(
+                (
+                    "沒中文的卡列成一行順手任務（本場 ≤3 張），不是 WARN，也不佔卡片檢查那一行",
+                    first_run.returncode == 0
+                    and "🈳 順手補中文別名（本場 ≤3 張）：" in first_context
+                    and all(f"english-{letter}.md" in first_context for letter in "abc")
+                    and "english-d.md" not in first_context
+                    and "🧾" not in first_context
+                    and "translate index detail" in first_context,
+                )
+            )
+            checks.append(
+                (
+                    "游標讓每場輪替：下一場從上次列到的那張之後接下去；壓縮續場不派翻譯",
+                    second_run.returncode == 0
+                    and "english-d.md" in second_context
+                    and "english-c.md" not in second_context
+                    and "🈳" not in compact_translate_context,
+                )
+            )
+            checks.append(
+                (
+                    "喚回的卡與現況不符就直接修卡——這條規則每一場說一次，壓縮續場也說",
+                    memspec.CARD_SELF_CORRECT_NOTICE in first_context
+                    and memspec.CARD_SELF_CORRECT_NOTICE in compact_translate_context
+                    and "superseded" in memspec.CARD_SELF_CORRECT_NOTICE,
                 )
             )
 
@@ -490,6 +656,175 @@ def _selftest():
                 )
             )
 
+            # --- 夢：順路做的觸發條件與開場通知 ---
+            import time as _time
+
+            dream_vault = root / "dream-vault"
+            dream_vault.mkdir()
+            (dream_vault / memspec.MEMORY_INDEX_FILENAME).write_text(
+                "# Dream\ndream index detail\n", encoding="utf-8"
+            )
+            dream_config = root / "dream-config.json"
+            write_config(dream_config, [dream_vault])
+            dream_dir = dream_vault / memspec.DREAM_DIRECTORY
+            dream_dir.mkdir()
+            dream_state_file = dream_dir / memspec.DREAM_STATE_FILENAME
+            lock_file = dream_dir / memspec.DREAM_LOCK_FILENAME
+            launched = []
+
+            def _fake_launcher(argv, log_path):
+                launched.append(argv)
+                return 99
+
+            piggyback = {
+                memspec.DREAM_MODE_FIELD: memspec.DREAM_MODE_PIGGYBACK,
+                memspec.DREAM_INTERVAL_HOURS_FIELD: 24,
+            }
+            first = _dream_spawn(piggyback, dream_vault, launcher=_fake_launcher)
+            held = _dream_spawn(piggyback, dream_vault, launcher=_fake_launcher)
+            checks.append(
+                (
+                    "a vault that never dreamt spawns one detached dream, and the held lock stops a second",
+                    first
+                    and not held
+                    and len(launched) == 1
+                    and launched[0][-2:]
+                    == [memspec.DREAM_SCHEDULED_FLAG, memspec.DREAM_LOCK_HELD_FLAG]
+                    and lock_file.is_file(),
+                )
+            )
+
+            lock_file.write_text(
+                json.dumps({"pid": 1, "started": _time.time() - memspec.DREAM_LOCK_STALE_SECONDS - 60}),
+                encoding="utf-8",
+            )
+            stale = _dream_spawn(piggyback, dream_vault, launcher=_fake_launcher)
+            lock_file.unlink()
+            checks.append(
+                (
+                    "a lock older than the stale window is taken over rather than blocking every later dream",
+                    stale and len(launched) == 2,
+                )
+            )
+
+            def _write_dream_state(completed_epoch, headline, notified=None):
+                value = {
+                    memspec.DREAM_STATE_COMPLETED_EPOCH_FIELD: completed_epoch,
+                    memspec.DREAM_STATE_COMPLETED_FIELD: "2026-09-06T03:30:00+00:00",
+                    memspec.DREAM_STATE_DATE_FIELD: "2026-09-06",
+                    memspec.DREAM_STATE_PACK_FIELD: os.fspath(dream_dir / memspec.DREAM_PACK_FILENAME),
+                    memspec.DREAM_STATE_HEADLINE_FIELD: headline,
+                    memspec.DREAM_STATE_NOTIFIED_FIELD: notified,
+                }
+                dream_state_file.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
+
+            full_headline = {"card_fail": 2, "missing_aliases": 7, "drafts": 1, "open_commitments": 3}
+            _write_dream_state(_time.time(), full_headline)
+            inside = _dream_spawn(piggyback, dream_vault, launcher=_fake_launcher)
+            _write_dream_state(_time.time() - 25 * 3600, full_headline)
+            outside = _dream_spawn(piggyback, dream_vault, launcher=_fake_launcher)
+            lock_file.unlink()
+            checks.append(
+                (
+                    "no dream inside the interval, one dream once the interval has passed",
+                    not inside and outside and len(launched) == 3,
+                )
+            )
+
+            _write_dream_state(_time.time() - 25 * 3600, full_headline)
+            nightly = _dream_spawn(
+                {**piggyback, memspec.DREAM_MODE_FIELD: memspec.DREAM_MODE_NIGHTLY},
+                dream_vault,
+                launcher=_fake_launcher,
+            )
+            off = _dream_spawn(
+                {**piggyback, memspec.DREAM_MODE_FIELD: memspec.DREAM_MODE_OFF},
+                dream_vault,
+                launcher=_fake_launcher,
+            )
+            checks.append(
+                (
+                    "nightly leaves the dream to the system scheduler and off starts nothing, however overdue",
+                    not nightly and not off and len(launched) == 3 and not lock_file.exists(),
+                )
+            )
+
+            late = _dream_spawn(
+                piggyback,
+                dream_vault,
+                started_at=time.monotonic() - memspec.HOOK_TIMEOUT_SECONDS + 1,
+                launcher=_fake_launcher,
+            )
+            checks.append(
+                (
+                    "a session that has almost spent its budget skips the dream rather than risking the injection",
+                    not late and len(launched) == 3 and not lock_file.exists(),
+                )
+            )
+
+            # U56b：壓縮續場不是新的一場，長回合壓縮幾次就起幾支背景夢搶自己的 CPU。
+            compact_spawn = _dream_spawn(piggyback, dream_vault, launcher=_fake_launcher, source="compact")
+            resume_spawn = _dream_spawn(piggyback, dream_vault, launcher=_fake_launcher, source="resume")
+            lock_file.unlink()
+            checks.append(
+                (
+                    "壓縮續場就算夢已到期也不起背景夢，resume 之類的新開場才起",
+                    not compact_spawn and resume_spawn and len(launched) == 4,
+                )
+            )
+
+            _write_dream_state(_time.time(), full_headline)
+            nightly_env = {memspec.DREAM_MODE_ENV: memspec.DREAM_MODE_NIGHTLY}
+            notice_result = run_synthetic(
+                Path(__file__), {"source": "startup"}, dream_config, environment=nightly_env
+            )
+            notice_value = json.loads(notice_result.stdout) if notice_result.stdout.strip() else {}
+            notice_context = notice_value.get("hookSpecificOutput", {}).get("additionalContext", "")
+            repeat_result = run_synthetic(
+                Path(__file__), {"source": "startup"}, dream_config, environment=nightly_env
+            )
+            repeat_value = json.loads(repeat_result.stdout) if repeat_result.stdout.strip() else {}
+            repeat_context = repeat_value.get("hookSpecificOutput", {}).get("additionalContext", "")
+            expected_notice = memspec.DREAM_NOTICE_LINE.format(
+                date="2026-09-06",
+                pack=os.fspath(dream_dir / memspec.DREAM_PACK_FILENAME),
+                **full_headline,
+            )
+            checks.append(
+                (
+                    "a finished dream is announced once, with its numbers and pack path, and never again",
+                    notice_result.returncode == 0
+                    and expected_notice in notice_context
+                    and "dream index detail" in notice_context
+                    and "🌙" not in repeat_context
+                    and "dream index detail" in repeat_context,
+                )
+            )
+
+            _write_dream_state(_time.time(), full_headline)
+            compact_notice = run_synthetic(
+                Path(__file__), {"source": "compact"}, dream_config, environment=nightly_env
+            )
+            compact_notice_value = json.loads(compact_notice.stdout) if compact_notice.stdout.strip() else {}
+            compact_notice_context = compact_notice_value.get("hookSpecificOutput", {}).get(
+                "additionalContext", ""
+            )
+            _write_dream_state(_time.time(), {field: 0 for field in memspec.DREAM_HEADLINE_FIELDS})
+            clean_notice = run_synthetic(
+                Path(__file__), {"source": "startup"}, dream_config, environment=nightly_env
+            )
+            clean_notice_value = json.loads(clean_notice.stdout) if clean_notice.stdout.strip() else {}
+            clean_notice_context = clean_notice_value.get("hookSpecificOutput", {}).get(
+                "additionalContext", ""
+            )
+            checks.append(
+                (
+                    "the compaction-resumed session says nothing about the dream; a clean dream still says it ran",
+                    "🌙" not in compact_notice_context
+                    and memspec.DREAM_NOTICE_CLEAN_LINE.format(date="2026-09-06") in clean_notice_context,
+                )
+            )
+
             bad_config = root / "bad-config.json"
             bad_config.write_text("{broken", encoding="utf-8")
             bad_result = run_synthetic(
@@ -509,7 +844,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 15
+    total = 26
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

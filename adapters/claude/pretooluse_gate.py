@@ -811,7 +811,43 @@ def _prospective_write(tool_name, tool_input, target):
     return additions, text
 
 
-def _forbidden_write(event, config, additions, started_at, notices):
+def _forbidden_rule_edit(decision_key, fragment, texts):
+    """True when this write is the ruling itself being edited, not a re-statement.
+
+    2026-09-06 incident: editing the very card that defines a `forbidden` pattern
+    was blocked by that pattern, and only got through because the same content is
+    allowed on its second attempt. Two exemptions, both read off the text the file
+    would then hold: the content carries this same `decision_key`, or the matched
+    fragment sits inside the frontmatter's own `forbidden:` block. Changing the rule
+    is always allowed; re-stating it anywhere else is not."""
+    for text_value in texts:
+        if not isinstance(text_value, str) or not text_value:
+            continue
+        front_lines, closing = memspec.split_frontmatter(text_value)
+        if front_lines is None or closing is None:
+            continue
+        block = []
+        parent = None
+        for raw_line in front_lines:
+            indented = raw_line[:1].isspace()
+            match = None if indented else memspec.TOP_LEVEL_FIELD.match(raw_line)
+            if match is not None:
+                key, raw_value = match.groups()
+                value = memspec.strip_inline_comment(raw_value).strip()
+                if key == memspec.DECISION_KEY_FIELD and value == decision_key:
+                    return True
+                parent = key
+                if key == memspec.FORBIDDEN_FIELD:
+                    block.append(value)
+                continue
+            if indented and parent == memspec.FORBIDDEN_FIELD:
+                block.append(raw_line)
+        if fragment and any(fragment in line for line in block):
+            return True
+    return False
+
+
+def _forbidden_write(event, config, additions, prospective, started_at, notices):
     """(vault, decision key, reason) for the first settled ruling this text violates.
 
     The decision cards, their `forbidden` patterns, and the pattern validator are
@@ -831,6 +867,8 @@ def _forbidden_write(event, config, additions, started_at, notices):
                     decision, text, notices if index == 0 else []
                 )
                 if fragment is None:
+                    continue
+                if _forbidden_rule_edit(decision.key, fragment, (prospective, text)):
                     continue
                 return (
                     vault,
@@ -962,7 +1000,7 @@ def _write_review(event, tool_name, tool_input, config, started_at):
 
     notices = []
     session_id = event.get("session_id")
-    found = _forbidden_write(event, config, additions, started_at, notices)
+    found = _forbidden_write(event, config, additions, prospective, started_at, notices)
     if found is not None:
         vault, decision_key, reason = found
         if not _write_marker(
@@ -1744,6 +1782,70 @@ def _selftest():
                 _superseded_result.returncode == 0 and not superseded_out,
             ))
 
+            # 2026-09-06 事故：改「定義 forbidden 的那張卡」時被自己的 forbidden 擋住。
+            _own_result, own_out = write_call(
+                "Write",
+                {
+                    "file_path": os.fspath(write_vault / "mirror.md"),
+                    "content": "---\nname: 虛擬盤鏡像裁定\ndescription: 2026-08-13 虛擬盤與實盤參數一致\n"
+                    f"{memspec.DECISION_KEY_FIELD}: virtual-mirrors-live\n"
+                    f"{memspec.DECISION_STATUS_FIELD}: {memspec.ACTIVE_DECISION_STATUS}\n"
+                    f"{memspec.CURRENT_DECISION_AT_FIELD}: 2026-08-13\n"
+                    f"{memspec.DECIDED_BY_FIELD}: {memspec.OWNER_EXPLICIT_DECIDER}\n"
+                    f"{memspec.OWNER_QUOTE_FIELD}: 虛擬必須鏡像實盤\n"
+                    f"{memspec.ALIASES_FIELD}: [虛擬盤, 鏡像實盤]\n"
+                    f"{memspec.FORBIDDEN_FIELD}: [兩套參數]\n---\n這條裁定禁的就是兩套參數。\n",
+                },
+            )
+            checks.append((
+                "改的就是定義那條 forbidden 的決策卡：命中自己的禁詞不擋",
+                _own_result.returncode == 0 and own_out.get("permissionDecision") != "deny",
+            ))
+
+            _other_result, other_out = write_call(
+                "Write",
+                {
+                    "file_path": os.fspath(write_vault / "other-rule.md"),
+                    "content": "---\nname: 別的裁定\ndescription: 2026-09-06 另一條裁定\n"
+                    f"{memspec.DECISION_KEY_FIELD}: k-other\n"
+                    f"{memspec.DECISION_STATUS_FIELD}: {memspec.ACTIVE_DECISION_STATUS}\n"
+                    f"{memspec.CURRENT_DECISION_AT_FIELD}: 2026-09-06\n"
+                    f"{memspec.DECIDED_BY_FIELD}: three-way\n"
+                    f"{memspec.ALIASES_FIELD}: [別甲, 別乙]\n---\n就讓虛擬盤用兩套參數各自最佳化。\n",
+                },
+            )
+            _plain_result, plain_out = write_call(
+                "Write",
+                {
+                    "file_path": os.fspath(write_root / "plan2.txt"),
+                    "content": "之後一律改用兩套參數。",
+                },
+            )
+            checks.append((
+                "豁免只認那張卡：別的決策卡與一般檔案寫同一句仍然擋",
+                other_out.get("permissionDecision") == "deny"
+                and plain_out.get("permissionDecision") == "deny",
+            ))
+
+            _block_result, block_out = write_call(
+                "Write",
+                {
+                    "file_path": os.fspath(write_vault / "new-rule.md"),
+                    "content": "---\nname: 新規則\ndescription: 2026-09-06 把裸名詞改寫成句形\n"
+                    f"{memspec.DECISION_KEY_FIELD}: k-newrule\n"
+                    f"{memspec.DECISION_STATUS_FIELD}: {memspec.ACTIVE_DECISION_STATUS}\n"
+                    f"{memspec.CURRENT_DECISION_AT_FIELD}: 2026-09-06\n"
+                    f"{memspec.DECIDED_BY_FIELD}: three-way\n"
+                    f"{memspec.ALIASES_FIELD}: [新甲, 新乙]\n"
+                    f"{memspec.FORBIDDEN_FIELD}:\n"
+                    "  - (建議|要不要|是否|應該).{0,12}(納入|採用|改成)兩套參數\n---\nbody\n",
+                },
+            )
+            checks.append((
+                "禁詞落在寫入內容自己的 forbidden 區塊裡＝正在改規則，放行",
+                _block_result.returncode == 0 and block_out.get("permissionDecision") != "deny",
+            ))
+
             _outside_result, outside_out = write_call(
                 "Write",
                 {
@@ -1799,7 +1901,6 @@ def _selftest():
                     "file_path": os.fspath(write_vault / "reference-dated.md"),
                     "content": "---\nname: reference-dated\ndescription: english only reference card\n"
                     f"{memspec.LAST_VERIFIED_AT_FIELD}: 2026-09-01\n"
-                    f"{memspec.ALIASES_FIELD}: [alias only in english]\n"
                     "metadata:\n  type: reference\n---\nbody\n",
                 },
             )
@@ -1808,7 +1909,25 @@ def _selftest():
                 _warn_result.returncode == 0
                 and "permissionDecision" not in warn_out
                 and memspec.WRITE_GATE_CARD_ADVICE[:6] in warn_out.get("additionalContext", "")
-                and "reference-dated.md" in warn_out.get("additionalContext", ""),
+                and "reference-dated.md" in warn_out.get("additionalContext", "")
+                and memspec.ALIASES_FIELD in warn_out.get("additionalContext", "")
+                and "沒有中文字" not in warn_out.get("additionalContext", ""),
+            ))
+
+            _derived_result, derived_out = write_call(
+                "Write",
+                {
+                    "file_path": os.fspath(write_vault / "body-dated.md"),
+                    "content": "---\nname: body-dated\ndescription: 欄位無日期、正文有\n"
+                    f"{memspec.ALIASES_FIELD}: [正文日期]\n"
+                    "metadata:\n  type: feedback\n---\n2026-08-15 那天的紀錄\n",
+                },
+            )
+            checks.append((
+                "正文有日期、frontmatter 沒有的卡不擋：規則 B 用的是 card_lint 同一條日期判定",
+                _derived_result.returncode == 0
+                and "permissionDecision" not in derived_out
+                and memspec.CARD_DATE_SOURCE_BODY in derived_out.get("additionalContext", ""),
             ))
 
             repeat_session = "write-repeat-" + uuid.uuid4().hex
@@ -1897,7 +2016,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 65
+    total = 69
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
