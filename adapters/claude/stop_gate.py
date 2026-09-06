@@ -348,13 +348,14 @@ def _claim_marker(session_id, decision_key, message):
     return True
 
 
-def _audit(config, decision_key, rule, started_at):
+def _audit(config, decision_key, rule, started_at, session_id=None):
     try:
-        from pretooluse_gate import _append_gate_log
+        from pretooluse_gate import _append_gate_log, _with_session
 
+        row = {"kind": memspec.STOP_GATE_LOG_KIND, "decision": decision_key, "rule": rule}
         _append_gate_log(
             governance_vault(config),
-            {"kind": memspec.STOP_GATE_LOG_KIND, "decision": decision_key, "rule": rule},
+            _with_session(row, session_id),
             started_at,
         )
     except Exception:
@@ -455,9 +456,10 @@ def _verdict(event, message, config, started_at, defects):
         return None
 
     decision, rule, reason = verdicts[0]
-    if not _claim_marker(event.get("session_id"), decision.key, message):
+    session_id = event.get("session_id", event.get("sessionId"))
+    if not _claim_marker(session_id, decision.key, message):
         return None
-    _audit(config, decision.key, rule, started_at)
+    _audit(config, decision.key, rule, started_at, session_id)
     return {"decision": "block", "reason": reason}
 
 
@@ -530,7 +532,7 @@ def _selftest():
                 value = json.loads(result.stdout) if result.stdout.strip() else {}
                 return result, value, session_id
 
-            forbidden_result, forbidden_value, _ = run(
+            forbidden_result, forbidden_value, forbidden_session = run(
                 "我建議虛擬盤先用不同參數跑一週再說。"
             )
             log_rows = [
@@ -549,6 +551,15 @@ def _selftest():
                     row.get("kind") == memspec.STOP_GATE_LOG_KIND
                     and row.get("decision") == "virtual-mirrors-live"
                     and row.get("rule") == _FORBIDDEN_RULE
+                    for row in log_rows
+                ),
+            ))
+            checks.append((
+                "the stop_block audit row carries the event's session_id",
+                any(
+                    row.get("kind") == memspec.STOP_GATE_LOG_KIND
+                    and row.get("decision") == "virtual-mirrors-live"
+                    and row.get("session_id") == forbidden_session
                     for row in log_rows
                 ),
             ))
@@ -786,7 +797,7 @@ def _selftest():
             clear_recall_markers(session_id)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 16
+    total = 17
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

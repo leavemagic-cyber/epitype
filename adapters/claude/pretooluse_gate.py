@@ -599,6 +599,35 @@ def _command_match_position(input_regex, candidates):
     return None
 
 
+# 2026-09-06 真機實測：治理 vault 的 _GATE_LOG.jsonl 灌到 13,061 列（12,784 筆同一批壞卡的
+# parse_defect，三天沒消）。GATE_LOG_MAX_BYTES 放這裡而非 memspec.py：memspec.py 這回合另有
+# 子代理在改，避免衝突。超過就把整份改名成 .1（保留一份，不刪，不接力鏈成 .2 .3…）。
+_GATE_LOG_MAX_BYTES = 2 * 1024 * 1024
+_PARSE_DEFECT_SEEN_FILENAME = "gate_parse_defect_seen.json"
+
+
+def _with_session(row, session_id):
+    """Row plus session_id when the hook event actually carried one; omitted
+    entirely otherwise so old-shaped log lines and new ones stay distinguishable."""
+    if isinstance(session_id, str) and session_id:
+        return {**row, "session_id": session_id}
+    return row
+
+
+def _rotate_gate_log_if_oversized(target):
+    """Called with the log's file lock already held. A stat/replace failure is
+    swallowed: a rotation that cannot happen must never block the audit write."""
+    try:
+        if target.stat().st_size <= _GATE_LOG_MAX_BYTES:
+            return
+    except OSError:
+        return
+    try:
+        os.replace(target, target.with_name(target.name + ".1"))
+    except OSError:
+        pass
+
+
 def _append_gate_log(vault, row, started_at):
     target = vault / memspec.GATE_LOG_FILENAME
     remaining = memspec.HOOK_TIMEOUT_SECONDS - (time.monotonic() - started_at)
@@ -611,6 +640,7 @@ def _append_gate_log(vault, row, started_at):
     with memspec.file_lock(target, min(0.25, remaining)) as acquired:
         if not acquired:
             raise OSError("gate audit lock unavailable")
+        _rotate_gate_log_if_oversized(target)
         with target.open("a", encoding="utf-8", newline="\n") as stream:
             stream.write(json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n")
             stream.flush()
@@ -618,7 +648,7 @@ def _append_gate_log(vault, row, started_at):
 
 
 def _append_audit(
-    vault, tool_name, card_name, started_at, fallback=None, position=None
+    vault, tool_name, card_name, started_at, fallback=None, position=None, session_id=None
 ):
     row = {"tool": tool_name, "card": card_name}
     if fallback is not None:
@@ -627,19 +657,58 @@ def _append_audit(
         row["position"] = position
     _append_gate_log(
         vault,
-        row,
+        _with_session(row, session_id),
         started_at,
     )
 
 
-def _append_parse_defect(vault, path, error, started_at):
+def _parse_defect_seen_today(vault, path, today):
+    """True (and remembered) if this card's parse defect was already logged today.
+
+    A card stuck broken for days used to get re-audited on every single PreToolUse
+    call (12,784 rows for four cards over three days, 2026-09-06 incident); a small
+    manifest under the vault's .epitype/ index directory caps that at one row per
+    (card, day). Read/write failures fall back to "not seen" so the defect is still
+    surfaced rather than silently dropped."""
+    seen_path = Path(vault) / memspec.FTS_INDEX_DIRECTORY / _PARSE_DEFECT_SEEN_FILENAME
+    try:
+        seen = json.loads(seen_path.read_text(encoding="utf-8"))
+        if not isinstance(seen, dict):
+            seen = {}
+    except (OSError, ValueError):
+        seen = {}
+    key = str(path)
+    already = seen.get(key) == today
+    if already:
+        return True
+    seen[key] = today
+    try:
+        seen_path.parent.mkdir(parents=True, exist_ok=True)
+        staging = seen_path.with_name(f".{seen_path.name}.tmp-{os.getpid()}")
+        staging.write_text(
+            json.dumps(seen, ensure_ascii=False, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        os.replace(staging, seen_path)
+    except OSError:
+        pass
+    return False
+
+
+def _append_parse_defect(vault, path, error, started_at, session_id=None):
+    today = datetime.now(timezone.utc).date().isoformat()
+    if _parse_defect_seen_today(vault, path, today):
+        return
     _append_gate_log(
         vault,
-        {
-            "kind": "parse_defect",
-            "filename": path.name,
-            "reason": f"{type(error).__name__}: {error}",
-        },
+        _with_session(
+            {
+                "kind": "parse_defect",
+                "filename": path.name,
+                "reason": f"{type(error).__name__}: {error}",
+            },
+            session_id,
+        ),
         started_at,
     )
 
@@ -956,17 +1025,20 @@ def _write_marker(session_id, rule, target, text):
     )
 
 
-def _append_write_block(vault, rule, subject, target, started_at):
+def _append_write_block(vault, rule, subject, target, started_at, session_id=None):
     """Audit a blocked write by rule, subject, and filename only — the content is
     exactly the material a ruling is about and does not belong in the ledger."""
     _append_gate_log(
         vault,
-        {
-            "kind": memspec.WRITE_GATE_LOG_KIND,
-            "rule": rule,
-            "filename": target.name,
-            **subject,
-        },
+        _with_session(
+            {
+                "kind": memspec.WRITE_GATE_LOG_KIND,
+                "rule": rule,
+                "filename": target.name,
+                **subject,
+            },
+            session_id,
+        ),
         started_at,
     )
 
@@ -1014,6 +1086,7 @@ def _write_review(event, tool_name, tool_input, config, started_at):
             {"decision": decision_key},
             target,
             started_at,
+            session_id,
         )
         return _deny_value(reason[: memspec.WRITE_GATE_REASON_MAX_CHARS]), []
 
@@ -1037,6 +1110,7 @@ def _write_review(event, tool_name, tool_input, config, started_at):
         {"card_path": relative},
         target,
         started_at,
+        session_id,
     )
     return _deny_value(reason), []
 
@@ -1077,6 +1151,7 @@ def _handle(event, started_at):
     config = load_config(started_at)
     if config is None:
         return None
+    session_id = event.get("session_id")
 
     cards = []
     defects = []
@@ -1095,7 +1170,7 @@ def _handle(event, started_at):
             except Exception as exc:
                 defects.append((path.stem, f"{type(exc).__name__}: {exc}"))
                 _best_effort_audit(
-                    _append_parse_defect, vault, path, exc, started_at
+                    _append_parse_defect, vault, path, exc, started_at, session_id
                 )
                 continue
             if card is not None:
@@ -1152,6 +1227,7 @@ def _handle(event, started_at):
         started_at,
         fallback,
         position,
+        session_id,
     )
     return value
 
@@ -1211,6 +1287,36 @@ def _selftest():
                 )
             )
 
+            session_hit = run_synthetic(
+                Path(__file__),
+                {
+                    "tool_name": "Bash",
+                    "tool_input": {"command": "remove target"},
+                    "session_id": "selftest-session-abc",
+                },
+                config,
+            )
+            session_log_rows = (
+                [
+                    json.loads(line)
+                    for line in log_path.read_text(encoding="utf-8").splitlines()
+                    if line
+                ]
+                if log_path.is_file()
+                else []
+            )
+            checks.append(
+                (
+                    "audit row carries the event's session_id when present",
+                    session_hit.returncode == 0
+                    and any(
+                        row.get("session_id") == "selftest-session-abc"
+                        and row.get("card") == "synthetic-safety"
+                        for row in session_log_rows
+                    ),
+                )
+            )
+
             audit_lock = Path(os.fspath(log_path) + ".lock")
             audit_lock.write_text("synthetic-busy\n", encoding="ascii")
             busy_audit = run_synthetic(
@@ -1225,6 +1331,27 @@ def _selftest():
                 busy_audit.returncode == 0
                 and busy_value.get("hookSpecificOutput", {}).get("permissionDecision") == "deny",
             ))
+
+            rotate_vault = root / "rotate-vault"
+            rotate_vault.mkdir()
+            rotate_log = rotate_vault / memspec.GATE_LOG_FILENAME
+            rotate_log.write_text("x" * (_GATE_LOG_MAX_BYTES + 1024) + "\n", encoding="utf-8")
+            _append_gate_log(rotate_vault, {"card": "rotate-check"}, time.monotonic())
+            rotated_path = rotate_vault / (memspec.GATE_LOG_FILENAME + ".1")
+            rotated_rows = [
+                json.loads(line)
+                for line in rotate_log.read_text(encoding="utf-8").splitlines()
+                if line
+            ]
+            checks.append(
+                (
+                    "a gate log past GATE_LOG_MAX_BYTES rotates to .1 before the next row lands",
+                    rotated_path.is_file()
+                    and rotated_path.stat().st_size > _GATE_LOG_MAX_BYTES
+                    and len(rotated_rows) == 1
+                    and rotated_rows[0].get("card") == "rotate-check",
+                )
+            )
 
             oversized_vault = root / "oversized-vault"
             oversized_vault.mkdir()
@@ -1531,6 +1658,29 @@ def _selftest():
                         and row.get("reason")
                         for row in log_rows
                     ),
+                )
+            )
+
+            for _ in range(3):
+                run_synthetic(
+                    Path(__file__),
+                    {"tool_name": "Bash", "tool_input": {"command": "remove target"}},
+                    config,
+                )
+            repeat_log_rows = [
+                json.loads(line)
+                for line in log_path.read_text(encoding="utf-8").splitlines()
+                if line
+            ]
+            checks.append(
+                (
+                    "parse_defect for the same broken card is recorded once per day, not once per call",
+                    sum(
+                        1
+                        for row in repeat_log_rows
+                        if row.get("kind") == "parse_defect" and row.get("filename") == "broken.md"
+                    )
+                    == 1,
                 )
             )
 
@@ -2016,7 +2166,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 69
+    total = 72
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

@@ -248,7 +248,7 @@ def _handle(event, started_at):
     governance = governance_vault(config)
     has_governance_ledger = (governance / memspec.WORK_LEDGER_FILENAME).is_file()
     if not has_governance_ledger:
-        vaults = resolved  # no ledger anywhere: keep the pre-1.1.0 behaviour
+        vaults = resolved  # no ledger anywhere: inject every configured vault
     else:
         vaults = [vault for vault in resolved if vault in native or vault == governance]
 
