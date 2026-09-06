@@ -20,6 +20,7 @@ SELFTESTS = (
     Path("epitype") / "narration_meter.py",
     Path("epitype") / "harvest.py",
     Path("epitype") / "alias_batch.py",
+    Path("epitype") / "dream.py",
     Path("adapters") / "claude" / "recall_hook.py",
     Path("adapters") / "claude" / "sessionstart_hook.py",
     Path("adapters") / "claude" / "precompact_hook.py",

@@ -31,6 +31,26 @@ HOOK_DIRECTORY = "hooks"
 BACKUP_INFIX = ".bak_epitype_"
 BACKUPS_KEPT = 3
 FALLBACK_VAULT = ".epitype-vault"
+WORK_LEDGER_FILENAME = "_WORK_LEDGER.md"
+# 夢的排程常數在這裡再寫一份：安裝器必須在 epitype 套件還不能 import 的機器上跑，
+# 所以它不 import memspec（既有的 budget_bytes 也是同樣理由）。漂移由 selftest 逐項
+# 比對 memspec 擋下。
+DREAM_CONFIG_FIELD = "dream"
+DREAM_MODE_FIELD = "mode"
+DREAM_INTERVAL_HOURS_FIELD = "interval_hours"
+DREAM_AT_FIELD = "at"
+DREAM_MODES = ("piggyback", "nightly", "off")
+DREAM_DEFAULT_MODE = "piggyback"
+DREAM_DEFAULT_INTERVAL_HOURS = 24
+DREAM_DEFAULT_AT = "03:30"
+DREAM_AT_REGEX = re.compile(r"(?:[01]\d|2[0-3]):[0-5]\d")
+DREAM_DIRECTORY = ".epitype"
+DREAM_STATE_FILENAME = "dream_state.json"
+DREAM_SCHEDULED_FLAG = "--scheduled"
+DREAM_MODE_ENV = "EPITYPE_DREAM_MODE"
+DREAM_SCRIPT_PARTS = ("epitype", "dream.py")
+DREAM_TASK_NAME = r"Epitype\Dream"             # schtasks /TN
+DREAM_CRON_MARKER = "# epitype-dream"          # crontab 只認自己這一行
 SHIM_ADAPTER_TOKEN = "__EPITYPE_ADAPTER_FILENAME__"
 SHIM_TRACE_ENV = "EPITYPE_SHIM_TRACE"
 HOOK_SPECS = {
@@ -635,7 +655,7 @@ def _existing_config_vaults(path):
     return valid, stale
 
 
-def _config_bytes(path, vaults, repo_root, preserve_vault_bytes=False):
+def _config_bytes(path, vaults, repo_root, preserve_vault_bytes=False, dream=None):
     if path.is_file():
         raw = path.read_bytes()
         bom = raw.startswith(b"\xef\xbb\xbf")
@@ -648,6 +668,8 @@ def _config_bytes(path, vaults, repo_root, preserve_vault_bytes=False):
             text = _set_object_member(text, "vaults", [os.fspath(item) for item in vaults])
         if "budget_bytes" not in value:
             text = _set_object_member(text, "budget_bytes", 10 * 1024)
+        if dream is not None:
+            text = _set_object_member(text, DREAM_CONFIG_FIELD, dream)
         text = _set_object_member(text, "repo_root", os.fspath(repo_root.resolve()))
         encoded = text.encode("utf-8")
         return (b"\xef\xbb\xbf" if bom else b"") + encoded
@@ -655,6 +677,8 @@ def _config_bytes(path, vaults, repo_root, preserve_vault_bytes=False):
         value = {}
     value["vaults"] = [os.fspath(path) for path in vaults]
     value.setdefault("budget_bytes", 10 * 1024)
+    if dream is not None:
+        value[DREAM_CONFIG_FIELD] = dream
     value["repo_root"] = os.fspath(repo_root.resolve())
     return (json.dumps(value, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
 
@@ -1070,6 +1094,8 @@ def _synthetic_health(home, repo_root, output):
         config.write_text(json.dumps({"vaults": [os.fspath(vault)]}), encoding="utf-8")
         environment = _home_environment(home)
         environment["EPITYPE_CONFIG"] = os.fspath(config)
+        # 健康檢查是唯讀的：合成的 SessionStart 不得順路起一場背景夢。
+        environment[DREAM_MODE_ENV] = "off"
         for name, shim_name, event, arguments in scripts:
             script = hooks_root / shim_name
             trace_path = root / f"{shim_name}.trace"
@@ -1106,6 +1132,149 @@ def _synthetic_health(home, repo_root, output):
                 )
     print(f"HEALTH {'PASS' if passed == len(scripts) else 'FAIL'} {passed}/{len(scripts)}", file=output)
     return passed == len(scripts)
+
+
+def _dream_block(existing, mode=None, at=None):
+    """設定檔裡的 dream 區塊。沒指定就沿用既有值，再沒有才用預設。"""
+    block = dict(existing) if isinstance(existing, dict) else {}
+    block[DREAM_MODE_FIELD] = mode or block.get(DREAM_MODE_FIELD) or DREAM_DEFAULT_MODE
+    if block[DREAM_MODE_FIELD] not in DREAM_MODES:
+        raise InstallError(f"unknown dream mode: {block[DREAM_MODE_FIELD]}")
+    interval = block.get(DREAM_INTERVAL_HOURS_FIELD)
+    if isinstance(interval, bool) or not isinstance(interval, (int, float)) or interval <= 0:
+        interval = DREAM_DEFAULT_INTERVAL_HOURS
+    block[DREAM_INTERVAL_HOURS_FIELD] = interval
+    block[DREAM_AT_FIELD] = at or block.get(DREAM_AT_FIELD) or DREAM_DEFAULT_AT
+    if not DREAM_AT_REGEX.fullmatch(str(block[DREAM_AT_FIELD])):
+        raise InstallError(f"--at must be HH:MM in 24-hour form: {block[DREAM_AT_FIELD]}")
+    return block
+
+
+def _existing_config_dream(path):
+    if not path.is_file():
+        return {}
+    try:
+        value = json.loads(path.read_bytes().decode("utf-8-sig"))
+    except (OSError, ValueError):
+        return {}
+    block = value.get(DREAM_CONFIG_FIELD) if isinstance(value, dict) else None
+    return block if isinstance(block, dict) else {}
+
+
+def _windowless_python(python, windows=None):
+    """Windows 排程用旁邊的 pythonw.exe——凌晨四點跑 python.exe 會閃一個主控台黑窗
+    （本機有前科）。stdout/stderr 本來就導進 log，換掉主控台不損失任何輸出；旁邊沒有
+    pythonw.exe 就維持原來的直譯器。"""
+    windows = os.name == "nt" if windows is None else windows
+    if not windows:
+        return python
+    path = Path(python)
+    candidate = path.with_name(path.stem + "w" + path.suffix)
+    return os.fspath(candidate) if candidate.is_file() else python
+
+
+def _dream_command(repo_root, python_executable=None):
+    """排程跑的就是 piggyback 起的那一支：夢自己從 config 解出庫與輸出路徑，所以
+    這條命令不帶庫路徑，config 改了也不必重註冊。"""
+    python = _windowless_python(os.fspath(Path(python_executable or sys.executable).resolve()))
+    script = os.fspath((Path(repo_root) / Path(*DREAM_SCRIPT_PARTS)).resolve())
+    return [python, script, DREAM_SCHEDULED_FLAG]
+
+
+def _dream_command_text(command):
+    return " ".join(_shell_token(item) for item in command)
+
+
+def _run_scheduler(argv, stdin_text=None):
+    return subprocess.run(
+        argv,
+        input=stdin_text,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+
+
+def _schedule_argv(repo_root, at, python_executable=None):
+    """Windows：schtasks 一行搞定。POSIX：crontab 要先讀再追加，所以這裡只回傳那一行。"""
+    command = _dream_command_text(_dream_command(repo_root, python_executable))
+    if os.name == "nt":
+        return ["schtasks", "/Create", "/SC", "DAILY", "/TN", DREAM_TASK_NAME, "/TR", command, "/ST", at, "/F"]
+    hour, _, minute = at.partition(":")
+    return [f"{int(minute)} {int(hour)} * * * {command} {DREAM_CRON_MARKER}"]
+
+
+def _crontab_without_dream(runner):
+    listed = runner(["crontab", "-l"], None)
+    body = listed.stdout if getattr(listed, "returncode", 1) == 0 else ""
+    return [line for line in body.splitlines() if DREAM_CRON_MARKER not in line]
+
+
+def _register_nightly(repo_root, at, dry_run, output, runner=None, python_executable=None):
+    """註冊每日排程。失敗只警告：hook 已經裝好了，排程掛不上不該把整個安裝回捲。"""
+    runner = runner or _run_scheduler
+    argv = _schedule_argv(repo_root, at, python_executable)
+    if os.name == "nt":
+        print(f"{'DRY-RUN schedule' if dry_run else 'SCHEDULE'}: {subprocess.list2cmdline(argv)}", file=output)
+        if dry_run:
+            return
+        result = runner(argv, None)
+    else:
+        line = argv[0]
+        print(f"{'DRY-RUN schedule' if dry_run else 'SCHEDULE'}: crontab + {line}", file=output)
+        if dry_run:
+            return
+        kept = _crontab_without_dream(runner)
+        result = runner(["crontab", "-"], "\n".join([*kept, line]) + "\n")
+    if getattr(result, "returncode", 1) != 0:
+        detail = (getattr(result, "stderr", "") or "").strip().splitlines()
+        print(f"WARN nightly dream schedule failed: {detail[0] if detail else 'unknown error'}", file=output)
+
+
+def _unregister_nightly(dry_run, output, runner=None):
+    runner = runner or _run_scheduler
+    if os.name == "nt":
+        argv = ["schtasks", "/Delete", "/TN", DREAM_TASK_NAME, "/F"]
+        print(f"{'DRY-RUN unschedule' if dry_run else 'UNSCHEDULE'}: {subprocess.list2cmdline(argv)}", file=output)
+        if dry_run:
+            return
+        runner(argv, None)
+        return
+    print(f"{'DRY-RUN unschedule' if dry_run else 'UNSCHEDULE'}: crontab - {DREAM_CRON_MARKER}", file=output)
+    if dry_run:
+        return
+    kept = _crontab_without_dream(runner)
+    runner(["crontab", "-"], ("\n".join(kept) + "\n") if kept else "")
+
+
+def _dream_governance(vaults):
+    """帶工作帳本的那個庫；沒有帳本就用第一個（與 hook 的 governance_vault 同規則）。"""
+    paths = [Path(item) for item in vaults if isinstance(item, str) and item.strip()]
+    if not paths:
+        return None
+    for vault in paths:
+        if (vault / WORK_LEDGER_FILENAME).is_file():
+            return vault
+    return paths[0]
+
+
+def _report_dream(config, output):
+    block = config.get(DREAM_CONFIG_FIELD) if isinstance(config, dict) else None
+    block = block if isinstance(block, dict) else {}
+    mode = block.get(DREAM_MODE_FIELD, DREAM_DEFAULT_MODE)
+    at = block.get(DREAM_AT_FIELD, DREAM_DEFAULT_AT)
+    interval = block.get(DREAM_INTERVAL_HOURS_FIELD, DREAM_DEFAULT_INTERVAL_HOURS)
+    governance = _dream_governance(config.get("vaults") or () if isinstance(config, dict) else ())
+    last = "never"
+    if governance is not None:
+        try:
+            state = json.loads((governance / DREAM_DIRECTORY / DREAM_STATE_FILENAME).read_text(encoding="utf-8"))
+            last = state.get("completed_at") or "never"
+        except (OSError, ValueError):
+            last = "never"
+    print(f"DREAM: mode={mode} interval_hours={interval} at={at} last={last}", file=output)
 
 
 def _doctor(home, dry_run=False, output=sys.stdout, clear_shim_status=False):
@@ -1174,6 +1343,7 @@ def _doctor(home, dry_run=False, output=sys.stdout, clear_shim_status=False):
             if mismatches:
                 raise ValueError(f"{name} shim registration mismatch: {', '.join(mismatches)}")
             print(f"REGISTRATION {name}: PASS {len(EVENTS)}/{len(EVENTS)}", file=output)
+        _report_dream(config, output)
         health_ok = _synthetic_health(home, repo_root, output)
         final_records = _read_shim_status(home)
         _report_shim_status(final_records, output, previous=initial_records)
@@ -1193,7 +1363,16 @@ def _planned_backup(path):
     return path.with_name(path.name + BACKUP_INFIX + "<UTC>")
 
 
-def _install(home, dry_run=False, apply_billing_guard=False, output=sys.stdout, repo_root=REPO_ROOT):
+def _install(
+    home,
+    dry_run=False,
+    apply_billing_guard=False,
+    output=sys.stdout,
+    repo_root=REPO_ROOT,
+    dream_mode=None,
+    dream_at=None,
+    scheduler=None,
+):
     repo_root = _validate_repo_root(repo_root)
     hosts = _detect_hosts(home)
     if not hosts:
@@ -1235,9 +1414,11 @@ def _install(home, dry_run=False, apply_billing_guard=False, output=sys.stdout, 
             for vault in native_vaults:
                 print(f"NATIVE VAULT: {vault}", file=output)
 
-        config_data = _config_bytes(config_path, vaults, repo_root, preserve_vault_bytes)
+        previous_dream = _existing_config_dream(config_path)
+        dream = _dream_block(previous_dream, dream_mode, dream_at)
+        config_data = _config_bytes(config_path, vaults, repo_root, preserve_vault_bytes, dream)
         if not config_path.exists() or config_path.read_bytes() != config_data:
-            print(f"{'DRY-RUN write' if dry_run else 'WRITE'} {config_path}: vaults, repo_root", file=output)
+            print(f"{'DRY-RUN write' if dry_run else 'WRITE'} {config_path}: vaults, repo_root, dream", file=output)
             if config_path.exists():
                 print(f"BACKUP: {_planned_backup(config_path) if dry_run else 'pending'}", file=output)
             if not dry_run:
@@ -1270,6 +1451,13 @@ def _install(home, dry_run=False, apply_billing_guard=False, output=sys.stdout, 
 
         if "codex" in hosts:
             _run_billing_guard(home, apply_billing_guard, dry_run, transaction, output, repo_root)
+
+        # nightly 才碰系統排程。改成別的模式時只在「原本就是 nightly」或使用者明講
+        # 這次要換模式時反註冊——否則每次安裝都會對一個不存在的排程下刪除指令。
+        if dream[DREAM_MODE_FIELD] == "nightly":
+            _register_nightly(repo_root, dream[DREAM_AT_FIELD], dry_run, output, scheduler)
+        elif dream_mode is not None or previous_dream.get(DREAM_MODE_FIELD) == "nightly":
+            _unregister_nightly(dry_run, output, scheduler)
 
         if dry_run:
             print(f"DRY-RUN write {state_path}: install ownership metadata", file=output)
@@ -1387,7 +1575,7 @@ def _relocate(home, target, dry_run=False, output=sys.stdout):
     return doctor_code
 
 
-def _uninstall(home, dry_run=False, output=sys.stdout):
+def _uninstall(home, dry_run=False, output=sys.stdout, scheduler=None):
     config_dir = home / CONFIG_DIRECTORY
     state_path = config_dir / STATE_FILENAME
     state = _load_state(state_path) if state_path.is_file() else {"version": STATE_VERSION, "targets": {}}
@@ -1424,6 +1612,10 @@ def _uninstall(home, dry_run=False, output=sys.stdout):
                     print(f"BACKUP: {_planned_backup(path)}", file=output)
                 else:
                     transaction.write(path, updated)
+
+        # 排程比 config 活得久：留著它會每晚跑一支讀不到 config 的夢。
+        if _existing_config_dream(config_path).get(DREAM_MODE_FIELD) == "nightly":
+            _unregister_nightly(dry_run, output, scheduler)
 
         if config_dir.exists():
             print(f"{'DRY-RUN remove' if dry_run else 'REMOVE'} config directory: {config_dir}", file=output)
@@ -1972,6 +2164,147 @@ def _selftest():
                 and "no files changed" in dry_output.getvalue(),
             ))
 
+            # --- 夢的排程：模式寫進 config，nightly 才碰系統排程 ---
+            class _FakeScheduler:
+                def __init__(self):
+                    self.calls = []
+
+                def __call__(self, argv, stdin_text=None):
+                    self.calls.append((list(argv), stdin_text))
+                    return subprocess.CompletedProcess(list(argv), 0, "", "")
+
+            dream_home = root / "dream-home"
+            (dream_home / ".claude").mkdir(parents=True)
+            (dream_home / ".claude" / "settings.json").write_text("{\"hooks\":{}}\n", encoding="utf-8")
+            dream_dry_output = io.StringIO()
+            dream_dry_code = _install(
+                dream_home, dry_run=True, output=dream_dry_output,
+                dream_mode="nightly", dream_at="04:15", scheduler=_FakeScheduler(),
+            )
+            dry_text = dream_dry_output.getvalue()
+            schedule_marker = f"/ST 04:15" if os.name == "nt" else "15 4 * * *"
+            checks.append((
+                "install --dream nightly --dry-run shows the exact schedule command and writes nothing",
+                dream_dry_code == 0
+                and "DRY-RUN schedule" in dry_text
+                and schedule_marker in dry_text
+                and DREAM_SCHEDULED_FLAG in dry_text
+                and os.fspath((REPO_ROOT / Path(*DREAM_SCRIPT_PARTS)).resolve()) in dry_text
+                and not (dream_home / CONFIG_DIRECTORY).exists(),
+            ))
+
+            windowless_root = root / "pythonbin"
+            windowless_root.mkdir()
+            console_python = windowless_root / "python.exe"
+            console_python.write_text("", encoding="utf-8")
+            (windowless_root / "pythonw.exe").write_text("", encoding="utf-8")
+            lonely_python = windowless_root / "other.exe"
+            lonely_python.write_text("", encoding="utf-8")
+            checks.append((
+                "Windows 排程改用旁邊的 pythonw.exe（凌晨不閃黑窗）；沒有就維持原來的直譯器",
+                _windowless_python(os.fspath(console_python), windows=True)
+                == os.fspath(windowless_root / "pythonw.exe")
+                and _windowless_python(os.fspath(console_python), windows=False)
+                == os.fspath(console_python)
+                and _windowless_python(os.fspath(lonely_python), windows=True)
+                == os.fspath(lonely_python)
+                and (
+                    os.name != "nt"
+                    or _dream_command(REPO_ROOT, os.fspath(console_python))[0]
+                    == os.fspath(windowless_root / "pythonw.exe")
+                ),
+            ))
+
+            scheduler = _FakeScheduler()
+            dream_code = _install(
+                dream_home, output=io.StringIO(),
+                dream_mode="nightly", dream_at="04:15", scheduler=scheduler,
+            )
+            dream_config_path = dream_home / CONFIG_DIRECTORY / CONFIG_FILENAME
+            dream_config_value = json.loads(dream_config_path.read_text(encoding="utf-8"))
+            registered, registered_stdin = scheduler.calls[-1] if scheduler.calls else ([], None)
+            if os.name == "nt":
+                registered_ok = (
+                    registered[:2] == ["schtasks", "/Create"]
+                    and "/F" in registered
+                    and registered[registered.index("/SC") + 1] == "DAILY"
+                    and registered[registered.index("/TN") + 1] == DREAM_TASK_NAME
+                    and registered[registered.index("/ST") + 1] == "04:15"
+                    and registered[registered.index("/TR") + 1].endswith(DREAM_SCHEDULED_FLAG)
+                )
+            else:
+                registered_ok = (
+                    registered == ["crontab", "-"]
+                    and registered_stdin.strip().splitlines()[-1].startswith("15 4 * * *")
+                    and registered_stdin.strip().endswith(DREAM_CRON_MARKER)
+                )
+            checks.append((
+                "install --dream nightly records the mode in config and registers one daily task",
+                dream_code == 0
+                and dream_config_value[DREAM_CONFIG_FIELD]
+                == {DREAM_MODE_FIELD: "nightly", DREAM_INTERVAL_HOURS_FIELD: 24, DREAM_AT_FIELD: "04:15"}
+                and registered_ok,
+            ))
+
+            dream_vault = Path(dream_config_value["vaults"][0])
+            (dream_vault / DREAM_DIRECTORY).mkdir(parents=True, exist_ok=True)
+            (dream_vault / DREAM_DIRECTORY / DREAM_STATE_FILENAME).write_text(
+                json.dumps({"completed_at": "2026-09-06T03:30:00+00:00"}), encoding="utf-8"
+            )
+            dream_doctor_output = io.StringIO()
+            dream_doctor_code = _doctor(dream_home, output=dream_doctor_output)
+            checks.append((
+                "doctor reports the dream mode and the last completion time",
+                dream_doctor_code == 0
+                and "DREAM: mode=nightly interval_hours=24 at=04:15 last=2026-09-06T03:30:00+00:00"
+                in dream_doctor_output.getvalue(),
+            ))
+
+            off_scheduler = _FakeScheduler()
+            off_code = _install(dream_home, output=io.StringIO(), dream_mode="off", scheduler=off_scheduler)
+            off_argv = off_scheduler.calls[-1][0] if off_scheduler.calls else []
+            off_mode = json.loads(dream_config_path.read_text(encoding="utf-8"))[DREAM_CONFIG_FIELD][DREAM_MODE_FIELD]
+            uninstall_scheduler = _FakeScheduler()
+            dream_config_value = json.loads(dream_config_path.read_text(encoding="utf-8"))
+            dream_config_value[DREAM_CONFIG_FIELD][DREAM_MODE_FIELD] = "nightly"
+            dream_config_path.write_text(json.dumps(dream_config_value, indent=2) + "\n", encoding="utf-8")
+            uninstall_code = _uninstall(dream_home, output=io.StringIO(), scheduler=uninstall_scheduler)
+            uninstall_argv = uninstall_scheduler.calls[-1][0] if uninstall_scheduler.calls else []
+            expected_unschedule = ["schtasks", "/Delete", "/TN", DREAM_TASK_NAME, "/F"] if os.name == "nt" else ["crontab", "-"]
+            checks.append((
+                "switching off, and uninstalling, both unregister the nightly task",
+                off_code == 0
+                and off_mode == "off"
+                and off_argv == expected_unschedule
+                and uninstall_code == 0
+                and uninstall_argv == expected_unschedule,
+            ))
+
+            if os.fspath(REPO_ROOT) not in sys.path:
+                sys.path.insert(0, os.fspath(REPO_ROOT))
+            from epitype import memspec as _memspec
+
+            checks.append((
+                "the installer's mirrored dream constants still match memspec",
+                (DREAM_CONFIG_FIELD, DREAM_MODE_FIELD, DREAM_INTERVAL_HOURS_FIELD, DREAM_AT_FIELD)
+                == (
+                    _memspec.DREAM_CONFIG_FIELD,
+                    _memspec.DREAM_MODE_FIELD,
+                    _memspec.DREAM_INTERVAL_HOURS_FIELD,
+                    _memspec.DREAM_AT_FIELD,
+                )
+                and DREAM_MODES == _memspec.DREAM_MODES
+                and DREAM_DEFAULT_MODE == _memspec.DREAM_DEFAULT_MODE
+                and DREAM_DEFAULT_INTERVAL_HOURS == _memspec.DREAM_DEFAULT_INTERVAL_HOURS
+                and DREAM_DEFAULT_AT == _memspec.DREAM_DEFAULT_AT
+                and DREAM_DIRECTORY == _memspec.DREAM_DIRECTORY
+                and DREAM_STATE_FILENAME == _memspec.DREAM_STATE_FILENAME
+                and DREAM_SCHEDULED_FLAG == _memspec.DREAM_SCHEDULED_FLAG
+                and DREAM_MODE_ENV == _memspec.DREAM_MODE_ENV
+                and WORK_LEDGER_FILENAME == _memspec.WORK_LEDGER_FILENAME
+                and DREAM_AT_REGEX.pattern == _memspec.DREAM_AT_PATTERN,
+            ))
+
             legacy_home = root / "legacy-home"
             (legacy_home / ".claude").mkdir(parents=True)
             legacy_settings = legacy_home / ".claude" / "settings.json"
@@ -2101,7 +2434,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 33
+    total = 39
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
@@ -2123,6 +2456,17 @@ def _parser():
     commands = parser.add_subparsers(dest="command", required=True)
     install = commands.add_parser("install", parents=[common], help="merge and verify Epitype hooks")
     install.add_argument("--apply-billing-guard", action="store_true", help="apply, rather than only report, Codex billing guard settings")
+    install.add_argument(
+        "--dream",
+        choices=DREAM_MODES,
+        default=None,
+        help="offline tidy batch: piggyback on session start (default), a nightly system schedule, or off",
+    )
+    install.add_argument(
+        "--at",
+        default=None,
+        help=f"HH:MM for --dream nightly (default {DREAM_DEFAULT_AT})",
+    )
     commands.add_parser("uninstall", parents=[common], help="remove only Epitype-owned registrations")
     doctor = commands.add_parser("doctor", parents=[common], help="inspect registrations and exercise synthetic hook stdin")
     doctor.add_argument(
@@ -2151,7 +2495,13 @@ def main(argv=None):
     dry_run = getattr(parsed, "dry_run", False)
     try:
         if parsed.command == "install":
-            return _install(home, dry_run, parsed.apply_billing_guard)
+            return _install(
+                home,
+                dry_run,
+                parsed.apply_billing_guard,
+                dream_mode=parsed.dream,
+                dream_at=parsed.at,
+            )
         if parsed.command == "uninstall":
             return _uninstall(home, dry_run)
         if parsed.command == "vaults":

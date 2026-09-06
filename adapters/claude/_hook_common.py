@@ -90,6 +90,29 @@ def load_config(started_at):
             budget,
             memspec.HOOK_DEFAULT_BUDGET_BYTES,
         ),
+        memspec.DREAM_CONFIG_FIELD: dream_settings(value),
+    }
+
+
+def dream_settings(value):
+    """夢的排程設定：模式與間隔，欄位缺了就用預設（預設 piggyback／24 小時）。
+    值壞掉一律當 off——背景程序不得從垃圾值起跑。EPITYPE_DREAM_MODE 是單次覆寫，
+    合成測試靠它保證永遠不起真程序。"""
+    raw = value.get(memspec.DREAM_CONFIG_FIELD)
+    raw = raw if isinstance(raw, dict) else {}
+    mode = os.environ.get(memspec.DREAM_MODE_ENV) or raw.get(
+        memspec.DREAM_MODE_FIELD, memspec.DREAM_DEFAULT_MODE
+    )
+    hours = raw.get(
+        memspec.DREAM_INTERVAL_HOURS_FIELD, memspec.DREAM_DEFAULT_INTERVAL_HOURS
+    )
+    if isinstance(hours, bool) or not isinstance(hours, (int, float)) or hours <= 0:
+        hours = memspec.DREAM_DEFAULT_INTERVAL_HOURS
+    return {
+        memspec.DREAM_MODE_FIELD: mode
+        if mode in memspec.DREAM_MODES
+        else memspec.DREAM_MODE_OFF,
+        memspec.DREAM_INTERVAL_HOURS_FIELD: hours,
     }
 
 
@@ -204,7 +227,12 @@ def emit(value):
 def run_synthetic(script, event, config_path, arguments=(), environment=None):
     import subprocess
 
-    environment = {**os.environ, **(environment or {})}
+    # 合成測試永遠不得起背景夢：預設關掉，呼叫端要測通知行時再自己開回來。
+    environment = {
+        **os.environ,
+        memspec.DREAM_MODE_ENV: memspec.DREAM_MODE_OFF,
+        **(environment or {}),
+    }
     environment[memspec.EPITYPE_CONFIG_ENV] = os.fspath(config_path)
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
     return subprocess.run(

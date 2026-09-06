@@ -43,6 +43,10 @@ A scar is an incident-born rule. Adding `trigger.tool`, `trigger.input`, and act
 
 The installer merges only entries marked as Epitype, keeps detected native vaults, and writes backups before changing an existing host file. Stable shims let the repository move without rewriting every host registration. Uninstall removes Epitype-owned registrations and configuration while preserving native memory and vault cards.
 
+### Tidy-up that runs itself
+
+The offline inventory pass ("the dream") does not wait to be remembered. By default (`dream.mode: piggyback`) a session start whose last dream is older than `dream.interval_hours` starts one detached, low-priority background process and returns without waiting; a pid-bearing lock, stale after 30 minutes, keeps a second one from starting. `graft install --dream nightly [--at HH:MM]` registers a daily system task instead (`graft doctor` shows the mode and the last completion; `graft uninstall` removes the task), and `--dream off` disables both. The run reads vaults and writes only `<governance vault>/.epitype/` — review pack, state, log — inside a ten-minute budget, and the next session announces it in one line. No model is called: the model half of tidying stays manual, so an installed Epitype never spends model budget on its own.
+
 ### Failure evidence
 
 Missing indexes, stale indexes, shim failures, malformed cards, and lock contention have distinct outcomes. The hooks fail open when they cannot safely finish, and the installer doctor reports recorded shim outages instead of treating silence as health.

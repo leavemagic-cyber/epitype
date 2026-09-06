@@ -418,6 +418,27 @@ TRIGGER_INPUT_PATH = TRIGGER_FIELD + "." + TRIGGER_INPUT_FIELD
 CARD_EXPIRY_FIELDS = (GRANT_EXPIRES_FIELD, VALID_UNTIL_FIELD)
 # 通用卡的日期任一即可；沒有任何日期的卡無法判斷它講的是哪個時點的事實。
 CARD_DATE_FIELDS = (LAST_VERIFIED_AT_FIELD, METADATA_MODIFIED_FIELD)
+# 2026-09-06 owner 裁定「盡量找清楚」：欄位沒寫日期不等於這張卡沒有日期。再找三處
+# ——正文第一個 YYYY-MM-DD／YYYY/MM/DD、name 或檔名裡的 YYYYMMDD、vault 是 git repo
+# 時的首次提交日；任一推得就降為 WARN 並可寫回，四處都沒有才 FAIL。
+CARD_DATE_BODY_REGEX = re.compile(r"(20\d\d)[-/](\d\d)[-/](\d\d)")
+CARD_DATE_COMPACT_REGEX = re.compile(r"(?<!\d)(20\d\d)(\d\d)(\d\d)(?!\d)")
+CARD_DATE_BODY_SCAN_CHARS = 4000
+# 一次 git log 的上限；逐檔 --follow 是 300 個行程，那才是預算殺手。
+CARD_DATE_GIT_BUDGET_SECONDS = 3.0
+# pathspec 塞不進命令列時改成整庫走訪（慢但不會失敗）。
+CARD_DATE_GIT_PATHSPEC_MAX_CHARS = 8000
+CARD_DATE_SOURCE_BODY = "正文日期"
+CARD_DATE_SOURCE_NAME = "name／檔名日期"
+CARD_DATE_SOURCE_GIT = "git 首次提交"
+CARD_DATE_DERIVED_REASON = (
+    "缺 {field}，由{source}推得 {date}；"
+    "`python epitype/card_lint.py <vault> --fix-dates` 可寫回（先 --dry-run 看清單）"
+)
+CARD_DATE_MISSING_REASON = (
+    "缺日期：{fields}、name、description、正文 YYYY-MM-DD、name／檔名 YYYYMMDD、"
+    "git 首次提交都找過，六處皆無"
+)
 # 這些欄位必須是至少一項的序列，空清單等於沒有欄位。
 CARD_LIST_FIELDS = (ALIASES_FIELD, FORBIDDEN_FIELD)
 CARD_EVENT_REQUIRED_FIELDS = (NAME_FIELD, DESCRIPTION_FIELD, CAPTURED_AT_FIELD, SESSION_FIELD)
@@ -1140,3 +1161,84 @@ COMMITMENT_SESSIONSTART_LINE = (
     "→ python epitype/commitments.py \"{vault}\" --list"
 )
 COMMITMENT_PRECOMPACT_HEADING = "## 未兌現承諾（壓縮前 open 快照）"
+
+
+# ── U56 夢的排程（append-only 常數區塊；實作在 epitype/dream.py 與 SessionStart）──
+# 夢＝離線整理批次，只產審核包、不套用、不呼叫模型。三種模式：piggyback（順路做：
+# 開場發現距上次超過 interval_hours，就起一個脫鉤低優先權背景程序，hook 不等它）、
+# nightly（graft 註冊系統排程）、off。模型那半永遠不自動。
+DREAM_DIRECTORY = FTS_INDEX_DIRECTORY   # 夢的檔案一律只落在 <治理 vault>/.epitype/
+DREAM_STATE_FILENAME = "dream_state.json"
+DREAM_LOCK_FILENAME = "dream.lock"
+DREAM_LOG_FILENAME = "dream.log"
+DREAM_PACK_FILENAME = "dream_pack_latest.md"
+DREAM_PACK_JSON_FILENAME = "dream_pack_latest.json"
+DREAM_MODE_PIGGYBACK = "piggyback"
+DREAM_MODE_NIGHTLY = "nightly"
+DREAM_MODE_OFF = "off"
+DREAM_MODES = (DREAM_MODE_PIGGYBACK, DREAM_MODE_NIGHTLY, DREAM_MODE_OFF)
+DREAM_DEFAULT_MODE = DREAM_MODE_PIGGYBACK
+DREAM_CONFIG_FIELD = "dream"
+DREAM_MODE_FIELD = "mode"
+DREAM_INTERVAL_HOURS_FIELD = "interval_hours"
+DREAM_AT_FIELD = "at"
+DREAM_DEFAULT_INTERVAL_HOURS = 24
+DREAM_DEFAULT_AT = "03:30"
+DREAM_AT_PATTERN = r"(?:[01]\d|2[0-3]):[0-5]\d"
+DREAM_AT_REGEX = re.compile(DREAM_AT_PATTERN)
+# 一次只准一個夢：lock 檔帶 pid 與起跑時間，逾時視為死鎖可覆蓋（背景程序被 kill
+# 時不會永久堵住後續的夢）。
+DREAM_LOCK_STALE_SECONDS = 30 * 60
+DREAM_BUDGET_SECONDS = 600              # 背景程序自己計時，逾時剩下的節略過
+DREAM_NICE = 10                         # POSIX 背景優先權；Windows 用 BELOW_NORMAL
+# 起夢（lazy import + Popen）在忙機器上量到 ~2.5 s。開場預算只有 HOOK_TIMEOUT_SECONDS，
+# 剩不到這個數就不起：夢晚一場沒關係，記憶注入掉一場才是真的損失。
+DREAM_SPAWN_RESERVE_SECONDS = 4.0
+DREAM_MODE_ENV = "EPITYPE_DREAM_MODE"   # 單次關閉／覆寫模式；合成測試靠它不起真程序
+DREAM_SCHEDULED_FLAG = "--scheduled"    # 排程與 piggyback 共用的唯一入口參數
+DREAM_LOCK_HELD_FLAG = "--lock-held"    # lock 已由呼叫端取得，跑完由子程序釋放
+DREAM_STATE_COMPLETED_FIELD = "completed_at"
+# 同一個完成時間存兩份：ISO 給人看，epoch 給 SessionStart 判「距上次多久」——開場那條
+# 路徑不 import epitype.dream（每場 +35 ms），所以它拿到的必須是不用解析的數字。
+DREAM_STATE_COMPLETED_EPOCH_FIELD = "completed"
+DREAM_STATE_NOTIFIED_FIELD = "notified_at"
+DREAM_STATE_HEADLINE_FIELD = "headline"
+DREAM_STATE_PACK_FIELD = "pack"
+DREAM_STATE_DATE_FIELD = "date"
+DREAM_STATE_ELAPSED_FIELD = "elapsed_seconds"
+DREAM_STATE_SECTIONS_FIELD = "sections"
+# 開場那一行只報這四個數字；其餘各節數字在 state 的 sections 裡，pack 裡有全文。
+DREAM_HEADLINE_FIELDS = ("card_fail", "missing_aliases", "drafts", "open_commitments")
+DREAM_NOTICE_LINE = (
+    "🌙 夢已整理（{date}）：型別 FAIL {card_fail}／缺別名 {missing_aliases}／"
+    "草稿 {drafts}／未兌現承諾 {open_commitments} → {pack}"
+)
+# 沒有待處理項也要印一行：不然「夢跑完但乾淨」與「夢從沒跑」在開場長得一樣。
+DREAM_NOTICE_CLEAN_LINE = "🌙 夢已整理（{date}）：沒有待處理項。"
+
+
+# --- U57b：沒中文的卡由 AI 自己補；forbidden 別寫裸名詞 ---
+# owner 2026-09-06 裁定：缺中文別名不是給 owner 的決定題，是本場 AI 的順手任務。
+# 每場只點名幾張；游標檔記上次列到哪，否則每一場都點同三張，後面的卡永遠輪不到。
+CARD_NO_CHINESE_PER_SESSION = 3
+CARD_NO_CHINESE_CURSOR_FILENAME = "no_chinese_cursor.json"
+CARD_NO_CHINESE_CURSOR_FIELD = "last"
+CARD_NO_CHINESE_LINE = "🈳 順手補中文別名（本場 ≤{limit} 張）：{cards}"
+# 同一裁定的另一半：喚回的卡與現況不符就直接改，開場說一次。
+CARD_SELF_CORRECT_NOTICE = (
+    "🔁 喚回的卡若與現況不符：直接修卡（舊內容標 superseded、不刪），不問 owner。"
+)
+
+# 2026-09-06 實測：forbidden 寫成裸名詞，連「為什麼不採用 X」的說明也被 Stop 閘擋下。
+# 三個訊號同時成立才算裸名詞——沒有動詞、夠短、沒有正則元字元。
+FORBIDDEN_BARE_TERM_MAX_CHARS = 8
+FORBIDDEN_REGEX_METACHARACTERS = "()[]{}|?*+^$.\\"
+FORBIDDEN_VERB_HINTS = (
+    "建議", "要不要", "是否", "應該", "提議", "再提", "納入", "採用", "改成",
+    "改用", "換成", "加入", "移除", "考慮", "評估", "要求", "不要", "可以",
+)
+FORBIDDEN_BARE_TERM_EXAMPLE = "(建議|要不要|是否|應該).{{0,12}}(納入|採用|改成){term}"
+FORBIDDEN_BARE_TERM_REASON = (
+    "forbidden 項「{term}」是裸名詞，連「為什麼不採用它」的說明也會被擋；"
+    "改寫成再提議的句形，例：{example}"
+)

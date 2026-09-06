@@ -43,6 +43,10 @@ Epitype 把同一組原生 vault 接到五個 host 事件：
 
 安裝器只 merge 帶 Epitype 標記的項目，沿用偵測到的原生 vault，修改既有 host 檔前先備份。穩定 shim 讓 repo 搬家時不必重寫每個 host 註冊。解除安裝只移除 Epitype 擁有的註冊與設定，原生記憶和 vault 卡片會保留。
 
+### 整理會自己跑（夢）
+
+離線整理批次不必等人想起來。預設 `dream.mode: piggyback`：開場時若距上次整理超過 `dream.interval_hours`（預設 24 小時），就起一個脫鉤的低優先權背景程序，開場本身不等它；lock 檔帶 pid 與時間，逾 30 分鐘視為死鎖可覆蓋，所以同一時間只會有一個。想用系統排程就 `graft install --dream nightly [--at HH:MM]` 註冊每日任務（`graft doctor` 顯示模式與上次完成時間，`graft uninstall` 反註冊），`--dream off` 則兩者都不做。背景那一趟只讀 vault，只寫 `<治理 vault>/.epitype/` 底下的審核包、狀態與 log，自己抓十分鐘時限，下一場開場用一行說明結果。全程不呼叫模型——整理的模型那半永遠手動，分享版不會偷跑你的模型額度。
+
 ### 失敗會留下證據
 
 索引不存在、索引過期、shim 故障、卡片格式錯誤與寫鎖競爭都有不同結果。hook 無法安全完成時會 fail open；installer doctor 也會把已記錄的 shim 下線事件報出來，不會把沒有聲音誤判成健康。

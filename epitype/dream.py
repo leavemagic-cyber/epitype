@@ -5,6 +5,11 @@ import sys; sys.dont_write_bytecode = True; [getattr(stream, "reconfigure", lamb
 待辦、承諾帳本、草稿、決策鏈、事件卡老化）在這裡各跑一次唯讀盤點，彙整成一份審核
 包（Markdown 或 JSON），讓 owner 或子代理一眼看到今晚該整理什麼、該跑哪個既有指令
 ——這裡本身不套用任何建議，套用一律由列出的指令另外執行。
+
+排程有三種模式（設定在 config 的 dream 區塊）：piggyback（SessionStart 順路起一個
+脫鉤的低優先權背景程序）、nightly（graft 註冊系統排程）、off。三者跑的都是同一條
+命令 `dream.py --scheduled`——庫與輸出路徑由這裡自己從 config 解出，所以換庫不必
+重註冊排程。只讀 vault，只寫 <治理 vault>/.epitype/ 底下的 pack／state／lock／log。
 """
 
 import argparse
@@ -15,6 +20,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 
 try:
     from . import alias_batch, card_lint, commitments, decision_lint, memsearch, memspec, pending_lint
@@ -28,6 +34,7 @@ except ImportError:  # Direct script execution keeps the CLI contract.
     import pending_lint
 
 EXAMPLE_LIMIT = 10
+TIME_BUDGET_ERROR = "time budget exhausted before this section ran"
 DEFAULT_EVENT_AGING_DAYS = 90
 RECENT_WINDOW_DAYS = 7
 DRAFT_DIRNAME = "_drafts"
@@ -411,11 +418,16 @@ def _next_steps(sections):
     return steps
 
 
-def build_report(vaults, today=None, since_date=None):
+def build_report(vaults, today=None, since_date=None, deadline=None):
     today = today or datetime.now(timezone.utc).date()
     since_date = since_date or (today - timedelta(days=DEFAULT_EVENT_AGING_DAYS))
     sections = []
     for section_id, title, fn in _SECTIONS:
+        # 時限到了就把剩下的節標成略過：背景程序寧可交半份標明缺口的包，也不要
+        # 在一個大庫上跑到天亮（CORE-10：缺口要說出來，不是靜靜少一節）。
+        if deadline is not None and time.monotonic() >= deadline:
+            sections.append({"id": section_id, "title": title, "error": TIME_BUDGET_ERROR})
+            continue
         try:
             data = fn(vaults, today, since_date)
             sections.append({"id": section_id, "title": title, "error": None, **data})
@@ -462,6 +474,223 @@ def _render_markdown(report):
         lines.append(f"- {step}")
     lines.append("")
     return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------- 排程與狀態
+
+
+def dream_root(governance):
+    """夢的檔案只落在這裡：pack、state、lock、log 全在 <治理 vault>/.epitype/ 內。"""
+    return Path(governance).expanduser().resolve() / memspec.DREAM_DIRECTORY
+
+
+def governance_vault(vaults):
+    """帶工作帳本的那個庫；沒有帳本就用第一個（與 hook 的 governance_vault 同規則）。"""
+    paths = [Path(vault) for vault in vaults]
+    for vault in paths:
+        if (vault / memspec.WORK_LEDGER_FILENAME).is_file():
+            return vault
+    return paths[0]
+
+
+def log(governance, message):
+    """夢的例外只寫這裡：開場不吵、hook 不受影響，事後查得到。"""
+    try:
+        root = dream_root(governance)
+        root.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        with (root / memspec.DREAM_LOG_FILENAME).open("a", encoding="utf-8", newline="\n") as stream:
+            stream.write(f"{stamp} {message}\n")
+    except OSError:
+        pass
+
+
+def _epoch_of(value):
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        moment = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.timestamp()
+
+
+def due(state, interval_hours=memspec.DREAM_DEFAULT_INTERVAL_HOURS, now=None):
+    """沒跑過，或距上次完成超過 interval_hours，才輪到這一場順路做。"""
+    state = state or {}
+    completed = state.get(memspec.DREAM_STATE_COMPLETED_EPOCH_FIELD)
+    if isinstance(completed, bool) or not isinstance(completed, (int, float)):
+        completed = _epoch_of(state.get(memspec.DREAM_STATE_COMPLETED_FIELD))
+    if completed is None:
+        return True
+    return ((time.time() if now is None else now) - completed) >= interval_hours * 3600
+
+
+def _lock_is_stale(path, now):
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        started = value.get("started") if isinstance(value, dict) else None
+    except (OSError, ValueError):
+        started = None
+    if isinstance(started, bool) or not isinstance(started, (int, float)):
+        try:
+            started = path.stat().st_mtime
+        except OSError:
+            return False
+    return (now - started) >= memspec.DREAM_LOCK_STALE_SECONDS
+
+
+def acquire_lock(governance, now=None, pid=None):
+    """True 表示這一輪歸我。逾 DREAM_LOCK_STALE_SECONDS 的 lock 視為死鎖可覆蓋——
+    背景程序被砍掉時，殘留的 lock 不得永久擋住之後每一場夢。"""
+    now = time.time() if now is None else now
+    root = dream_root(governance)
+    path = root / memspec.DREAM_LOCK_FILENAME
+    body = json.dumps(
+        {
+            "pid": os.getpid() if pid is None else pid,
+            "started": now,
+            "started_at": datetime.fromtimestamp(now, timezone.utc).isoformat(timespec="seconds"),
+        },
+        ensure_ascii=False,
+    )
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        handle = os.open(os.fspath(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        if not _lock_is_stale(path, now):
+            return False
+        try:
+            path.write_text(body, encoding="utf-8")
+            return True
+        except OSError:
+            return False
+    except OSError:
+        return False
+    with os.fdopen(handle, "w", encoding="utf-8") as stream:
+        stream.write(body)
+    return True
+
+
+def release_lock(governance):
+    try:
+        (dream_root(governance) / memspec.DREAM_LOCK_FILENAME).unlink()
+    except OSError:
+        pass
+
+
+def _note_lock_pid(governance, pid):
+    path = dream_root(governance) / memspec.DREAM_LOCK_FILENAME
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(value, dict):
+            return
+        value["pid"] = pid
+        path.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
+    except (OSError, ValueError):
+        pass
+
+
+def launch_argv(python_executable=None, script=None):
+    """排程與 piggyback 共用的唯一命令形。不用 `-m`：排程器無法保證 cwd 或
+    PYTHONPATH 帶得到 repo，而腳本路徑在哪都一樣讀得到。庫與輸出路徑由
+    `--scheduled` 自己從 config 解出，呼叫端不必重述一遍。"""
+    return [
+        str(python_executable or sys.executable),
+        os.fspath(Path(script or __file__).resolve()),
+        memspec.DREAM_SCHEDULED_FLAG,
+    ]
+
+
+def _launch(argv, log_path):
+    """脫鉤、低優先權、輸出全導進 dream.log 的背景程序；回傳 pid。"""
+    options = {}
+    if os.name == "nt":
+        options["creationflags"] = (
+            subprocess.CREATE_NEW_PROCESS_GROUP
+            | subprocess.DETACHED_PROCESS
+            | getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0)
+        )
+    else:
+        options["start_new_session"] = True
+        if hasattr(os, "nice"):
+            options["preexec_fn"] = lambda: os.nice(memspec.DREAM_NICE)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("a", encoding="utf-8", newline="\n") as stream:
+        process = subprocess.Popen(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=stream,
+            stderr=subprocess.STDOUT,
+            close_fds=True,
+            **options,
+        )
+    return process.pid
+
+
+def spawn(governance, python_executable=None, launcher=None, now=None):
+    """起一個脫鉤的背景夢，不等它。已有未逾時的 lock 就不起；起不來只寫 log。"""
+    if not acquire_lock(governance, now):
+        return False
+    argv = launch_argv(python_executable)
+    if not argv[0]:
+        log(governance, "spawn skipped: no python executable")
+        release_lock(governance)
+        return False
+    try:
+        pid = (launcher or _launch)(
+            [*argv, memspec.DREAM_LOCK_HELD_FLAG],
+            dream_root(governance) / memspec.DREAM_LOG_FILENAME,
+        )
+    except Exception as exc:
+        log(governance, f"spawn failed: {type(exc).__name__}: {exc}")
+        release_lock(governance)
+        return False
+    _note_lock_pid(governance, pid)
+    return True
+
+
+def _config_path():
+    configured = os.environ.get(memspec.EPITYPE_CONFIG_ENV)
+    return Path(configured).expanduser() if configured else Path.home() / ".epitype" / "config.json"
+
+
+def configured_vaults(config_path=None):
+    """登記的庫（只留存在的目錄）。夢只讀 vaults：跑不跑由排程器與 hook 決定。"""
+    value = json.loads(Path(config_path or _config_path()).read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise ValueError("config root must be an object")
+    raw = value.get(memspec.CONFIG_VAULTS_FIELD)
+    vaults = [
+        Path(item).expanduser().resolve()
+        for item in (raw if isinstance(raw, list) else ())
+        if isinstance(item, str) and item.strip()
+    ]
+    vaults = [vault for vault in vaults if vault.is_dir()]
+    if not vaults:
+        raise ValueError("config lists no existing vault")
+    return vaults
+
+
+# 開場那一行的欄位名同源 memspec；這裡只說每個名字取哪一節的哪個數字。
+_HEADLINE_SOURCES = {
+    "card_fail": (2, "fail"),
+    "missing_aliases": (1, "missing_aliases"),
+    "drafts": (5, "total_drafts"),
+    "open_commitments": (4, "open_commitments"),
+}
+
+
+def _headline(report):
+    """開場那一行要的數字；其餘各節數字整包留在 state 的 sections 裡。"""
+    counts = {section["id"]: (section.get("counts") or {}) for section in report["sections"]}
+    headline = {}
+    for field in memspec.DREAM_HEADLINE_FIELDS:
+        section_id, key = _HEADLINE_SOURCES.get(field, (None, None))
+        headline[field] = counts.get(section_id, {}).get(key, 0)
+    return headline
 
 
 # --------------------------------------------------------------------------- selftest
@@ -649,11 +878,124 @@ def _selftest():
                 parsed_by_id[6]["counts"] == by_id[6]["counts"]
                 and parsed_by_id[3]["counts"] == by_id[3]["counts"]
             )))
+
+            # --- 排程與狀態 ---
+            gov = Path(temp_dir).resolve() / "gov"
+            (gov / memspec.DREAM_DIRECTORY).mkdir(parents=True)
+            state_file = gov / memspec.DREAM_DIRECTORY / memspec.DREAM_STATE_FILENAME
+            md_out = gov / memspec.DREAM_DIRECTORY / memspec.DREAM_PACK_FILENAME
+            js_out = gov / memspec.DREAM_DIRECTORY / memspec.DREAM_PACK_JSON_FILENAME
+            code = main([
+                "--today", "2026-09-06", "--out", os.fspath(md_out), "--json-out", os.fspath(js_out),
+                os.fspath(vault),
+            ], output=io.StringIO())
+            written_state = json.loads(state_file.read_text(encoding="utf-8"))
+            checks.append(("--json-out writes the JSON pack beside --out and both parse", (
+                code == 0
+                and md_out.is_file()
+                and json.loads(js_out.read_text(encoding="utf-8"))["today"] == "2026-09-06"
+            )))
+            checks.append(("the run writes completion time, per-section counts and elapsed into dream_state.json", (
+                memspec.is_iso_date(written_state[memspec.DREAM_STATE_COMPLETED_FIELD][:10])
+                and written_state[memspec.DREAM_STATE_HEADLINE_FIELD]["card_fail"] >= 1
+                and written_state[memspec.DREAM_STATE_HEADLINE_FIELD]["drafts"] == 2
+                and written_state[memspec.DREAM_STATE_SECTIONS_FIELD]["3"]["zombie_lines"] == 1
+                and isinstance(written_state[memspec.DREAM_STATE_ELAPSED_FIELD], float)
+                and written_state[memspec.DREAM_STATE_PACK_FIELD] == os.fspath(md_out)
+            )))
+
+            # 時限是自己計時的：預算耗盡後剩下的節標成略過，而不是靜靜少一節。
+            budget_report = build_report([vault], today=today, deadline=time.monotonic() - 1)
+            checks.append(("an exhausted time budget marks every remaining section, and the default budget is 10 minutes", (
+                memspec.DREAM_BUDGET_SECONDS == 600
+                and all(section["error"] == TIME_BUDGET_ERROR for section in budget_report["sections"])
+            )))
+
+            # lock：一次只准一個夢，逾時的 lock 可以覆蓋。
+            first = acquire_lock(gov)
+            second = acquire_lock(gov)
+            stale_now = time.time() + memspec.DREAM_LOCK_STALE_SECONDS + 1
+            checks.append(("one dream at a time; a lock older than the stale window is taken over", (
+                first and not second and acquire_lock(gov, now=stale_now)
+            )))
+            release_lock(gov)
+            checks.append(("a released lock frees the next dream", (
+                not (gov / memspec.DREAM_DIRECTORY / memspec.DREAM_LOCK_FILENAME).exists()
+                and acquire_lock(gov)
+            )))
+            release_lock(gov)
+
+            checks.append(("due() is true when no dream ever finished and false inside the interval", (
+                due({}, 24)
+                and not due({memspec.DREAM_STATE_COMPLETED_FIELD:
+                             datetime.now(timezone.utc).isoformat(timespec="seconds")}, 24)
+                and due({memspec.DREAM_STATE_COMPLETED_FIELD: "2026-09-01T00:00:00+00:00"}, 24,
+                        now=datetime(2026, 9, 6, tzinfo=timezone.utc).timestamp())
+            )))
+
+            launched = []
+            spawned = spawn(gov, launcher=lambda argv, log_path: launched.append((argv, log_path)) or 4242)
+            lock_body = json.loads((gov / memspec.DREAM_DIRECTORY / memspec.DREAM_LOCK_FILENAME).read_text(encoding="utf-8"))
+            checks.append(("spawn takes the lock, records the child pid, and runs the one scheduled command form", (
+                spawned
+                and launched[0][0][1:] == [os.fspath(Path(__file__).resolve()),
+                                           memspec.DREAM_SCHEDULED_FLAG, memspec.DREAM_LOCK_HELD_FLAG]
+                and launched[0][1].name == memspec.DREAM_LOG_FILENAME
+                and lock_body["pid"] == 4242
+            )))
+            checks.append(("a second spawn while the lock is held starts nothing", (
+                not spawn(gov, launcher=lambda argv, log_path: launched.append((argv, log_path)) or 1)
+                and len(launched) == 1
+            )))
+            release_lock(gov)
+
+            def _refuse(argv, log_path):
+                raise OSError("no such file")
+
+            refused = spawn(gov, launcher=_refuse)
+            dream_log = (gov / memspec.DREAM_DIRECTORY / memspec.DREAM_LOG_FILENAME).read_text(encoding="utf-8")
+            checks.append(("a launcher that fails leaves no lock behind and says so only in dream.log", (
+                not refused
+                and "spawn failed: OSError" in dream_log
+                and not (gov / memspec.DREAM_DIRECTORY / memspec.DREAM_LOCK_FILENAME).exists()
+            )))
+
+            # --scheduled 自己從 config 解出登記庫、治理庫與輸出路徑，跑完釋放 lock。
+            scheduled_config = Path(temp_dir).resolve() / "scheduled-config.json"
+            scheduled_config.write_text(json.dumps({
+                memspec.CONFIG_VAULTS_FIELD: [os.fspath(vault), os.fspath(gov)],
+            }, ensure_ascii=False), encoding="utf-8")
+            (gov / memspec.WORK_LEDGER_FILENAME).write_text("ledger\n", encoding="utf-8")
+            saved_env = os.environ.get(memspec.EPITYPE_CONFIG_ENV)
+            os.environ[memspec.EPITYPE_CONFIG_ENV] = os.fspath(scheduled_config)
+            try:
+                acquire_lock(gov)
+                scheduled_code = main([memspec.DREAM_SCHEDULED_FLAG, memspec.DREAM_LOCK_HELD_FLAG,
+                                       "--today", "2026-09-06"], output=io.StringIO())
+                lock_released = not (gov / memspec.DREAM_DIRECTORY / memspec.DREAM_LOCK_FILENAME).exists()
+                scheduled_state = state_file.read_text(encoding="utf-8")
+                acquire_lock(gov)  # 假裝另一場夢正在跑
+                blocked_code = main([memspec.DREAM_SCHEDULED_FLAG, "--today", "2026-09-06"], output=io.StringIO())
+                blocked_state = state_file.read_text(encoding="utf-8")
+            finally:
+                release_lock(gov)
+                if saved_env is None:
+                    os.environ.pop(memspec.EPITYPE_CONFIG_ENV, None)
+                else:
+                    os.environ[memspec.EPITYPE_CONFIG_ENV] = saved_env
+            checks.append(("--scheduled resolves the ledger holder as governance and writes pack, JSON and state there", (
+                scheduled_code == 0
+                and json.loads(js_out.read_text(encoding="utf-8"))["vaults"] == [os.fspath(vault), os.fspath(gov)]
+                and json.loads(scheduled_state)[memspec.DREAM_STATE_PACK_FIELD] == os.fspath(md_out)
+            )))
+            checks.append(("--lock-held releases the caller's lock at exit; a held lock makes the next scheduled run a no-op", (
+                lock_released and blocked_code == 0 and blocked_state == scheduled_state
+            )))
     except Exception as exc:
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 17
+    total = 28
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
@@ -671,37 +1013,106 @@ def main(argv=None, output=sys.stdout):
     if arguments == ["--selftest"]:
         return _selftest()
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("vaults", nargs="+", type=Path)
+    parser.add_argument("vaults", nargs="*", type=Path)
     parser.add_argument("--out", type=Path, default=None)
     parser.add_argument("--json", action="store_true")
+    parser.add_argument("--json-out", type=Path, default=None, help="除了 --out 之外，再把 JSON 報告寫到這裡")
+    parser.add_argument("--state", type=Path, default=None,
+                         help=f"完成後寫入的狀態檔；預設 <--out 目錄>/{memspec.DREAM_STATE_FILENAME}")
     parser.add_argument("--since", type=date.fromisoformat, default=None,
                          help=f"事件卡老化門檻 ISO 日期；預設今天往前 {DEFAULT_EVENT_AGING_DAYS} 天")
     parser.add_argument("--today", type=date.fromisoformat, default=None, help="ISO date override for reproducible runs")
     parser.add_argument("--dry-run", action="store_true", help="只印到 stdout，不寫檔")
+    parser.add_argument(memspec.DREAM_SCHEDULED_FLAG, action="store_true",
+                         help="排程／順路模式：自己從 config 解出登記庫與 .epitype 輸出路徑")
+    parser.add_argument(memspec.DREAM_LOCK_HELD_FLAG, action="store_true",
+                         help="lock 已由呼叫端取得，跑完由這個程序釋放")
+    parser.add_argument("--time-budget-seconds", type=float, default=memspec.DREAM_BUDGET_SECONDS,
+                         help="自己計時的總時限，逾時剩下的節標成略過")
     parsed = parser.parse_args(arguments)
 
-    vaults = []
-    for raw in parsed.vaults:
-        try:
-            vaults.append(memsearch._resolve_vault(raw))
-        except Exception as exc:
-            print(f"ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
-            return 2
+    started = time.monotonic()
+    deadline = started + parsed.time_budget_seconds if parsed.time_budget_seconds > 0 else None
+    governance = None
+    out_path = parsed.out.resolve() if parsed.out else None
+    json_out_path = parsed.json_out.resolve() if parsed.json_out else None
+    state_path = parsed.state.resolve() if parsed.state else None
+    try:
+        if parsed.scheduled:
+            vaults = configured_vaults()
+            governance = governance_vault(vaults)
+            root = dream_root(governance)
+            out_path = out_path or root / memspec.DREAM_PACK_FILENAME
+            json_out_path = json_out_path or root / memspec.DREAM_PACK_JSON_FILENAME
+            state_path = state_path or root / memspec.DREAM_STATE_FILENAME
+            if not parsed.lock_held and not acquire_lock(governance):
+                log(governance, "skipped: another dream holds the lock")
+                return 0
+        else:
+            if not parsed.vaults:
+                parser.error("vaults are required unless " + memspec.DREAM_SCHEDULED_FLAG + " is given")
+            vaults = [memsearch._resolve_vault(raw) for raw in parsed.vaults]
+    except SystemExit:
+        raise
+    except Exception as exc:
+        print(f"ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
 
-    today = parsed.today or datetime.now(timezone.utc).date()
-    since_date = parsed.since or (today - timedelta(days=DEFAULT_EVENT_AGING_DAYS))
-    report = build_report(vaults, today=today, since_date=since_date)
-    content = json.dumps(report, ensure_ascii=False, indent=1) if parsed.json else _render_markdown(report)
+    try:
+        today = parsed.today or datetime.now(timezone.utc).date()
+        since_date = parsed.since or (today - timedelta(days=DEFAULT_EVENT_AGING_DAYS))
+        report = build_report(vaults, today=today, since_date=since_date, deadline=deadline)
+        rendered = json.dumps(report, ensure_ascii=False, indent=1)
+        content = rendered if parsed.json else _render_markdown(report)
 
-    if parsed.dry_run:
-        print(content, file=output)
+        if parsed.dry_run:
+            print(content, file=output)
+            return 0
+
+        out_path = out_path or (vaults[0] / memspec.DREAM_DIRECTORY / f"dream_pack_{today.strftime('%Y%m%d')}.md")
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(content, encoding="utf-8")
+        if json_out_path is not None:
+            json_out_path.parent.mkdir(parents=True, exist_ok=True)
+            json_out_path.write_text(rendered, encoding="utf-8")
+        _write_run_state(
+            state_path or (out_path.parent / memspec.DREAM_STATE_FILENAME),
+            report,
+            out_path,
+            time.monotonic() - started,
+        )
+        print(f"DREAM PACK {out_path}", file=output)
         return 0
+    finally:
+        # lock 只在這個程序負責時才放：手動跑的夢不得把背景那場的 lock 掃掉。
+        if governance is not None and (parsed.lock_held or parsed.scheduled):
+            release_lock(governance)
 
-    out_path = parsed.out.resolve() if parsed.out else (vaults[0] / ".epitype" / f"dream_pack_{today.strftime('%Y%m%d')}.md")
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(content, encoding="utf-8")
-    print(f"DREAM PACK {out_path}", file=output)
-    return 0
+
+def _write_run_state(path, report, out_path, elapsed):
+    """完成時間、各節數字、耗時——開場那一行與「距上次多久」都只讀這一份。
+    notified_at 沿用舊值：那是上一場的通知紀錄，比對的是新的 completed_at。"""
+    try:
+        previous = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        previous = {}
+    now = datetime.now(timezone.utc)
+    value = {
+        memspec.DREAM_STATE_COMPLETED_FIELD: now.isoformat(timespec="seconds"),
+        memspec.DREAM_STATE_COMPLETED_EPOCH_FIELD: round(now.timestamp(), 3),
+        memspec.DREAM_STATE_DATE_FIELD: report["today"],
+        memspec.DREAM_STATE_ELAPSED_FIELD: round(elapsed, 3),
+        memspec.DREAM_STATE_PACK_FIELD: os.fspath(out_path),
+        memspec.DREAM_STATE_HEADLINE_FIELD: _headline(report),
+        memspec.DREAM_STATE_SECTIONS_FIELD: {
+            str(section["id"]): section.get("counts") or {} for section in report["sections"]
+        },
+        memspec.DREAM_STATE_NOTIFIED_FIELD: (previous or {}).get(memspec.DREAM_STATE_NOTIFIED_FIELD)
+        if isinstance(previous, dict)
+        else None,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
 
 
 if __name__ == "__main__":
