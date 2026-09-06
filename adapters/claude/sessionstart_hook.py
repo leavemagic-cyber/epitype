@@ -1,6 +1,7 @@
 import sys, time; sys.dont_write_bytecode = True; _STARTED_AT = time.monotonic(); [getattr(stream, "reconfigure", lambda **_: None)(encoding="utf-8", errors="replace") for stream in (sys.stdin, sys.stdout, sys.stderr)]  # cp950 consoles must not break hook entrypoints.
 """Claude SessionStart adapter for slim index and work-ledger injection."""
 
+from datetime import date, timedelta
 import json
 import os
 from pathlib import Path
@@ -59,14 +60,26 @@ def _frontmatter_fields(path):
     return fields
 
 
-def _active_decisions(vault, started_at):
-    """(current_decision_at, decision_key, owner's words) per active decision card.
+def _recent(decided_at, today):
+    """近 30 天內定的？沒有日期的一律不算近期。"""
+    try:
+        return (today - date.fromisoformat(decided_at[:10])).days <= (
+            memspec.SESSIONSTART_DECISION_RECENT_DAYS
+        )
+    except ValueError:
+        return False
 
-    Read from disk rather than from the index: the index carries `status` but
-    neither the decision's key nor the owner's words, and a vault whose index was
-    never built must still open the session with its standing rulings. None when
-    the hook's deadline arrives mid-scan — half a vault's rulings would read as
-    the whole list.
+
+def _active_decisions(vault, started_at):
+    """(current_decision_at, decision_key, 有沒有 forbidden) per active decision card.
+
+    Read from disk rather than from the index: the index carries `status` but not
+    the decision's key, and a vault whose index was never built must still open the
+    session with its standing rulings. None when the hook's deadline arrives
+    mid-scan — half a vault's rulings would read as the whole list.
+
+    2026-09-06 實測：12 條各帶完整 owner 原話＝1977 bytes。原話是喚回命中那張卡時
+    才需要的東西，開場只需要「有哪些現行裁定、哪天定的」。
     """
     found = []
     try:
@@ -84,14 +97,12 @@ def _active_decisions(vault, started_at):
         status = " ".join(str(fields.get(memspec.DECISION_STATUS_FIELD) or "").split())
         if not key or status != memspec.ACTIVE_DECISION_STATUS:
             continue
-        said = " ".join(str(fields.get(memspec.OWNER_QUOTE_FIELD) or "").split())
-        if not said:
-            said = " ".join(str(fields.get(memspec.DESCRIPTION_FIELD) or "").split())
         found.append(
             (
                 " ".join(str(fields.get(memspec.CURRENT_DECISION_AT_FIELD) or "").split()),
                 key,
-                said[: memspec.SESSIONSTART_DECISION_QUOTE_CHARS],
+                # 欄位在不在，不看值：區塊式清單被前置解析攤成空字串。
+                memspec.FORBIDDEN_FIELD in fields,
             )
         )
     found.sort(key=lambda row: row[1])
@@ -105,12 +116,19 @@ def _decision_block(vault, label, started_at):
     rows = _active_decisions(vault, started_at)
     if not rows:
         return None
+    today = date.today()
+    # 會擋人的裁定（有 forbidden）不論多舊都佔位、也不被上限擠掉；其餘只列近 30 天的，
+    # 舊的靠喚回在命中時帶回來。
+    forbidden = [row for row in rows if row[2]][: memspec.SESSIONSTART_DECISIONS_MAX_LINES]
+    room = memspec.SESSIONSTART_DECISIONS_MAX_LINES - len(forbidden)
+    recent = [row for row in rows if not row[2] and _recent(row[0], today)][:room]
+    listed = sorted(forbidden + recent, key=lambda row: (row[0], row[1]), reverse=True)
     lines = [memspec.SESSIONSTART_DECISIONS_HEADER.format(vault=label)]
-    for decided_at, key, said in rows[: memspec.SESSIONSTART_DECISIONS_MAX_LINES]:
-        lines.append("｜".join(part for part in (key, decided_at, said) if part))
-    dropped = len(rows) - memspec.SESSIONSTART_DECISIONS_MAX_LINES
+    for decided_at, key, _forbidden in listed:
+        lines.append("｜".join(part for part in (key, decided_at) if part))
+    dropped = len(rows) - len(listed)
     if dropped > 0:
-        lines.append(f'…另 {dropped} 條：python epitype/decision_lint.py "{vault}"')
+        lines.append(memspec.SESSIONSTART_DECISION_REST_LINE.format(count=dropped, vault=vault))
     return "\n".join(lines)
 
 
@@ -573,14 +591,37 @@ def _selftest():
             (decision_vault / memspec.MEMORY_INDEX_FILENAME).write_text(
                 "# Decisions\ndecision index detail\n", encoding="utf-8"
             )
+            # 日期相對今天算，否則這份題目會隨時間自己過期（近 30 天的判斷是時間函數）。
+            today = date.today()
+            recent_days = [
+                (today - timedelta(days=index)).isoformat() for index in range(14)
+            ]
+            stale_day = (
+                today - timedelta(days=memspec.SESSIONSTART_DECISION_RECENT_DAYS + 10)
+            ).isoformat()
             for index in range(14):
                 (decision_vault / f"decision-{index:02d}.md").write_text(
                     f"---\nname: Decision {index}\ndescription: 2026 決策摘要 {index}\n"
                     f"{memspec.DECISION_KEY_FIELD}: rule-{index:02d}\n"
                     f"{memspec.DECISION_STATUS_FIELD}: {memspec.ACTIVE_DECISION_STATUS}\n"
-                    f"{memspec.CURRENT_DECISION_AT_FIELD}: 2026-08-{index + 1:02d}\n"
+                    f"{memspec.CURRENT_DECISION_AT_FIELD}: {recent_days[13 - index]}\n"
                     f"{memspec.DECIDED_BY_FIELD}: {memspec.OWNER_EXPLICIT_DECIDER}\n"
                     f"{memspec.OWNER_QUOTE_FIELD}: 只有 6s 是標準合約 {index}\n---\nbody\n",
+                    encoding="utf-8",
+                )
+            # 舊的沒 forbidden＝不列，只進「另 N 條」；舊的有 forbidden＝會擋人，照列。
+            for name, key, forbidden in (
+                ("decision-stale", "rule-stale", ""),
+                ("decision-stale-forbidden", "rule-stale-forbidden",
+                 f"{memspec.FORBIDDEN_FIELD}:\n  - 再提議改回舊制\n"),
+            ):
+                (decision_vault / f"{name}.md").write_text(
+                    f"---\nname: {key}\ndescription: 舊決策\n"
+                    f"{memspec.DECISION_KEY_FIELD}: {key}\n"
+                    f"{memspec.DECISION_STATUS_FIELD}: {memspec.ACTIVE_DECISION_STATUS}\n"
+                    f"{memspec.CURRENT_DECISION_AT_FIELD}: {stale_day}\n"
+                    f"{memspec.DECIDED_BY_FIELD}: {memspec.OWNER_EXPLICIT_DECIDER}\n"
+                    f"{forbidden}---\nbody\n",
                     encoding="utf-8",
                 )
             (decision_vault / "decision-retired.md").write_text(
@@ -602,13 +643,14 @@ def _selftest():
             ]
             checks.append(
                 (
-                    "active decisions open the session in the owner's words, newest first, above the index",
+                    "active decisions open the session as key｜date, newest first, above the index",
                     decision_result.returncode == 0
                     and decision_header in decision_context
                     and decision_lines[:2] == [
-                        "rule-13｜2026-08-14｜只有 6s 是標準合約 13",
-                        "rule-12｜2026-08-13｜只有 6s 是標準合約 12",
+                        f"rule-13｜{recent_days[0]}",
+                        f"rule-12｜{recent_days[1]}",
                     ]
+                    and "只有 6s 是標準合約" not in decision_context
                     and "rule-retired" not in decision_context
                     and decision_context.index(decision_header)
                     < decision_context.index("decision index detail"),
@@ -616,9 +658,13 @@ def _selftest():
             )
             checks.append(
                 (
-                    "the list is capped and the cut is said with the command that shows the rest",
+                    "old decisions are dropped unless they carry forbidden, and the cut is said",
                     len(decision_lines) == memspec.SESSIONSTART_DECISIONS_MAX_LINES
-                    and f'…另 2 條：python epitype/decision_lint.py "{decision_vault}"' in decision_context,
+                    and f"rule-stale-forbidden｜{stale_day}" in decision_context
+                    and f"rule-stale｜{stale_day}" not in decision_context
+                    and memspec.SESSIONSTART_DECISION_REST_LINE.format(
+                        count=4, vault=decision_vault
+                    ) in decision_context,
                 )
             )
             compact_result = run_synthetic(Path(__file__), {"source": "compact"}, decision_config)
@@ -629,7 +675,7 @@ def _selftest():
                     "the session that resumes after a compaction gets the same decisions",
                     compact_result.returncode == 0
                     and decision_header in compact_context
-                    and "rule-13｜2026-08-14｜只有 6s 是標準合約 13" in compact_context,
+                    and f"rule-13｜{recent_days[0]}" in compact_context,
                 )
             )
             plain_result = run_synthetic(Path(__file__), {"source": "startup"}, config)

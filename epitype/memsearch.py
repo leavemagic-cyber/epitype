@@ -26,6 +26,8 @@ _FRONT_FIELDS = _SEARCH_FRONT_FIELDS + (
     memspec.SUPERSEDED_BY_FIELD,
 )
 _ALL_FIELDS = _SEARCH_FRONT_FIELDS + ("body",)
+# 卡的身分欄：一個切詞碰到這裡，講的是這張卡是什麼；碰到描述或本文只是提到。
+_IDENTITY_FIELDS = ("name", memspec.ALIASES_FIELD)
 _DB_FIELDS = {
     "name": "name",
     "description": "description",
@@ -613,6 +615,10 @@ def _rows_for_term(connection, term):
 _CJK_FUNCTION_CHARS = frozenset(
     "的了是在我你他她它們這那有會就都也要把跟不嗎呢什麼怎個很和與及或之其而但又才還於吧啊呀"
     "讓被為對從以所著過給說來去等些每另此該者哪誰何如若則即已曾將能可應得須只再太更最卻並且因沒無非別請"
+    # 2026-09-06 追加：數詞「一」、結果補語「成」、比較詞「較」。三者都只當黏著成分
+    # 用，跨詞界的碎片（「寫|一首」→寫一、「翻成|日文」→成日、「比較|好」→較好）幾乎
+    # 全從它們生出來；兩份回歸題庫加上這三個字後分數不變。
+    "一成較"
 )
 _ALNUM_OR_CJK = re.compile(f"[0-9A-Za-z{_CJK_RANGE}]")
 
@@ -623,6 +629,10 @@ def _substantive(term):
     (2026-09-05: such fragments filled the window while the rule card that
     answered the prompt ranked below it)."""
     if not _ALNUM_OR_CJK.search(term):
+        return False
+    # 裸數字不是主題詞：「算一下 37 乘以 42」的 37／42 只是碰到卡片裡的日期與代號
+    # （2026-09-06 實測注入 4 張卡）。帶字母的代號（U58、2026-09-06）不受影響。
+    if term.isdigit():
         return False
     if len(term) == 2 and _CJK_RUN.fullmatch(term):
         return not any(character in _CJK_FUNCTION_CHARS for character in term)
@@ -708,7 +718,38 @@ def _recall_hits(row, terms):
                 matched_terms.add(key)
         if field_hit:
             hit_fields.append(field)
-    return hit_fields, len(matched_terms)
+    return hit_fields, matched_terms
+
+
+def _strong_terms(terms):
+    """實詞＝不是泛詞的切詞。2026-09-06 實測：「今天天氣如何」注入 7 張卡，命中的全
+    是「今天」「天天」碰到卡片正文；泛詞碰到什麼都不代表這句話問的是那件事。
+
+    庫內高頻詞不當泛詞：同日實測 bug 佔 titan 庫 30%、titan 佔 41%、記憶佔 25%，
+    以 df 比例判泛詞會把「這個 bug 要不要我截圖」的答案卡一起殺掉（回歸退 1 題）。"""
+    return {
+        term.casefold()
+        for term in terms
+        if term.casefold() not in memspec.RECALL_GENERIC_TERMS
+    }
+
+
+def _qualifies(hit_fields, strong):
+    """這張卡算不算被這句話命中。2026-09-06 實測「今天天氣如何」注入 7 張卡、24 句
+    無關問句有 15 句有注入，機制是兩種弱證據：
+
+    * 實詞一個都沒碰到（泛詞碰到什麼都不代表這句話在問那件事）。
+    * 中文切詞是滑動二元組，跨詞界的碎片跟真詞一樣多（「馬拉松|前一天」切出
+      「松前」「前一」）。單獨一個二元組要碰到卡的身分欄才算——碰到描述或本文
+      是巧合。第二個實詞就算背書，拉丁詞與三字以上的詞是真詞，都不受此限。"""
+    if not strong:
+        return False
+    if len(strong) >= 2:
+        return True
+    term = next(iter(strong))
+    if len(term) == 2 and _CJK_RUN.fullmatch(term):
+        return any(field in _IDENTITY_FIELDS for field in hit_fields)
+    return True
 
 
 def _is_superseded(row):
@@ -885,13 +926,19 @@ def recall_index(vault, prompt, include_superseded=False, include_noncard=False,
     connection = _read_connection(db_path)
     connection.row_factory = sqlite3.Row
     try:
+        strong_terms = _strong_terms(terms)
         candidates = []
         excluded_links = []
         for row in _rows_for_recall(connection, terms):
-            hits, matched_count = _recall_hits(row, terms)
+            hits, matched = _recall_hits(row, terms)
             if not hits:
                 continue
             if not include_noncard and not row["is_card"]:
+                continue
+            # 只被泛詞碰到＝沒有命中。放在被取代卡的分支之前：泛詞不該連「現行決定
+            # 在這裡」那行指路都一起帶出來。
+            strong = matched & strong_terms
+            if not _qualifies(hits, strong):
                 continue
             if not include_superseded and _is_superseded(row):
                 excluded_links.append(
@@ -904,7 +951,7 @@ def recall_index(vault, prompt, include_superseded=False, include_noncard=False,
                 (
                     (
                         float(row["relevance"]),
-                        -matched_count,
+                        -len(strong),
                         0 if front_hit else 1,
                         field_rank,
                         row["card_path"],
@@ -1397,6 +1444,39 @@ def _selftest():
                     recall_index(vault, "quartz zebras frolic beyond nebula")["count"] == 0,
                 )
             )
+            # U59：泛詞不算命中。這張卡的本文含「今天」，2026-09-06 之前一句無關的
+            # 「今天天氣如何」就靠這種詞注入 7 張卡。
+            generic_card = vault / "genericwordfixture.md"
+            generic_card.write_text(
+                "---\nname: genericwordfixture\ndescription: 泛詞測試卡\n---\n"
+                "今天我們把星塵處理掉了，之後不會再提。\n",
+                encoding="utf-8",
+            )
+            identity_card = vault / "identityfixture.md"
+            identity_card.write_text(
+                "---\nname: 星塵政策\ndescription: 身分欄命中測試卡\n---\nbody\n",
+                encoding="utf-8",
+            )
+            mark_stale(vault)
+            generic_recall = recall_index(vault, "今天天氣如何")
+            checks.append(
+                (
+                    "泛詞不算命中：整句話只剩泛詞就一張卡都不注入",
+                    generic_recall["count"] == 0 and "今天" in generic_recall["terms"],
+                )
+            )
+            single_bigram = recall_index(vault, "星塵在哪裡")
+            checks.append(
+                (
+                    "單一中文二元組只認身分欄：碰到卡名算命中，只碰到本文不算",
+                    single_bigram["terms"] == ["星塵"]
+                    and [item["path"] for item in single_bigram["results"]]
+                    == [str(identity_card.resolve())],
+                )
+            )
+            generic_card.unlink()
+            identity_card.unlink()
+            mark_stale(vault)
             empty_recall = recall_index(vault, "I a x \t")
             checks.append(
                 ("Empty recall term set", empty_recall["count"] == 0 and empty_recall["terms"] == [])
@@ -1827,7 +1907,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 41
+    total = 43
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

@@ -89,7 +89,7 @@ HOOK_TIMEOUT_SECONDS = 9.0
 SESSIONSTART_BUDGET_SECONDS = 5.0
 # 剩不到這個時間就不再起新的一段：一段起了跑不完，等於白付。
 SESSIONSTART_SEGMENT_FLOOR_SECONDS = 0.25
-HOOK_DEFAULT_BUDGET_BYTES = 10 * 1024
+HOOK_DEFAULT_BUDGET_BYTES = 8 * 1024
 HOOK_MAX_OUTPUT_BYTES = 10 * 1024
 TRIGGER_REGEX_MAX_CHARS = 1024
 # A trigger card the gate cannot use is named to the model once per session:
@@ -335,7 +335,6 @@ CONTEXT_TRUNCATED_SUFFIX = "…（超出預算，餘 {dropped} 段未注入）"
 DECISION_PREFIX = "⚖ 裁定："
 SESSIONSTART_DECISIONS_HEADER = "⚖ 現行裁定（{vault}）"
 SESSIONSTART_DECISIONS_MAX_LINES = 12
-SESSIONSTART_DECISION_QUOTE_CHARS = 80
 
 # 2026-09-03 owner:「你在過程一直讀這種跟寫出這種有必要嗎?很浪費token吧」。工具呼叫之間的
 # 旁白(「改成 C:/… 重跑一次」)輸出一次、之後每輪當 context 重讀一次;36 小時內全機 7797 段
@@ -1120,7 +1119,7 @@ if __name__ == "__main__":
 COMMITMENT_LEDGER_FILENAME = "commitments.jsonl"
 COMMITMENT_LOCK_SECONDS = 0.2
 COMMITMENT_MAX_SENTENCE_CHARS = 200   # 超長句截斷後才入帳，digest 才穩定
-COMMITMENT_MAX_PER_TURN = 5           # 一回合最多記幾條，避免長篇報告把帳本灌爆
+COMMITMENT_MAX_PER_TURN = 2           # 一回合最多記幾條（U59 由 5 降為 2：真庫實測長篇回報一輪灌四五條）
 COMMITMENT_LEDGER_MAX_ROWS = 500      # 重寫時保留的最新列數（closed 先被丟）
 COMMITMENT_SETTLE_PREFIX_CHARS = 20   # 收尾比對用的關鍵片段長度
 COMMITMENT_SUMMARY_CHARS = 60         # SessionStart 一行裡的摘錄長度
@@ -1167,7 +1166,7 @@ COMMITMENT_DONE_PATTERN = (
 )
 COMMITMENT_DONE_REGEX = re.compile(COMMITMENT_DONE_PATTERN, re.IGNORECASE)
 COMMITMENT_SESSIONSTART_LINE = (
-    "⏳ AI 未兌現承諾 {count} 條（最近：{excerpt}…）"
+    "⏳ AI 未兌現承諾 {count} 條（最近：{excerpt}）"
     "→ python epitype/commitments.py \"{vault}\" --list"
 )
 COMMITMENT_PRECOMPACT_HEADING = "## 未兌現承諾（壓縮前 open 快照）"
@@ -1252,3 +1251,65 @@ FORBIDDEN_BARE_TERM_REASON = (
     "forbidden 項「{term}」是裸名詞，連「為什麼不採用它」的說明也會被擋；"
     "改寫成再提議的句形，例：{example}"
 )
+
+
+# ── U59 三個 token 洞（append-only 常數區塊；實作在 memsearch／sessionstart_hook／
+# commitments）─────────────────────────────────────────────────────────────
+# 2026-09-06 真機實測：無關的一句「今天天氣如何」注入 2007 bytes／7 張卡，命中的全是
+# 「今天」「天天」這種泛詞碰到卡片正文。規則：泛詞不算命中——只被泛詞碰到的卡不進
+# 候選，一句話若沒有任何實詞命中就整份不注入。泛詞只認這張與語料無關的停用詞表：
+# 同日實測庫內高頻詞（bug 30%、titan 41%、記憶 25%）全是真正的主題詞，用 df 比例
+# 判泛詞會殺掉答案卡。
+RECALL_GENERIC_TERMS = frozenset(
+    (
+        # 時間
+        "今天", "明天", "昨天", "前天", "後天", "今日", "明日", "昨日", "每天",
+        "天天", "當天", "整天", "半天", "一天", "今年", "去年", "明年", "上週",
+        "下週", "本週", "這週", "最近", "近期", "目前", "現在", "剛剛", "待會",
+        "早上", "中午", "下午", "晚上", "凌晨", "時候", "之後", "之前", "以前",
+        "以後", "等等", "馬上", "立刻", "隨時", "平常", "偶爾",
+        # 數量、指稱、填充
+        "多少", "多久", "幾個", "一下", "一些", "一樣", "一點", "一個", "一種",
+        "這個", "那個", "這些", "那些", "這樣", "那樣", "這裡", "那裡", "哪裡",
+        "哪個", "什麼", "怎麼", "怎樣", "為何", "是否", "可否", "能否", "而已",
+        "還是", "或者", "但是", "因為", "所以", "如果", "雖然", "然後", "於是",
+        "其實", "真的", "應該", "可能", "大概", "也許", "有點", "比較", "非常",
+        "很多", "不會", "沒有", "不是", "就是", "我們", "你們", "他們", "自己",
+        "東西", "事情", "覺得", "知道", "認為", "看看", "試試",
+        # 招呼、客套
+        "請問", "麻煩", "幫忙", "謝謝", "你好", "哈囉", "拜託", "抱歉",
+        # 英文虛詞（長度 <2 的 token 本來就不入切詞，故不列 a／i）
+        "of", "to", "in", "on", "at", "is", "it", "be", "as", "by", "or", "if",
+        "so", "do", "we", "me", "my", "an", "up", "no", "us", "he", "she",
+        "the", "and", "for", "you", "are", "can", "how", "what", "when", "why",
+        "who", "this", "that", "with", "from", "will", "not", "but", "all",
+        "any", "our", "your", "one", "two", "out", "its", "has", "have", "had",
+        "was", "were", "been", "does", "did", "some", "more", "most", "very",
+        "just", "also", "than", "then", "there", "here", "about", "into",
+        "over", "only", "other", "same", "such", "they", "them", "their",
+        "would", "could", "should", "may", "might", "must", "want", "like",
+        "please", "thanks", "hello", "today", "tomorrow", "yesterday", "now",
+    )
+)
+
+# 2026-09-06 真機實測：開場的「現行裁定」12 條各帶完整 owner 原話＝1977 bytes。原話在
+# 喚回命中那張卡時才有用（喚回本來就會帶），開場需要的只是「有哪些現行裁定、哪天定的」。
+# 規則：開場一條裁定只列 key｜日期；並只列近 30 天的、或帶 forbidden（會擋人的）那些，
+# 其餘用一行收尾說還有幾條。
+SESSIONSTART_DECISION_RECENT_DAYS = 30
+SESSIONSTART_DECISION_REST_LINE = '…另 {count} 條現行裁定：python epitype/decision_lint.py "{vault}"'
+
+# 2026-09-06 真機實測：帳本 23 條 open，多數是過程旁白被當成承諾（「Private list: (1) the
+# Core3 verifier's background pytest…」「這兩個跑完我會確認…」）。規則：只看訊息結尾那段
+# （兌現的宣告在結尾，過程旁白在中間）、執行旁白詞一律不算承諾、一回合最多兩條、
+# open 超過 COMMITMENT_STALE_DAYS 天自動標 expired。
+COMMITMENT_TAIL_CHARS = 600           # 結尾段落最多回看幾個字
+COMMITMENT_STALE_DAYS = 7             # open 超過幾天自動標 expired
+COMMITMENT_EXPIRED_STATUS = "expired"
+COMMITMENT_SESSIONSTART_EXCERPTS = 3  # 開場一行最多摘幾條
+# 執行旁白：講的是「我正在跑什麼工具」，不是對 owner 開的帳。
+COMMITMENT_NOISE_PATTERN = (
+    r"(?:private\s+list|verifier|background|\bshell\b|pytest|subagent|sub-agent"
+    r"|背景|子代理|正在跑|跑完|驗收官|派工)"
+)
+COMMITMENT_NOISE_REGEX = re.compile(COMMITMENT_NOISE_PATTERN, re.IGNORECASE)

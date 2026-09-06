@@ -75,16 +75,29 @@ def is_commitment(sentence):
         return False
     if memspec.CAPTURE_REJECT_REGEX.search(text):
         return False
+    if memspec.COMMITMENT_NOISE_REGEX.search(text):
+        # 「Private list: (1) the verifier's background pytest…」講的是我正在跑什麼
+        # 工具，不是對 owner 開的帳；2026-09-06 真庫 23 條 open 有一半是這種。
+        return False
     return True
 
 
+def _tail(text):
+    """訊息的結尾那一段。2026-09-06 真庫實測：過程段裡的「等這兩個跑完我會…」被當成
+    對 owner 的承諾記進帳本；真正要記的那句在收尾段。段落不夠長就往前補到上限。"""
+    trimmed = str(text)[: memspec.STOP_GATE_MESSAGE_MAX_CHARS].rstrip()
+    cut = trimmed.rfind("\n\n")
+    tail = trimmed[cut + 2:] if cut >= 0 else trimmed
+    return tail[-memspec.COMMITMENT_TAIL_CHARS:]
+
+
 def extract(text):
-    """回合結尾訊息裡的承諾句，依出現順序、去重、封頂。"""
+    """回合結尾那一段裡的承諾句，依出現順序、去重、封頂。"""
     if not isinstance(text, str) or not text.strip():
         return []
     found = []
     seen = set()
-    for match in _SENTENCE_REGEX.finditer(text[: memspec.STOP_GATE_MESSAGE_MAX_CHARS]):
+    for match in _SENTENCE_REGEX.finditer(_tail(text)):
         sentence = _one_line(match.group(0))
         if not is_commitment(sentence):
             continue
@@ -240,6 +253,40 @@ def _close_rows(vault, session_id, hits, timeout):
     return closed
 
 
+def _stale_before():
+    return time.strftime(
+        "%Y-%m-%dT%H:%M:%SZ",
+        time.gmtime(time.time() - memspec.COMMITMENT_STALE_DAYS * 86400),
+    )
+
+
+def expire_stale(vault, timeout=memspec.COMMITMENT_LOCK_SECONDS):
+    """開太久沒兌現的 open 標 expired，回傳過期的 digest。收尾時順手做：帳本要是只
+    進不出，開場那行的數字就只會愈滾愈大，然後被當成背景噪音。"""
+    cutoff = _stale_before()
+    target = ledger_path(vault)
+    expired = []
+    try:
+        with memspec.file_lock(target, timeout) as locked:
+            if not locked:
+                return []
+            rows = _rows(vault)
+            for row in rows:
+                if row.get("status") != memspec.COMMITMENT_OPEN_STATUS:
+                    continue
+                stamp = _one_line(row.get("ts"))
+                if not stamp or stamp >= cutoff:
+                    continue
+                row["status"] = memspec.COMMITMENT_EXPIRED_STATUS
+                row["closed_at"] = _stamp()
+                expired.append(row.get("digest"))
+            if expired:
+                _write_all(target, _pruned(rows))
+    except OSError:
+        return expired
+    return expired
+
+
 def settle(vault, session_id, text):
     """回合結尾訊息裡的完成訊號 → 標 closed，回傳被收尾的 digest。
 
@@ -248,6 +295,7 @@ def settle(vault, session_id, text):
     的回報必然重述那件事）。重申承諾不算兌現，見 ``_residue``。"""
     if not isinstance(text, str) or not text.strip():
         return []
+    expire_stale(vault)
     open_rows = [row for row in _rows(vault) if row.get("status") == memspec.COMMITMENT_OPEN_STATUS]
     if not open_rows:
         return []
@@ -295,16 +343,25 @@ def purge_closed(vault):
 
 
 def open_items(vault, limit=memspec.COMMITMENT_SESSIONSTART_MAX):
-    """還沒兌現的承諾，最新在前。帳本是追加寫，尾端就是最新。"""
-    rows = [row for row in _rows(vault) if row.get("status") == memspec.COMMITMENT_OPEN_STATUS]
+    """還沒兌現、也還沒過期的承諾，最新在前。帳本是追加寫，尾端就是最新。
+
+    過期在這裡也判一次（不只在 settle 落檔）：開場那行的數字不能等到下一輪收尾才對。
+    沒有時間戳的列年齡不明，一律留著。"""
+    cutoff = _stale_before()
+    rows = [
+        row
+        for row in _rows(vault)
+        if row.get("status") == memspec.COMMITMENT_OPEN_STATUS
+        and (not _one_line(row.get("ts")) or _one_line(row.get("ts")) >= cutoff)
+    ]
     rows.reverse()
     return rows if limit is None or limit <= 0 else rows[:limit]
 
 
 def summary_line(vaults, limit=memspec.COMMITMENT_SESSIONSTART_MAX):
-    """SessionStart 的一行，沒有 open 承諾時 None。"""
+    """SessionStart 的一行，沒有 open 承諾時 None。過期的不算數也不摘錄。"""
     total = 0
-    newest = None
+    newest = []
     worst = None
     for vault in vaults or ():
         try:
@@ -314,12 +371,15 @@ def summary_line(vaults, limit=memspec.COMMITMENT_SESSIONSTART_MAX):
         if not items:
             continue
         total += len(items)
-        if newest is None or _one_line(items[0].get("ts")) > _one_line(newest.get("ts")):
-            newest, worst = items[0], vault
-    if not total or newest is None:
+        if not newest or _one_line(items[0].get("ts")) > _one_line(newest[0].get("ts")):
+            newest, worst = items, vault
+    if not total or not newest:
         return None
     count = f"{limit}+" if total >= limit else str(total)
-    excerpt = _one_line(newest.get("text"))[: memspec.COMMITMENT_SUMMARY_CHARS]
+    excerpt = "；".join(
+        _one_line(row.get("text"))[: memspec.COMMITMENT_SUMMARY_CHARS] + "…"
+        for row in newest[: memspec.COMMITMENT_SESSIONSTART_EXCERPTS]
+    )
     return memspec.COMMITMENT_SESSIONSTART_LINE.format(count=count, excerpt=excerpt, vault=worst)
 
 
@@ -333,6 +393,25 @@ def snapshot_block(vault, limit=memspec.COMMITMENT_PRECOMPACT_MAX):
         text = _one_line(row.get("text"))[: memspec.COMMITMENT_MAX_SENTENCE_CHARS]
         lines.append(f"- {_one_line(row.get('ts'))} {row.get('digest')} {text}")
     return "\n".join(lines) + "\n"
+
+
+def requalify(vault):
+    """用現行規則重評帳本每一列，回傳 [(keep, digest, text)]。改規則之後既有帳本
+    不會自己重評，所以要有一支能先看再決定的路。"""
+    return [
+        (bool(extract(_one_line(row.get("text")))), row.get("digest"), _one_line(row.get("text")))
+        for row in _rows(vault)
+    ]
+
+
+def _print_requalify(vault, verdicts, output):
+    for keep, key, text in verdicts:
+        print(f"{'keep' if keep else 'drop'} {key} {text}", file=output)
+    kept = sum(1 for keep, _key, _text in verdicts if keep)
+    print(
+        f"REQUALIFY keep={kept} drop={len(verdicts) - kept} ledger={ledger_path(vault)}",
+        file=output,
+    )
 
 
 def _print_report(vault, items, rows, output):
@@ -357,7 +436,7 @@ def _selftest():
                 "我等一下把 stop_gate 的預算量一遍。",
                 "稍後我再跑一次 exam 全集。",
                 "下一步是把 CLI 子命令登記進 run_all。",
-                "等 verifier 回報後我把 FAILURE_MODES 補完。",
+                "等交叉審核回報後我把 FAILURE_MODES 補完。",
                 "等 owner 裁決後我會改成鏡像。",
                 "I will re-run the privacy lint before reporting.",
                 "Next I check the wall-time delta on a temp vault.",
@@ -389,6 +468,28 @@ def _selftest():
             checks.append((
                 "one turn dedupes the same sentence and keeps the other text out",
                 extract(turn) == ["我會補上 settle 的測試。"],
+            ))
+
+            # U59 三條新規則：只看結尾段、執行旁白不算承諾、一回合最多兩條。
+            staged = "我等一下把 A 量一遍。\n\n中間段的說明。\n\n我會補上 settle 的測試。"
+            checks.append((
+                "only the closing paragraph is mined; a promise in an earlier paragraph is process talk",
+                extract(staged) == ["我會補上 settle 的測試。"],
+            ))
+            noise = (
+                "Private list: (1) the Core3 verifier's background pytest — I'll read the outputs.",
+                "the verifier itself yielded, so I'll finish conditions 7-8 from those outputs.",
+                "這兩個跑完我會確認快取真的重建。",
+                "我等一下會去讀 background shell 的輸出。",
+            )
+            checks.append((
+                "execution narration (private list, verifier, background shell, pytest) is not a commitment",
+                not [sentence for sentence in noise if extract(sentence)],
+            ))
+            many = "".join(f"我會做第 {index} 件事。" for index in range(5))
+            checks.append((
+                f"a turn records at most {memspec.COMMITMENT_MAX_PER_TURN} commitments",
+                len(extract(many)) == memspec.COMMITMENT_MAX_PER_TURN,
             ))
 
             first = record(vault, "s1", extract("我會補上 settle 的測試。"))
@@ -429,11 +530,12 @@ def _selftest():
 
             line = summary_line([vault])
             checks.append((
-                "the session-start line is one line naming the count and the newest excerpt",
+                f"the session-start line is one line naming the count and up to"
+                f" {memspec.COMMITMENT_SESSIONSTART_EXCERPTS} newest excerpts",
                 isinstance(line, str)
                 and "\n" not in line
                 and "承諾 3 條" in line
-                and "我會最後做丙。" in line
+                and all(item in line for item in ("我會最後做丙。", "我會再做乙。", "我會先做甲。"))
                 and str(vault) in line,
             ))
             checks.append((
@@ -490,11 +592,58 @@ def _selftest():
                 "the CLI lists the ledger and reports the counts",
                 code == 0 and "我會做丁。" in out.getvalue() and "COMMITMENTS open=1" in out.getvalue(),
             ))
+
+            aged = Path(temp_dir).resolve() / "aged"
+            (aged / memspec.FTS_INDEX_DIRECTORY).mkdir(parents=True)
+            old_stamp = time.strftime(
+                "%Y-%m-%dT%H:%M:%SZ",
+                time.gmtime(time.time() - (memspec.COMMITMENT_STALE_DAYS + 1) * 86400),
+            )
+            ledger_path(aged).write_text(
+                json.dumps({"ts": old_stamp, "digest": "bbbbbbbbbbbb", "text": "我會做很久以前那件事。",
+                            "status": memspec.COMMITMENT_OPEN_STATUS}, ensure_ascii=False) + "\n"
+                + json.dumps({"ts": _stamp(), "digest": "cccccccccccc", "text": "我會做今天這件事。",
+                              "status": memspec.COMMITMENT_OPEN_STATUS}, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            before = [row["digest"] for row in open_items(aged)]
+            expired = expire_stale(aged)
+            checks.append((
+                f"an open row older than {memspec.COMMITMENT_STALE_DAYS} days stops counting and is"
+                " stamped expired",
+                before == ["cccccccccccc"]
+                and expired == ["bbbbbbbbbbbb"]
+                and [row["status"] for row in _rows(aged) if row["digest"] == "bbbbbbbbbbbb"]
+                == [memspec.COMMITMENT_EXPIRED_STATUS],
+            ))
+
+            out = io.StringIO()
+            code = main([os.fspath(aged), "--requalify", "--dry-run"], output=out)
+            report = out.getvalue()
+            noisy = Path(temp_dir).resolve() / "noisy"
+            (noisy / memspec.FTS_INDEX_DIRECTORY).mkdir(parents=True)
+            ledger_path(noisy).write_text(
+                json.dumps({"ts": _stamp(), "digest": "dddddddddddd",
+                            "text": "Private list: (1) the verifier's pytest — I'll read it.",
+                            "status": memspec.COMMITMENT_OPEN_STATUS}, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            drop = io.StringIO()
+            main([os.fspath(noisy), "--requalify", "--dry-run"], output=drop)
+            checks.append((
+                "requalify re-scores an existing ledger under the current rules without touching it",
+                code == 0
+                and "keep cccccccccccc" in report
+                and "REQUALIFY keep=2 drop=0" in report
+                and "drop dddddddddddd" in drop.getvalue()
+                and len(_rows(noisy)) == 1
+                and main([os.fspath(noisy), "--requalify"], output=io.StringIO()) == 2,
+            ))
     except Exception as exc:
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 15
+    total = 20
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
@@ -517,11 +666,25 @@ def main(argv=None, output=sys.stdout):
     parser.add_argument("--list", action="store_true", help="列出還沒兌現的承諾（預設）")
     parser.add_argument("--close", metavar="DIGEST", action="append", default=[], help="照 digest 標為 closed")
     parser.add_argument("--purge-closed", action="store_true", help="把 closed 列從帳本移除")
+    parser.add_argument("--requalify", action="store_true", help="用現行規則重評每一列，印 keep/drop")
+    parser.add_argument("--dry-run", action="store_true", help="只印判定，不動帳本（--requalify 目前只支援這個）")
+    parser.add_argument("--expire-stale", action="store_true",
+                        help=f"把 open 超過 {memspec.COMMITMENT_STALE_DAYS} 天的標 expired")
     parser.add_argument("--limit", type=int, default=0, help="最多列出幾條，0＝全部")
     parser.add_argument("--json", action="store_true")
     parsed = parser.parse_args(arguments)
     vault = parsed.vault.expanduser()
     try:
+        if parsed.requalify:
+            if not parsed.dry_run:
+                print("REQUALIFY 需要 --dry-run：重評只印判定，套用由人決定", file=sys.stderr)
+                return 2
+            _print_requalify(vault, requalify(vault), output)
+            return 0
+        if parsed.expire_stale:
+            expired = expire_stale(vault)
+            print(f"EXPIRED {len(expired)} {' '.join(item for item in expired if item)}".rstrip(),
+                  file=output)
         if parsed.close:
             closed = close(vault, parsed.close)
             print(f"CLOSED {len(closed)}/{len(parsed.close)} {' '.join(closed)}".rstrip(), file=output)

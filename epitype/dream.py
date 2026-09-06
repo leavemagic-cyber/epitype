@@ -739,7 +739,8 @@ def _selftest():
             ledger.write_text(
                 json.dumps({
                     "digest": "abc123456789",
-                    "ts": "2026-08-01T00:00:00Z",
+                    # U59 起 open 超過 COMMITMENT_STALE_DAYS 天自動過期，時間戳不能寫死。
+                    "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                     "text": "我會做 X。",
                     "status": memspec.COMMITMENT_OPEN_STATUS,
                     "session_id": "s1",

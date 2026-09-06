@@ -444,3 +444,58 @@ python tests/capture_precision.py --selftest
 python tests/capture_precision.py --local <labelled set outside the repo>
 python epitype/harvest.py --reevaluate <quarantine directory>
 ```
+
+## 15. Token 洞：泛詞查詢、開場清單、承諾誤抓
+
+### Symptom
+
+三個地方各自把 context 花在沒有資訊的位元組上，量到才看得見：
+
+- 一句與記憶完全無關的「今天天氣如何」注入 2007 bytes／7 張卡，命中的全是「今天」
+  「天天」這類泛詞碰到卡片正文；24 句無關日常問話裡有 15 句都有注入。
+- 每一場開場列出 12 條現行裁定，每條帶完整 owner 原話＝1977 bytes。同一句原話在喚回
+  命中那張卡時本來就會再送一次。
+- 承諾帳本累到 23 條 open，其中 6 條是過程旁白（「Private list: (1) the verifier's
+  background pytest…」「這兩個跑完我會確認…」），開場那行的數字因此變成背景噪音。
+
+### Why it happens
+
+中文切詞在沒有詞典的情況下只能滑動取二元組，一半的二元組跨詞界（「馬拉松|前一天」
+切出「松前」「前一」）；再加上「命中」被定義成子字串包含，於是任何一句話都碰得到
+幾張卡，而檢索器沒有辦法區分「碰到」與「問的是這件事」。開場清單與承諾帳本則是同一
+個形狀的另一面：兩者都只進不出，沒有人為「這條還值不值得每場都送」定過條件。
+
+### Epitype countermeasure
+
+- 查詢端把泛詞排除在「命中」之外（`memspec.RECALL_GENERIC_TERMS`：時間詞、量詞、
+  填充詞、英文虛詞；裸數字不入切詞），一句話若沒有任何實詞命中就整份不注入；單一
+  中文二元組只認卡的身分欄（name／aliases），碰到描述或本文要第二個實詞背書。
+- 開場一條裁定只列 `decision_key｜日期`，並只列近 `SESSIONSTART_DECISION_RECENT_DAYS`
+  天的、或帶 `forbidden`（會擋人）的那些，其餘用一行說還有幾條與看全部的命令。
+- 承諾只從訊息結尾那一段抽（過程段不算）、執行旁白詞（`COMMITMENT_NOISE_PATTERN`）
+  一律不算承諾、一回合最多 `COMMITMENT_MAX_PER_TURN` 條、open 超過
+  `COMMITMENT_STALE_DAYS` 天自動標 expired 且不再計數。
+
+### Known limits
+
+- **詞面碰撞不是切詞錯誤。** 「熱帶魚缸的水草照明週期」碰到「週期」、「台北到高雄」
+  碰到「台北」、「what is the capital of Portugal」碰到 capital——這些詞在該庫的別名裡
+  是本業詞彙。無關問句題庫 20 題只到 15 題棄答，剩下 5 題全是這一類；修法在語意層
+  （向量或模型），不在查詢端。
+- **短拉丁詞的子字串命中留著。** tie 會命中 tier，但 bug 命中 debug 是回歸題庫要的；
+  兩側都要求詞界會換掉一題真命中，所以維持子字串。
+- **開場是預算飽和的。** 開場注入本來就頂到 `budget_bytes`，所以裁定清單省下的
+  1.6 KB 不會讓總位元組變小，而是把原本被丟掉的帳本／索引段落換進來（實測掉段
+  42→35、行數 61→103）。要讓總量下降只能調 `budget_bytes`。
+- **既有帳本不會自己重評。** 規則改了之後舊列還在，`--requalify --dry-run` 印每條
+  keep/drop 供人決定；結尾段那條規則無法回溯（原始訊息已經不在）。
+
+### Self-verification
+
+```powershell
+python epitype/memsearch.py --selftest
+python adapters/claude/sessionstart_hook.py --selftest
+python epitype/commitments.py --selftest
+python tests/recall_regression.py --selftest
+python epitype/commitments.py "<vault>" --requalify --dry-run
+```

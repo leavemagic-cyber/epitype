@@ -138,6 +138,29 @@ inside the interpreter fell from 4.0–4.6 s to about 0.4 s.
   印 WARN `forbidden-bare-term`（要寫「再提議」的句形，裸名詞會連「為什麼不採用 X」的
   說明一起擋掉；FAILURE_MODES §10）。nightly 排程在 Windows 改用旁邊的 `pythonw.exe`，
   凌晨不再閃一個主控台黑窗。
+- 三個 token 洞（2026-09-06 真機量測，FAILURE_MODES §15）。**泛詞查詢**：一句與記憶
+  無關的「今天天氣如何」原本注入 2007 bytes／7 張卡，命中的全是「今天」「天天」碰到
+  卡片正文。查詢端把泛詞排除在「命中」之外（`memspec.RECALL_GENERIC_TERMS`：時間詞、
+  量詞、填充詞、英文虛詞；裸數字不再入切詞；「一成較」入虛詞字表），沒有任何實詞命中
+  就整份不注入；單一中文二元組只認卡的身分欄（name／aliases），碰到描述或本文要第二個
+  實詞背書——跨詞界的碎片（「馬拉松|前一天」切出「松前」「前一」）跟真詞一樣多。庫內
+  高頻詞刻意不當泛詞：實測 bug 佔該庫 30%、titan 41%、記憶 25%，用 df 比例判泛詞會殺掉
+  答案卡。「今天天氣如何」2007→0 bytes、「幫我翻譯這句英文」1880→771、「titan 回測為
+  什麼變慢」1815→1653；真庫 56 題回歸 48/56、合成 51 題 45/51 兩者皆不變。**開場裁定
+  清單**：12 條各帶完整 owner 原話＝1977 bytes，原話在喚回命中那張卡時本來就會送。開場
+  改成一條只列 `decision_key｜日期`，並只列近 30 天（`SESSIONSTART_DECISION_RECENT_DAYS`）
+  或帶 `forbidden`（會擋人、不受上限擠掉）的那些，其餘一行收尾說還有幾條；兩庫合計
+  2167→576 bytes（開場總量本來就頂到 `budget_bytes`，省下的位元組換成原本被丟掉的
+  帳本／索引段落：掉段 42→35、行數 61→103）。開場預算 10240→8192
+  （`memspec.HOOK_DEFAULT_BUDGET_BYTES`）：`sessionstart_hook --selftest` 28/28、
+  `exam_runner` morning_review 15/15、corrections 5/5、corpus_300 330/330 全過。
+  **承諾誤抓**：真庫 23 條 open 有 6 條是
+  過程旁白。承諾只從訊息結尾那一段抽（`COMMITMENT_TAIL_CHARS`，過程段不算）、執行旁白
+  詞不算承諾（`COMMITMENT_NOISE_PATTERN`：Private list／verifier／background／shell／
+  pytest／正在跑／跑完…）、一回合最多 2 條（原 5）、open 超過 7 天
+  （`COMMITMENT_STALE_DAYS`）自動標 `expired` 並不再計數；開場那行改印最多 3 條摘要
+  （各 ≤60 字）。新增 `commitments.py <vault> --requalify --dry-run` 用現行規則重評既有
+  帳本並逐條印 keep/drop（只印不套用），以及 `--expire-stale`。
 
 ## v1.1.0 — 2026-09-03
 
