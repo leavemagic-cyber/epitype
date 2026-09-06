@@ -347,9 +347,9 @@ def run_selftest():
             mix_vault = Path(temp_dir2).resolve()
             mix_path = mix_vault / GATE_LOG_FILENAME
             mix_lines = [
-                synth(1, kind="write_block", rule="forbidden", session_id="4c9c3b1a-2222-4d3e-9a11-000000000001", label_field={"decision": "dec-y"}),
-                synth(2, kind="write_block", rule="forbidden", session_id="4c9c3b1a-2222-4d3e-9a11-000000000001", label_field={"decision": "dec-y"}),
-                synth(3, kind="write_block", rule="forbidden", session_id="4c9c3b1a-2222-4d3e-9a11-000000000001", label_field={"decision": "dec-y"}),
+                synth(1, kind="write_block", rule="forbidden", session_id="claude-session-alpha", label_field={"decision": "dec-y"}),
+                synth(2, kind="write_block", rule="forbidden", session_id="claude-session-alpha", label_field={"decision": "dec-y"}),
+                synth(3, kind="write_block", rule="forbidden", session_id="claude-session-alpha", label_field={"decision": "dec-y"}),
                 synth(4, kind="stop_block", rule="forbidden", session_id="stopgate-abcdef01", label_field={"decision": "dec-z"}),
                 synth(5, kind="stop_block", rule="forbidden", session_id="stopgate-abcdef01", label_field={"decision": "dec-z"}),
                 synth(6, label_field={"card": "scar-a"}),  # no session_id at all
@@ -360,7 +360,7 @@ def run_selftest():
             checks.append((
                 "混合 host session_id 形狀不同：連擋 >=3 偵測，不同形狀各自計數",
                 any(
-                    entry["session_id"] == "4c9c3b1a-2222-4d3e-9a11-000000000001" and entry["count"] == 3
+                    entry["session_id"] == "claude-session-alpha" and entry["count"] == 3
                     for entry in mix_report["repeat_offenders"]
                 )
                 and all(entry["session_id"] != "stopgate-abcdef01" for entry in mix_report["repeat_offenders"])
