@@ -705,20 +705,37 @@ def _rows_for_recall(connection, terms):
         return []
 
 
+_LATIN_ALPHA_TERM = re.compile(r"^[a-z]+$")
+
+
+def _short_latin_pattern(key):
+    """≤3 字母的純英文詞只認「詞尾邊界」比對：`bug\\b` 吃得到 debug 的字尾（真字根，
+    2026-09-06 迴歸題 titan-log-over-screenshot 就靠這個），但 `tie\\b` 吃不到 tier／
+    tiered／service_tier 的字首（2026-09-06 真機實測：這種字首巧合灌了 27 張卡，
+    無一命中該卡的 name 欄）。≥4 字母與中文維持子字串比對，規格未變。"""
+    if len(key) <= 3 and _LATIN_ALPHA_TERM.fullmatch(key):
+        return re.compile(re.escape(key) + r"\b")
+    return None
+
+
 def _recall_hits(row, terms):
     hit_fields = []
     matched_terms = set()
+    term_fields = {}
     for field in _ALL_FIELDS:
         value = (row[_DB_FIELDS[field]] or "").casefold()
         field_hit = False
         for term in terms:
             key = term.casefold()
-            if key in value:
+            pattern = _short_latin_pattern(key)
+            found = bool(pattern.search(value)) if pattern is not None else key in value
+            if found:
                 field_hit = True
                 matched_terms.add(key)
+                term_fields.setdefault(key, set()).add(field)
         if field_hit:
             hit_fields.append(field)
-    return hit_fields, matched_terms
+    return hit_fields, matched_terms, term_fields
 
 
 def _strong_terms(terms):
@@ -734,21 +751,32 @@ def _strong_terms(terms):
     }
 
 
-def _qualifies(hit_fields, strong):
+def _qualifies(strong_hit_fields, strong):
     """這張卡算不算被這句話命中。2026-09-06 實測「今天天氣如何」注入 7 張卡、24 句
     無關問句有 15 句有注入，機制是兩種弱證據：
 
     * 實詞一個都沒碰到（泛詞碰到什麼都不代表這句話在問那件事）。
     * 中文切詞是滑動二元組，跨詞界的碎片跟真詞一樣多（「馬拉松|前一天」切出
       「松前」「前一」）。單獨一個二元組要碰到卡的身分欄才算——碰到描述或本文
-      是巧合。第二個實詞就算背書，拉丁詞與三字以上的詞是真詞，都不受此限。"""
+      是巧合。第二個實詞就算背書，三字以上的中文真詞不受此限。
+
+    2026-09-06 追加：≤3 字母的英文詞（§b 詞尾邊界比對的同一批）比照辦理——單獨一個
+    短詞只碰到 body 不算數，`strong_hit_fields` 只看這個實詞自己碰到哪些欄，不吃其
+    他泛詞灌水的欄位。**≥4 字母的英文詞不套這道門檻**：試過套用全體英文詞後，
+    memsearch --selftest「Card without status remains eligible」直接炸
+    IndexError（`ordinarynostatusneedle` 這種只出現在 body 的獨特英文實詞查得到是
+    既有正確行為，跟 `capital` 這種常見多義詞撞到 body 高頻流量是兩回事，光看字數
+    與是否命中身分欄分不出來，實測證明用 df／長度硬分只會兩邊各打一巴掌）；規格
+    §b 的「≥4 字母維持現狀」原意也包含這裡，所以維持 43/43。"""
     if not strong:
         return False
     if len(strong) >= 2:
         return True
     term = next(iter(strong))
     if len(term) == 2 and _CJK_RUN.fullmatch(term):
-        return any(field in _IDENTITY_FIELDS for field in hit_fields)
+        return any(field in _IDENTITY_FIELDS for field in strong_hit_fields)
+    if len(term) <= 3 and _LATIN_ALPHA_TERM.fullmatch(term):
+        return any(field in _IDENTITY_FIELDS for field in strong_hit_fields)
     return True
 
 
@@ -930,7 +958,7 @@ def recall_index(vault, prompt, include_superseded=False, include_noncard=False,
         candidates = []
         excluded_links = []
         for row in _rows_for_recall(connection, terms):
-            hits, matched = _recall_hits(row, terms)
+            hits, matched, term_fields = _recall_hits(row, terms)
             if not hits:
                 continue
             if not include_noncard and not row["is_card"]:
@@ -938,7 +966,13 @@ def recall_index(vault, prompt, include_superseded=False, include_noncard=False,
             # 只被泛詞碰到＝沒有命中。放在被取代卡的分支之前：泛詞不該連「現行決定
             # 在這裡」那行指路都一起帶出來。
             strong = matched & strong_terms
-            if not _qualifies(hits, strong):
+            # 身分欄門檻只看實詞自己碰到哪些欄——泛詞（what/is/the...）巧合命中的
+            # 欄位不能替實詞背書，否則 capital 這種單一實詞又會靠泛詞灌水的 hits
+            # 蒙混過關（2026-09-06 實測）。
+            strong_hit_fields = set()
+            for term in strong:
+                strong_hit_fields |= term_fields.get(term, set())
+            if not _qualifies(strong_hit_fields, strong):
                 continue
             if not include_superseded and _is_superseded(row):
                 excluded_links.append(
@@ -1476,6 +1510,67 @@ def _selftest():
             )
             generic_card.unlink()
             identity_card.unlink()
+            # U59 追加：英文路徑的三個洞。2026-09-06 真機實測「how do I tie a bow
+            # tie」注入 27 張卡，全是 tie 撞進 tier／tiered／service_tier 的字首。
+            english_generic_card = vault / "englishgenericfixture.md"
+            english_generic_card.write_text(
+                "---\nname: englishgenericfixture\ndescription: english stopword card\n---\n"
+                "How to do this the right way, of course.\n",
+                encoding="utf-8",
+            )
+            suffix_card = vault / "suffixfixture.md"
+            suffix_card.write_text(
+                "---\nname: Debug this fixture\ndescription: suffix boundary card\n"
+                "aliases:\n  - Debug看log不要screenshot\n---\nDebug directly, no screenshots.\n",
+                encoding="utf-8",
+            )
+            prefix_card = vault / "prefixfixture.md"
+            prefix_card.write_text(
+                "---\nname: prefixfixture\ndescription: prefix collision card\n"
+                "aliases:\n  - service_tier priority removed\n---\ntiered exit ladder only.\n",
+                encoding="utf-8",
+            )
+            longword_card = vault / "longwordfixture.md"
+            longword_card.write_text(
+                "---\nname: longwordfixture\ndescription: long-word body card\n---\n"
+                "capital allocation guardrail for this book.\n",
+                encoding="utf-8",
+            )
+            mark_stale(vault)
+            stopword_recall = recall_index(vault, "how do")
+            checks.append(
+                (
+                    "英文泛詞不算命中：how／do 都在泛詞表，整句話不注入",
+                    stopword_recall["count"] == 0 and {"how", "do"} <= set(stopword_recall["terms"]),
+                )
+            )
+            suffix_recall = recall_index(vault, "bug")
+            checks.append(
+                (
+                    "≤3 字母英文詞認字尾：bug 命中 debug 的字尾（真字根）",
+                    [item["path"] for item in suffix_recall["results"]]
+                    == [str(suffix_card.resolve())],
+                )
+            )
+            prefix_recall = recall_index(vault, "tie")
+            checks.append(
+                (
+                    "≤3 字母英文詞不認字首：tie 不命中 tier／tiered 的字首（純巧合）",
+                    prefix_recall["count"] == 0,
+                )
+            )
+            longword_recall = recall_index(vault, "capital")
+            checks.append(
+                (
+                    "≥4 字母英文詞維持子字串比對：capital 命中 body 內的 capital 一樣算",
+                    [item["path"] for item in longword_recall["results"]]
+                    == [str(longword_card.resolve())],
+                )
+            )
+            english_generic_card.unlink()
+            suffix_card.unlink()
+            prefix_card.unlink()
+            longword_card.unlink()
             mark_stale(vault)
             empty_recall = recall_index(vault, "I a x \t")
             checks.append(
@@ -1907,7 +2002,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 43
+    total = 47
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
