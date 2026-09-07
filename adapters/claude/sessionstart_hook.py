@@ -21,6 +21,7 @@ from _hook_common import (
     load_config,
     native_cwd_vaults,
     payload,
+    payload_fits,
     read_event,
     resolve_vaults,
     run_synthetic,
@@ -235,7 +236,8 @@ def _handle(event, started_at):
     if config is None:
         return None
     budget = config[memspec.CONFIG_BUDGET_BYTES_FIELD]
-    pieces = []
+    # Session entry can resume generation without a fresh UserPromptSubmit.
+    pieces = [memspec.QUESTION_PREFLIGHT]
     # Session start carries the cwd's own vault(s) plus the governance vault;
     # another project's index and ledger are noise here and were crowding the
     # budget. Recall still reaches that project's cards by content.
@@ -341,6 +343,12 @@ def _handle(event, started_at):
     if expired(started_at):
         return None
     context = bounded_context("SessionStart", pieces, budget)
+    # A truncation suffix must not evict the whole procedure.
+    if not context:
+        if payload_fits("SessionStart", memspec.QUESTION_PREFLIGHT, budget):
+            context = memspec.QUESTION_PREFLIGHT
+        else:
+            print("Epitype: question preflight omitted: configured budget too small", file=sys.stderr)
     return payload("SessionStart", context) if context else None
 
 
@@ -430,9 +438,9 @@ def _selftest():
             overdue_context = overdue_value.get("hookSpecificOutput", {}).get("additionalContext", "")
             checks.append(
                 (
-                    "overdue pending line is announced first, in one line",
+                    "overdue pending line follows the procedure, before the index",
                     overdue_result.returncode == 0
-                    and overdue_context.startswith("⏳ 殭屍待辦 1 行／1 卡")
+                    and overdue_context.startswith(memspec.QUESTION_PREFLIGHT + "\n⏳ 殭屍待辦 1 行／1 卡")
                     and "index detail" in overdue_context,
                 )
             )

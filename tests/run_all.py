@@ -40,6 +40,7 @@ SELFTESTS = (
     Path("tests") / "recall_regression.py",
     Path("tests") / "governance_regression.py",
     Path("tests") / "recall_selection_regression.py",
+    Path("tests") / "question_premise_regression.py",
 )
 
 

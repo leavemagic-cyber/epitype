@@ -141,14 +141,18 @@ def _merge_ordinary(groups):
             heapq.heappush(queue, (-coverage, rank, vault_index, line))
 
 
-def _bounded_recall(pieces, budget, required_count, header_count):
+def _bounded_recall(pieces, budget, required_count, header_count, prefix=""):
     """Keep the authority prefix intact; only ordinary cards may be skipped."""
+    def fits(parts):
+        context = "\n".join(([prefix] if prefix else []) + parts)
+        return payload_fits("UserPromptSubmit", context, budget)
+
     selected = []
     truncated = False
     for index, piece in enumerate(pieces):
         if len(selected) - header_count >= memspec.RECALL_TOTAL_MAX_LINES:
             break
-        if payload_fits("UserPromptSubmit", "\n".join([*selected, piece]), budget):
+        if fits([*selected, piece]):
             selected.append(piece)
         else:
             truncated = True
@@ -157,7 +161,7 @@ def _bounded_recall(pieces, budget, required_count, header_count):
     if truncated:
         while selected:
             suffix = memspec.CONTEXT_TRUNCATED_SUFFIX.format(dropped=len(pieces) - len(selected))
-            if payload_fits("UserPromptSubmit", "\n".join([*selected, suffix]), budget):
+            if fits([*selected, suffix]):
                 selected.append(suffix)
                 break
             selected.pop()
@@ -171,6 +175,25 @@ def _handle(event, started_at, delivery_markers=None):
     config = load_config(started_at)
     if config is None:
         return None
+
+    # User wording cannot predict a question the model will invent later.
+    # Reserve the procedure before retrieval; card delivery markers must refer
+    # only to the remaining budget's output, never to subsequently trimmed cards.
+    budget = config[memspec.CONFIG_BUDGET_BYTES_FIELD]
+    guide = memspec.QUESTION_PREFLIGHT
+    if not payload_fits("UserPromptSubmit", guide, budget):
+        guide = ""
+        print("Epitype: question preflight omitted: configured budget too small", file=sys.stderr)
+    value = _recall(event, started_at, config, delivery_markers, guide)
+    if expired(started_at):
+        return None
+    recalled = value["hookSpecificOutput"]["additionalContext"] if value else ""
+    context = "\n".join(part for part in (guide, recalled) if part)
+    return payload("UserPromptSubmit", context) if context else None
+
+
+def _recall(event, started_at, config, delivery_markers=None, guide=""):
+    prompt = event["prompt"]
 
     # 落點依「這場對話屬於哪個專案」決定（_hook_common.capture_vault）：專案的卡
     # 進專案庫，cwd 不屬於任何已登記專案庫時才落治理庫。2026-09-06 之前一律落治理
@@ -313,6 +336,7 @@ def _handle(event, started_at, delivery_markers=None):
         config[memspec.CONFIG_BUDGET_BYTES_FIELD],
         required_count=header_count + sum(line in pinned_set for line in lines),
         header_count=header_count,
+        prefix=guide,
     )
     if not context or expired(started_at):
         return None
@@ -479,7 +503,9 @@ def _selftest():
             checks.append(
                 (
                     "same-session deduplication",
-                    second.returncode == 0 and not second.stdout and not second.stderr,
+                    second.returncode == 0
+                    and json.loads(second.stdout)["hookSpecificOutput"]["additionalContext"] == memspec.QUESTION_PREFLIGHT
+                    and not second.stderr,
                 )
             )
 
