@@ -13,6 +13,7 @@ import sys; sys.dont_write_bytecode = True; [getattr(stream, "reconfigure", lamb
 """
 
 import argparse
+from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 import json
 import os
@@ -20,7 +21,9 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+import uuid
 
 try:
     from . import alias_batch, card_lint, commitments, decision_lint, memsearch, memspec, pending_lint
@@ -544,55 +547,128 @@ def _lock_is_stale(path, now):
     return (now - started) >= memspec.DREAM_LOCK_STALE_SECONDS
 
 
-def acquire_lock(governance, now=None, pid=None):
-    """True 表示這一輪歸我。逾 DREAM_LOCK_STALE_SECONDS 的 lock 視為死鎖可覆蓋——
-    背景程序被砍掉時，殘留的 lock 不得永久擋住之後每一場夢。"""
-    now = time.time() if now is None else now
-    root = dream_root(governance)
-    path = root / memspec.DREAM_LOCK_FILENAME
-    body = json.dumps(
-        {
-            "pid": os.getpid() if pid is None else pid,
-            "started": now,
-            "started_at": datetime.fromtimestamp(now, timezone.utc).isoformat(timespec="seconds"),
-        },
-        ensure_ascii=False,
-    )
+_LOCK_THREAD_GUARD = threading.Lock()
+
+
+@contextmanager
+def _lock_guard(governance):
+    """OS 鎖只保護 lease 的讀改寫；guard 永不刪除／換檔，避免不同 inode 各自上鎖。
+    非阻塞取得，最多等 0.1 秒；程序死亡由 kernel 釋放，不另做 stale 搶鎖。"""
+    if not _LOCK_THREAD_GUARD.acquire(timeout=0.1):
+        yield None
+        return
+    handle = None
     try:
+        root = dream_root(governance)
         root.mkdir(parents=True, exist_ok=True)
-        handle = os.open(os.fspath(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except FileExistsError:
-        if not _lock_is_stale(path, now):
+        path = root / memspec.DREAM_LOCK_FILENAME
+        handle = os.open(str(path) + ".guard", os.O_CREAT | os.O_RDWR, 0o600)
+        if os.name == "nt":
+            import msvcrt
+            acquire = lambda: msvcrt.locking(handle, msvcrt.LK_NBLCK, 1)
+            unlock = lambda: msvcrt.locking(handle, msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            acquire = lambda: fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            unlock = lambda: fcntl.flock(handle, fcntl.LOCK_UN)
+        deadline = time.monotonic() + 0.1
+        while True:
+            try:
+                acquire()
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.005)
+    except (OSError, ImportError):
+        if handle is not None:
+            os.close(handle)
+        _LOCK_THREAD_GUARD.release()
+        yield None
+        return
+    try:
+        yield path
+    finally:
+        try:
+            unlock()
+        finally:
+            os.close(handle)
+            _LOCK_THREAD_GUARD.release()
+
+
+def _read_lock(path):
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        return value if isinstance(value, dict) else {}
+    except (FileNotFoundError, ValueError):
+        return {}
+
+
+def _write_lock(path, value):
+    staging = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
+    try:
+        staging.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
+        os.replace(staging, path)
+    finally:
+        staging.unlink(missing_ok=True)
+
+
+def acquire_lock(governance, now=None, pid=None, handoff=False):
+    """取得後回傳本輪 token；只有逾時且持有人已死的 lease 才能接管。"""
+    now = time.time() if now is None else now
+    with _lock_guard(governance) as path:
+        if path is None:
+            return None
+        try:
+            value = _read_lock(path)
+            owner = value.get("pid")
+            alive = (isinstance(owner, int) and not isinstance(owner, bool)
+                     and memspec._process_is_alive(owner))
+            if path.exists() and (alive or not _lock_is_stale(path, now)):
+                return None
+            token = uuid.uuid4().hex
+            _write_lock(path, {
+                "pid": os.getpid() if pid is None else pid, "token": token,
+                "started": now, "handoff": handoff,
+                "started_at": datetime.fromtimestamp(now, timezone.utc).isoformat(timespec="seconds"),
+            })
+            return token
+        except OSError:
+            return None
+
+
+def release_lock(governance, token):
+    with _lock_guard(governance) as path:
+        if path is None:
             return False
         try:
-            path.write_text(body, encoding="utf-8")
+            value = _read_lock(path)
+            if value.get("token") != token or value.get("pid") != os.getpid():
+                return False
+            path.unlink()
             return True
         except OSError:
             return False
-    except OSError:
-        return False
-    with os.fdopen(handle, "w", encoding="utf-8") as stream:
-        stream.write(body)
-    return True
 
 
-def release_lock(governance):
-    try:
-        (dream_root(governance) / memspec.DREAM_LOCK_FILENAME).unlink()
-    except OSError:
-        pass
-
-
-def _note_lock_pid(governance, pid):
-    path = dream_root(governance) / memspec.DREAM_LOCK_FILENAME
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(value, dict):
-            return
-        value["pid"] = pid
-        path.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
-    except (OSError, ValueError):
-        pass
+def _handoff_lock(governance, token, child_pid=None):
+    """父程序只補 pending lease 的 PID；子程序憑 token 接手一次，之後父程序不可改寫。"""
+    with _lock_guard(governance) as path:
+        if path is None:
+            return False
+        try:
+            value = _read_lock(path)
+            if not token or value.get("token") != token or not value.get("handoff"):
+                return False
+            if child_pid is not None and value.get("pid") != os.getpid():
+                return False
+            value["pid"] = os.getpid() if child_pid is None else child_pid
+            if child_pid is None:
+                value["handoff"] = False
+            _write_lock(path, value)
+            return True
+        except OSError:
+            return False
 
 
 def launch_argv(python_executable=None, script=None):
@@ -634,23 +710,24 @@ def _launch(argv, log_path):
 
 def spawn(governance, python_executable=None, launcher=None, now=None):
     """起一個脫鉤的背景夢，不等它。已有未逾時的 lock 就不起；起不來只寫 log。"""
-    if not acquire_lock(governance, now):
+    token = acquire_lock(governance, now, handoff=True)
+    if not token:
         return False
     argv = launch_argv(python_executable)
     if not argv[0]:
         log(governance, "spawn skipped: no python executable")
-        release_lock(governance)
+        release_lock(governance, token)
         return False
     try:
         pid = (launcher or _launch)(
-            [*argv, memspec.DREAM_LOCK_HELD_FLAG],
+            [*argv, memspec.DREAM_LOCK_HELD_FLAG, "--lock-token", token],
             dream_root(governance) / memspec.DREAM_LOG_FILENAME,
         )
     except Exception as exc:
         log(governance, f"spawn failed: {type(exc).__name__}: {exc}")
-        release_lock(governance)
+        release_lock(governance, token)
         return False
-    _note_lock_pid(governance, pid)
+    _handoff_lock(governance, token, child_pid=pid)
     return True
 
 
@@ -929,19 +1006,20 @@ def _selftest():
                 and all(section["error"] == TIME_BUDGET_ERROR for section in budget_report["sections"])
             )))
 
-            # lock：一次只准一個夢，逾時的 lock 可以覆蓋。
+            # 已活過時間窗的程序仍是持有人；時間經過本身不授權搶鎖。
             first = acquire_lock(gov)
             second = acquire_lock(gov)
             stale_now = time.time() + memspec.DREAM_LOCK_STALE_SECONDS + 1
-            checks.append(("one dream at a time; a lock older than the stale window is taken over", (
-                first and not second and acquire_lock(gov, now=stale_now)
+            checks.append(("one dream at a time; a live owner is protected even after the stale window", (
+                first and not second and not acquire_lock(gov, now=stale_now)
             )))
-            release_lock(gov)
+            release_lock(gov, first)
+            next_token = acquire_lock(gov)
+            release_lock(gov, next_token)
             checks.append(("a released lock frees the next dream", (
                 not (gov / memspec.DREAM_DIRECTORY / memspec.DREAM_LOCK_FILENAME).exists()
-                and acquire_lock(gov)
+                and next_token
             )))
-            release_lock(gov)
 
             checks.append(("due() is true when no dream ever finished and false inside the interval", (
                 due({}, 24)
@@ -957,7 +1035,8 @@ def _selftest():
             checks.append(("spawn takes the lock, records the child pid, and runs the one scheduled command form", (
                 spawned
                 and launched[0][0][1:] == [os.fspath(Path(__file__).resolve()),
-                                           memspec.DREAM_SCHEDULED_FLAG, memspec.DREAM_LOCK_HELD_FLAG]
+                                           memspec.DREAM_SCHEDULED_FLAG, memspec.DREAM_LOCK_HELD_FLAG,
+                                           "--lock-token", lock_body["token"]]
                 and launched[0][1].name == memspec.DREAM_LOG_FILENAME
                 and lock_body["pid"] == 4242
             )))
@@ -965,7 +1044,8 @@ def _selftest():
                 not spawn(gov, launcher=lambda argv, log_path: launched.append((argv, log_path)) or 1)
                 and len(launched) == 1
             )))
-            release_lock(gov)
+            # 假 launcher 沒有子程序可釋放；只清除這份 fixture 的 lease。
+            (gov / memspec.DREAM_DIRECTORY / memspec.DREAM_LOCK_FILENAME).unlink()
 
             def _refuse(argv, log_path):
                 raise OSError("no such file")
@@ -987,16 +1067,17 @@ def _selftest():
             saved_env = os.environ.get(memspec.EPITYPE_CONFIG_ENV)
             os.environ[memspec.EPITYPE_CONFIG_ENV] = os.fspath(scheduled_config)
             try:
-                acquire_lock(gov)
+                token = acquire_lock(gov, handoff=True)
                 scheduled_code = main([memspec.DREAM_SCHEDULED_FLAG, memspec.DREAM_LOCK_HELD_FLAG,
+                                       "--lock-token", token,
                                        "--today", "2026-09-06"], output=io.StringIO())
                 lock_released = not (gov / memspec.DREAM_DIRECTORY / memspec.DREAM_LOCK_FILENAME).exists()
                 scheduled_state = state_file.read_text(encoding="utf-8")
-                acquire_lock(gov)  # 假裝另一場夢正在跑
+                token = acquire_lock(gov)  # 假裝另一場夢正在跑
                 blocked_code = main([memspec.DREAM_SCHEDULED_FLAG, "--today", "2026-09-06"], output=io.StringIO())
                 blocked_state = state_file.read_text(encoding="utf-8")
             finally:
-                release_lock(gov)
+                release_lock(gov, token)
                 if saved_env is None:
                     os.environ.pop(memspec.EPITYPE_CONFIG_ENV, None)
                 else:
@@ -1019,30 +1100,31 @@ def _selftest():
             saved_dream_root = dream_root
             root_calls = []
 
-            def _dream_root_fails_first(governance):
+            def _dream_root_fails_after_handoff(governance):
                 root_calls.append(governance)
-                if len(root_calls) == 1:
+                if len(root_calls) == 2:
                     raise OSError("governance path unavailable")
                 return saved_dream_root(governance)
 
             os.environ[memspec.EPITYPE_CONFIG_ENV] = os.fspath(scheduled_config)
             try:
-                acquire_lock(gov)
-                globals()["dream_root"] = _dream_root_fails_first
+                token = acquire_lock(gov, handoff=True)
+                globals()["dream_root"] = _dream_root_fails_after_handoff
                 setup_code = main(
-                    [memspec.DREAM_SCHEDULED_FLAG, memspec.DREAM_LOCK_HELD_FLAG],
+                    [memspec.DREAM_SCHEDULED_FLAG, memspec.DREAM_LOCK_HELD_FLAG,
+                     "--lock-token", token],
                     output=io.StringIO(),
                 )
             finally:
                 globals()["dream_root"] = saved_dream_root
-                release_lock(gov)
+                release_lock(gov, token)
                 if saved_env is None:
                     os.environ.pop(memspec.EPITYPE_CONFIG_ENV, None)
                 else:
                     os.environ[memspec.EPITYPE_CONFIG_ENV] = saved_env
             checks.append(("設定階段拋例外：回 2，交接來的 lock 仍然釋放", (
                 setup_code == 2
-                and len(root_calls) == 2
+                and len(root_calls) == 3
                 and not (gov / memspec.DREAM_DIRECTORY / memspec.DREAM_LOCK_FILENAME).exists()
             )))
     except Exception as exc:
@@ -1080,7 +1162,8 @@ def main(argv=None, output=sys.stdout):
     parser.add_argument(memspec.DREAM_SCHEDULED_FLAG, action="store_true",
                          help="排程／順路模式：自己從 config 解出登記庫與 .epitype 輸出路徑")
     parser.add_argument(memspec.DREAM_LOCK_HELD_FLAG, action="store_true",
-                         help="lock 已由呼叫端取得，跑完由這個程序釋放")
+                         help="接手呼叫端的 lock，必須同時提供 --lock-token")
+    parser.add_argument("--lock-token", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--time-budget-seconds", type=float, default=memspec.DREAM_BUDGET_SECONDS,
                          help="自己計時的總時限，逾時剩下的節標成略過")
     parsed = parser.parse_args(arguments)
@@ -1088,7 +1171,7 @@ def main(argv=None, output=sys.stdout):
     started = time.monotonic()
     deadline = started + parsed.time_budget_seconds if parsed.time_budget_seconds > 0 else None
     governance = None
-    owns_lock = False
+    lock_token = None
     out_path = parsed.out.resolve() if parsed.out else None
     json_out_path = parsed.json_out.resolve() if parsed.json_out else None
     state_path = parsed.state.resolve() if parsed.state else None
@@ -1097,17 +1180,20 @@ def main(argv=None, output=sys.stdout):
             if parsed.scheduled:
                 vaults = configured_vaults()
                 governance = governance_vault(vaults)
-                # 交接進來的 lock 從這一刻起歸這個程序負責，設定階段就出事也要放掉。
-                owns_lock = parsed.lock_held
+                if parsed.lock_held:
+                    if not _handoff_lock(governance, parsed.lock_token):
+                        log(governance, "skipped: lock handoff unavailable or no longer owned")
+                        return 0
+                    lock_token = parsed.lock_token
                 root = dream_root(governance)
                 out_path = out_path or root / memspec.DREAM_PACK_FILENAME
                 json_out_path = json_out_path or root / memspec.DREAM_PACK_JSON_FILENAME
                 state_path = state_path or root / memspec.DREAM_STATE_FILENAME
-                if not owns_lock:
-                    if not acquire_lock(governance):
+                if not lock_token:
+                    lock_token = acquire_lock(governance)
+                    if not lock_token:
                         log(governance, "skipped: another dream holds the lock")
                         return 0
-                    owns_lock = True
             else:
                 if not parsed.vaults:
                     parser.error("vaults are required unless " + memspec.DREAM_SCHEDULED_FLAG + " is given")
@@ -1143,11 +1229,8 @@ def main(argv=None, output=sys.stdout):
         print(f"DREAM PACK {out_path}", file=output)
         return 0
     finally:
-        # lock 只在這個程序負責時才放：手動跑的夢、以及「別人正握著」而略過的那一輪，
-        # 都不得把別人的 lock 掃掉。config 讀不出治理庫時 governance 還是 None，那份
-        # 交接來的 lock 只能等 DREAM_LOCK_STALE_SECONDS 逾時被覆蓋。
-        if governance is not None and owns_lock:
-            release_lock(governance)
+        if governance is not None and lock_token:
+            release_lock(governance, lock_token)
 
 
 def _write_run_state(path, report, out_path, elapsed):
