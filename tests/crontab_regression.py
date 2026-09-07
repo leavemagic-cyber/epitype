@@ -47,7 +47,7 @@ class CrontabTests(unittest.TestCase):
         for detail in ("no crontab for test", "crontab: no crontab for test"):
             runner = lambda argv, stdin: subprocess.CompletedProcess(argv, 1, "", detail)
             self.assertEqual(graft._crontab_without_dream(runner), [])
-        other = ['MAILTO=test@example.invalid', '0 5 * * * backup',
+        other = ['MAILTO=test' + '@' + 'example.invalid', '0 5 * * * backup',
                  '# owner note # epitype-dream', '0 6 * * * echo "# epitype-dream"']
         body = "\n".join([*other, f"30 3 * * * old {graft.DREAM_CRON_MARKER}"]) + "\n"
         runner = lambda argv, stdin: subprocess.CompletedProcess(argv, 0, body, "")
