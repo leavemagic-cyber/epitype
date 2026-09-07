@@ -15,10 +15,11 @@ import re
 import time
 
 try:
-    from . import capture, capture_route, memsearch, memspec
+    from . import capture, capture_route, card_io, memsearch, memspec
 except ImportError:  # Direct script execution keeps the CLI contract.
     import capture
     import capture_route
+    import card_io
     import memsearch
     import memspec
 
@@ -515,7 +516,7 @@ def reevaluate(directory, vault, apply=False, quarantine_drops=None):
     without ever deleting a card.
 
     Either direction, --apply gates every move; without it this only prints what
-    would happen, and every move that does happen is an os.replace.
+    would happen. Publication refuses an occupied destination even during a race.
 
     A keeper's destination can already be occupied — an older bug once wrote
     the same owner sentence under two kinds ("一句兩卡"), or (reverse mode) a
@@ -589,9 +590,11 @@ def _quarantine_drop(path, kind, quarantine_drops, apply, counts):
     target_dir = Path(quarantine_drops) / kind
     target = target_dir / path.name
     try:
-        target_dir.mkdir(parents=True, exist_ok=True)
-        os.replace(path, target)
-    except OSError:
+        moved = card_io.move(path, target)
+    except OSError as exc:
+        counts["failed"] = counts.get("failed", 0) + 1
+        return f" FAILED {exc}"
+    if not moved:
         return ""
     counts["moved"] += 1
     return f" -> {target}"
@@ -629,26 +632,26 @@ def _move_card(path, vault, kind, digest, counts, counter="moved"):
       "-2" suffix so both cards keep their own file.
 
     Returns (outcome, target) where outcome is "moved", "renamed", "duplicate",
-    or None (an OSError, or a collision on the "-2" name too — the source is
-    left exactly where it was, same as the pre-fix behaviour).
+    "unchanged", or None on a reported failure. Conflicts preserve both cards.
     """
     stamp = path.name.split("-")[1] if path.name.count("-") >= 2 else ""
     if not (len(stamp) == 8 and stamp.isdigit()):
         stamp = time.strftime("%Y%m%d", time.gmtime())
     name = f"{kind}-{stamp}-{digest}"
     target = Path(vault) / CARD_DIRECTORIES[kind] / f"{name}.md"
+    if target.resolve() == path.resolve():
+        return "unchanged", target
     outcome = "moved"
     if target.exists() and target.resolve() != path.resolve():
         if _card_summary(path) == _card_summary(target):
             existing = target  # the already-landed card `path` duplicates
             duplicate_dir = Path(vault).joinpath(*DUPLICATES_SUBPATH, kind)
             destination = duplicate_dir / path.name
-            if destination.exists():
-                return None, None  # already quarantined once; leave the source alone
             try:
-                duplicate_dir.mkdir(parents=True, exist_ok=True)
-                os.replace(path, destination)
-            except OSError:
+                card_io.move(path, destination)
+            except OSError as exc:
+                counts["failed"] = counts.get("failed", 0) + 1
+                print(f"MOVE FAILED {path}: {exc}", file=sys.stderr)
                 return None, None
             counts["duplicates"] += 1
             # Report what `path` duplicates (the existing vault card), not where
@@ -658,18 +661,16 @@ def _move_card(path, vault, kind, digest, counts, counter="moved"):
         name = f"{name}-2"
         target = target.with_name(f"{name}.md")
         outcome = "renamed"
-        if target.exists():
-            return None, None
     try:
-        text = path.read_text(encoding="utf-8-sig")
+        original = path.read_bytes()
+        text = original.decode("utf-8-sig")
         text = CARD_NAME_REGEX.sub(f"name: {name}", text, count=1)
         text = CARD_LABEL_REGEX.sub(rf"\g<1>{CARD_LABELS[kind]}", text, count=1)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        temporary = target.with_name(target.name + ".tmp")
-        temporary.write_text(text, encoding="utf-8")
-        os.replace(temporary, target)
-        path.unlink()
-    except OSError:
+        payload = (b"\xef\xbb\xbf" if original.startswith(b"\xef\xbb\xbf") else b"") + text.encode("utf-8")
+        card_io.move(path, target, payload, expected=original)
+    except (OSError, UnicodeError) as exc:
+        counts["failed"] = counts.get("failed", 0) + 1
+        print(f"MOVE FAILED {path}: {exc}", file=sys.stderr)
         return None, None
     counts[counter] += 1
     return outcome, target
@@ -1249,12 +1250,12 @@ def main(argv=None):
             quarantine_drops = Path(options.quarantine_drops) if options.quarantine_drops else (
                 options.reevaluate / "_drafts" / "captured_dropped"
             )
-        _counts, lines = reevaluate(
+        counts, lines = reevaluate(
             options.reevaluate, governance_vault(vaults), apply=options.apply, quarantine_drops=quarantine_drops
         )
         for text in lines:
             print(text)
-        return 0
+        return 1 if counts.get("failed") else 0
 
     counts, vault, routed = harvest(
         home, vaults, docs=options.docs, since=options.since, limit=options.limit, dry_run=options.dry_run
