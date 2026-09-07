@@ -11,11 +11,13 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import subprocess
 import tempfile
 import time
 import tomllib
+import xml.etree.ElementTree as ET
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -1302,7 +1304,76 @@ def _report_dream(config, output):
     print(f"DREAM: mode={mode} interval_hours={interval} at={at} last={last}", file=output)
 
 
-def _doctor(home, dry_run=False, output=sys.stdout, clear_shim_status=False):
+def _read_nightly(runner):
+    """讀取實際入口；缺少、停用或不明格式都不是已驗證的每日排程。"""
+    argv = (["schtasks", "/Query", "/TN", DREAM_TASK_NAME, "/XML"]
+            if os.name == "nt" else ["crontab", "-l"])
+    result = runner(argv, None)
+    if getattr(result, "returncode", 1) != 0:
+        raise InstallError("nightly schedule is missing or unreadable")
+    body = getattr(result, "stdout", "") or ""
+    if os.name == "nt":
+        root = ET.fromstring(body)
+        actions = root.findall("./{*}Actions/{*}Exec")
+        triggers = root.findall("./{*}Triggers/{*}CalendarTrigger")
+        if (len(actions) != 1 or len(triggers) != 1
+                or len(root.findall("./{*}Actions/*")) != 1
+                or len(root.findall("./{*}Triggers/*")) != 1
+                or root.findtext("./{*}Settings/{*}Enabled") == "false"
+                or triggers[0].findtext("{*}Enabled") == "false"
+                or triggers[0].findtext("{*}ScheduleByDay/{*}DaysInterval") != "1"):
+            raise InstallError("nightly schedule must have one enabled daily action")
+        python = actions[0].findtext("{*}Command") or ""
+        args = shlex.split(actions[0].findtext("{*}Arguments") or "", posix=False)
+        command = [python.strip('"'), *(item.strip('"') for item in args)]
+        boundary = triggers[0].findtext("{*}StartBoundary") or ""
+        at = datetime.fromisoformat(boundary).strftime("%H:%M")
+        return {"command": command, "at": at}
+    lines = body.splitlines()
+    own = [index for index, line in enumerate(lines) if _is_dream_cron(line)]
+    if len(own) != 1:
+        raise InstallError("nightly schedule must contain exactly one Epitype cron entry")
+    fields = lines[own[0]][:-len(DREAM_CRON_MARKER)].split(None, 5)
+    if (len(fields) != 6 or fields[2:5] != ["*", "*", "*"]
+            or not fields[0].isdigit() or not fields[1].isdigit()):
+        raise InstallError("nightly cron entry is not a daily schedule")
+    at = f"{int(fields[1]):02d}:{int(fields[0]):02d}"
+    return {"command": shlex.split(fields[5]), "at": at, "lines": lines, "index": own[0]}
+
+
+def _check_nightly(config, output, runner, require_script=True):
+    state = _read_nightly(runner)
+    command = state["command"]
+    expected = Path(config["repo_root"]) / Path(*DREAM_SCRIPT_PARTS)
+    print(f"DREAM SCHEDULE: target={command!r} at={state['at']}", file=output)
+    if (len(command) != 3 or command[2] != DREAM_SCHEDULED_FLAG
+            or Path(command[1]).resolve() != expected.resolve()
+            or not Path(command[0]).is_file() or (require_script and not expected.is_file())
+            or state["at"] != config[DREAM_CONFIG_FIELD].get(DREAM_AT_FIELD, DREAM_DEFAULT_AT)):
+        raise InstallError("nightly schedule target, time, or executable does not match config")
+    print("DREAM SCHEDULE: PASS", file=output)
+    return state
+
+
+def _replace_nightly_command(expected, command, runner):
+    """只改自己的入口，並拒絕覆蓋在讀取後已被改動的入口。"""
+    current = _read_nightly(runner)
+    if any(current[key] != expected[key] for key in ("command", "at")):
+        raise InstallError("nightly schedule changed concurrently; left untouched")
+    rendered = _dream_command_text(command)
+    if os.name == "nt":
+        result = runner(["schtasks", "/Change", "/TN", DREAM_TASK_NAME, "/TR", rendered], None)
+    else:
+        hour, minute = current["at"].split(":")
+        current["lines"][current["index"]] = (
+            f"{int(minute)} {int(hour)} * * * {rendered} {DREAM_CRON_MARKER}"
+        )
+        result = runner(["crontab", "-"], "\n".join(current["lines"]) + "\n")
+    if getattr(result, "returncode", 1) != 0:
+        raise InstallError("nightly schedule update failed")
+
+
+def _doctor(home, dry_run=False, output=sys.stdout, clear_shim_status=False, scheduler=None):
     hosts = _detect_hosts(home)
     print("HOSTS: " + (", ".join(hosts) if hosts else "none"), file=output)
     if dry_run:
@@ -1369,6 +1440,8 @@ def _doctor(home, dry_run=False, output=sys.stdout, clear_shim_status=False):
                 raise ValueError(f"{name} shim registration mismatch: {', '.join(mismatches)}")
             print(f"REGISTRATION {name}: PASS {len(EVENTS)}/{len(EVENTS)}", file=output)
         _report_dream(config, output)
+        if _existing_config_dream(config_path).get(DREAM_MODE_FIELD) == "nightly":
+            _check_nightly(config, output, scheduler or _run_scheduler)
         health_ok = _synthetic_health(home, repo_root, output)
         final_records = _read_shim_status(home)
         _report_shim_status(final_records, output, previous=initial_records)
@@ -1494,7 +1567,7 @@ def _install(
         transaction.write(state_path, _state_bytes(state))
         protected_after = {path: path.read_bytes() for path in protected_paths if path.is_file()}
         _assert_native_protection(protected_before, protected_after)
-        if _doctor(home, output=output) != 0:
+        if _doctor(home, output=output, scheduler=scheduler) != 0:
             raise InstallError("post-install doctor failed")
 
         print("INSTALL REPORT", file=output)
@@ -1573,24 +1646,55 @@ def _resync_vaults(home, dry_run=False, output=sys.stdout):
         raise
 
 
-def _relocate(home, target, dry_run=False, output=sys.stdout):
+def _relocate(home, target, dry_run=False, output=sys.stdout, scheduler=None):
     repo_root = _validate_repo_root(target)
     config_path = home / CONFIG_DIRECTORY / CONFIG_FILENAME
     if not config_path.is_file():
         raise InstallError(f"Epitype config is missing: {config_path}")
+    original = config_path.read_bytes()
+    config = json.loads(original.decode("utf-8-sig"))
     config_data = _repo_root_bytes(config_path, repo_root)
-    changed = config_path.read_bytes() != config_data
+    changed = original != config_data
+    nightly = _existing_config_dream(config_path).get(DREAM_MODE_FIELD) == "nightly"
     print(f"RELOCATE TARGET VALID: {repo_root}", file=output)
     if dry_run:
         if changed:
             print(f"DRY-RUN write {config_path}: repo_root", file=output)
+            if nightly:
+                print(f"DRY-RUN update nightly target: {repo_root / Path(*DREAM_SCRIPT_PARTS)}", file=output)
         print("DRY-RUN complete; no files changed.", file=output)
         return 0
 
     transaction = Transaction()
-    if changed:
-        transaction.write(config_path, config_data)
-    doctor_code = _doctor(home, output=output)
+    runner = scheduler or _run_scheduler
+    before = _check_nightly(config, output, runner, require_script=False) if nightly and changed else None
+    updated = None
+    try:
+        if changed:
+            if config_path.read_bytes() != original:
+                raise InstallError("config changed concurrently; left untouched")
+            transaction.write(config_path, config_data)
+        if before:
+            command = [before["command"][0], os.fspath(repo_root / Path(*DREAM_SCRIPT_PARTS)), DREAM_SCHEDULED_FLAG]
+            updated = {"command": command, "at": before["at"]}
+            _replace_nightly_command(before, command, runner)
+        doctor_code = _doctor(home, output=output, scheduler=scheduler)
+        if doctor_code:
+            raise InstallError("post-relocate doctor failed")
+    except Exception:
+        if updated:
+            try:
+                current = _read_nightly(runner)
+                if any(current[key] != before[key] for key in ("command", "at")):
+                    _replace_nightly_command(updated, before["command"], runner)
+            except Exception as exc:
+                print(f"ROLLBACK FAIL schedule: {exc}", file=output)
+        if transaction.changed:
+            if config_path.read_bytes() == config_data:
+                transaction.rollback()
+            else:
+                print("ROLLBACK FAIL config changed concurrently; left untouched", file=output)
+        raise
     print("RELOCATE REPORT", file=output)
     print(f"REPO ROOT: {repo_root}", file=output)
     print(f"CONFIG: {'CHANGED' if changed else 'UNCHANGED'} {config_path}", file=output)
@@ -2195,10 +2299,30 @@ def _selftest():
             class _FakeScheduler:
                 def __init__(self):
                     self.calls = []
+                    self.command = []
+                    self.at = "03:30"
+                    self.cron = ""
 
                 def __call__(self, argv, stdin_text=None):
                     self.calls.append((list(argv), stdin_text))
-                    return subprocess.CompletedProcess(list(argv), 0, "", "")
+                    body = ""
+                    if argv[:2] == ["schtasks", "/Create"]:
+                        self.command = [part.strip('"') for part in shlex.split(argv[argv.index("/TR") + 1], posix=False)]
+                        self.at = argv[argv.index("/ST") + 1]
+                    elif argv[:2] == ["schtasks", "/Query"]:
+                        task = ET.Element("Task")
+                        action = ET.SubElement(ET.SubElement(task, "Actions"), "Exec")
+                        ET.SubElement(action, "Command").text = self.command[0]
+                        ET.SubElement(action, "Arguments").text = _dream_command_text(self.command[1:])
+                        trigger = ET.SubElement(ET.SubElement(task, "Triggers"), "CalendarTrigger")
+                        ET.SubElement(trigger, "StartBoundary").text = f"2026-01-01T{self.at}:00"
+                        ET.SubElement(ET.SubElement(trigger, "ScheduleByDay"), "DaysInterval").text = "1"
+                        body = ET.tostring(task, encoding="unicode")
+                    elif argv == ["crontab", "-"]:
+                        self.cron = stdin_text
+                    elif argv == ["crontab", "-l"]:
+                        body = self.cron
+                    return subprocess.CompletedProcess(list(argv), 0, body, "")
 
             dream_home = root / "dream-home"
             (dream_home / ".claude").mkdir(parents=True)
@@ -2249,7 +2373,9 @@ def _selftest():
             )
             dream_config_path = dream_home / CONFIG_DIRECTORY / CONFIG_FILENAME
             dream_config_value = json.loads(dream_config_path.read_text(encoding="utf-8"))
-            registered, registered_stdin = scheduler.calls[-1] if scheduler.calls else ([], None)
+            registrations = [call for call in scheduler.calls
+                             if call[0][:2] == ["schtasks", "/Create"] or call[0] == ["crontab", "-"]]
+            registered, registered_stdin = registrations[-1] if registrations else ([], None)
             if os.name == "nt":
                 registered_ok = (
                     registered[:2] == ["schtasks", "/Create"]
@@ -2279,7 +2405,7 @@ def _selftest():
                 json.dumps({"completed_at": "2026-09-06T03:30:00+00:00"}), encoding="utf-8"
             )
             dream_doctor_output = io.StringIO()
-            dream_doctor_code = _doctor(dream_home, output=dream_doctor_output)
+            dream_doctor_code = _doctor(dream_home, output=dream_doctor_output, scheduler=scheduler)
             checks.append((
                 "doctor reports the dream mode and the last completion time",
                 dream_doctor_code == 0
