@@ -774,21 +774,21 @@ def _selftest():
                     first
                     and not held
                     and len(launched) == 1
-                    and launched[0][-2:]
-                    == [memspec.DREAM_SCHEDULED_FLAG, memspec.DREAM_LOCK_HELD_FLAG]
+                    and launched[0][-4:-1]
+                    == [memspec.DREAM_SCHEDULED_FLAG, memspec.DREAM_LOCK_HELD_FLAG, "--lock-token"]
                     and lock_file.is_file(),
                 )
             )
 
             lock_file.write_text(
-                json.dumps({"pid": 1, "started": _time.time() - memspec.DREAM_LOCK_STALE_SECONDS - 60}),
+                json.dumps({"pid": 0, "started": _time.time() - memspec.DREAM_LOCK_STALE_SECONDS - 60}),
                 encoding="utf-8",
             )
             stale = _dream_spawn(piggyback, dream_vault, launcher=_fake_launcher)
             lock_file.unlink()
             checks.append(
                 (
-                    "a lock older than the stale window is taken over rather than blocking every later dream",
+                    "a dead owner's stale lock is taken over rather than blocking every later dream",
                     stale and len(launched) == 2,
                 )
             )
