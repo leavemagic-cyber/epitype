@@ -193,11 +193,16 @@ def _dream_notice(governance, source, settings):
         return None
     when = state.get(memspec.DREAM_STATE_DATE_FIELD)
     when = when if isinstance(when, str) and when else completed[:10]
+    pack = state.get(memspec.DREAM_STATE_PACK_FIELD)
+    pack = pack if isinstance(pack, str) and pack else "-"
+    # 舊格式沒有完整性證據；保留通知，但不能把未知或部分結果宣告成乾淨。
+    if (state.get(memspec.DREAM_STATE_COMPLETE_FIELD) is not True
+            or state.get(memspec.DREAM_STATE_ERRORS_FIELD)):
+        return memspec.DREAM_NOTICE_INCOMPLETE_LINE.format(date=when, pack=pack)
     if not any(numbers.values()):
         return memspec.DREAM_NOTICE_CLEAN_LINE.format(date=when)
-    pack = state.get(memspec.DREAM_STATE_PACK_FIELD)
     return memspec.DREAM_NOTICE_LINE.format(
-        date=when, pack=pack if isinstance(pack, str) and pack else "-", **numbers
+        date=when, pack=pack, **numbers
     )
 
 
@@ -793,6 +798,8 @@ def _selftest():
                     memspec.DREAM_STATE_COMPLETED_EPOCH_FIELD: completed_epoch,
                     memspec.DREAM_STATE_COMPLETED_FIELD: "2026-09-06T03:30:00+00:00",
                     memspec.DREAM_STATE_DATE_FIELD: "2026-09-06",
+                    memspec.DREAM_STATE_COMPLETE_FIELD: True,
+                    memspec.DREAM_STATE_ERRORS_FIELD: {},
                     memspec.DREAM_STATE_PACK_FIELD: os.fspath(dream_dir / memspec.DREAM_PACK_FILENAME),
                     memspec.DREAM_STATE_HEADLINE_FIELD: headline,
                     memspec.DREAM_STATE_NOTIFIED_FIELD: notified,

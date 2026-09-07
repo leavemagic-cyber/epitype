@@ -413,6 +413,8 @@ def _next_steps(sections):
     event = counts(7)
     if event.get("aging_total", 0) > 0:
         steps.append(f"事件卡老化候選 {event['aging_total']} 張 → 人工複核是否歸檔（不刪）")
+    if any(section.get("error") or section.get("errors") for section in sections):
+        steps.append("盤點未完成：先查看失敗／略過的節與 vault，重跑後才能確認其餘待處理項。")
     if not steps:
         steps.append("目前沒有需要今晚整理的項目。")
     return steps
@@ -691,6 +693,21 @@ def _headline(report):
         section_id, key = _HEADLINE_SOURCES.get(field, (None, None))
         headline[field] = counts.get(section_id, {}).get(key, 0)
     return headline
+
+
+def _report_errors(report):
+    """保留每節及逐庫錯誤；沒有執行的檢查不能折算成零問題。"""
+    sections = {section["id"]: section for section in report["sections"]}
+    errors = {}
+    for section_id, _title, _fn in _SECTIONS:
+        section = sections.get(section_id)
+        if section is None:
+            errors[str(section_id)] = {"error": "section missing", "errors": []}
+        elif section.get("error") or section.get("errors"):
+            errors[str(section_id)] = {
+                "error": section.get("error"), "errors": section.get("errors") or [],
+            }
+    return errors
 
 
 # --------------------------------------------------------------------------- selftest
@@ -1134,13 +1151,15 @@ def main(argv=None, output=sys.stdout):
 
 
 def _write_run_state(path, report, out_path, elapsed):
-    """完成時間、各節數字、耗時——開場那一行與「距上次多久」都只讀這一份。
+    """本次嘗試收尾時間、各節數字、完整性——開場與排程共用這一份。
+    部分交件仍按本次收尾時間節流，避免故障庫在每場開場被重啟；complete 才表示查完。
     notified_at 沿用舊值：那是上一場的通知紀錄，比對的是新的 completed_at。"""
     try:
         previous = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         previous = {}
     now = datetime.now(timezone.utc)
+    errors = _report_errors(report)
     value = {
         memspec.DREAM_STATE_COMPLETED_FIELD: now.isoformat(timespec="seconds"),
         memspec.DREAM_STATE_COMPLETED_EPOCH_FIELD: round(now.timestamp(), 3),
@@ -1148,6 +1167,8 @@ def _write_run_state(path, report, out_path, elapsed):
         memspec.DREAM_STATE_ELAPSED_FIELD: round(elapsed, 3),
         memspec.DREAM_STATE_PACK_FIELD: os.fspath(out_path),
         memspec.DREAM_STATE_HEADLINE_FIELD: _headline(report),
+        memspec.DREAM_STATE_COMPLETE_FIELD: not errors,
+        memspec.DREAM_STATE_ERRORS_FIELD: errors,
         memspec.DREAM_STATE_SECTIONS_FIELD: {
             str(section["id"]): section.get("counts") or {} for section in report["sections"]
         },

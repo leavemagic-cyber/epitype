@@ -1257,6 +1257,8 @@ DREAM_STATE_PACK_FIELD = "pack"
 DREAM_STATE_DATE_FIELD = "date"
 DREAM_STATE_ELAPSED_FIELD = "elapsed_seconds"
 DREAM_STATE_SECTIONS_FIELD = "sections"
+DREAM_STATE_COMPLETE_FIELD = "complete"
+DREAM_STATE_ERRORS_FIELD = "section_errors"
 # 開場那一行只報這四個數字；其餘各節數字在 state 的 sections 裡，pack 裡有全文。
 DREAM_HEADLINE_FIELDS = ("card_fail", "missing_aliases", "drafts", "open_commitments")
 DREAM_NOTICE_LINE = (
@@ -1265,6 +1267,7 @@ DREAM_NOTICE_LINE = (
 )
 # 沒有待處理項也要印一行：不然「夢跑完但乾淨」與「夢從沒跑」在開場長得一樣。
 DREAM_NOTICE_CLEAN_LINE = "🌙 夢已整理（{date}）：沒有待處理項。"
+DREAM_NOTICE_INCOMPLETE_LINE = "🌙 夢未完整檢查（{date}）：仍有未確認結果；詳見 {pack}。"
 
 
 # --- U57b：沒中文的卡由 AI 自己補；forbidden 別寫裸名詞 ---
