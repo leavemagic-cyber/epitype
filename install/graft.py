@@ -1195,6 +1195,7 @@ def _run_scheduler(argv, stdin_text=None):
         encoding="utf-8",
         errors="replace",
         check=False,
+        env={**os.environ, "LC_ALL": "C"},
     )
 
 
@@ -1208,40 +1209,45 @@ def _schedule_argv(repo_root, at, python_executable=None):
 
 
 def _crontab_without_dream(runner):
-    """現有 crontab 去掉自己那一行，讀不到就回 None。
-
-    `crontab -l` 非零有兩種：使用者本來沒有 crontab（第一次安裝，stdout 空的），
-    或一次暫時性失敗。2026-09-06 覆審：兩種一律當空表，暫時性失敗就會把整份
-    crontab 換成我們這一行。有印出內容卻又非零＝讀得不完整，寧可放棄註冊。"""
+    """只把已確認不存在的 crontab 當空表；未知讀取錯誤不得觸發替換。"""
     listed = runner(["crontab", "-l"], None)
     body = getattr(listed, "stdout", "") or ""
-    if getattr(listed, "returncode", 1) != 0 and body.strip():
-        return None
-    return [line for line in body.splitlines() if DREAM_CRON_MARKER not in line]
+    if getattr(listed, "returncode", 1) != 0:
+        detail = (getattr(listed, "stderr", "") or "").strip()
+        if (getattr(listed, "returncode", 1) != 1 or body.strip()
+                or not re.fullmatch(r"(?:crontab: )?no crontab for [^\s:]+", detail)):
+            return None
+    return [line for line in body.splitlines() if not _is_dream_cron(line)]
+
+
+def _is_dream_cron(line):
+    return not line.lstrip().startswith("#") and line.rstrip().endswith(" " + DREAM_CRON_MARKER)
 
 
 def _register_nightly(repo_root, at, dry_run, output, runner=None, python_executable=None):
-    """註冊每日排程。失敗只警告：hook 已經裝好了，排程掛不上不該把整個安裝回捲。"""
+    """註冊每日排程並回報成敗；呼叫端負責維持設定與排程一致。"""
     runner = runner or _run_scheduler
     argv = _schedule_argv(repo_root, at, python_executable)
     if os.name == "nt":
         print(f"{'DRY-RUN schedule' if dry_run else 'SCHEDULE'}: {subprocess.list2cmdline(argv)}", file=output)
         if dry_run:
-            return
+            return True
         result = runner(argv, None)
     else:
         line = argv[0]
         print(f"{'DRY-RUN schedule' if dry_run else 'SCHEDULE'}: crontab + {line}", file=output)
         if dry_run:
-            return
+            return True
         kept = _crontab_without_dream(runner)
         if kept is None:
             print(CRONTAB_UNREADABLE_WARN.format(action="schedule"), file=output)
-            return
+            return False
         result = runner(["crontab", "-"], "\n".join([*kept, line]) + "\n")
     if getattr(result, "returncode", 1) != 0:
         detail = (getattr(result, "stderr", "") or "").strip().splitlines()
         print(f"WARN nightly dream schedule failed: {detail[0] if detail else 'unknown error'}", file=output)
+        return False
+    return True
 
 
 def _unregister_nightly(dry_run, output, runner=None):
@@ -1250,17 +1256,22 @@ def _unregister_nightly(dry_run, output, runner=None):
         argv = ["schtasks", "/Delete", "/TN", DREAM_TASK_NAME, "/F"]
         print(f"{'DRY-RUN unschedule' if dry_run else 'UNSCHEDULE'}: {subprocess.list2cmdline(argv)}", file=output)
         if dry_run:
-            return
-        runner(argv, None)
-        return
+            return True
+        result = runner(argv, None)
+        if getattr(result, "returncode", 1) == 0:
+            return True
+        # ERROR_FILE_NOT_FOUND 是冪等移除；用 HRESULT，避免依賴 Windows 訊息語言。
+        query = runner(["schtasks", "/Query", "/TN", DREAM_TASK_NAME, "/HRESULT"], None)
+        return (getattr(query, "returncode", 1) & 0xFFFFFFFF) == 0x80070002
     print(f"{'DRY-RUN unschedule' if dry_run else 'UNSCHEDULE'}: crontab - {DREAM_CRON_MARKER}", file=output)
     if dry_run:
-        return
+        return True
     kept = _crontab_without_dream(runner)
     if kept is None:
         print(CRONTAB_UNREADABLE_WARN.format(action="unschedule"), file=output)
-        return
-    runner(["crontab", "-"], ("\n".join(kept) + "\n") if kept else "")
+        return False
+    result = runner(["crontab", "-"], ("\n".join(kept) + "\n") if kept else "")
+    return getattr(result, "returncode", 1) == 0
 
 
 def _dream_governance(vaults):
@@ -1471,7 +1482,8 @@ def _install(
         if dream[DREAM_MODE_FIELD] == "nightly":
             _register_nightly(repo_root, dream[DREAM_AT_FIELD], dry_run, output, scheduler)
         elif dream_mode is not None or previous_dream.get(DREAM_MODE_FIELD) == "nightly":
-            _unregister_nightly(dry_run, output, scheduler)
+            if not _unregister_nightly(dry_run, output, scheduler):
+                raise InstallError("nightly dream unschedule failed; installation rolled back")
 
         if dry_run:
             print(f"DRY-RUN write {state_path}: install ownership metadata", file=output)
@@ -1629,7 +1641,8 @@ def _uninstall(home, dry_run=False, output=sys.stdout, scheduler=None):
 
         # 排程比 config 活得久：留著它會每晚跑一支讀不到 config 的夢。
         if _existing_config_dream(config_path).get(DREAM_MODE_FIELD) == "nightly":
-            _unregister_nightly(dry_run, output, scheduler)
+            if not _unregister_nightly(dry_run, output, scheduler):
+                raise InstallError("nightly dream unschedule failed; installation preserved")
 
         if config_dir.exists():
             print(f"{'DRY-RUN remove' if dry_run else 'REMOVE'} config directory: {config_dir}", file=output)
@@ -2294,15 +2307,16 @@ def _selftest():
                 and uninstall_argv == expected_unschedule,
             ))
 
-            def _crontab_runner(returncode, stdout):
+            def _crontab_runner(returncode, stdout, stderr=""):
                 return lambda argv, stdin_text=None: subprocess.CompletedProcess(
-                    list(argv), returncode, stdout, ""
+                    list(argv), returncode, stdout, stderr
                 )
 
             checks.append((
                 "crontab -l 非零又印了內容＝讀不完整，放棄註冊而不是把整份 crontab 換掉",
                 _crontab_without_dream(_crontab_runner(1, "0 5 * * * backup\n")) is None
-                and _crontab_without_dream(_crontab_runner(1, "")) == []
+                and _crontab_without_dream(_crontab_runner(1, "")) is None
+                and _crontab_without_dream(_crontab_runner(1, "", "no crontab for test")) == []
                 and _crontab_without_dream(
                     _crontab_runner(0, f"0 5 * * * backup\n1 2 * * * old {DREAM_CRON_MARKER}\n")
                 )
