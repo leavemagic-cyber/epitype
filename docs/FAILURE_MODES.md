@@ -837,3 +837,20 @@ avoids capture of explicit operator blocks while retaining ordinary guidance and
 read-only tools. This is harness isolation, not proof that all impersonated or
 hypothetical authority can be recognized. Supersede the mistaken capture rather
 than deleting its evidence or treating it as a real owner decision.
+
+## 24. Git option suffixes and diagnostic patterns mistaken for operations
+
+A scar matching arbitrary text between `git` and `checkout` also matched the
+clone flag `--no-checkout`. When unsupported PowerShell syntax triggered the
+adapter's conservative full-text fallback, a quoted diagnostic regex matched
+itself too. The portable destructive-Git example now requires complete command
+and operation boundaries while retaining case, quoted-executable and serialized
+newline handling. The same rule can update an existing local scar; adding the
+example to the repository does not automatically overwrite an installed card.
+
+Regression inputs go through the real adapter with a temporary vault; dangerous
+commands are never executed. Preserve direct, chained, wrapper and unsupported
+dynamic-execution denials, and keep full-text fallback/auditing. This is a narrow
+lexical repair, not a complete shell interpreter: unsupported scripts quoting
+actual dangerous commands may still be conservatively blocked. Source recovery,
+rollback proof and native question-premise acceptance remain separate results.
