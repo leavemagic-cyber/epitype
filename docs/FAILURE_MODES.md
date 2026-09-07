@@ -649,3 +649,53 @@ previously stranded cards can now be delivered on later turns.
 `python tests/recall_selection_regression.py --selftest` checks the real
 shared recall path with synthetic homes and vaults, plus packing boundaries.
 These offline checks do not establish improvements in unrestricted dialogue.
+
+## 20. Questions can assert unsupported premises
+
+An assistant can ask the user to choose details of a combined workflow before
+checking that its components actually connect. Earlier searches, individual
+API documentation, citations, and an assistant's own `verified` flag do not
+establish that integration. Conversely, unimplemented does not mean infeasible:
+a clearly hypothetical feature and its development investment can be discussed.
+
+Lexical recall searches the user's prompt, not every question the assistant
+will later invent. Relevant feedback cards can therefore be absent even when
+they exist. The existing Stop and PreToolUse rules check particular prohibited
+actions or settled decisions; they do not judge arbitrary evidence entailment.
+
+The shared procedure is `memspec.QUESTION_PREFLIGHT`. Every valid, nonempty
+UserPromptSubmit reserves it before recalled cards, even on a no-hit or deduped
+turn; every SessionStart restores it before generation, including startup,
+resume and compact. App-originated continuation may arrive through SessionStart
+without an observed UserPromptSubmit, so compact-only coverage is insufficient.
+It requires
+the answering model to retrieve accessible facts, check the exact premise and
+integration path, distinguish tested behavior / concrete development route /
+unknown or test-needed behavior, and disclose gaps before dependent choices.
+Preferences, tradeoffs, necessary authorization, owner-only information and
+explicit hypothetical designs remain legitimate questions. Quoted failures
+and discussion of rules are not outgoing questions.
+
+This is **pre-generation guidance, not a semantic interception gate**. No new
+question-word classifier, evidence certificate or model-per-question call is
+added. Raw unsupported questions still pass the existing gates. Stop happens
+after a response and is not proof of preventing display. Host tool-event support
+and actual App behavior must be verified separately from adapter subprocesses.
+Sending a message into an already loaded App conversation may produce neither
+entry event; this change does not force host events or retroactively inject
+into such a continuation. Existing trusted hook registration is required.
+
+Cost: 980 UTF-8 bytes on each delivered prompt hook and session-entry hook;
+no-hit turns were previously empty. The same raw-context and JSON-envelope caps
+apply to the combined output, leaving less room for recall cards; omitted cards
+remain eligible. An undersized budget warns and omits the complete procedure
+rather than truncating it. Existing timeout/configuration fail-open behavior
+and host-side truncation can still prevent delivery. Token and task-quality
+improvement are not implied by byte counts or successful delivery.
+
+`python tests/question_premise_regression.py --selftest` checks eight delivery,
+budget, session entry and non-denial contracts. It deliberately does not label
+evidence support as mechanically verified. The synthetic evaluation protocol in
+`docs/QUESTION_PREMISE_VALIDATION.md` separates actual retrieval, model judgment,
+normal questions and native App coverage. Private incident transcripts stay
+outside the repository.
