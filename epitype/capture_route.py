@@ -179,9 +179,8 @@ def _unique_target(directory, stem):
     return None, stem
 
 
-def _annotate(target, source_vault, cwd, stamp, renamed_stem=None):
-    """搬到位的卡補上歸戶註記；檔名改過時 name: 一併對齊，否則卡名與檔名對不上。"""
-    text = target.read_text(encoding="utf-8")
+def _annotated(text, source_vault, cwd, stamp, renamed_stem=None):
+    """先產生完整歸戶內容，再一次發布；不修改已搬到位的卡。"""
     if renamed_stem is not None:
         text = re.sub(
             rf"^{re.escape(memspec.NAME_FIELD)}:.*$",
@@ -195,13 +194,15 @@ def _annotate(target, source_vault, cwd, stamp, renamed_stem=None):
     note = REHOME_NOTE.format(
         stamp=stamp, source=os.fspath(source_vault), field=memspec.CWD_FIELD, cwd=cwd
     )
-    temporary = target.with_name(target.name + ".tmp")
-    temporary.write_text(text + note + "\n", encoding="utf-8")
-    os.replace(temporary, target)
+    return text + note + "\n"
 
 
 def apply_routes(vault, home=None, stamp=None, report=None):
-    """把誤置的卡搬到它該在的庫。搬移用 os.replace（原子改名），永不刪、永不覆蓋。"""
+    """把完整的歸戶卡發布到空檔名；碰撞時保留來源及目的地。"""
+    try:
+        from . import card_io
+    except ImportError:
+        import card_io
     vault = Path(vault).resolve()
     report = report if report is not None else audit(vault, home)
     stamp = stamp or time.strftime("%Y-%m-%d", time.gmtime())
@@ -218,8 +219,13 @@ def apply_routes(vault, home=None, stamp=None, report=None):
             target, stem = _unique_target(directory, source.stem)
             if target is None:
                 raise OSError(f"{MAX_RENAME_SUFFIX} 個同名檔都被佔用")
-            os.replace(source, target)
-        except OSError as exc:
+            original = source.read_bytes()
+            text = _annotated(
+                original.decode("utf-8"), vault, entry[memspec.CWD_FIELD], stamp,
+                renamed_stem=stem if stem != source.stem else None,
+            )
+            card_io.move(source, target, text.encode("utf-8"), expected=original)
+        except (OSError, UnicodeError) as exc:
             failed += 1
             lines.append(f"FAILED {entry['card']} -> {entry['target']} {type(exc).__name__}: {exc}")
             continue
@@ -228,14 +234,6 @@ def apply_routes(vault, home=None, stamp=None, report=None):
             renamed += 1
         touched.add(entry["target"])
         lines.append(f"MOVED {entry['card']} -> {os.fspath(target)}")
-        try:
-            _annotate(
-                target, vault, entry[memspec.CWD_FIELD], stamp,
-                renamed_stem=stem if stem != source.stem else None,
-            )
-        except OSError as exc:
-            notes_failed += 1
-            lines.append(f"NOTE-FAILED {os.fspath(target)} {type(exc).__name__}: {exc}")
     if moved:
         # 兩邊的索引都不再反映庫裡的卡：標舊，讓下一個讀者重建；不標，搬走的卡會
         # 在來源庫的索引裡繼續被喚回，搬到的卡則要等寬限期過了才看得見。
