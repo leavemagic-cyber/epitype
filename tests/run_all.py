@@ -41,6 +41,17 @@ SELFTESTS = (
     Path("tests") / "governance_regression.py",
     Path("tests") / "recall_selection_regression.py",
     Path("tests") / "question_premise_regression.py",
+    Path("tests") / "card_io_regression.py",
+    Path("tests") / "harvest_safety_regression.py",
+    Path("tests") / "alias_safety_regression.py",
+    Path("tests") / "route_safety_regression.py",
+    Path("tests") / "capture_integration_regression.py",
+    Path("tests") / "commitment_persistence_regression.py",
+    Path("tests") / "dream_status_regression.py",
+    Path("tests") / "dream_lock_regression.py",
+    Path("tests") / "crontab_regression.py",
+    Path("tests") / "scheduler_regression.py",
+    Path("tests") / "stop_freshness_regression.py",
 )
 
 
