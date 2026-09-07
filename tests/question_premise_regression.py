@@ -44,10 +44,14 @@ class QuestionPremiseRegression(unittest.TestCase):
     def context(value):
         return value["hookSpecificOutput"]["additionalContext"] if value else ""
 
+    @staticmethod
+    def guide():
+        return memspec.QUESTION_PREFLIGHT + "\n" + getattr(memspec, "TURN_CONTINUITY", "MISSING CONTINUITY PROCEDURE")
+
     def test_before_generation_without_hits_or_question_keywords(self):
         for prompt in ("繼續。", "Proceed with the design.", "42"):
             value = recall._handle({"prompt": prompt}, time.monotonic())
-            self.assertEqual(self.context(value), memspec.QUESTION_PREFLIGHT)
+            self.assertEqual(self.context(value), self.guide())
             self.assertNotIn("decision", value)
 
     def test_repeat_turn_keeps_procedure_without_repeating_cards(self):
@@ -60,25 +64,25 @@ class QuestionPremiseRegression(unittest.TestCase):
         for session, digest in markers:
             recall._claim_marker(session, digest)
         self.assertIn("fact.md", first)
-        self.assertEqual(self.context(recall._handle(event, time.monotonic())), memspec.QUESTION_PREFLIGHT)
+        self.assertEqual(self.context(recall._handle(event, time.monotonic())), self.guide())
 
     def test_session_entry_restores_procedure_ahead_of_index(self):
         (self.vault / memspec.MEMORY_INDEX_FILENAME).write_text("noise\n" * 2000, encoding="utf-8")
         for source in ("startup", "resume", "clear", "compact", None):
             context = self.context(start._handle({"source": source}, time.monotonic()))
-            self.assertTrue(context.startswith(memspec.QUESTION_PREFLIGHT))
+            self.assertTrue(context.startswith(self.guide()))
             self.assertLessEqual(len(context.encode("utf-8")), memspec.HOOK_DEFAULT_BUDGET_BYTES)
 
     def test_budget_never_truncates_procedure(self):
-        size = len(memspec.QUESTION_PREFLIGHT.encode("utf-8"))
+        size = len(self.guide().encode("utf-8"))
         for budget in (size, size + 1, memspec.HOOK_DEFAULT_BUDGET_BYTES):
             common.write_config(self.config, [self.vault], budget=budget)
             value = recall._handle({"prompt": "continue"}, time.monotonic())
-            self.assertEqual(self.context(value), memspec.QUESTION_PREFLIGHT)
+            self.assertEqual(self.context(value), self.guide())
             self.assertTrue(common.payload_fits("UserPromptSubmit", self.context(value), budget))
             for source in ("resume", "compact"):
                 restored = start._handle({"source": source}, time.monotonic())
-                self.assertTrue(self.context(restored).startswith(memspec.QUESTION_PREFLIGHT))
+                self.assertTrue(self.context(restored).startswith(self.guide()))
 
     def test_small_budget_reports_omission_and_fails_open(self):
         common.write_config(self.config, [self.vault], budget=100)
@@ -103,6 +107,44 @@ class QuestionPremiseRegression(unittest.TestCase):
         for prompt in (None, {}, ""):
             self.assertIsNone(recall._handle({"prompt": prompt}, time.monotonic()))
         self.assertIsNone(recall._handle({"prompt": "continue"}, 0))
+
+    def test_continuity_not_conditioned_on_followup_keywords(self):
+        # Delivery only: none of these inputs is classified as authority or
+        # completion by the hook. Correct next actions need model evaluation.
+        for prompt in (
+            "可以。", "順便問一下，原因是什麼？", "還有另一個錯誤。", "做完了？",
+            "Diagnosis only; do not modify anything.", "Pause the work now.",
+            "We need the owner's colour preference.", "All scoped deliverables passed.",
+            "Quoted bad example: 'I finished the first step, so I stopped.'",
+        ):
+            value = recall._handle({"prompt": prompt}, time.monotonic())
+            # Capture may recall a prior synthetic correction later in this
+            # loop; the procedure must stay first and appear exactly once.
+            self.assertTrue(self.context(value).startswith(self.guide()))
+            self.assertEqual(self.context(value).count(self.guide()), 1)
+            self.assertNotIn("decision", value)
+
+    def test_question_only_budget_preserves_old_procedure(self):
+        budget = len(memspec.QUESTION_PREFLIGHT.encode("utf-8"))
+        common.write_config(self.config, [self.vault], budget=budget)
+        for hook, event in ((recall, {"prompt": "continue"}), (start, {"source": "compact"})):
+            error = io.StringIO()
+            with contextlib.redirect_stderr(error):
+                value = hook._handle(event, time.monotonic())
+            self.assertEqual(self.context(value), memspec.QUESTION_PREFLIGHT)
+            self.assertIn("continuity procedure omitted", error.getvalue())
+
+    def test_no_new_stop_loop_or_false_completion_detector(self):
+        for message in (
+            "The first step is saved; the integration test is still pending.",
+            "Here is the diagnosis. Implementation has not been done.",
+            "Which colour do you prefer?", "Please approve this external upload.",
+            "Paused as requested.", "All requested deliverables are verified.",
+            "Example of a bad answer: 'I stopped after the first step.'",
+        ):
+            for active in (False, True):
+                self.assertIsNone(stop._handle({"last_assistant_message": message,
+                                               "stop_hook_active": active}, time.monotonic(), []))
 
     def test_no_keyword_gate_or_self_certification(self):
         # Bad premises ALSO pass these gates. This proves no NEW denial,

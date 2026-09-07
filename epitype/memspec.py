@@ -120,6 +120,25 @@ QUESTION_PREFLIGHT = (
     "to outgoing questions, not quoted examples or discussion of limitations/rules; "
     "do not halt authorized design work."
 )
+# Applied before generation; the model, not a text matcher, reconciles scope.
+TURN_CONTINUITY = (
+    "[Epitype: task continuity]\n"
+    "Before answering a follow-up, recover the active task, its remaining "
+    "deliverables and still-valid authorization from the conversation/current "
+    "project records. A confirmation, status question, related bug report or "
+    "diagnostic aside does not reset an authorized run to analysis-only. Answer "
+    "the aside, then perform the next safe in-scope step in the same turn. "
+    "Before ending, compare actual results with the whole requested scope: "
+    "a diagnosis, saved decision, checkpoint or single test is not completion. "
+    "If work remains, continue; yield only for a needed user choice/information/"
+    "authorization or a verified external gate with no independent work left. "
+    "Honor an explicit pause, replacement or narrowing of scope; a standalone "
+    "analysis request authorizes no repair. Do not invent work from unrelated "
+    "ledgers or quoted examples, bypass safety, or claim background continuation "
+    "without a running mechanism. Evidence, not a self-declared done flag, "
+    "supports completion. Resource pressure calls for a checkpoint, not a "
+    "false closeout."
+)
 TRIGGER_FIELD = "trigger"
 TRIGGER_TOOL_FIELD = "tool"
 TRIGGER_INPUT_FIELD = "input"

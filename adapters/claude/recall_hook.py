@@ -34,6 +34,7 @@ from _hook_common import (
     load_config,
     payload,
     payload_fits,
+    pre_generation_guide,
     read_event,
     recall_marker_directory,
     resolve_vaults,
@@ -180,10 +181,7 @@ def _handle(event, started_at, delivery_markers=None):
     # Reserve the procedure before retrieval; card delivery markers must refer
     # only to the remaining budget's output, never to subsequently trimmed cards.
     budget = config[memspec.CONFIG_BUDGET_BYTES_FIELD]
-    guide = memspec.QUESTION_PREFLIGHT
-    if not payload_fits("UserPromptSubmit", guide, budget):
-        guide = ""
-        print("Epitype: question preflight omitted: configured budget too small", file=sys.stderr)
+    guide = pre_generation_guide("UserPromptSubmit", budget)
     value = _recall(event, started_at, config, delivery_markers, guide)
     if expired(started_at):
         return None
@@ -504,7 +502,7 @@ def _selftest():
                 (
                     "same-session deduplication",
                     second.returncode == 0
-                    and json.loads(second.stdout)["hookSpecificOutput"]["additionalContext"] == memspec.QUESTION_PREFLIGHT
+                    and json.loads(second.stdout)["hookSpecificOutput"]["additionalContext"] == pre_generation_guide("UserPromptSubmit", memspec.HOOK_DEFAULT_BUDGET_BYTES)
                     and not second.stderr,
                 )
             )

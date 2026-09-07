@@ -44,6 +44,19 @@ def expired(started_at):
     return time.monotonic() - started_at >= memspec.HOOK_TIMEOUT_SECONDS
 
 
+def pre_generation_guide(event_name, budget):
+    """Atomic procedures within both budgets; never evict the older question check."""
+    guide = memspec.QUESTION_PREFLIGHT
+    if not payload_fits(event_name, guide, budget):
+        print("Epitype: question preflight omitted: configured budget too small", file=sys.stderr)
+        return ""
+    combined = guide + "\n" + memspec.TURN_CONTINUITY
+    if payload_fits(event_name, combined, budget):
+        return combined
+    print("Epitype: continuity procedure omitted: configured budget too small", file=sys.stderr)
+    return guide
+
+
 def read_event(stream):
     value = json.load(stream)
     if not isinstance(value, dict):

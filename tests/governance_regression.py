@@ -118,7 +118,7 @@ class GovernanceRegression(unittest.TestCase):
              patch.object(recall, "expired", lambda _started: late):
             self.assertEqual(self.recall_once(), "")
         self.assertIn("fixturedecision", self.recall_once())
-        self.assertEqual(json.loads(self.recall_once())["hookSpecificOutput"]["additionalContext"], memspec.QUESTION_PREFLIGHT)
+        self.assertEqual(json.loads(self.recall_once())["hookSpecificOutput"]["additionalContext"], memspec.QUESTION_PREFLIGHT + "\n" + memspec.TURN_CONTINUITY)
 
     def test_output_failure_leaves_recall_retryable(self):
         self.card()
@@ -126,7 +126,7 @@ class GovernanceRegression(unittest.TestCase):
         with patch.object(recall, "emit", side_effect=OSError("synthetic output failure")):
             self.assertEqual(self.recall_once(), "")
         self.assertIn("fixturedecision", self.recall_once())
-        self.assertEqual(json.loads(self.recall_once())["hookSpecificOutput"]["additionalContext"], memspec.QUESTION_PREFLIGHT)
+        self.assertEqual(json.loads(self.recall_once())["hookSpecificOutput"]["additionalContext"], memspec.QUESTION_PREFLIGHT + "\n" + memspec.TURN_CONTINUITY)
 
     def test_missing_vault_keeps_reads_but_never_redirects_capture(self):
         self.card()
@@ -167,7 +167,7 @@ class GovernanceRegression(unittest.TestCase):
         second_output = json.loads(self.recall_once())["hookSpecificOutput"]["additionalContext"]
         self.assertEqual(sum(line.startswith("- ") for line in second_output.splitlines()), 1)
         self.assertNotIn(first, second_output)
-        self.assertEqual(json.loads(self.recall_once())["hookSpecificOutput"]["additionalContext"], memspec.QUESTION_PREFLIGHT)
+        self.assertEqual(json.loads(self.recall_once())["hookSpecificOutput"]["additionalContext"], memspec.QUESTION_PREFLIGHT + "\n" + memspec.TURN_CONTINUITY)
 
     def test_degraded_governance_writers_are_paused(self):
         self.card()
