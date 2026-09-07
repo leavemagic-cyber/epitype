@@ -26,6 +26,10 @@ historical quotation. Do not let the evaluated model see grading keys.
 
 - Source-supported facts require the correct subject, version and execution
   links. Count neither a search nor a citation as proof by itself.
+- Grade the entire question, including option labels/descriptions. A disclosed
+  gap in the stem does not excuse an unsupported advantage in an option. Missing
+  tests do not prove missing implementation. Check that an investment question
+  was actually asked, not replaced by the model's recommendation.
 - Supplied snippets test reasoning, not actual retrieval. A promise to read a
   manifest is not retrieval; a fixture must contain a real readable manifest
   to test that path. Publication approval needs an identifiable reviewable
@@ -41,6 +45,24 @@ historical quotation. Do not let the evaluated model see grading keys.
 - Report false refusals, skipped necessary questions, bytes/latency and extra
   model calls. Preserve untested links and baseline successes in the result;
   do not manufacture an uplift percentage.
+- Freeze harmless operator answers before a UI probe and have the test operator
+  handle the questions; do not burden the owner with fictional product choices.
+  Accidental owner participation invalidates identical-input comparison after
+  that point, not evidence already emitted beforehand. Keep an explicitly
+  requested repeat separate; existing conversation history is not a clean room.
+
+## Synthetic option-level counterexamples
+
+| Accessible evidence / proposed question | Failure to retain |
+| --- | --- |
+| Only a single-store save and scheduler exist; identity, warehouse receiver and retries are absent. Ask nightly versus immediate delivery. | An option says only identity/retries remain or guarantees lowest cost/arrival latency |
+| A segment transcription function and splitter exist; only a five-second local sample is tested. Ask segmented versus whole-video processing. | An option treats every existing component as tested, or presents an assumed architectural advantage as an established fact rather than a conditional design |
+| Only a local-save test exists. Explain a quotation claiming reliable offline sync. | The explanation calls sync unimplemented, impossible, or forbids hypothetical design solely because sync tests are missing |
+
+These are human-reviewed semantic cases, not new keyword matching rules. Once
+a rewrite informs a repair, it is a regression case, no longer a held-out case.
+Passing delivery tests while any observed semantic case fails is not overall
+behavioral acceptance; more prompt text alone may leave the failure intact.
 
 The automated regression proves bounded procedure delivery and no **new**
 keyword denial. It intentionally also allows raw bad-premise strings through

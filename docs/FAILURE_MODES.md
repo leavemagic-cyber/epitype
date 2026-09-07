@@ -677,6 +677,11 @@ Preferences, tradeoffs, necessary authorization, owner-only information and
 explicit hypothetical designs remain legitimate questions. Quoted failures
 and discussion of rules are not outgoing questions.
 
+The procedure also covers option labels and descriptions: a caveated stem does
+not justify omitting a missing integration step or asserting lower cost, latency
+or implementation state without evidence. Missing tests do not establish missing
+implementation. Recommendations must leave a requested user choice intact.
+
 This is **pre-generation guidance, not a semantic interception gate**. No new
 question-word classifier, evidence certificate or model-per-question call is
 added. Raw unsupported questions still pass the existing gates. Stop happens
@@ -686,7 +691,7 @@ Sending a message into an already loaded App conversation may produce neither
 entry event; this change does not force host events or retroactively inject
 into such a continuation. Existing trusted hook registration is required.
 
-The question procedure alone costs 980 UTF-8 bytes on each delivered prompt
+The question procedure alone costs 1,372 UTF-8 bytes on each delivered prompt
 hook and session-entry hook (the continuity procedure in §21 adds to this);
 no-hit turns were previously empty. The same raw-context and JSON-envelope caps
 apply to the combined output, leaving less room for recall cards; omitted cards
@@ -695,12 +700,21 @@ rather than truncating it. Existing timeout/configuration fail-open behavior
 and host-side truncation can still prevent delivery. Token and task-quality
 improvement are not implied by byte counts or successful delivery.
 
-`python tests/question_premise_regression.py --selftest` checks eleven shared
+`python tests/question_premise_regression.py --selftest` checks twelve shared
 delivery, budget, session entry and non-denial contracts. It deliberately does not label
 evidence support as mechanically verified. The synthetic evaluation protocol in
 `docs/QUESTION_PREMISE_VALIDATION.md` separates actual retrieval, model judgment,
 normal questions and native App coverage. Private incident transcripts stay
 outside the repository.
+
+A bounded native App check observed the full procedure before actual reads,
+ordinary text and a question-tool call. An option still omitted a required
+receiver and claimed lowest cost. Refining the procedure corrected those parts
+and restored a skipped investment choice, but other answers still equated
+untested with unimplemented and called existing components tested. Behavioral
+acceptance therefore remained **FAIL**, despite passing delivery regressions.
+No semantic error was mechanically blocked before display. Preserve such
+failures instead of reporting hook delivery or a better example as sign-off.
 
 ## 21. A follow-up can silently replace the active task
 
@@ -717,7 +731,7 @@ repair that missing semantic distinction.
 
 `memspec.TURN_CONTINUITY` now runs as a procedure for the answering model,
 delivered by the existing UserPromptSubmit and SessionStart paths alongside
-the unchanged question procedure. It requires recovering the active scope,
+the question procedure. It requires recovering the active scope,
 remaining deliverables and still-valid authorization **before** interpreting
 a follow-up. A confirmation, status question or related bug report does not
 erase that scope. Answer an aside and take the next safe authorized step in
@@ -736,7 +750,7 @@ questions, explanations and valid final answers acquire no new mechanical denial
 
 The shared packing helper reserves whole procedures within the existing raw
 and JSON budgets. The new part costs 1,055 additional UTF-8 bytes including
-its separator, 2,035 bytes total when both are delivered. If only the old
+its separator, 2,427 bytes total with the current question procedure. If only the
 question procedure fits it remains intact, and omitted continuity is reported
 on stderr; neither procedure is cut mid-sentence. This reduces room for cards,
 not the eight-card or time limits. A warm App continuation without an entry

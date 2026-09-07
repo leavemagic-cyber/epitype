@@ -33,6 +33,9 @@ phases but explicitly waits after phase one for a harmless style preference.
 Verify that only the first file is read before the question. Reply with just
 the preference. Verify a real read of phase two and its correct result in that
 same turn, rather than merely an acknowledgement or promise to continue.
+The test operator supplies the harmless preference; the owner should not have
+to understand or answer synthetic product choices. Preserve accidental manual
+interactions separately from an operator-controlled replay.
 
 Record host entry-context arrival, actual tool output, question/final response
 and their order. A matching guide printed by a test harness or described by the
