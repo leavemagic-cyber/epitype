@@ -117,6 +117,8 @@ def _normalize_alias(value):
 def _clean_alias(raw):
     if not isinstance(raw, str):
         return ""
+    if any(unicodedata.category(char) in ("Cc", "Zl", "Zp") for char in raw):
+        return ""
     value = raw.strip().strip(_QUOTE_STRIP_CHARS).strip()
     return value
 
@@ -126,7 +128,7 @@ def _needs_quoting(value):
         return True
     if value.strip() != value:
         return True
-    if ": " in value or value.endswith(":"):
+    if ": " in value or value.endswith(":") or any(char in value for char in ",[]{}#\"'"):
         return True
     return False
 
@@ -250,21 +252,16 @@ def _insert_aliases(lines_with_ends, closing, location, new_aliases, terminator)
     return "".join(lines)
 
 
-def _write_card(target, bom, new_text):
+def _write_card(target, bom, new_text, *, expected):
+    try:
+        from . import card_io
+    except ImportError:
+        import card_io
     payload = new_text.encode("utf-8")
     if bom:
         payload = b"\xef\xbb\xbf" + payload
-    fd, tmp_name = tempfile.mkstemp(prefix=target.name + ".", suffix=".tmp", dir=str(target.parent))
-    try:
-        with os.fdopen(fd, "wb") as stream:
-            stream.write(payload)
-        os.replace(tmp_name, target)
-    except Exception:
-        try:
-            os.unlink(tmp_name)
-        except OSError:
-            pass
-        raise
+    original = (b"\xef\xbb\xbf" if bom else b"") + expected.encode("utf-8")
+    card_io.replace_if_unchanged(target, payload, original)
 
 
 def _decision_key_of(path):
@@ -337,6 +334,7 @@ def _prepare_entry(vault, entry):
         "card_path": card_path,
         "target": target,
         "bom": bom,
+        "original": text,
         "lines_with_ends": lines_with_ends,
         "closing": closing,
         "location": location,
@@ -391,7 +389,7 @@ def cmd_apply(args):
     prepared = [item for item in (_prepare_entry(vault, entry) for entry in entries) if item is not None]
     collisions, blocked = _collisions(vault, prepared)
 
-    cards = added = skipped = 0
+    cards = added = skipped = failed = 0
     for item in prepared:
         cards += 1
         aliases_to_apply = [
@@ -406,12 +404,17 @@ def cmd_apply(args):
             aliases_to_apply, item["terminator"],
         )
         if not args.dry_run:
-            _write_card(item["target"], item["bom"], new_text)
+            try:
+                _write_card(item["target"], item["bom"], new_text, expected=item["original"])
+            except OSError as exc:
+                failed += 1
+                print(f"ALIAS APPLY FAILED {item['card_path']}: {exc}", file=sys.stderr)
+                continue
         print(f"+{len(aliases_to_apply)} {item['card_path']}")
         added += len(aliases_to_apply)
 
-    print(f"ALIAS APPLY cards={cards} added={added} skipped={skipped} collisions={collisions}")
-    return 0
+    print(f"ALIAS APPLY cards={cards} added={added} skipped={skipped} collisions={collisions} failed={failed}")
+    return 1 if failed else 0
 
 
 # ------------------------------------------------------------------------- selftest

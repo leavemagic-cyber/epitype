@@ -1,7 +1,6 @@
 import sys; [getattr(stream, "reconfigure", lambda **_: None)(encoding="utf-8", errors="replace") for stream in (sys.stdout, sys.stderr)]  # cp950 主控台先轉 UTF-8，避免繁中輸出在程式進入點就中斷。
 """Epitype 記憶卡的本機 FTS5 全文與別名搜尋器。"""
 
-import csv
 import json
 import os
 from pathlib import Path
@@ -46,7 +45,7 @@ _RECALL_PART = re.compile(f"[{_CJK_RANGE}]+|[^\\s{_CJK_RANGE}，。！？：；�
 # bigrams indexable while the cards table and returned hit fields stay raw.
 _CJK_BIGRAM_PREFIX = "\ue000"
 _FTS_FORMAT_KEY = "fts_format"
-_FTS_FORMAT_VERSION = "5"
+_FTS_FORMAT_VERSION = "6"
 _CURRENT_DECISION_GUIDANCE = "此題現行決定="
 
 
@@ -149,11 +148,37 @@ def _alias_values(raw):
     if value.startswith("[") and "]" in value:
         value = value[1:value.rfind("]")]
         try:
-            return [_scalar(item) for item in next(csv.reader([value], skipinitialspace=True)) if item.strip()]
-        except csv.Error:
+            return [_scalar(item) for item in _alias_items(value) if item.strip()]
+        except ValueError:
             pass
     scalar = _scalar(value)
     return [scalar] if scalar else []
+
+
+def _alias_items(value):
+    """Split flow aliases without stripping quotes before the scalar parser."""
+    items, current = [], []
+    quote, escaped = None, False
+    for character in value:
+        if quote is not None:
+            current.append(character)
+            if escaped:
+                escaped = False
+            elif character == "\\" and quote == '"':
+                escaped = True
+            elif character == quote:
+                quote = None
+        elif character in ('"', "'") and not "".join(current).strip():
+            quote = character
+            current.append(character)
+        elif character == ",":
+            items.append("".join(current).strip())
+            current = []
+        else:
+            current.append(character)
+    if quote is not None:
+        raise ValueError("unterminated quoted alias")
+    return items + ["".join(current).strip()]
 
 
 def _parse_frontmatter(text):

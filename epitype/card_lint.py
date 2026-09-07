@@ -633,12 +633,13 @@ def _fix_dates(report, dry_run, output):
         bom, _text, lines_with_ends, closing = raw
         terminator = alias_batch._default_terminator(lines_with_ends)
         line = f"{memspec.LAST_VERIFIED_AT_FIELD}: {stamped}"
-        print(f"{'WOULD-FIX' if dry_run else 'FIX'} {card['path']} +{line}", file=output)
         if dry_run:
+            print(f"WOULD-FIX {card['path']} +{line}", file=output)
             continue
         lines = list(lines_with_ends)
         lines[closing:closing] = [line + terminator]
-        alias_batch._write_card(target, bom, "".join(lines))
+        alias_batch._write_card(target, bom, "".join(lines), expected=_text)
+        print(f"FIX {card['path']} +{line}", file=output)
         written += 1
     print(f"FIX-DATES{' dry-run' if dry_run else ''} written={written} skipped={skipped}", file=output)
 
@@ -1056,7 +1057,11 @@ def main(argv=None, output=sys.stdout):
         print(f"ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
     if parsed.fix_dates:
-        _fix_dates(report, parsed.dry_run, output)
+        try:
+            _fix_dates(report, parsed.dry_run, output)
+        except OSError as exc:
+            print(f"FIX-DATES ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
+            return 2
         return 0
     if parsed.json:
         print(json.dumps(report, ensure_ascii=False, indent=1), file=output)
