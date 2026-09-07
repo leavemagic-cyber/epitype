@@ -36,6 +36,10 @@ class StopFreshnessRegression(unittest.TestCase):
         })
         environment.start()
         self.addCleanup(environment.stop)
+        marker = patch.object(stop, "recall_marker_directory",
+                              lambda session: self.root / "markers" / common.session_component(session))
+        marker.start()
+        self.addCleanup(marker.stop)
 
     def card(self, name="decision.md", text=CARD):
         path = self.vault / name
