@@ -685,7 +685,8 @@ Sending a message into an already loaded App conversation may produce neither
 entry event; this change does not force host events or retroactively inject
 into such a continuation. Existing trusted hook registration is required.
 
-Cost: 980 UTF-8 bytes on each delivered prompt hook and session-entry hook;
+The question procedure alone costs 980 UTF-8 bytes on each delivered prompt
+hook and session-entry hook (the continuity procedure in §21 adds to this);
 no-hit turns were previously empty. The same raw-context and JSON-envelope caps
 apply to the combined output, leaving less room for recall cards; omitted cards
 remain eligible. An undersized budget warns and omits the complete procedure
@@ -693,9 +694,50 @@ rather than truncating it. Existing timeout/configuration fail-open behavior
 and host-side truncation can still prevent delivery. Token and task-quality
 improvement are not implied by byte counts or successful delivery.
 
-`python tests/question_premise_regression.py --selftest` checks eight delivery,
-budget, session entry and non-denial contracts. It deliberately does not label
+`python tests/question_premise_regression.py --selftest` checks eleven shared
+delivery, budget, session entry and non-denial contracts. It deliberately does not label
 evidence support as mechanically verified. The synthetic evaluation protocol in
 `docs/QUESTION_PREMISE_VALIDATION.md` separates actual retrieval, model judgment,
 normal questions and native App coverage. Private incident transcripts stay
 outside the repository.
+
+## 21. A follow-up can silently replace the active task
+
+An assistant may save one design decision and stop, or answer a diagnostic
+aside and discard an already-authorized repair. It can also explicitly admit
+that implementation is unfinished while ending the turn. Neither a completed
+turn nor a saved checkpoint proves that the requested scope is complete.
+
+Existing Stop rules only enforce selected settled decisions. The commitments
+ledger records promises; it is not an active-task completion judge. A global
+pending list cannot identify which work belongs to this conversation. Raising
+a host's stop cap or parsing private native-goal transcript formats would not
+repair that missing semantic distinction.
+
+`memspec.TURN_CONTINUITY` now runs as a procedure for the answering model,
+delivered by the existing UserPromptSubmit and SessionStart paths alongside
+the unchanged question procedure. It requires recovering the active scope,
+remaining deliverables and still-valid authorization **before** interpreting
+a follow-up. A confirmation, status question or related bug report does not
+erase that scope. Answer an aside and take the next safe authorized step in
+the same turn; before ending, compare the actual results to the whole task.
+
+Genuine owner choices, owner-only information, necessary authorization and
+verified external gates with no independent work remain valid waiting points.
+Explicit pauses or scope changes win; standalone analysis stays analysis.
+Unrelated ledger items and quoted failure examples do not authorize new work.
+
+This is **not an automatic unfinished-work detector or a new Stop block**.
+The model can still misjudge scope, ignore the procedure or overclaim evidence.
+No self-certified completion field, question-word gate, native-goal parser or
+per-turn model call is added. Stop's existing loop brake is unchanged; ordinary
+questions, explanations and valid final answers acquire no new mechanical denial.
+
+The shared packing helper reserves whole procedures within the existing raw
+and JSON budgets. The new part costs 1,055 additional UTF-8 bytes including
+its separator, 2,035 bytes total when both are delivered. If only the old
+question procedure fits it remains intact, and omitted continuity is reported
+on stderr; neither procedure is cut mid-sentence. This reduces room for cards,
+not the eight-card or time limits. A warm App continuation without an entry
+event receives no fresh procedure. CLI, installed-shim and native App results
+must be reported separately; see [continuity validation](TASK_CONTINUITY_VALIDATION.md).
