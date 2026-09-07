@@ -118,7 +118,12 @@ QUESTION_PREFLIGHT = (
     "information without invented facts. Clearly labeled hypothetical designs "
     "and investment choices may be discussed before implementation. Apply this "
     "to outgoing questions, not quoted examples or discussion of limitations/rules; "
-    "do not halt authorized design work."
+    "do not halt authorized design work. Check each option label and description too: "
+    "retain missing integration steps; qualify cost/effort/latency/quality claims "
+    "by their evidence or uncertainty. A caveated question does not justify "
+    "confident options. Missing tests do not prove missing implementation or infeasibility. "
+    "Offer recommendations without taking over a requested user choice; "
+    "hypothetical design need not await delivery."
 )
 # Applied before generation; the model, not a text matcher, reconciles scope.
 TURN_CONTINUITY = (

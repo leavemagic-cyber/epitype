@@ -54,6 +54,18 @@ class QuestionPremiseRegression(unittest.TestCase):
             self.assertEqual(self.context(value), self.guide())
             self.assertNotIn("decision", value)
 
+    def test_option_and_choice_procedure_reaches_both_entry_paths(self):
+        # Text delivery, not a semantic verdict about any model's answer.
+        for hook, event in ((recall, {"prompt": "continue"}),
+                            (start, {"source": "resume"})):
+            context = self.context(hook._handle(event, time.monotonic()))
+            for clause in (
+                "Check each option label and description too",
+                "Missing tests do not prove missing implementation or infeasibility",
+                "without taking over a requested user choice",
+            ):
+                self.assertIn(clause, context)
+
     def test_repeat_turn_keeps_procedure_without_repeating_cards(self):
         (self.vault / "fact.md").write_text(
             "---\nname: fact\ndescription: fixturepremise\n---\n", encoding="utf-8")
@@ -160,7 +172,10 @@ class QuestionPremiseRegression(unittest.TestCase):
         for text in texts:
             for name in ("AskUserQuestion", "request_user_input", "request_user_input_async"):
                 value = pretool._handle({"tool_name": name, "tool_input": {
-                    "questions": [{"question": text}], "verified": True,
+                    "questions": [{"question": text, "options": [{
+                        "label": "Guaranteed cheapest",
+                        "description": "Only the scheduler is missing; instant delivery.",
+                    }]}], "verified": True,
                 }}, time.monotonic())
                 output = (value or {}).get("hookSpecificOutput", {})
                 self.assertNotEqual(output.get("permissionDecision"), "deny")
