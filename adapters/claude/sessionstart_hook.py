@@ -256,7 +256,7 @@ def _handle(event, started_at):
     dream = config.get(memspec.DREAM_CONFIG_FIELD) or {}
     if _soft_remaining(started_at) > 0:
         try:
-            _dream_spawn(dream, governance, started_at, source=source)
+            _dream_spawn(dream, governance_vault(config, for_write=True), started_at, source=source)
         except Exception:
             pass  # 夢起不來絕不影響開場注入
 
@@ -302,7 +302,7 @@ def _handle(event, started_at):
     # 夢的一行跟其他一行摘要放在一起，排在裁定之前：它是狀態，不是規則。
     if _soft_remaining(started_at) > 0:
         try:
-            notice = _dream_notice(governance, source, dream)
+            notice = _dream_notice(governance_vault(config, for_write=True), source, dream)
         except Exception:
             notice = None
         if notice:

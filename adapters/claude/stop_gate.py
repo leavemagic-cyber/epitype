@@ -44,12 +44,12 @@ _WHITESPACE_REGEX = re.compile(r"\s+")
 _FORBIDDEN_RULE = "forbidden"
 _QUESTION_RULE = "question"
 _DECISION_CACHE_FILENAME = "stop_decisions.json"
-_DECISION_CACHE_VERSION = 1
+_DECISION_CACHE_VERSION = 2
 _KEY = "key"
 _DECIDED_AT = "decided_at"
 _QUOTE = "quote"
 
-_Decision = namedtuple("_Decision", "key decided_at quote forbidden aliases path")
+_Decision = namedtuple("_Decision", "key decided_at quote forbidden aliases path decided_by")
 
 
 def _one_line(value):
@@ -157,11 +157,13 @@ def _read_decision(path):
     if not key or _one_line(fields.get(memspec.DECISION_STATUS_FIELD)) != memspec.ACTIVE_DECISION_STATUS:
         return None
     sequences = _sequence_fields(front_lines, memspec.TOP_LEVEL_FIELD, _inline_items)
-    quote = _one_line(fields.get(memspec.OWNER_QUOTE_FIELD)) or _one_line(
-        fields.get(memspec.DESCRIPTION_FIELD)
-    )
+    decided_by = _one_line(fields.get(memspec.DECIDED_BY_FIELD))
+    quote = _one_line(fields.get(memspec.OWNER_QUOTE_FIELD))
+    if not quote and decided_by != memspec.OWNER_EXPLICIT_DECIDER:
+        quote = _one_line(fields.get(memspec.DESCRIPTION_FIELD))
     return {
         _KEY: key,
+        memspec.DECIDED_BY_FIELD: decided_by,
         _DECIDED_AT: _one_line(fields.get(memspec.CURRENT_DECISION_AT_FIELD)),
         _QUOTE: quote[: memspec.STOP_GATE_QUOTE_MAX_CHARS],
         memspec.FORBIDDEN_FIELD: sequences[memspec.FORBIDDEN_FIELD],
@@ -253,6 +255,7 @@ def _decisions(vault, started_at):
                 tuple(_strings(ruling.get(memspec.FORBIDDEN_FIELD))),
                 tuple(_strings(ruling.get(memspec.ALIASES_FIELD))),
                 vault / card_path,
+                _one_line(ruling.get(memspec.DECIDED_BY_FIELD)),
             )
         )
     return found
@@ -329,6 +332,9 @@ def _asks_again(decision, message):
     unrelated questions, while「虛擬盤」and「鏡像實盤」together in a question is the
     settled subject being put back to the owner. Aliases belonging to different cards
     never add up."""
+    # Only a sourced, explicit owner ruling can make a question "already decided".
+    if decision.decided_by != memspec.OWNER_EXPLICIT_DECIDER or not decision.quote:
+        return False
     aliases = tuple(
         alias
         for alias in dict.fromkeys(_normalized(item) for item in decision.aliases)
@@ -382,7 +388,7 @@ def _audit(config, decision_key, rule, started_at, session_id=None):
 
         row = {"kind": memspec.STOP_GATE_LOG_KIND, "decision": decision_key, "rule": rule}
         _append_gate_log(
-            governance_vault(config),
+            governance_vault(config, for_write=True),
             _with_session(row, session_id),
             started_at,
         )
@@ -409,7 +415,7 @@ def _commitments(event, message, config, started_at):
         return
     from epitype import commitments
 
-    vault = governance_vault(config)
+    vault = governance_vault(config, for_write=True)
     session_id = event.get("session_id", event.get("sessionId"))
     commitments.settle(vault, session_id, message)
     if expired(started_at):
@@ -523,6 +529,7 @@ def _selftest():
                 f"{memspec.DECISION_KEY_FIELD}: schedule-owner-only\n"
                 f"{memspec.DECISION_STATUS_FIELD}: {memspec.ACTIVE_DECISION_STATUS}\n"
                 f"{memspec.CURRENT_DECISION_AT_FIELD}: 2026-08-20\n"
+                f"{memspec.DECIDED_BY_FIELD}: {memspec.OWNER_EXPLICIT_DECIDER}\n"
                 f"{memspec.OWNER_QUOTE_FIELD}: 排程只由我改\n"
                 f"{memspec.ALIASES_FIELD}: [排程甲, 排程乙]\n"
                 "---\nbody\n",

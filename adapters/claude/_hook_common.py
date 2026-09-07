@@ -69,12 +69,18 @@ def load_config(started_at):
     if not isinstance(raw_vaults, list) or not raw_vaults:
         raise ValueError("config vaults must be a non-empty list")
     vaults = []
+    unavailable = []
     for item in raw_vaults:
         if not isinstance(item, str) or not item.strip():
             raise ValueError("vault paths must be non-empty strings")
-        vault = Path(item).expanduser().resolve()
-        if not vault.is_dir():
-            raise NotADirectoryError(str(vault))
+        vault = Path(item).expanduser().absolute()
+        try:
+            vault = vault.resolve()
+            available = vault.is_dir()
+        except (OSError, RuntimeError):
+            available = False
+        if not available:
+            unavailable.append(vault)
         vaults.append(vault)
 
     raw_budget = value.get(
@@ -86,8 +92,12 @@ def load_config(started_at):
     budget = raw_budget
     if budget <= 0:
         raise ValueError("budget_bytes must be a positive integer")
+    if unavailable:
+        print(f"Epitype degraded: {len(unavailable)} configured vault(s) unavailable; "
+              "readable vaults remain searchable; hook governance writes paused.", file=sys.stderr)
     return {
         memspec.CONFIG_VAULTS_FIELD: vaults,
+        "_unavailable_vaults": unavailable,
         memspec.CONFIG_BUDGET_BYTES_FIELD: min(
             budget,
             memspec.HOOK_DEFAULT_BUDGET_BYTES,
@@ -122,13 +132,17 @@ def resolve_vaults(config, event, home=None):
     """Closest native cwd vault first, then the configured vaults, deduplicated."""
     vaults = native_cwd_vaults(event.get("cwd") if isinstance(event, dict) else None, home)
     for vault in config[memspec.CONFIG_VAULTS_FIELD]:
-        if vault not in vaults:
+        if vault not in config.get("_unavailable_vaults", ()) and vault not in vaults:
             vaults.append(vault)
     return vaults
 
 
-def governance_vault(config):
+def governance_vault(config, *, for_write=False):
     """Return the configured ledger holder, falling back to the legacy first vault."""
+    # A missing vault may have held the ledger; never reinterpret its absence
+    # as permission to write governance state into a different vault.
+    if for_write and config.get("_unavailable_vaults"):
+        raise OSError("governance write destination cannot be verified")
     vaults = config[memspec.CONFIG_VAULTS_FIELD]
     return next(
         (vault for vault in vaults if (vault / memspec.WORK_LEDGER_FILENAME).is_file()),
@@ -143,7 +157,8 @@ def capture_vault(config, event, home=None):
     不屬於任何已登記專案庫時接手。
     """
     return capture_route.capture_vault(
-        event.get("cwd") if isinstance(event, dict) else None, governance_vault(config), home
+        event.get("cwd") if isinstance(event, dict) else None,
+        governance_vault(config, for_write=True), home
     )
 
 

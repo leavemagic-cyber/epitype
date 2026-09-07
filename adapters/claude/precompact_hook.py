@@ -65,7 +65,9 @@ def _handle(event, started_at):
     transcript = Path(transcript_value).expanduser().resolve()
     if not transcript.is_file():
         return None
-    vault = governance_vault(config)
+    # Compaction invalidates recall dedupe even if the recovery-map write fails.
+    clear_recall_markers(event.get("session_id", event.get("sessionId", "")))
+    vault = governance_vault(config, for_write=True)
     destination = _map_destination(vault, event, transcript)
     compact_map.build_map(
         transcript,
@@ -85,9 +87,6 @@ def _handle(event, started_at):
     except Exception:
         pass
     _sweep_maps(destination.parent, destination)
-    # What recall injected before compaction is gone after it; forget the
-    # same-session dedupe with it so corrections and rulings can return.
-    clear_recall_markers(event.get("session_id", event.get("sessionId", "")))
     context = f"地圖已落於{destination},壓縮後先讀它按行號回撈原文。"
     budget = config[memspec.CONFIG_BUDGET_BYTES_FIELD]
     if expired(started_at) or not payload_fits("PreCompact", context, budget):

@@ -39,7 +39,9 @@ _DB_FIELDS = {
 }
 _CJK_RANGE = "\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\U00020000-\U0002fa1f"
 _CJK_RUN = re.compile(f"[{_CJK_RANGE}]+")
-_RECALL_PART = re.compile(f"[{_CJK_RANGE}]+|[^\\s{_CJK_RANGE}]+")
+# CJK punctuation separates prose from identifiers; ASCII punctuation may belong
+# to technical names such as node:fs, C++, --dry-run, or a path.
+_RECALL_PART = re.compile(f"[{_CJK_RANGE}]+|[^\\s{_CJK_RANGE}，。！？：；、「」『』（）【】]+")
 # Trigram FTS cannot match two-codepoint terms. A private-use prefix makes CJK
 # bigrams indexable while the cards table and returned hit fields stay raw.
 _CJK_BIGRAM_PREFIX = "\ue000"
@@ -990,7 +992,7 @@ def recall_index(vault, prompt, include_superseded=False, include_noncard=False,
                         field_rank,
                         row["card_path"],
                     ),
-                    _result(vault, row, hits),
+                    {**_result(vault, row, hits), "matched_term_count": len(strong)},
                 )
             )
         indexed_paths = (
@@ -1987,6 +1989,18 @@ def _selftest():
             dual_legacy_directory = _legacy_db_path(dual_vault).parent
             dual_legacy_directory.mkdir()
             dual_query = query_index(dual_vault, "currentindexfixture")
+            checks.append((
+                "CJK punctuation cannot attach to a recalled identifier",
+                all(recall_index(dual_vault, prompt)["count"] == 1 for prompt in (
+                    "請查：currentindexfixture。", "「currentindexfixture」",
+                    "（currentindexfixture）", "currentindexfixture，無關文字",
+                )),
+            ))
+            checks.append((
+                "Technical ASCII identifiers retain their punctuation",
+                _recall_terms("node:fs C++ --dry-run A/B.py")
+                == ["node:fs", "C++", "--dry-run", "A/B.py"],
+            ))
             checks.append(
                 (
                     "Current index wins and the legacy directory is disclosed",
@@ -2002,7 +2016,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 47
+    total = 49
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

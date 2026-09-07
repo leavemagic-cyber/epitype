@@ -156,7 +156,7 @@ python tests/privacy_lint.py
 python exam/exam_runner.py --strict
 ```
 
-`tests/run_all.py` currently runs 30 component selftests covering the core tools, hook adapters, package surface, installer, exam engine, and privacy gate. The included exam corpus is a small synthetic sample. For this release, the publication gate also passed a strict 300-case behavior corpus and a 15-seed review; those release materials are not part of this repository.
+`tests/run_all.py` currently runs 32 component selftests covering the core tools, hook adapters, package surface, installer, exam engine, and privacy gate. The included exam corpus is a small synthetic sample. For this release, the publication gate also passed a strict 300-case behavior corpus and a 15-seed review; those release materials are not part of this repository.
 
 These checks are regression evidence, not proof that every future host version or every memory failure is covered.
 

@@ -16,6 +16,8 @@ Storage and ranking receive most of the engineering attention. Retrieval timing 
 
 `UserPromptSubmit` performs contextual card recall, while `PreToolUse` evaluates trigger-bearing scar cards against the current tool name and input before each covered action. This is narrower than claiming that every rule is injected before every possible action: prompt recall and scar interception are distinct paths. At the CLI boundary, read commands never create a missing index or disguise that state as zero hits; they return an explicit no-index error and leave first-write ownership to `build`.
 
+CJK punctuation must delimit Latin query terms: `請查：identifier。` cannot search for the literal `：identifier。`. Recall splits those prose delimiters while preserving ASCII punctuation inside technical identifiers and paths. This does not provide semantic translation or fix missing bilingual aliases.
+
 ### Self-verification
 
 ```powershell
@@ -158,7 +160,7 @@ Some hosts execute a hook only after the user has explicitly trusted it, and kee
 
 ### Epitype countermeasure
 
-`adapters/codex/hook_trust.py check` reads the registrations and the host's trust store, classifies every Epitype hook as `TRUSTED`, `UNTRUSTED`, `DISABLED`, or `MODIFIED` (definition changed after trust was granted), and exits non-zero with the exact review step. Trust itself stays a user action in the host UI; Epitype never forges it.
+`adapters/codex/hook_trust.py check` reads the registrations and trust store, then verifies candidate trusted entries against Codex's native `hooks/list` inventory and current hashes. A cached digest or an old `trusted_hash` alone cannot prove runtime trust. Results are `TRUSTED`, `UNTRUSTED`, `DISABLED`, `MODIFIED`, or `UNVERIFIED`; missing or unavailable native evidence fails closed. The bounded inventory query starts no model turn. Trust itself stays an explicit action in the host UI; Epitype never forges it.
 
 A trusted registration can still never run: on Windows, Codex launches command hooks through `cmd.exe /C`, whose quoting rule drops the first and last quote of a line that begins with one. A command written as `"…/python.exe" "…/recall.py"` therefore fails at the shell before Python starts (2026-09-05, a day after a quoted form was introduced), while Claude Code, which runs the same line through a POSIX shell, keeps working. The installer now leaves tokens unquoted whenever the path allows, and when a token must be quoted it also registers a `commandWindows` form wrapped in one outer pair of quotes, which is what `cmd.exe /C` preserves.
 
@@ -594,3 +596,56 @@ python epitype/capture_route.py --selftest
 python adapters/claude/recall_hook.py --selftest
 python epitype/harvest.py --selftest
 ```
+
+## 18. Governance boundaries: authority, stale hits, delivery and unavailable vaults
+
+Synthetic regressions cover four gaps in the shared hook paths:
+
+- **Authority:** Stop previously discarded `decided_by` and could describe an AI
+  decision as the owner's settled ruling. Cached decisions now retain the source;
+  only `owner-explicit` with a nonempty source quote blocks re-asking. Other
+  decision sources retain their existing forbidden-pattern checks. The cache
+  version changes so old, source-less records are not reused.
+- **Freshness:** an indexed-active card that is retired or unreadable on disk
+  must be dropped, not downgraded into ordinary recall or a captured-event pin.
+  This checks the candidate card without forcing a whole-vault index rebuild.
+- **Delivery:** recall prepares output without consuming dedupe markers. Only
+  card lines actually included in successfully flushed output are marked;
+  budget-omitted lines, deadline drops and output errors remain retryable.
+  A crash between output and marking can repeat context. A successful flush
+  means output was written, not that the host or model acknowledged it.
+- **Availability:** an unavailable configured vault is retained in configuration
+  identity but excluded from recall's readable set. The hook reports degradation.
+  Since that vault may have held the governance ledger, capture, commitment/audit
+  writes, recovery-map writes and piggyback-dream writes must not select a new
+  destination implicitly. Those writes pause until the configured set is available.
+  Compaction clears recall dedupe even when its recovery-map write is unavailable.
+
+`python tests/governance_regression.py --selftest` covers these synthetic cases;
+`python tests/run_all.py --jobs 2` includes the existing adapter and installer
+regressions. These checks do not establish live model compliance in either host.
+
+## 19. Recall slots consumed before dedupe, or monopolized by the first vault
+
+Applying the global eight-card cap before checking delivery markers stranded
+unseen candidates. Concatenating each vault's top five also gave earlier vaults
+the ordinary slots regardless of query evidence. A long ordinary line could
+then stop a prefix-only byte pack even when a later whole card would fit.
+
+Recall now deduplicates before assigning output slots. Ordinary candidates are
+merged at each vault's frontier by matched non-generic query-term count, then
+local rank and vault order; independent BM25 values are never compared across
+databases. Each vault's original order, five-candidate cap, body-only cap and
+decision/correction priority remain intact. This is lexical evidence, not a
+semantic relevance guarantee, and it does not widen the search window.
+
+Only ordinary lines may be skipped for size. An unfit authority-prefix line
+stops selection; output never bypasses it with a cheaper ordinary card. Cards
+omitted by size or slot caps remain unmarked and eligible on a later turn.
+Eight cards, the configured byte budget, JSON-envelope ceiling and hook
+deadline still apply. This bounds each injection, not total session tokens:
+previously stranded cards can now be delivered on later turns.
+
+`python tests/recall_selection_regression.py --selftest` checks the real
+shared recall path with synthetic homes and vaults, plus packing boundaries.
+These offline checks do not establish improvements in unrestricted dialogue.

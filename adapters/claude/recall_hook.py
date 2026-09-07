@@ -2,6 +2,7 @@ import sys, time; sys.dont_write_bytecode = True; _STARTED_AT = time.monotonic()
 """Claude UserPromptSubmit adapter for bounded, deduplicated local recall."""
 
 import hashlib
+import heapq
 import json
 import os
 from pathlib import Path
@@ -27,12 +28,12 @@ from epitype.capture import (
     write_capture as _write_capture,
 )
 from _hook_common import (
-    bounded_context,
     capture_vault as _capture_vault,
     emit,
     expired,
     load_config,
     payload,
+    payload_fits,
     read_event,
     recall_marker_directory,
     resolve_vaults,
@@ -75,7 +76,6 @@ def _claim_marker(session_id, block_digest):
     if not session_id:
         return True
     directory = recall_marker_directory(session_id)
-    _sweep_recall_markers(directory.parent, time.time(), keep=directory)
     directory.mkdir(parents=True, exist_ok=True)
     marker = directory / block_digest
     try:
@@ -105,15 +105,18 @@ def _active_decision(path):
     The index carries `status` but neither the decision's key nor the owner's own
     words, so the card is opened — only a card the index already called active,
     a handful per prompt, never the vault. Status is re-read from the card so a
-    stale index cannot pin a decision the owner has already superseded.
+    stale index cannot pin a decision the owner has already superseded. False
+    invalidates an indexed-active hit; None means an active non-decision card.
     """
     try:
         fields = _frontmatter_fields(Path(path))
     except Exception:
-        return None
+        return False
     key = _one_line(fields.get(memspec.DECISION_KEY_FIELD))
     status = _one_line(fields.get(memspec.DECISION_STATUS_FIELD))
-    if not key or status != memspec.ACTIVE_DECISION_STATUS:
+    if status != memspec.ACTIVE_DECISION_STATUS:
+        return False
+    if not key:
         return None
     return (
         key,
@@ -122,7 +125,46 @@ def _active_decision(path):
     )
 
 
-def _handle(event, started_at):
+def _merge_ordinary(groups):
+    """Compare evidence at each vault's frontier, never independent BM25 scores."""
+    queue = []
+    for vault_index, group in enumerate(groups):
+        if group:
+            coverage, line = group[0]
+            heapq.heappush(queue, (-coverage, 0, vault_index, line))
+    while queue:
+        _coverage, rank, vault_index, line = heapq.heappop(queue)
+        yield line
+        rank += 1
+        if rank < len(groups[vault_index]):
+            coverage, line = groups[vault_index][rank]
+            heapq.heappush(queue, (-coverage, rank, vault_index, line))
+
+
+def _bounded_recall(pieces, budget, required_count, header_count):
+    """Keep the authority prefix intact; only ordinary cards may be skipped."""
+    selected = []
+    truncated = False
+    for index, piece in enumerate(pieces):
+        if len(selected) - header_count >= memspec.RECALL_TOTAL_MAX_LINES:
+            break
+        if payload_fits("UserPromptSubmit", "\n".join([*selected, piece]), budget):
+            selected.append(piece)
+        else:
+            truncated = True
+            if index < required_count:
+                break
+    if truncated:
+        while selected:
+            suffix = memspec.CONTEXT_TRUNCATED_SUFFIX.format(dropped=len(pieces) - len(selected))
+            if payload_fits("UserPromptSubmit", "\n".join([*selected, suffix]), budget):
+                selected.append(suffix)
+                break
+            selected.pop()
+    return "\n".join(selected) if selected else None
+
+
+def _handle(event, started_at, delivery_markers=None):
     prompt = event.get("prompt")
     if not isinstance(prompt, str) or not prompt.strip():
         return None
@@ -133,10 +175,14 @@ def _handle(event, started_at):
     # 落點依「這場對話屬於哪個專案」決定（_hook_common.capture_vault）：專案的卡
     # 進專案庫，cwd 不屬於任何已登記專案庫時才落治理庫。2026-09-06 之前一律落治理
     # 庫，所以專案對話裡的裁定與糾正全被寫進通用庫（實測 132 張裡 74 張屬於別的庫）。
-    capture_vault = _capture_vault(config, event)
-    for kind in CAPTURE_KINDS:
-        _capture_owner_sentence(prompt, capture_vault, event, started_at, kind)
-    _capture_ruling(prompt, capture_vault, event, started_at)
+    try:
+        capture_vault = _capture_vault(config, event)
+    except OSError:
+        capture_vault = None
+    if capture_vault is not None:
+        for kind in CAPTURE_KINDS:
+            _capture_owner_sentence(prompt, capture_vault, event, started_at, kind)
+        _capture_ruling(prompt, capture_vault, event, started_at)
 
     # A correction or ruling the owner already made outranks any lexical hit:
     # it goes first, marked, so a stale plan line cannot be re-proposed over it.
@@ -145,7 +191,7 @@ def _handle(event, started_at):
     # from it (親裁 > 自動捕捉), so decisions take the first seats.
     decisions = []
     pinned = []
-    others = []
+    ordinary_groups = []
     legend = []
     for vault in resolve_vaults(config, event):
         if expired(started_at):
@@ -162,6 +208,7 @@ def _handle(event, started_at):
         used = False
         body_only = 0
         ordinary = 0
+        ordinary_lines = []
         for hit in result.get("results", ()):
             path = _one_line(hit.get("path"))
             parent = Path(path).parent.name
@@ -179,8 +226,10 @@ def _handle(event, started_at):
             # Decided before the caps, for the same reason a correction is: the
             # owner's standing ruling is never a weak hit.
             decision = None
-            if prefix is None and _one_line(hit.get(memspec.DECISION_STATUS_FIELD)) == memspec.ACTIVE_DECISION_STATUS:
+            if _one_line(hit.get(memspec.DECISION_STATUS_FIELD)) == memspec.ACTIVE_DECISION_STATUS:
                 decision = _active_decision(path)
+                if decision is False:
+                    continue  # A retired/unreadable ruling is not an ordinary hit.
                 if decision is not None:
                     prefix = memspec.DECISION_PREFIX
             # A card matched only in its body is a weak lexical hit; two per vault
@@ -215,13 +264,19 @@ def _handle(event, started_at):
                 # Say each fact once: a name the path already spells is not repeated.
                 parts = (description, located) if located.endswith(f"/{name}.md") else (name, description, located)
             line = "- " + (prefix or "") + " | ".join(part for part in parts if part)
-            (decisions if decision is not None else pinned if prefix else others).append(line)
+            if decision is not None:
+                decisions.append(line)
+            elif prefix:
+                pinned.append(line)
+            else:
+                ordinary_lines.append((hit.get("matched_term_count", 0), line))
             used = True
+        ordinary_groups.append(ordinary_lines)
         if used:
             legend.append(f"{alias}={vault}")
-    # The cap covers everything, pinned lines included; pinned lines win the room.
-    pinned = [*decisions, *pinned][: memspec.RECALL_TOTAL_MAX_LINES]
-    others = others[: max(0, memspec.RECALL_TOTAL_MAX_LINES - len(pinned))]
+    # Authority order is preserved, but delivered lines must not consume slots.
+    pinned = [*decisions, *pinned]
+    others = list(_merge_ordinary(ordinary_groups))
     # The legend is what makes V1/... resolvable, so it shares the required first
     # piece with the advisory instead of being droppable on its own.
     if not pinned and not others:
@@ -236,23 +291,39 @@ def _handle(event, started_at):
     # compaction, which clears the markers); each distinct legend is sent once.
     head_digest = "head-" + hashlib.sha256(head.encode("utf-8")).hexdigest()[:24]
     head_seen = bool(session_id) and (recall_marker_directory(session_id) / head_digest).is_file()
-    pieces = [*pinned, *others] if head_seen else [head, *pinned, *others]
+    # Deduplicate actual card lines, including their legend's identity. A line cut
+    # by the byte budget has not been delivered and must remain eligible.
+    pending = []
+    for line in [*pinned, *others]:
+        digest = "card-" + hashlib.sha256((head_digest + "\0" + line).encode("utf-8")).hexdigest()
+        if not session_id or not (recall_marker_directory(session_id) / digest).is_file():
+            pending.append((line, digest))
+    if not pending:
+        return None
+    if session_id and not head_seen:
+        directory = recall_marker_directory(session_id)
+        _sweep_recall_markers(directory.parent, time.time(), keep=directory)
+    lines = [line for line, _digest in pending]
+    pieces = lines if head_seen else [head, *lines]
 
-    context = bounded_context(
-        "UserPromptSubmit",
+    pinned_set = set(pinned)
+    header_count = 0 if head_seen else 1
+    context = _bounded_recall(
         pieces,
         config[memspec.CONFIG_BUDGET_BYTES_FIELD],
-        required_first=True,
+        required_count=header_count + sum(line in pinned_set for line in lines),
+        header_count=header_count,
     )
-    if not context or context == head:
+    if not context or expired(started_at):
         return None
-    # Dedupe on the cards, not on the head: the same cards are not re-sent
-    # merely because the head was dropped from their second appearance.
-    digest = hashlib.sha256("\n".join([*pinned, *others]).encode("utf-8")).hexdigest()
-    if expired(started_at) or not _claim_marker(session_id, digest):
+    sent_lines = set(context.splitlines())
+    markers = [(session_id, digest) for line, digest in pending if line in sent_lines]
+    if not markers:
         return None
     if not head_seen:
-        _claim_marker(session_id, head_digest)
+        markers.append((session_id, head_digest))
+    if delivery_markers is not None:
+        delivery_markers.extend(markers)
     return payload("UserPromptSubmit", context)
 
 
@@ -1409,9 +1480,15 @@ def main():
         return _selftest()
     try:
         event = read_event(sys.stdin)
-        value = _handle(event, _STARTED_AT)
+        delivery_markers = []
+        value = _handle(event, _STARTED_AT, delivery_markers)
         if value is not None and not expired(_STARTED_AT):
             emit(value)
+            sys.stdout.flush()
+            # A failed output must not consume the retry. A crash after output
+            # can repeat context, but must never suppress context not emitted.
+            for session_id, digest in delivery_markers:
+                _claim_marker(session_id, digest)
     except Exception:
         pass
     return 0

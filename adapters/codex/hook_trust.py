@@ -20,6 +20,11 @@ import subprocess
 import tempfile
 import tomllib
 
+try:
+    from ._native_hooks import hook_states as _native_hook_states
+except ImportError:
+    from _native_hooks import hook_states as _native_hook_states
+
 
 MARKER_VALUE = "epitype"
 MARKER_FIELDS = ("id", "comment")
@@ -28,6 +33,7 @@ TRUSTED = "TRUSTED"
 UNTRUSTED = "UNTRUSTED"
 DISABLED = "DISABLED"
 MODIFIED = "MODIFIED"
+UNVERIFIED = "UNVERIFIED"
 REVIEW_HINT = (
     "Codex skips untrusted hooks. In the Codex TUI run /hooks (Desktop app: "
     "the hooks review panel), approve the epitype entries, then rerun this check."
@@ -135,10 +141,27 @@ def run_check(home, output=sys.stdout, seen_path=None):
     states = _trust_states(config_path)
     seen_path = seen_path or home / ".epitype" / SEEN_FILENAME
     seen = _load_seen(seen_path)
+    native = {}
+    if any(_classify(states.get(key), digest, seen.get(key)) == TRUSTED
+           for _event, key, digest in positions):
+        try:
+            native = _native_hook_states(home)
+        except Exception:
+            print("CODEX TRUST: UNVERIFIED native hook inventory unavailable", file=output)
     verdicts = []
     for event, key, digest in positions:
         record = states.get(key)
         verdict = _classify(record, digest, seen.get(key))
+        if verdict == TRUSTED:
+            current = native.get(key, {})
+            verdict = current.get("trustStatus", "").upper()
+            if verdict not in (TRUSTED, UNTRUSTED, DISABLED, MODIFIED):
+                verdict = UNVERIFIED
+            if verdict == TRUSTED:
+                if current.get("enabled") is not True:
+                    verdict = DISABLED
+                elif current.get("currentHash") != record.get("trusted_hash"):
+                    verdict = MODIFIED
         verdicts.append(verdict)
         print(f"CODEX TRUST {event} {':'.join(key.rsplit(':', 3)[1:])}: {verdict}", file=output)
         if verdict == TRUSTED:
@@ -194,9 +217,18 @@ def _fixture(root, states, hook_command="python x.py"):
 
 
 def _selftest():
+    from unittest.mock import patch
+
+    def fixture_native(home):
+        states = _trust_states(home / ".codex" / "config.toml")
+        return {key: {"trustStatus": "trusted", "enabled": True,
+                      "currentHash": states.get(key, {}).get("trusted_hash")}
+                for _event, key, _digest in _epitype_positions(home / ".codex" / "hooks.json")}
+
     checks = []
     try:
-        with tempfile.TemporaryDirectory(prefix=".hook-trust-", dir=_REPO_ROOT) as temp_dir:
+        with tempfile.TemporaryDirectory(prefix=".hook-trust-", dir=_REPO_ROOT) as temp_dir, \
+             patch(__name__ + "._native_hook_states", side_effect=fixture_native):
             root = Path(temp_dir).resolve()
             every_event = {
                 "session_start:0:0": {"trusted_hash": "sha256:ss"},
@@ -242,6 +274,24 @@ def _selftest():
                 and f"PASS {expected}/{expected}" in out.getvalue()
                 and len(_load_seen(seen_file)) == expected,
             ))
+
+            for status, native_hash, expected_verdict in (
+                ("modified", "sha256:new", MODIFIED),
+                ("trusted", "sha256:unmatched", MODIFIED),
+                ("", "", UNVERIFIED),
+            ):
+                report = {key: {"trustStatus": status, "enabled": True, "currentHash": native_hash}
+                          for _event, key, _digest in _epitype_positions(home / ".codex" / "hooks.json")}
+                out = io.StringIO()
+                with patch(__name__ + "._native_hook_states", return_value=report):
+                    code = run_check(home, out)
+                checks.append(("native inventory overrides cached trust: " + expected_verdict,
+                               code == 1 and out.getvalue().count(expected_verdict) == expected))
+            out = io.StringIO()
+            with patch(__name__ + "._native_hook_states", side_effect=OSError("fixture unavailable")):
+                code = run_check(home, out)
+            checks.append(("unavailable native inventory cannot pass",
+                           code == 1 and "PASS" not in out.getvalue() and UNVERIFIED in out.getvalue()))
 
             _fixture(home, every_event, hook_command="python relocated.py")
             out = io.StringIO()
@@ -299,7 +349,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 8
+    total = 12
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

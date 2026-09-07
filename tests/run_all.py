@@ -38,6 +38,8 @@ SELFTESTS = (
     Path("tests") / "package_smoke.py",
     Path("tests") / "frontmatter_consistency.py",
     Path("tests") / "recall_regression.py",
+    Path("tests") / "governance_regression.py",
+    Path("tests") / "recall_selection_regression.py",
 )
 
 
