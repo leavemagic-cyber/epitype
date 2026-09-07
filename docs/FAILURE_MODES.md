@@ -880,5 +880,9 @@ Seven synthetic regressions cover legacy and new captures, a multiline grant,
 missing provenance, read failure, preview clipping and budget omission; the full
 runner passes 49/49. The installed shim also delivered the repaired content from
 an isolated synthetic home. These are pipeline checks, not proof of arbitrary
-model inference or native App acceptance. No extra model, database migration,
-vault-wide scan or historical-card rewrite was added.
+model inference or native App acceptance. A separate native Claude App check
+verified delivery through a normal-text UserPromptSubmit and a response that
+distinguished historical origin from standing authorization, without fallback
+tool reads. This bounded check does not resolve other recorded semantic failures.
+No extra runtime model, database migration, vault-wide scan or historical-card
+rewrite was added.
