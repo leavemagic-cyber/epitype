@@ -137,7 +137,7 @@ class GovernanceRegression(unittest.TestCase):
                 common.write_config(self.config, vaults)
                 errors = io.StringIO()
                 with contextlib.redirect_stderr(errors), \
-                     patch.object(recall, "_capture_owner_sentence") as capture:
+                     patch.object(recall, "_capture_event") as capture:
                     value = recall._handle({"prompt": "fixturedecision"}, time.monotonic())
                     config = common.load_config(time.monotonic())
                 context = (value or {}).get("hookSpecificOutput", {}).get("additionalContext", "")

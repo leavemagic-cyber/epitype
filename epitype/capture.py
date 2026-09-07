@@ -221,19 +221,11 @@ def existing_capture(vault, directory_name, kind, digest):
         return None
 
 
-def capture_owner_sentence(prompt, vault, event, started_at, kind, replay=None):
-    directory_name, trigger, label = CAPTURE_KINDS[kind]
-    if expired(started_at):
-        return None
-    # One utterance earns one card: routing through classify() is what stops the
-    # same sentence landing in grants/ and corrections/ (two seats on recall).
-    found = classify(prompt)
+def capture_owner_sentence(prompt, vault, event, started_at, kind, replay=None, question=None):
+    found = _classify_event(prompt, event, started_at, question)
     if found is None or found[0] != kind:
         return None
-    sentence = found[1]
-    return write_capture(
-        vault, directory_name, kind, grant_digest(sentence), label, sentence, event, started_at, replay=replay
-    )
+    return _capture_classified(found, vault, event, started_at, replay)
 
 
 def write_capture(vault, directory_name, kind, digest, label, body, event, started_at, summary=None, replay=None):
@@ -338,6 +330,8 @@ def last_assistant_text(transcript_path):
         try:
             item = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, ValueError):
+            continue
+        if not isinstance(item, dict):
             continue
         text = assistant_text(item)
         if text is None:
@@ -449,31 +443,40 @@ def classify(prompt, question=None):
     return None
 
 
-def capture_ruling(prompt, vault, event, started_at, question=None, replay=None):
-    """The owner's answer to a question the agent explicitly put to them.
-
-    question is supplied by the offline replay, which already holds the preceding
-    assistant turn; online it is read from the transcript tail as before — after
-    the cheap shape checks, so an ordinary prompt still costs no transcript read.
-    """
-    if expired(started_at) or not _answer_shape(prompt):
+def _classify_event(prompt, event, started_at, question=None):
+    """Resolve context before choosing the one card; reject noise before tail I/O."""
+    if expired(started_at) or not is_owner_utterance(prompt, memspec.NEVER_MATCH_REGEX)[0]:
         return None
-    # A sentence that already earned a grant or a correction card is done; asking
-    # first costs a few regex passes and saves reading the transcript tail.
-    settled = classify(prompt)
-    if settled is not None and settled[0] != "ruling":
-        return None
-    shaped, _reason = candidate_shape(prompt)
-    if not shaped:
+    if not candidate_shape(prompt)[0]:
         return None
     if question is None:
         question = last_assistant_text(event.get("transcript_path"))
-    found = classify(prompt, question)
+    if expired(started_at):
+        return None
+    return classify(prompt, question)
+
+
+def _capture_classified(found, vault, event, started_at, replay):
+    kind, body, summary, digest_source = found
+    if kind == "ruling":
+        directory, label = memspec.RULING_DIRECTORY, "owner ruling auto-captured"
+    else:
+        directory, _trigger, label = CAPTURE_KINDS[kind]
+    return write_capture(
+        vault, directory, kind, grant_digest(digest_source), label, body, event, started_at,
+        summary=summary, replay=replay,
+    )
+
+
+def capture_event(prompt, vault, event, started_at, question=None, replay=None):
+    """Capture one event using the same prompt + question decision as replay."""
+    found = _classify_event(prompt, event, started_at, question)
+    return _capture_classified(found, vault, event, started_at, replay) if found is not None else None
+
+
+def capture_ruling(prompt, vault, event, started_at, question=None, replay=None):
+    """Compatibility entry point; classification includes the preceding question."""
+    found = _classify_event(prompt, event, started_at, question)
     if found is None or found[0] != "ruling":
         return None
-    _kind, body, answer, _digest = found
-    return write_capture(
-        vault, memspec.RULING_DIRECTORY, "ruling", grant_digest(prompt), "owner ruling auto-captured", body, event, started_at,
-        summary=answer,
-        replay=replay,
-    )
+    return _capture_classified(found, vault, event, started_at, replay)

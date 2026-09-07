@@ -18,9 +18,7 @@ from epitype import memsearch, memspec
 # 捕捉核心住在 epitype.capture，讓離線回放（harvest）套用同一份觸發與遮罩規則；
 # 這裡保留原本的私名，呼叫端與 selftest 不因搬移而改。
 from epitype.capture import (
-    CAPTURE_KINDS,
-    capture_owner_sentence as _capture_owner_sentence,
-    capture_ruling as _capture_ruling,
+    capture_event as _capture_event,
     grant_digest as _grant_digest,
     is_owner_utterance,
     matched_sentence as _matched_sentence,
@@ -201,9 +199,7 @@ def _recall(event, started_at, config, delivery_markers=None, guide=""):
     except OSError:
         capture_vault = None
     if capture_vault is not None:
-        for kind in CAPTURE_KINDS:
-            _capture_owner_sentence(prompt, capture_vault, event, started_at, kind)
-        _capture_ruling(prompt, capture_vault, event, started_at)
+        _capture_event(prompt, capture_vault, event, started_at)
 
     # A correction or ruling the owner already made outranks any lexical hit:
     # it goes first, marked, so a stale plan line cannot be re-proposed over it.
