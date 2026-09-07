@@ -124,6 +124,36 @@ def _active_decision(path):
     )
 
 
+_CAPTURE_HISTORY = "歷史捕捉（非完整對話／現行裁定）："
+
+
+def _captured_context(path):
+    """Read one bounded snapshot; old captures can be sentences, not whole turns."""
+    try:
+        with Path(path).open("rb") as stream:
+            raw = stream.read(memspec.STOP_GATE_FRONTMATTER_MAX_BYTES + 1)
+        if len(raw) > memspec.STOP_GATE_FRONTMATTER_MAX_BYTES:
+            return "原卡超過讀取上限；先讀原卡核對來源與限制"
+        text = raw.decode("utf-8-sig")
+        fields, problem = memspec.frontmatter_text(text)
+        _front, closing = memspec.split_frontmatter(text)
+        if problem or closing is None:
+            return "原卡格式不完整；先讀原卡核對來源與限制"
+        body = _one_line("\n".join(text.splitlines()[closing + 1:]))
+        if not body:
+            return "原卡正文缺失；先讀原卡核對來源與限制"
+        # Preserve the clipping notice and source pointer as part of the line.
+        if len(body) > 800:
+            body = body[:800] + "…（未完；先讀原卡）"
+        source = [f"{key}={_one_line(fields[key])}" for key in
+                  ("captured_at", memspec.CWD_FIELD, "session_id") if fields.get(key)]
+        if len(source) < 3:
+            source.append("來源欄位不全")
+        return " | ".join([*source, body])
+    except (OSError, UnicodeError):
+        return "未讀得原卡；先讀原卡核對來源與限制"
+
+
 def _merge_ordinary(groups):
     """Compare evidence at each vault's frontier, never independent BM25 scores."""
     queue = []
@@ -269,7 +299,10 @@ def _recall(event, started_at, config, delivery_markers=None, guide=""):
                 except (OSError, ValueError):
                     located = path  # never emit an alias the legend cannot resolve
             name = _one_line(hit.get("name"))
-            description = memspec.CAPTURE_LABEL_REGEX.sub("", _one_line(hit.get("description")))
+            raw_description = _one_line(hit.get("description"))
+            captured = any(raw_description.startswith(f"owner {kind} auto-captured")
+                           for kind in ("grant", "correction", "ruling"))
+            description = memspec.CAPTURE_LABEL_REGEX.sub("", raw_description)
             description = description[: memspec.RECALL_DESCRIPTION_MAX_CHARS]
             if decision is not None:
                 key, decided_at, quote = decision
@@ -277,10 +310,13 @@ def _recall(event, started_at, config, delivery_markers=None, guide=""):
                 # name, and the owner's words go in uncut: a ruling paraphrased
                 # into 120 characters is what let 08-13 come back as an option.
                 parts = (key + (f"（{decided_at}）" if decided_at else ""), quote or description, located)
+            elif captured:
+                parts = (_captured_context(path), located)
             else:
                 # Say each fact once: a name the path already spells is not repeated.
                 parts = (description, located) if located.endswith(f"/{name}.md") else (name, description, located)
-            line = "- " + (prefix or "") + " | ".join(part for part in parts if part)
+            shown_prefix = _CAPTURE_HISTORY if captured and decision is None else (prefix or "")
+            line = "- " + shown_prefix + " | ".join(part for part in parts if part)
             if decision is not None:
                 decisions.append(line)
             elif prefix:
@@ -887,7 +923,7 @@ def _selftest():
                     ranked.returncode == 0
                     and bool(correction_files)
                     and len(ranked_lines) >= 2
-                    and ranked_lines[0].startswith("- " + memspec.CORRECTION_PREFIX)
+                    and ranked_lines[0].startswith("- " + _CAPTURE_HISTORY)
                     and correction_files[0].stem in ranked_lines[0]
                     and any("Drive Plan" in line for line in ranked_lines[1:]),
                 )
@@ -1015,13 +1051,13 @@ def _selftest():
             ]
             checks.append(
                 (
-                    "ruling is pinned with its own marker",
+                    "captured ruling is pinned as history, not a current decision",
                     pinned.returncode == 0
                     and bool(ruling_files)
-                    and any(line.startswith("- " + memspec.RULING_PREFIX) and ruling_files[0].stem in line for line in pinned_lines)
+                    and any(line.startswith("- " + _CAPTURE_HISTORY) and ruling_files[0].stem in line for line in pinned_lines)
                     and all(
-                        line.startswith("- " + memspec.RULING_PREFIX) or line.startswith("- " + memspec.CORRECTION_PREFIX)
-                        for line in pinned_lines[: sum(1 for line in pinned_lines if memspec.RULING_PREFIX in line or memspec.CORRECTION_PREFIX in line)]
+                        line.startswith("- " + _CAPTURE_HISTORY)
+                        for line in pinned_lines[: sum(1 for line in pinned_lines if _CAPTURE_HISTORY in line)]
                     ),
                 )
             )
@@ -1079,7 +1115,7 @@ def _selftest():
             caps_value = json.loads(caps_result.stdout) if caps_result.stdout.strip() else {}
             caps_context = caps_value.get("hookSpecificOutput", {}).get("additionalContext", "")
             caps_lines = [line for line in caps_context.splitlines() if line.startswith("- ")]
-            pinned_lines = [line for line in caps_lines if memspec.CORRECTION_PREFIX in line]
+            pinned_lines = [line for line in caps_lines if _CAPTURE_HISTORY in line]
             checks.append(
                 (
                     "body-only cap never drops a correction, and the cap covers every line",

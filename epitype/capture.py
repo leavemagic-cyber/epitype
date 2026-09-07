@@ -247,7 +247,7 @@ def write_capture(vault, directory_name, kind, digest, label, body, event, start
         target = directory / f"{name}.md"
         # The description is what recall injects; it must carry the owner's words,
         # not just a label, or the model has to open the file to learn anything.
-        summary = one_line(summary if summary is not None else body)[: memspec.CAPTURE_SUMMARY_CHARS]
+        summary = one_line(summary if summary is not None else body)
         provenance = "".join(
             f"{key}: {one_line(value)}\n" for key, value in (replay.fields if replay is not None else ())
         )
