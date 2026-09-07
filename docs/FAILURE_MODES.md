@@ -854,3 +854,31 @@ dynamic-execution denials, and keep full-text fallback/auditing. This is a narro
 lexical repair, not a complete shell interpreter: unsupported scripts quoting
 actual dangerous commands may still be conservatively blocked. Source recovery,
 rollback proof and native question-premise acceptance remain separate results.
+
+## 25. Captured conditions silently shortened into apparent standing authority
+
+The capture writer shortened descriptions to 80 characters; recall shortened them
+again and labeled captured rulings as owner decisions. A stored passage's trailing
+restriction could disappear although it remained in the card body. Historical
+utterances also lost their original project/session context at delivery.
+
+New descriptions retain the captured passage. Auto-captured hits now read the
+original card in one bounded 16KiB snapshot and show historical-capture status,
+the recorded timestamp/project/session and a resolvable card path. Body previews
+over 800 characters explicitly require reading the rest. Missing, malformed or
+oversized sources produce an explicit lookup limitation, not an index summary
+presented as checked original text. The entire line remains indivisible under
+the existing context/JSON budget and delivery-marker rules.
+
+Curated active decisions still precede captures; classification, expiry and
+supersession rules are unchanged. Captures may contain one sentence or a labeled
+question/answer pair, not the complete conversation. A project/session identifies
+the origin, not permanent scope or fresh authorization. Reading the source and
+determining its current meaning remain the agent's responsibility.
+
+Seven synthetic regressions cover legacy and new captures, a multiline grant,
+missing provenance, read failure, preview clipping and budget omission; the full
+runner passes 49/49. The installed shim also delivered the repaired content from
+an isolated synthetic home. These are pipeline checks, not proof of arbitrary
+model inference or native App acceptance. No extra model, database migration,
+vault-wide scan or historical-card rewrite was added.
