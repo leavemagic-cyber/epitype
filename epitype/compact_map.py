@@ -8,6 +8,7 @@ from pathlib import Path
 import tempfile
 
 try:
+    from .transcript import message_text as _text_content, source_record
     from .memspec import (
         COMPACT_MAP_ASSISTANT_MAX_CHARS,
         COMPACT_MAP_DEFAULT_BUDGET_BYTES,
@@ -16,6 +17,7 @@ try:
         COMPACT_MAP_USER_MAX_CHARS,
     )
 except ImportError:  # Direct script execution keeps the U1 CLI contract.
+    from transcript import message_text as _text_content, source_record
     from memspec import (
         COMPACT_MAP_ASSISTANT_MAX_CHARS,
         COMPACT_MAP_DEFAULT_BUDGET_BYTES,
@@ -34,24 +36,6 @@ def _positive_int(value):
     if number <= 0:
         raise argparse.ArgumentTypeError('must be greater than zero')
     return number
-
-
-def _text_content(message):
-    if not isinstance(message, dict):
-        return ''
-    content = message.get('content')
-    if isinstance(content, str):
-        return content
-    if not isinstance(content, list):
-        return ''
-    parts = []
-    for block in content:
-        if not isinstance(block, dict) or block.get('type') != 'text':
-            continue
-        text = block.get('text')
-        if isinstance(text, str):
-            parts.append(text)
-    return ''.join(parts)
 
 
 def _one_line(text):
@@ -85,8 +69,6 @@ def _tail_lines(path):
 def _extract_candidates(numbered_lines):
     users = []
     assistants = []
-    pending_assistant_line = None
-    pending_assistant_text = ''
 
     for line_number, raw_line in numbered_lines:
         if raw_line.endswith(b'\r'):
@@ -97,44 +79,15 @@ def _extract_candidates(numbered_lines):
             item = json.loads(raw_line.decode('utf-8'))
         except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
             continue
-        if not isinstance(item, dict) or item.get('isSidechain') is True:
+        source = source_record(item)
+        if source is None:
             continue
-
-        role = item.get('type')
-        if role not in ('user', 'assistant'):
-            continue
-        text = _text_content(item.get('message'))
-        if not text.strip():
-            continue
-
-        if role == 'user':
-            if pending_assistant_line is not None:
-                assistants.append((
-                    pending_assistant_line,
-                    'A',
-                    _one_line(pending_assistant_text),
-                ))
-                pending_assistant_line = None
-                pending_assistant_text = ''
-            users.append(
-                (
-                    line_number,
-                    'U',
-                    _one_line(text[:COMPACT_MAP_USER_MAX_CHARS]),
-                )
-            )
-        else:
-            pending_assistant_line = line_number
-            pending_assistant_text = (
-                pending_assistant_text + text
-            )[-COMPACT_MAP_ASSISTANT_MAX_CHARS:]
-
-    if pending_assistant_line is not None:
-        assistants.append((
-            pending_assistant_line,
-            'A',
-            _one_line(pending_assistant_text),
-        ))
+        role, text = source
+        limit = COMPACT_MAP_ASSISTANT_MAX_CHARS if role == 'A' else COMPACT_MAP_USER_MAX_CHARS
+        if len(text) > limit:
+            text = text[:limit] + ' [truncated]'
+        target = assistants if role == 'A' else users
+        target.append((line_number, role, _one_line(text)))
     return users, assistants
 
 
@@ -155,6 +108,7 @@ def _header(source, generated_at, numbered_lines, window_start, number_mode):
     text = (
         f'來源檔={source}｜產生時間={generated_at}'
         f'｜涵蓋行號範圍={covered}'
+        '｜僅定位，非完整記憶或裁定；U=使用者記錄 Q=人類排隊 A=助理'
     )
     if number_mode == 'tail':
         text += f'｜行號基準=尾窗｜尾窗起始位元={window_start}'
@@ -181,9 +135,13 @@ def _render_map(header, candidates, budget_bytes):
             output.extend(suffix)
             continue
 
-        allowed_text = remaining - len(prefix) - len(suffix)
+        marker = b' [truncated]'
+        allowed_text = remaining - len(prefix) - len(suffix) - len(marker)
+        if allowed_text < 0:
+            break
         output.extend(prefix)
         output.extend(_utf8_prefix_bytes(text, allowed_text))
+        output.extend(marker)
         output.extend(suffix)
         break
     return bytes(output)

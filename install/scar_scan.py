@@ -14,7 +14,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from epitype.compact_map import _text_content
+from epitype.transcript import source_record
 from epitype.memspec import COMPACT_MAP_MAX_LINE_BYTES, SCAR_CORRECTION_PATTERNS
 
 
@@ -50,13 +50,9 @@ def _records(path):
                 item = json.loads(raw_line.decode("utf-8"))
             except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
                 continue
-            if not isinstance(item, dict) or item.get("isSidechain") is True:
-                continue
-            if item.get("type") != "user":
-                continue
-            text = _text_content(item.get("message"))
-            if text.strip():
-                yield text
+            source = source_record(item)
+            if source is not None and source[0] in ("U", "Q"):
+                yield source[1]
 
 
 def scan(directory):
