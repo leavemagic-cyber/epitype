@@ -781,3 +781,59 @@ now binds its marker-directory function to each test's temporary root. It
 retains the real claiming logic, creates no new runtime behavior and does not
 delete real host markers. Two consecutive focused runs and the full suite
 passed; that result is test isolation, not evidence of semantic enforcement.
+
+## 23. Recovery can lose or misattribute original messages
+
+The old compact-map decoder ignored human queued-command attachments, accepted
+host-generated compact summaries as user messages, and joined assistant records
+under the last physical line number. Clipped user text was not marked. An agent
+following that map could miss a later instruction or quote the wrong source.
+These are demonstrated parser defects, not proof that compaction caused every
+historical wrong answer.
+
+`transcript.source_record` now distinguishes host user records (U), human queue
+records (Q) and assistant records (A), excludes meta/compact summaries and agent
+queues, and supports Codex response-item messages without duplicating event
+streams. Compact maps retain one pointer per physical record and mark clipped
+message text. The proposal-only scar scanner uses the same source decoder.
+Source identity does not make quoted instructions authoritative.
+
+The map routes back to the read-only `source` command. Each lookup uses one
+explicit JSONL file, at most 64 MiB and a three-second decoding budget, retaining
+up to eight latest matches in source order. It exposes the snapshot, physical
+line/byte position, row hash, unreadable rows, omitted matches, changed-file and
+incomplete-scan status. Preview text is capped at 800 characters and output at
+16 KiB; truncation requires reading the original line. Offset-based line numbers
+are explicitly relative. There is no global search, semantic matcher, automatic
+link following, model call, new daemon or memory write.
+
+The core recovery map remains capped at 2 KiB from a 4 MiB tail; its larger header
+leaves less room for excerpts. The existing host adapter can append a separate
+open-commitments snapshot, so the final on-disk file can exceed that core cap.
+Neither a full byte scan nor a matching hash
+proves complete historical coverage, current authority or semantic entailment.
+Tool results are deliberately excluded from message lookup: inspect the named
+artifact or original tool record when that is the evidence. Filesystem I/O is
+not covered by the decoding deadline. Existing host permission gates still apply.
+
+Synthetic provenance regressions initially failed seven of eight checks;
+after repair, provenance and lookup regressions each passed nine checks, and
+the complete runner passed 47/47. Existing recall@8 remains 45/51. These numbers
+do not cancel the native semantic failures recorded in section 20.
+
+A subsequent native Claude App Code batch actually read the map, original
+messages, both reports and configuration; it preserved normal questions and
+continued after the operator's answers. It still inferred absent implementation
+from absent sync tests in an explanatory answer: **behavioral FAIL**. The new
+lookup also ran successfully from the native App in a separate instrumentation
+check. Neither that command nor the successful source/metric answers corrected
+the unsupported prose before display. No prompt retuning or semantic judge was
+added after those outputs.
+
+Native test operators must also mark non-owner messages structurally. A short
+untagged synthetic probe was captured as an owner ruling; a natural-language
+disclaimer did not stop lexical capture. The existing leading-tag exclusion
+avoids capture of explicit operator blocks while retaining ordinary guidance and
+read-only tools. This is harness isolation, not proof that all impersonated or
+hypothetical authority can be recognized. Supersede the mistaken capture rather
+than deleting its evidence or treating it as a real owner decision.

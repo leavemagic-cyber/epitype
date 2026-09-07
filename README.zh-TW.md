@@ -141,6 +141,7 @@ epitype search recall "自然語言提示" --vault C:\path\to\vault
 | `epitype token-meter [rollout] [--selftest]` | 讀 Codex rollout JSONL，印出最後一筆當前與累計 token 用量對照視窗大小。 |
 | `epitype scar-census build` | 建立四層傷疤普查的機器生成視圖。 |
 | `epitype compact-map build` | 建立有界的壓縮復原地圖，與 `PreCompact` 每場自動寫的是同一種。 |
+| `epitype source SOURCE.jsonl [--find TEXT] [--role user\|assistant\|all] [--line N] [--offset BYTES] [--limit 1..8]` | 唯讀查原始訊息，列出角色、實體行號、雜湊及截斷／涵蓋範圍。指定 offset 時行號相對該位元位置。逐字查找不等於現行裁定或前提已受證據支持。 |
 | `epitype pending <vault> [--max-age-days N] [--strict] [--json]` | 找殭屍待辦：有待辦標記、沒收尾字樣、沒有可跑的 `verify:`、且超過年齡門檻的行。 |
 | `epitype exam [corpus] [--strict] [--selftest]` | 對行為題庫跑筆試引擎。 |
 | `epitype trust [--home HOME]` | 檢查 Codex 真實的 hook 信任狀態；詳見上方〈核准 Codex hooks〉。 |
