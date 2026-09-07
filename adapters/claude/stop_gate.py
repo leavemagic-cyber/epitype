@@ -13,6 +13,7 @@ error it guards against.
 """
 
 from collections import namedtuple
+import codecs
 import hashlib
 import json
 import os
@@ -44,7 +45,7 @@ _WHITESPACE_REGEX = re.compile(r"\s+")
 _FORBIDDEN_RULE = "forbidden"
 _QUESTION_RULE = "question"
 _DECISION_CACHE_FILENAME = "stop_decisions.json"
-_DECISION_CACHE_VERSION = 2
+_DECISION_CACHE_VERSION = 3
 _KEY = "key"
 _DECIDED_AT = "decided_at"
 _QUOTE = "quote"
@@ -76,7 +77,13 @@ def _decision_frontmatter(path):
             head = stream.read(memspec.STOP_GATE_FRONTMATTER_MAX_BYTES)
     except OSError:
         return None
-    lines, closing = memspec.split_frontmatter(head.decode("utf-8", errors="replace"))
+    try:
+        # A bounded read may cut a valid UTF-8 body character after the closing
+        # boundary. Only an incomplete final character may wait for more bytes.
+        text = codecs.getincrementaldecoder("utf-8")().decode(head, final=False)
+        lines, closing = memspec.split_frontmatter(text)
+    except UnicodeError:
+        return None
     if lines is None or closing is None:
         return None
     declares = any(
@@ -152,7 +159,7 @@ def _read_decision(path):
     front_lines = _decision_frontmatter(path)
     if front_lines is None:
         return None
-    fields, _problem = memspec.frontmatter_fields(path)
+    fields, _problem = memspec.frontmatter_text("---\n" + "\n".join(front_lines) + "\n---\n")
     key = _one_line(fields.get(memspec.DECISION_KEY_FIELD))
     if not key or _one_line(fields.get(memspec.DECISION_STATUS_FIELD)) != memspec.ACTIVE_DECISION_STATUS:
         return None
@@ -175,23 +182,24 @@ def _read_cache(cache_path):
     try:
         loaded = json.loads(cache_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return {}, {}
-    if not isinstance(loaded, dict) or loaded.get("version") != _DECISION_CACHE_VERSION:
-        return {}, {}
+        return {}, {}, ""
+    if not isinstance(loaded, dict) or loaded.get("version") not in (2, _DECISION_CACHE_VERSION):
+        return {}, {}, ""
     manifest = loaded.get("manifest")
     rulings = loaded.get("decisions")
     if not isinstance(manifest, dict) or not isinstance(rulings, dict):
-        return {}, {}
-    return manifest, rulings
+        return {}, {}, ""
+    cursor = loaded.get("cursor")
+    return manifest, rulings, cursor if isinstance(cursor, str) else ""
 
 
-def _write_cache(cache_path, manifest, rulings):
+def _write_cache(cache_path, manifest, rulings, cursor=""):
     try:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         staging = cache_path.with_name(f".{cache_path.name}.tmp-{os.getpid()}")
         staging.write_text(
             json.dumps(
-                {"version": _DECISION_CACHE_VERSION, "manifest": manifest, "decisions": rulings},
+                {"version": _DECISION_CACHE_VERSION, "manifest": manifest, "decisions": rulings, "cursor": cursor},
                 ensure_ascii=False,
                 separators=(",", ":"),
             ),
@@ -203,14 +211,12 @@ def _write_cache(cache_path, manifest, rulings):
 
 
 def _decisions(vault, started_at):
-    """Active decision cards of one vault, capped and deadline-bounded.
+    """Cache discovery only; every returned authority comes from this turn's bytes.
 
-    A manifest cache under the vault's index directory, the same shape the action
-    gate keeps for trigger cards, means a turn re-reads only the cards that changed:
-    on Windows the per-file open dominates, and opening every card of a 320-card
-    vault cost 4.8 s — half the hook's whole deadline — every single turn. A
-    rescan cut short by the deadline is never written back: a partial answer stored
-    as the whole vault's would go on hiding rulings after the pressure passed."""
+    Refresh at most one cap of discovery cards and one cap of known decisions.
+    Negative entries rotate, because timestamps/size/identity cannot prove that a
+    non-decision's contents never changed. Unread work retains its old signature.
+    """
     from epitype import memsearch
 
     vault = Path(vault).resolve()
@@ -218,34 +224,52 @@ def _decisions(vault, started_at):
         scan = memsearch.scan_cards(vault)
     except Exception:
         return []
-    manifest = {card_path: [mtime_ns, size] for card_path, _, mtime_ns, size in scan}
-    cache_path = vault / memspec.FTS_INDEX_DIRECTORY / _DECISION_CACHE_FILENAME
-    old_manifest, cached = _read_cache(cache_path)
-    rulings = {}
-    for card_path, path, _mtime_ns, _size in scan:
-        if old_manifest.get(card_path) == manifest[card_path] and card_path in cached:
-            rulings[card_path] = cached[card_path]
+    manifest, paths = {}, {}
+    for card_path, path, mtime_ns, size in scan:
+        if expired(started_at):
+            return []
+        try:
+            info = path.stat()
+        except OSError:
             continue
+        manifest[card_path] = [mtime_ns, size, info.st_ctime_ns, info.st_dev, info.st_ino]
+        paths[card_path] = path
+    cache_path = vault / memspec.FTS_INDEX_DIRECTORY / _DECISION_CACHE_FILENAME
+    old_manifest, cached, cursor = _read_cache(cache_path)
+    old_cursor = cursor
+    rulings = {key: value for key, value in cached.items() if key in paths}
+    verified = {key: old_manifest.get(key) for key in rulings}
+    changed = [key for key in paths if key not in cached or old_manifest.get(key) != manifest[key]]
+    negatives = sorted(key for key in paths if key in cached and key not in changed
+                       and not (isinstance(cached[key], dict) and cached[key].get(_KEY)))
+    rotated = [key for key in negatives if key > cursor] + [key for key in negatives if key <= cursor]
+    refreshed = set()
+    cap = memspec.STOP_GATE_MAX_CARDS_PER_VAULT
+    for card_path in (changed + rotated)[:cap]:
         if expired(started_at):
             break
         try:
-            rulings[card_path] = _read_decision(path)
+            rulings[card_path] = _read_decision(paths[card_path])
         except Exception:
             rulings[card_path] = None
-    # Only the cards actually read this turn are recorded, so a rescan the deadline
-    # cut short still leaves the next turn less to do: a vault big enough to expire
-    # mid-scan would otherwise never finish a first pass and never build a cache at
-    # all. A card absent from the manifest is simply read again.
-    verified = {card_path: manifest[card_path] for card_path in rulings}
-    if verified != old_manifest or rulings != cached:
-        _write_cache(cache_path, verified, rulings)
+        refreshed.add(card_path)
+        verified[card_path] = manifest[card_path]
+        if card_path in negatives:
+            cursor = card_path
 
     found = []
-    for card_path in sorted(rulings):
-        if len(found) >= memspec.STOP_GATE_MAX_CARDS_PER_VAULT:
+    candidates = [key for key in sorted(rulings) if isinstance(rulings[key], dict) and rulings[key].get(_KEY)]
+    for card_path in candidates[:cap]:
+        if expired(started_at):
             break
+        if card_path not in refreshed:
+            try:
+                rulings[card_path] = _read_decision(paths[card_path])
+            except Exception:
+                rulings[card_path] = None
+            verified[card_path] = manifest[card_path]
         ruling = rulings[card_path]
-        if not isinstance(ruling, dict) or not ruling.get(_KEY):
+        if expired(started_at) or not isinstance(ruling, dict) or not ruling.get(_KEY):
             continue
         found.append(
             _Decision(
@@ -258,7 +282,9 @@ def _decisions(vault, started_at):
                 _one_line(ruling.get(memspec.DECIDED_BY_FIELD)),
             )
         )
-    return found
+    if verified != old_manifest or rulings != cached or cursor != old_cursor:
+        _write_cache(cache_path, verified, rulings, cursor)
+    return [] if expired(started_at) else found
 
 
 def _strings(value):

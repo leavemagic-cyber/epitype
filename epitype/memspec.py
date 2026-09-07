@@ -739,6 +739,12 @@ def frontmatter_fields(path):
     except (OSError, UnicodeError) as exc:
         return {}, f"無法以 UTF-8 讀取 frontmatter：{type(exc).__name__}"
 
+    return frontmatter_text(text)
+
+
+def frontmatter_text(text):
+    """Parse one already-read snapshot with the same rules as frontmatter_fields."""
+
     front_lines, closing_index = split_frontmatter(text)
     if front_lines is None:
         return {}, None
