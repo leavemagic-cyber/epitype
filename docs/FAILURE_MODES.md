@@ -716,6 +716,21 @@ acceptance therefore remained **FAIL**, despite passing delivery regressions.
 No semantic error was mechanically blocked before display. Preserve such
 failures instead of reporting hook delivery or a better example as sign-off.
 
+A further bounded native run used separate implementation and validation axes.
+It handled new contrasts but repeated failures on existing cases: existence
+became tested behavior, and absent tests became absent implementation. That
+increment was withdrawn; the prior procedure remains, with no claimed semantic
+acceptance. The native run also preserved normal preferences, hypothetical
+investment, owner-only information, authorization and actual configuration reads.
+Those successes do not cancel the failures or establish unrestricted coverage.
+
+Evidence misuse also precedes questions: a truncated directory listing is not
+proof of global absence; an old provisional choice is not a current final
+decision; relative improvement is not an absolute positive outcome. A new card
+can perpetuate those errors. Check the named source, later corrections and the
+exact metric/comparison before treating a recalled conclusion as established.
+These distinctions remain model judgments, not new lexical denial rules.
+
 ## 21. A follow-up can silently replace the active task
 
 An assistant may save one design decision and stop, or answer a diagnostic
@@ -756,3 +771,13 @@ on stderr; neither procedure is cut mid-sentence. This reduces room for cards,
 not the eight-card or time limits. A warm App continuation without an entry
 event receives no fresh procedure. CLI, installed-shim and native App results
 must be reported separately; see [continuity validation](TASK_CONTINUITY_VALIDATION.md).
+
+## 22. Regression markers can leak across test runs
+
+Isolating HOME does not isolate `tempfile.gettempdir()`. Fixed synthetic session
+ids therefore reused persistent Stop dedupe markers, suppressing the expected
+first block and producing false test failures. `stop_freshness_regression`
+now binds its marker-directory function to each test's temporary root. It
+retains the real claiming logic, creates no new runtime behavior and does not
+delete real host markers. Two consecutive focused runs and the full suite
+passed; that result is test isolation, not evidence of semantic enforcement.
