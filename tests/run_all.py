@@ -53,6 +53,7 @@ SELFTESTS = (
     Path("tests") / "scheduler_regression.py",
     Path("tests") / "stop_freshness_regression.py",
     Path("tests") / "transcript_provenance_regression.py",
+    Path("tests") / "source_lookup_regression.py",
 )
 
 

@@ -109,6 +109,8 @@ def _header(source, generated_at, numbered_lines, window_start, number_mode):
         f'來源檔={source}｜產生時間={generated_at}'
         f'｜涵蓋行號範圍={covered}'
         '｜僅定位，非完整記憶或裁定；U=使用者記錄 Q=人類排隊 A=助理'
+        f'｜原文查找器={Path(__file__).with_name("source_lookup.py").resolve()}'
+        '（python 執行；來源檔 --line N --limit 1；尾窗加 --offset 起始位元）'
     )
     if number_mode == 'tail':
         text += f'｜行號基準=尾窗｜尾窗起始位元={window_start}'
