@@ -130,7 +130,7 @@ Install and removal are treated as packaging details instead of governed behavio
 
 ### Epitype countermeasure
 
-`graft.py` previews changes, merges marked entries, backs up changed host files, rejects native-memory disable diffs, runs synthetic hook health checks, and removes only owned registrations. Reinstallation preserves an existing curated vault list; adopting current detection requires the explicit `graft.py vaults --resync` command. Hosts register stable launchers under `~/.epitype/hooks/`; after moving the repository, `graft.py relocate --to <new-root>` updates only `config.json`, resolves all four adapters, and runs `doctor` without changing host hook configuration. A shim that must fail open leaves a bounded reason breadcrumb, synthetic health passes only with positive adapter trace evidence, and `doctor` reveals any recorded silent outage until it is explicitly cleared. Its synthetic untouched-host round trip restores the original registration bytes and preserves vault cards; later host edits are preserved by marked-entry removal rather than overwritten with an old backup.
+`graft.py` previews changes, merges marked entries, backs up changed host files, rejects native-memory disable diffs, runs synthetic hook health checks, and removes only owned registrations. Reinstallation preserves an existing curated vault list; adopting current detection requires the explicit `graft.py vaults --resync` command. Hosts register stable launchers under `~/.epitype/hooks/`; after moving the repository, `graft.py relocate --to <new-root>` updates `config.json` and the nightly task command when enabled, resolves the adapters, and runs `doctor` without changing host hook configuration. A shim that must fail open leaves a bounded reason breadcrumb, synthetic health passes only with positive adapter trace evidence, and `doctor` reveals any recorded silent outage until it is explicitly cleared. Its synthetic untouched-host round trip restores the original registration bytes and preserves vault cards; later host edits are preserved by marked-entry removal rather than overwritten with an old backup.
 
 ### Self-verification
 
@@ -144,7 +144,7 @@ For an installed local host, also run:
 python install/graft.py doctor
 ```
 
-After moving the repository, run `python install/graft.py relocate --to <new-root>` once; it rewrites `config.json` and then runs `doctor` itself.
+After moving the repository, run `python install/graft.py relocate --to <new-root>` once; it updates `config.json` and the enabled nightly task command, then runs `doctor` against both.
 
 The selftest proves a synthetic filesystem round trip. `doctor` proves current local registration and synthetic hook execution; neither proves every future host version.
 
@@ -346,7 +346,7 @@ The command is correct and the schedule is a person. A tool that must be remembe
 
 ### Epitype countermeasure
 
-`dream.mode` decides who remembers. The default, `piggyback`, needs no scheduler and no habit: `SessionStart` compares `dream_state.json`'s last completion against `dream.interval_hours`, and when the gap is wide enough it starts `epitype/dream.py --scheduled` as a detached, low-priority process and returns immediately — the session never waits, and a pid-bearing lock (stale after 30 minutes) keeps concurrent sessions from starting a second one. Operators who prefer a real schedule use `graft install --dream nightly [--at HH:MM]`, which registers one daily system task and stops the piggyback trigger so the same day is not swept twice; `graft doctor` prints the mode and the last completion, and `graft uninstall` unregisters the task. `off` disables both.
+`dream.mode` decides who remembers. The default, `piggyback`, needs no scheduler and no habit: `SessionStart` compares `dream_state.json`'s last completion against `dream.interval_hours`, and when the gap is wide enough it starts `epitype/dream.py --scheduled` as a detached, low-priority process and returns immediately — the session never waits, and a token/PID lease protected by an OS guard (only an expired dead holder can be replaced after 30 minutes) keeps concurrent sessions from starting a second one. Operators who prefer a real schedule use `graft install --dream nightly [--at HH:MM]`, which registers one daily system task and stops the piggyback trigger so the same day is not swept twice; `graft doctor` prints the mode and last attempt completion and verifies the actual nightly command and time, and `graft uninstall` unregisters the task. `off` disables both.
 
 The failure directions are bounded on purpose:
 
@@ -583,8 +583,9 @@ owner 決定在那裡開庫，所以未登記一律退回治理庫，並在卡�
 跨專案通用的長效規則仍該進治理庫，但那是人立卡時的判斷，自動捕捉判不了；所以自動捕捉
 一律照 cwd 落點，通用化留給人。既有的誤置卡不由捕捉端搬：
 `python epitype/capture_route.py <vault> --audit` 唯讀列出 `MISROUTED <卡> -> <庫>` 與統計，
-`--apply` 才真的搬（`os.replace` 原子改名、同名加 `-2`、永不刪、永不覆蓋），搬到的卡正文
-補一行歸戶註記，兩邊的索引都標舊讓下一個讀者重建。
+`--apply` 先產生完整歸戶註記，再發布到未占用的檔名；同名加 `-2`，發布時仍拒絕競態覆蓋。
+失敗保留原件；原名已被其他寫者使用而無法復原時，錯誤訊息指出 recovery 檔位置。
+成功後兩邊的索引都標舊讓下一個讀者重建。
 
 卡上的 `scope: governance-core` 沒有跟著改：那是索引裡的搜尋欄位，改它等於新增一套
 scope 詞彙，超出本次修正的範圍——落點的證據看 `cwd`，不看 `scope`。
