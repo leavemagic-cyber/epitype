@@ -10,8 +10,8 @@ SessionStart 與 PreCompact 把還 open 的條目端回模型眼前。
 待辦，也不該被 pending_lint 當殭屍待辦點名，更不進喚回索引。句型表、引用排除、
 digest 去重的規格一律在 memspec 的 ``COMMITMENT_*`` 區塊，線上 hook 與 CLI 讀同一份。
 
-Fail-open by construction：帳本讀不到、壞行、鎖搶不到，一律當作沒有承諾，never raise
-into the hook that called it.
+Hook 呼叫預設 fail-open；CLI 使用 strict 路徑回報讀寫／鎖失敗。
+寫入前必須成功讀取現有帳本，成功清單只代表已完成的原子替換。
 """
 
 import hashlib
@@ -135,11 +135,15 @@ def ledger_path(vault):
     return Path(vault) / memspec.FTS_INDEX_DIRECTORY / memspec.COMMITMENT_LEDGER_FILENAME
 
 
-def _rows(vault):
-    """帳本現有列。壞行、壞檔、讀不到一律跳過：hook 不能被自己的帳本弄死。"""
+def _rows(vault, *, strict=False, for_write=False):
+    """讀者可略過壞行；寫者不得把未完整讀懂的帳本重寫成部分資料。"""
     try:
-        text = ledger_path(vault).read_text(encoding="utf-8", errors="replace")
+        text = ledger_path(vault).read_text(encoding="utf-8", errors="strict" if for_write else "replace")
+    except FileNotFoundError:
+        return []
     except OSError:
+        if strict:
+            raise
         return []
     rows = []
     for line in text.splitlines():
@@ -149,9 +153,13 @@ def _rows(vault):
         try:
             row = json.loads(stripped)
         except ValueError:
+            if for_write:
+                raise
             continue
         if isinstance(row, dict) and isinstance(row.get("digest"), str) and isinstance(row.get("text"), str):
             rows.append(row)
+        elif for_write:
+            raise ValueError("unrecognized commitment ledger row")
     return rows
 
 
@@ -180,11 +188,22 @@ def _session(session_id):
 
 def _write_all(target, rows):
     temporary = target.with_name(f".{target.name}.tmp-{os.getpid()}")
-    temporary.write_bytes("".join(_encode(row) for row in rows).encode("utf-8"))
-    os.replace(temporary, target)
+    try:
+        data = "".join(_encode(row) for row in rows).encode("utf-8")
+        with temporary.open("wb") as stream:
+            if stream.write(data) != len(data):
+                raise OSError("incomplete commitment ledger write")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, target)
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
-def record(vault, session_id, sentences, timeout=memspec.COMMITMENT_LOCK_SECONDS):
+def record(vault, session_id, sentences, timeout=memspec.COMMITMENT_LOCK_SECONDS, *, strict=False):
     """新承諾入帳，回傳實際寫入的 digest。同 session 同 digest 不重複記。"""
     candidates = [item for item in (sentences or ()) if isinstance(item, str) and item.strip()]
     if not candidates:
@@ -195,8 +214,8 @@ def record(vault, session_id, sentences, timeout=memspec.COMMITMENT_LOCK_SECONDS
         target.parent.mkdir(parents=True, exist_ok=True)
         with memspec.file_lock(target, timeout) as locked:
             if not locked:
-                return []
-            rows = _rows(vault)
+                raise TimeoutError("commitment ledger lock unavailable")
+            rows = _rows(vault, strict=True, for_write=True)
             session = _session(session_id)
             existing = {(row.get("session"), row.get("digest")) for row in rows}
             fresh = []
@@ -217,27 +236,24 @@ def record(vault, session_id, sentences, timeout=memspec.COMMITMENT_LOCK_SECONDS
                 written.append(key)
             if not fresh:
                 return []
-            combined = rows + fresh
-            kept = _pruned(combined)
-            if len(kept) != len(combined):
-                _write_all(target, kept)
-            else:
-                with target.open("a", encoding="utf-8", newline="\n") as stream:
-                    stream.write("".join(_encode(row) for row in fresh))
-    except OSError:
-        return written
+            _write_all(target, _pruned(rows + fresh))
+    except (OSError, ValueError):
+        if strict:
+            raise
+        return []
     return written
 
 
-def _close_rows(vault, session_id, hits, timeout):
+def _close_rows(vault, session_id, hits, timeout, *, strict=False):
     """鎖內重讀後把命中的 open 列標 closed。回傳真正關掉的 digest。"""
     target = ledger_path(vault)
     closed = []
     try:
+        target.parent.mkdir(exist_ok=True)
         with memspec.file_lock(target, timeout) as locked:
             if not locked:
-                return []
-            rows = _rows(vault)
+                raise TimeoutError("commitment ledger lock unavailable")
+            rows = _rows(vault, strict=True, for_write=True)
             stamp = _stamp()
             for row in rows:
                 if row.get("status") != memspec.COMMITMENT_OPEN_STATUS or row.get("digest") not in hits:
@@ -248,8 +264,10 @@ def _close_rows(vault, session_id, hits, timeout):
                 closed.append(row["digest"])
             if closed:
                 _write_all(target, _pruned(rows))
-    except OSError:
-        return closed
+    except (OSError, ValueError):
+        if strict:
+            raise
+        return []
     return closed
 
 
@@ -260,17 +278,18 @@ def _stale_before():
     )
 
 
-def expire_stale(vault, timeout=memspec.COMMITMENT_LOCK_SECONDS):
+def expire_stale(vault, timeout=memspec.COMMITMENT_LOCK_SECONDS, *, strict=False):
     """開太久沒兌現的 open 標 expired，回傳過期的 digest。收尾時順手做：帳本要是只
     進不出，開場那行的數字就只會愈滾愈大，然後被當成背景噪音。"""
     cutoff = _stale_before()
     target = ledger_path(vault)
     expired = []
     try:
+        target.parent.mkdir(exist_ok=True)
         with memspec.file_lock(target, timeout) as locked:
             if not locked:
-                return []
-            rows = _rows(vault)
+                raise TimeoutError("commitment ledger lock unavailable")
+            rows = _rows(vault, strict=True, for_write=True)
             for row in rows:
                 if row.get("status") != memspec.COMMITMENT_OPEN_STATUS:
                     continue
@@ -282,8 +301,10 @@ def expire_stale(vault, timeout=memspec.COMMITMENT_LOCK_SECONDS):
                 expired.append(row.get("digest"))
             if expired:
                 _write_all(target, _pruned(rows))
-    except OSError:
-        return expired
+    except (OSError, ValueError):
+        if strict:
+            raise
+        return []
     return expired
 
 
@@ -317,40 +338,43 @@ def settle(vault, session_id, text):
     return _close_rows(vault, session_id, hits, memspec.COMMITMENT_LOCK_SECONDS)
 
 
-def close(vault, digests, session_id="cli"):
+def close(vault, digests, session_id="cli", *, strict=False):
     """CLI 收尾：照 digest 關帳。"""
     wanted = {item for item in (digests or ()) if isinstance(item, str) and item}
     if not wanted:
         return []
-    return _close_rows(vault, session_id, wanted, memspec.COMMITMENT_LOCK_SECONDS)
+    return _close_rows(vault, session_id, wanted, memspec.COMMITMENT_LOCK_SECONDS, strict=strict)
 
 
-def purge_closed(vault):
+def purge_closed(vault, *, strict=False):
     """把 closed 列丟掉，回傳丟掉幾列（None＝沒動到檔）。"""
     target = ledger_path(vault)
     try:
+        target.parent.mkdir(exist_ok=True)
         with memspec.file_lock(target, memspec.COMMITMENT_LOCK_SECONDS) as locked:
             if not locked:
-                return None
-            rows = _rows(vault)
+                raise TimeoutError("commitment ledger lock unavailable")
+            rows = _rows(vault, strict=True, for_write=True)
             kept = [row for row in rows if row.get("status") == memspec.COMMITMENT_OPEN_STATUS]
             if len(kept) == len(rows):
                 return 0
             _write_all(target, kept)
             return len(rows) - len(kept)
-    except OSError:
+    except (OSError, ValueError):
+        if strict:
+            raise
         return None
 
 
-def open_items(vault, limit=memspec.COMMITMENT_SESSIONSTART_MAX):
-    """還沒兌現、也還沒過期的承諾，最新在前。帳本是追加寫，尾端就是最新。
+def open_items(vault, limit=memspec.COMMITMENT_SESSIONSTART_MAX, *, strict=False):
+    """還沒兌現、也還沒過期的承諾，最新在前。列依入帳順序排列，尾端就是最新。
 
     過期在這裡也判一次（不只在 settle 落檔）：開場那行的數字不能等到下一輪收尾才對。
     沒有時間戳的列年齡不明，一律留著。"""
     cutoff = _stale_before()
     rows = [
         row
-        for row in _rows(vault)
+        for row in _rows(vault, strict=strict)
         if row.get("status") == memspec.COMMITMENT_OPEN_STATUS
         and (not _one_line(row.get("ts")) or _one_line(row.get("ts")) >= cutoff)
     ]
@@ -395,12 +419,12 @@ def snapshot_block(vault, limit=memspec.COMMITMENT_PRECOMPACT_MAX):
     return "\n".join(lines) + "\n"
 
 
-def requalify(vault):
+def requalify(vault, *, strict=False):
     """用現行規則重評帳本每一列，回傳 [(keep, digest, text)]。改規則之後既有帳本
     不會自己重評，所以要有一支能先看再決定的路。"""
     return [
         (bool(extract(_one_line(row.get("text")))), row.get("digest"), _one_line(row.get("text")))
-        for row in _rows(vault)
+        for row in _rows(vault, strict=strict)
     ]
 
 
@@ -679,23 +703,23 @@ def main(argv=None, output=sys.stdout):
             if not parsed.dry_run:
                 print("REQUALIFY 需要 --dry-run：重評只印判定，套用由人決定", file=sys.stderr)
                 return 2
-            _print_requalify(vault, requalify(vault), output)
+            _print_requalify(vault, requalify(vault, strict=True), output)
             return 0
         if parsed.expire_stale:
-            expired = expire_stale(vault)
+            expired = expire_stale(vault, strict=True)
             print(f"EXPIRED {len(expired)} {' '.join(item for item in expired if item)}".rstrip(),
                   file=output)
         if parsed.close:
-            closed = close(vault, parsed.close)
+            closed = close(vault, parsed.close, strict=True)
             print(f"CLOSED {len(closed)}/{len(parsed.close)} {' '.join(closed)}".rstrip(), file=output)
         if parsed.purge_closed:
-            dropped = purge_closed(vault)
+            dropped = purge_closed(vault, strict=True)
             print(f"PURGED {dropped if dropped is not None else 'skipped'}", file=output)
-        items = open_items(vault, parsed.limit)
+        items = open_items(vault, parsed.limit, strict=True)
         if parsed.json:
             print(json.dumps(items, ensure_ascii=False, indent=1), file=output)
         else:
-            _print_report(vault, items, _rows(vault), output)
+            _print_report(vault, items, _rows(vault, strict=True), output)
     except Exception as exc:
         print(f"ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
