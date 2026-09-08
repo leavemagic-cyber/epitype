@@ -2,6 +2,7 @@ import sys; sys.dont_write_bytecode = True
 """Delivery contracts, not an automated semantic-evidence grader."""
 import contextlib
 import io
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -66,17 +67,45 @@ class QuestionPremiseRegression(unittest.TestCase):
             ):
                 self.assertIn(clause, context)
 
-    def test_repeat_turn_keeps_procedure_without_repeating_cards(self):
+    def test_repeat_turn_omits_procedure_until_compaction(self):
+        # Owner 2026-09-09: the procedure (2,427 chars) is sent once per session and
+        # again after compaction, never on every prompt.
         (self.vault / "fact.md").write_text(
             "---\nname: fact\ndescription: fixturepremise\n---\n", encoding="utf-8")
         memsearch.build_index(self.vault)
         event = {"prompt": "fixturepremise", "session_id": "fixture-question"}
         markers = []
         first = self.context(recall._handle(event, time.monotonic(), markers))
+        self.assertTrue(first.startswith(self.guide()))
+        self.assertIn("fact.md", first)
         for session, digest in markers:
             recall._claim_marker(session, digest)
-        self.assertIn("fact.md", first)
-        self.assertEqual(self.context(recall._handle(event, time.monotonic())), self.guide())
+        self.assertIsNone(recall._handle(event, time.monotonic()))
+        follow_up = {"prompt": "continue", "session_id": "fixture-question"}
+        self.assertIsNone(recall._handle(follow_up, time.monotonic()))
+        # A different session still gets it; compaction (marker clear) restores it here.
+        self.assertEqual(self.context(recall._handle({"prompt": "continue", "session_id": "other"}, time.monotonic())), self.guide())
+        for marker in (self.root / "markers" / "fixture-question").iterdir():
+            marker.unlink()
+        restored = self.context(recall._handle(event, time.monotonic()))
+        self.assertTrue(restored.startswith(self.guide()))
+        self.assertIn("fact.md", restored)
+
+    def test_session_entry_claims_procedure_for_following_prompts(self):
+        entry_markers = patch.object(start, "recall_marker_directory",
+                                     lambda session: self.root / "markers" / session)
+        entry_markers.start()
+        self.addCleanup(entry_markers.stop)
+        output = io.StringIO()
+        event = {"source": "startup", "session_id": "fixture-entry"}
+        with patch.object(sys, "stdin", io.StringIO(json.dumps(event))), \
+             patch.object(sys, "argv", ["sessionstart"]), \
+             patch.object(start, "_STARTED_AT", time.monotonic()), \
+             contextlib.redirect_stdout(output):
+            self.assertEqual(start.main(), 0)
+        self.assertTrue(json.loads(output.getvalue())["hookSpecificOutput"]["additionalContext"].startswith(self.guide()))
+        self.assertIsNone(recall._handle({"prompt": "continue", "session_id": "fixture-entry"}, time.monotonic()))
+        self.assertEqual(self.context(recall._handle({"prompt": "continue", "session_id": "fixture-other"}, time.monotonic())), self.guide())
 
     def test_session_entry_restores_procedure_ahead_of_index(self):
         (self.vault / memspec.MEMORY_INDEX_FILENAME).write_text("noise\n" * 2000, encoding="utf-8")

@@ -16,13 +16,16 @@ from epitype import card_lint, commitments, memsearch, memspec, pending_lint
 from _hook_common import (
     bounded_context,
     emit,
+    event_session_id,
     expired,
     governance_vault,
+    guide_marker_digest,
     load_config,
     native_cwd_vaults,
     payload,
     pre_generation_guide,
     read_event,
+    recall_marker_directory,
     resolve_vaults,
     run_synthetic,
     write_config,
@@ -995,6 +998,26 @@ def _selftest():
     return 0 if status == "PASS" else 1
 
 
+def _claim_guide(event, value):
+    """The procedure emitted at session entry counts for the whole session:
+    UserPromptSubmit omits it until compaction clears the markers (owner 2026-09-09).
+    Claimed only after a successful emission, so a failed output never suppresses it."""
+    session_id = event_session_id(event)
+    if not session_id:
+        return
+    context = value.get("hookSpecificOutput", {}).get("additionalContext", "")
+    for guide in (memspec.QUESTION_PREFLIGHT + "\n" + memspec.TURN_CONTINUITY, memspec.QUESTION_PREFLIGHT):
+        if context.startswith(guide):
+            directory = recall_marker_directory(session_id)
+            try:
+                directory.mkdir(parents=True, exist_ok=True)
+                with (directory / guide_marker_digest(guide)).open("x", encoding="ascii") as stream:
+                    stream.write(guide_marker_digest(guide) + "\n")
+            except OSError:
+                pass
+            return
+
+
 def main():
     if "--selftest" in sys.argv[1:]:
         return _selftest()
@@ -1003,6 +1026,8 @@ def main():
         value = _handle(event, _STARTED_AT)
         if value is not None and not expired(_STARTED_AT):
             emit(value)
+            sys.stdout.flush()
+            _claim_guide(event, value)
     except Exception:
         pass
     return 0

@@ -1,6 +1,7 @@
 import sys; sys.dont_write_bytecode = True; [getattr(stream, "reconfigure", lambda **_: None)(encoding="utf-8", errors="replace") for stream in (sys.stdout, sys.stderr)]  # cp950 consoles must not break hook entrypoints.
 """Shared fail-open mechanics for Claude hook adapters."""
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -36,6 +37,18 @@ def clear_recall_markers(session_id):
         directory.rmdir()
     except OSError:
         pass
+
+
+def event_session_id(event):
+    value = event.get("session_id", event.get("sessionId", "")) if isinstance(event, dict) else ""
+    return value if isinstance(value, str) else ""
+
+
+def guide_marker_digest(guide):
+    """Per-session marker name for the pre-generation procedure. Owner 2026-09-09:
+    the procedure (2,427 chars) is paid for once per session — SessionStart or the
+    first prompt — and again after compaction clears the markers, not on every prompt."""
+    return "guide-" + hashlib.sha256(guide.encode("utf-8")).hexdigest()[:24]
 
 
 def expired(started_at):

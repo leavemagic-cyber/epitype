@@ -74,13 +74,13 @@ class RecallSelectionRegression(unittest.TestCase):
         first, second = self.lines(self.invoke()), self.lines(self.invoke())
         self.assertEqual((len(first), len(second)), (8, 2))
         self.assertTrue(set(first).isdisjoint(second))
-        self.assertEqual(self.invoke(), memspec.QUESTION_PREFLIGHT + "\n" + memspec.TURN_CONTINUITY)
+        self.assertEqual(self.invoke(), "")  # procedure already sent this session (owner 2026-09-09)
 
     def test_existing_per_vault_candidate_cap_does_not_expand(self):
         self.populate(count=7)
         delivered = self.lines(self.invoke()) + self.lines(self.invoke())
         self.assertEqual(len(set(delivered)), 10)
-        self.assertEqual(self.invoke(), memspec.QUESTION_PREFLIGHT + "\n" + memspec.TURN_CONTINUITY)
+        self.assertEqual(self.invoke(), "")  # procedure already sent this session (owner 2026-09-09)
 
     def test_delivered_authority_releases_slots_without_losing_priority(self):
         self.populate()
@@ -91,7 +91,7 @@ class RecallSelectionRegression(unittest.TestCase):
         self.assertEqual((len(first), len(second)), (8, 6))
         self.assertTrue(all(line.startswith("- " + memspec.DECISION_PREFIX) for line in first[:4]))
         self.assertFalse(any(line.startswith("- " + memspec.DECISION_PREFIX) for line in second))
-        self.assertEqual(self.invoke(), memspec.QUESTION_PREFLIGHT + "\n" + memspec.TURN_CONTINUITY)
+        self.assertEqual(self.invoke(), "")  # procedure already sent this session (owner 2026-09-09)
 
     def test_absent_session_has_no_persistent_dedupe(self):
         self.populate()

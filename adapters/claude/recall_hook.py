@@ -28,7 +28,9 @@ from epitype.capture import (
 from _hook_common import (
     capture_vault as _capture_vault,
     emit,
+    event_session_id,
     expired,
+    guide_marker_digest,
     load_config,
     payload,
     payload_fits,
@@ -210,11 +212,20 @@ def _handle(event, started_at, delivery_markers=None):
     # only to the remaining budget's output, never to subsequently trimmed cards.
     budget = config[memspec.CONFIG_BUDGET_BYTES_FIELD]
     guide = pre_generation_guide("UserPromptSubmit", budget)
+    # Owner 2026-09-09: the procedure is sent once per session (SessionStart or the
+    # first prompt) and again after compaction, which clears the markers; later
+    # prompts omit it. Without a session id there is no marker and it stays per prompt.
+    session_id = event_session_id(event)
+    guide_digest = guide_marker_digest(guide) if guide else ""
+    if guide and session_id and (recall_marker_directory(session_id) / guide_digest).is_file():
+        guide = ""
     value = _recall(event, started_at, config, delivery_markers, guide)
     if expired(started_at):
         return None
     recalled = value["hookSpecificOutput"]["additionalContext"] if value else ""
     context = "\n".join(part for part in (guide, recalled) if part)
+    if guide and context and session_id and delivery_markers is not None:
+        delivery_markers.append((session_id, guide_digest))
     return payload("UserPromptSubmit", context) if context else None
 
 
@@ -533,8 +544,10 @@ def _selftest():
             checks.append(
                 (
                     "same-session deduplication",
+                    # Cards and the procedure were both delivered once; nothing is
+                    # re-sent until compaction clears the markers (owner 2026-09-09).
                     second.returncode == 0
-                    and json.loads(second.stdout)["hookSpecificOutput"]["additionalContext"] == pre_generation_guide("UserPromptSubmit", memspec.HOOK_DEFAULT_BUDGET_BYTES)
+                    and second.stdout.strip() == ""
                     and not second.stderr,
                 )
             )

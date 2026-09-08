@@ -664,11 +664,14 @@ will later invent. Relevant feedback cards can therefore be absent even when
 they exist. The existing Stop and PreToolUse rules check particular prohibited
 actions or settled decisions; they do not judge arbitrary evidence entailment.
 
-The shared procedure is `memspec.QUESTION_PREFLIGHT`. Every valid, nonempty
-UserPromptSubmit reserves it before recalled cards, even on a no-hit or deduped
-turn; every SessionStart restores it before generation, including startup,
-resume and compact. App-originated continuation may arrive through SessionStart
-without an observed UserPromptSubmit, so compact-only coverage is insufficient.
+The shared procedure is `memspec.QUESTION_PREFLIGHT`. It is reserved before
+recalled cards and delivered **once per session** (see §28, owner 2026-09-09):
+every SessionStart restores it before generation, including startup, resume and
+compact, and claims the session marker; a UserPromptSubmit sends it only while
+no marker exists (first prompt, or after PreCompact cleared the markers), and
+otherwise omits it. Without a session id it remains per prompt. App-originated
+continuation may arrive through SessionStart without an observed
+UserPromptSubmit, so compact-only coverage is insufficient.
 It requires
 the answering model to retrieve accessible facts, check the exact premise and
 integration path, distinguish tested behavior / concrete development route /
@@ -941,3 +944,27 @@ the final isolated installation run passed 41/41, while the other 49 suites had
 already passed on the final source. This is composite passing coverage of all
 50 suites, not a newly observed single all-green invocation. Both failed full
 runs are retained; no repeated full run was added for the count-only correction.
+
+## 28. The pre-generation procedure was re-sent on every prompt
+
+`QUESTION_PREFLIGHT` + `TURN_CONTINUITY` total 2,427 characters. Until
+2026-09-09 every valid UserPromptSubmit re-sent both, in addition to
+SessionStart, so a 50-prompt session paid roughly 35,000 tokens for text that
+never changed. The owner measured it in the universal-vault tidy of 2026-09-09
+and chose option B: **once per session, again after compaction.**
+
+Mechanism: SessionStart still emits the procedure first and, after a successful
+emission, claims a per-session marker `guide-<sha256[:24]>` in the recall marker
+directory. UserPromptSubmit omits the procedure while that marker exists and
+otherwise sends it and claims the marker after emission (a failed output never
+consumes the send). PreCompact already clears the session's markers, so the
+procedure returns on the first prompt after compaction. Events without a
+session id keep the old per-prompt behavior because no marker can exist.
+
+Not changed: the procedure text, its budget priority (never evicted by cards),
+the SessionStart coverage of startup/resume/clear/compact, and card dedupe.
+Regressions: `question_premise_regression` (repeat turn omits until markers are
+cleared; session entry claims for following prompts), `governance_regression`
+and `recall_selection_regression` (a fully delivered session emits nothing),
+recall selftest "same-session deduplication". Gates after the change:
+run_all 50/50, privacy PASS, corpus 330/330, seeds 15/15 and 5/5.
