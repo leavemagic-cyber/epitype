@@ -19,13 +19,14 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from epitype import memsearch, memspec, narration_meter
+from epitype import control_lifecycle, memsearch, memspec, narration_meter
 from _hook_common import (
     emit,
     encode_payload,
     expired,
     load_config,
     read_event,
+    payload_fits,
     resolve_vaults,
     run_synthetic,
     session_component,
@@ -1123,7 +1124,7 @@ def _write_review(event, tool_name, tool_input, config, started_at):
     return _deny_value(reason), []
 
 
-def _allow_context(event, started_at, defects, notices=()):
+def _allow_context(event, started_at, defects, notices=(), budget=memspec.HOOK_DEFAULT_BUDGET_BYTES):
     """Context for a call the gate lets through: trigger cards it could not use
     are named once per session (a scar that silently stopped applying is the
     failure the gate exists to prevent), then the write gate's own advice, then
@@ -1140,6 +1141,12 @@ def _allow_context(event, started_at, defects, notices=()):
     narration = _narration_context(event, started_at)
     if narration is not None:
         lines.append(narration["hookSpecificOutput"]["additionalContext"])
+    guide = control_lifecycle.guidance(event.get("tool_name"))
+    if guide and not expired(started_at):
+        if payload_fits("PreToolUse", "\n".join([*lines, guide]), budget):
+            lines.append(guide)
+        else:
+            print("[Epitype] control lifecycle omitted: output budget", file=sys.stderr)
     if not lines:
         return None
     return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": "\n".join(lines)}}
@@ -1224,7 +1231,7 @@ def _handle(event, started_at):
             write_value, notices = None, ()
         if write_value is not None:
             return write_value
-        return _allow_context(event, started_at, defects, notices)
+        return _allow_context(event, started_at, defects, notices, config[memspec.CONFIG_BUDGET_BYTES_FIELD])
     vault, card, fallback, position = match
     value = _bounded_deny(card)
     _best_effort_audit(
