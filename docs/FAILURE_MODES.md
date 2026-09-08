@@ -886,3 +886,58 @@ distinguished historical origin from standing authorization, without fallback
 tool reads. This bounded check does not resolve other recorded semantic failures.
 No extra runtime model, database migration, vault-wide scan or historical-card
 rewrite was added.
+
+## 26. Control cleanup rules recalled in discussion but absent at tool use
+
+A short memory-card description can omit the operational distinction between
+closing a target window, closing browser tabs/groups and ending the controller.
+Prompt-based recall also need not fire when the agent independently chooses a
+control tool. `PreToolUse` now supplies an indivisible 696-byte lifecycle guide
+for the node/CUA REPL tool identities and Claude's Chrome, built-in browser and
+computer-use tool families. Ordinary file/shell calls and quoted tool names do
+not select it. Generic REPL advice is conditional: not all JavaScript uses UI.
+
+The guide requires necessary use, recording created resource IDs, immediate
+cleanup, preserving pre-existing resources and mixed-group tabs, separate
+controller shutdown, actual-result verification and respect for interruptions.
+Existing scar/write denials take precedence. There is no new permission decision,
+event registration, resource mutation, persistent tracker or runtime model call.
+Each matching call adds the guide; it is omitted whole with a diagnostic when the
+configured budget cannot hold it. It is not deduplicated across control calls.
+
+This is tool-stage instruction delivery, not automatic closure or a semantic
+necessity/ownership gate. An already-selected tool call is not cancelled by this
+advice. The model must apply the procedure and inspect actual results. The
+[Codex hook interface](https://learn.chatgpt.com/docs/hooks) and
+[Claude hook interface](https://code.claude.com/docs/en/hooks) distinguish
+tool input from post-execution output; this repair does not register a result
+observer or treat an issued close/reset request as proof of success. Unknown
+tool families, UI actions outside hooks, CLI browser commands and host security
+interruptions remain outside this delivery check.
+
+Seven regressions cover complete/repeated delivery, conditional non-UI use,
+nonmatches, existing-deny priority, budget omission and fail-open boundaries.
+An installed-shim check used an isolated home. Native Codex delivered the guide
+on actual REPL calls. A separate native Claude App probe used Chrome tools:
+create a session-owned new tab/group, close the returned tab ID, then confirm
+the group no longer exists. Hook and tool-result records substantiate that
+bounded cleanup path. The fixture opened the browser's new-tab page rather than
+the requested `about:blank`; an initial create-before-group error is retained.
+Neither this instructed example nor fixture tests measure autonomous compliance
+rates, mixed-group cleanup or every supported tool family.
+
+## 27. Installation selftest copied a sibling test's transient directory
+
+Parallel hook-trust tests create and remove repo-local `.hook-trust-*` directories.
+The installation selftest copied the repo without excluding that prefix, so a
+directory could disappear during `copytree`. Its fixture now excludes this owned
+transient prefix; a new assertion verifies that real source names remain included.
+Runtime installation behavior is unchanged.
+
+The initial full run passed 50/50. A later run failed 49/50 on the copy race.
+After the fixture repair, all 41 installation assertions passed but the old
+hard-coded denominator of 40 still failed that suite. The denominator was fixed;
+the final isolated installation run passed 41/41, while the other 49 suites had
+already passed on the final source. This is composite passing coverage of all
+50 suites, not a newly observed single all-green invocation. Both failed full
+runs are retained; no repeated full run was added for the count-only correction.
