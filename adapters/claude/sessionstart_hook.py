@@ -12,7 +12,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from epitype import card_lint, commitments, memsearch, memspec, pending_lint
+from epitype import capture_route, card_lint, commitments, memsearch, memspec, pending_lint
 from _hook_common import (
     bounded_context,
     emit,
@@ -239,6 +239,33 @@ def _vault_labels(vaults):
     ]
 
 
+def _claude_native_index_vaults(event, native):
+    """Claude Code hands every hook a transcript_path under ~/.claude/projects/<slug>/
+    and already loads that cwd slug's MEMORY.md into context, so echoing it here
+    doubled up to 3 KB per session (owner 2026-09-09: skip it on Claude). Codex has
+    no native index load and no .claude transcript, so its echo stays; ancestor
+    vaults are not loaded natively either and stay."""
+    path = event.get("transcript_path") if isinstance(event, dict) else None
+    if not isinstance(path, str) or ".claude" not in path.replace("\\", "/").split("/"):
+        return set()
+    cwd = event.get("cwd")
+    if not isinstance(cwd, str) or not cwd.strip():
+        return set()
+    projects = Path.home().joinpath(*capture_route.NATIVE_PROJECTS_SUBPATH)
+    texts = {cwd}
+    try:
+        texts.add(str(Path(cwd).resolve()))
+    except OSError:
+        pass
+    exact = set()
+    for text in texts:
+        try:
+            exact.add((projects / capture_route.project_slug(text) / capture_route.NATIVE_MEMORY_DIRNAME).resolve())
+        except OSError:
+            continue
+    return {vault for vault in native if vault in exact}
+
+
 def _handle(event, started_at):
     config = load_config(started_at)
     if config is None:
@@ -330,11 +357,12 @@ def _handle(event, started_at):
         if block:
             pieces.append(block)
 
+    skip_index = _claude_native_index_vaults(event, native)
     for vault in vaults:
         if expired(started_at):
             return None
         index_path = vault / memspec.MEMORY_INDEX_FILENAME
-        if index_path.is_file():
+        if index_path.is_file() and vault not in skip_index:
             body = index_path.read_text(encoding="utf-8")
             slim = memspec.slim_index(
                 body,
@@ -432,6 +460,32 @@ def _selftest():
                     native_result.returncode == 0
                     and native_context.index("native index detail") < native_context.index("index detail")
                     and "ledger detail" in native_context,
+                )
+            )
+
+            # Owner 2026-09-09: Claude Code loads the cwd slug's MEMORY.md itself, so a
+            # Claude-shaped event (transcript under ~/.claude/projects) skips that echo
+            # while the governance index and ledger stay. Codex-shaped events above
+            # (no .claude transcript) keep the echo.
+            claude_result = run_synthetic(
+                Path(__file__),
+                {
+                    "source": "startup",
+                    "cwd": str(project),
+                    "transcript_path": str(home / ".claude" / "projects" / slug / "session.jsonl"),
+                },
+                config,
+                environment={"HOME": os.fspath(home), "USERPROFILE": os.fspath(home)},
+            )
+            claude_value = json.loads(claude_result.stdout) if claude_result.stdout.strip() else {}
+            claude_context = claude_value.get("hookSpecificOutput", {}).get("additionalContext", "")
+            checks.append(
+                (
+                    "Claude host skips the natively loaded cwd index, keeps governance index and ledger",
+                    claude_result.returncode == 0
+                    and "native index detail" not in claude_context
+                    and "index detail" in claude_context
+                    and "ledger detail" in claude_context,
                 )
             )
 
@@ -988,7 +1042,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 28
+    total = 29
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

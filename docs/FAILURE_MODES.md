@@ -968,3 +968,19 @@ cleared; session entry claims for following prompts), `governance_regression`
 and `recall_selection_regression` (a fully delivered session emits nothing),
 recall selftest "same-session deduplication". Gates after the change:
 run_all 50/50, privacy PASS, corpus 330/330, seeds 15/15 and 5/5.
+
+## 29. SessionStart echoed an index the host had already loaded
+
+Claude Code loads the cwd slug's `MEMORY.md` into context on its own. SessionStart
+also injected a slimmed copy of that same index (up to 3 KB), so every Claude
+session carried it twice; the copy also crowded the ledger out of the 10 KB
+budget (`…超出預算，餘 N 段未注入`). Codex has no native index load, so for it the
+echo is the only index.
+
+Owner 2026-09-09: skip the echo on Claude. The host is recognised by what Claude
+Code alone sends — a `transcript_path` under a `.claude` directory. Only the
+vault of the exact cwd slug is skipped, because that is the one Claude loads;
+ancestor-directory vaults and the governance vault are still echoed, and the
+ledger is unchanged. Events without a `.claude` transcript (Codex, synthetic)
+keep the old behaviour. Selftest: "Claude host skips the natively loaded cwd
+index, keeps governance index and ledger" (sessionstart 29/29).

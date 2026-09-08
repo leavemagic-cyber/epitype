@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- SessionStart 在 Claude Code 上不再回音 cwd 的 MEMORY.md（宿主本來就會載入，回音重複 ≤3 KB 並擠掉帳本）；依 transcript_path 位於 `.claude` 判定宿主，只跳過該 cwd slug 的庫，Codex 與治理庫照舊（owner 2026-09-09；FAILURE_MODES §29）
 - 生成前程序（提問前查證＋任務續行，共 2,427 字元）改為每場一次：SessionStart 或第一個 prompt 送出後，同場後續 prompt 不再重送；壓縮清掉標記後補送；無 session id 維持每 prompt（owner 2026-09-09 選項 B；FAILURE_MODES §28）
 
 - 操控工具階段補完整收尾程序：必要才開、記錄自建視窗／分頁／分組、用完即關、另結束操控，依工具結果確認並保留原有資源。沿用現有 PreToolUse，既有拒絕優先，無新增權限、常駐監控或模型；每次匹配增加696B，普通讀檔／shell不增加。7項回歸、安裝shim與隔離還原通過；原生Codex送達，以及Claude App原生Chrome分頁／分組建立後關閉已有工具證據。這是工具階段指引，不是自動關閉或每次遵從的保證；測試偏差與覆蓋界線見 FAILURE_MODES §26。
