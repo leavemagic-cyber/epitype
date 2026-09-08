@@ -1785,10 +1785,17 @@ def _selftest():
         with tempfile.TemporaryDirectory(prefix="epitype-graft-") as temp_dir:
             root = Path(temp_dir).resolve()
             old_repo = root / "repo-before-move"
+            # Parallel trust tests own transient directories, not installable sources.
+            copy_ignore = shutil.ignore_patterns(".git", "__pycache__", "*.pyc", ".pytest_cache", ".hook-trust-*")
+            checks.append((
+                "install fixture excludes transient trust directories but preserves sources",
+                copy_ignore(str(REPO_ROOT), [".hook-trust-fixture", "adapters", "epitype", "pyproject.toml"])
+                == {".hook-trust-fixture"},
+            ))
             shutil.copytree(
                 REPO_ROOT,
                 old_repo,
-                ignore=shutil.ignore_patterns(".git", "__pycache__", "*.pyc", ".pytest_cache"),
+                ignore=copy_ignore,
             )
             shim_payloads = _shim_payloads(old_repo)
             checks.append((
@@ -2603,7 +2610,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 40
+    total = 41
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
