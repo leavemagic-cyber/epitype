@@ -21,7 +21,7 @@ Epitype connects the same native vaults to five host events:
 
 | Event | What Epitype does |
 |---|---|
-| `SessionStart` | Echoes the bounded memory index to hosts that do not load it natively, plus any line that names something to do (a card-type FAIL, a dream that errored, left candidates, or is past due). Nothing standing is re-sent. |
+| `SessionStart` | Only the lines that name something to do (a card-type FAIL, the by-the-way alias task, a dream that errored, left candidates, or is past due). Nothing standing is re-sent, the memory index included: the host loads that itself from `CLAUDE.md` / `AGENTS.md`. A session with nothing to do gets no injection. |
 | `UserPromptSubmit` | Recalls up to five relevant cards from each resolved vault within the shared output budget. Short owner statements are stored verbatim, deduplicated, and indexed; their meaning is not inferred during capture. |
 | `PreToolUse` | Write gate: checks the content a file write is about to commit against the settled rulings and the card contract. A block returns the ruling and an audit row. |
 | `PreCompact` | Builds a small recovery map from the transcript tail before context compaction. |

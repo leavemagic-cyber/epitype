@@ -1660,3 +1660,73 @@ a drift candidate and a vault with no rule cards never is. The core-gen selftest
 them in a `finally`, with one case pinning that: its CLI cases go through `main()`, which
 reads the real config when nothing redirects it, so the day an owner sets `core_cap_bytes`
 an unisolated selftest would start failing against a cap that has nothing to do with it.
+
+## 40. The short index was echoed to hosts that already load it
+
+§35 emptied the session prologue of everything standing except one piece: an echo of
+each vault's hand-written `MEMORY.md` short entry point, kept "for hosts that do not
+load it natively". The premise was already false for one host and became false for the
+other. Claude Code loads the cwd project's `MEMORY.md` on its own, which is why §35's
+Claude-shaped measurement was already 0 bytes; Codex loads `AGENTS.md`. What was
+missing was never a delivery mechanism — it was that neither host file carried the
+index. Once the index section was written into `~/.claude/CLAUDE.md`,
+`~/.codex/AGENTS.md` and each project's `AGENTS.md`, the hook's echo was a second copy
+of text the host had already loaded, sent at every session start whether or not
+anything in it was wanted.
+
+### Owner's ruling, verbatim
+
+owner 2026-09-09:「原生功能就會你就會去讀claude.md;CODEX就會去讀agents.md」
+「不應該塞，這是多餘設計」「沒必要就拿掉阿，反正浪費token的行為都不應該」.
+
+### Why it happened
+
+The echo was built when the host files held no index, so "the host does not load it"
+was true and the hook was the only route. The condition was then encoded as a host
+test — `transcript_path` under `.claude` means Claude, so skip; anything else means
+Codex, so echo — instead of as a question about the destination. A host test cannot
+notice that the destination changed. The order the owner insisted on ("先接通替代路徑
+再拆舊功能") is what makes the removal safe: the index section reached all three host
+files, and was confirmed there, before the echo was taken out.
+
+### The rule
+
+SessionStart injects nothing that is not an action. The whole index path is gone —
+the Claude/Codex host test, the ancestor-vault echoes, the byte-budget sampling and
+its "sent N of M bytes" footer. `additionalContext` may now be empty, and when it is,
+the hook emits nothing at all; the stdout JSON shape is otherwise unchanged
+(`hookSpecificOutput` → `hookEventName` + `additionalContext`). What remains: the
+card-type FAIL line, the by-the-way alias task, and the dream line. The vault
+selection (cwd vault plus the governance vault) survives — it now bounds which vaults
+the card scan reads rather than which indexes are echoed.
+
+Measured on copies of the owner's two real vaults, four event shapes in the order
+Claude×`C:\`, Codex×`C:\`, Claude×titan, Codex×titan, 2026-09-09: before
+**0 / 996 / 996 / 2624** bytes, after **0 / 0 / 0 / 0**. (§35 records 0 / 2033 / 1821 /
+3510 for the same four shapes earlier the same day; the copies were re-taken for this
+unit and the vaults had changed in between, so the before column is re-measured against
+`master` rather than carried over.) The same four shapes against the real config and real home
+also injected 0 bytes with `rc=0`, empty stderr, and no write to either vault
+(`dream_state.json` and `no_chinese_cursor.json` unchanged by sha256). Zero is the
+honest number here rather than a floor: on that day neither vault had a card-type FAIL
+or a card missing a Chinese alias, and the dream was inside its interval, so nothing
+named an action. A vault with a FAIL still gets its one line.
+
+Retired with the behaviour: `sessionstart_hook._index_echo`,
+`_claude_native_index_vaults`, `_joined`, `_fits`, `_SUFFIX_RESERVE`, the
+`payload_fits` and `epitype.capture_route` imports, `memspec.slim_index` and
+`memspec.SESSIONSTART_INDEX_TRUNCATED_LINE`. The sessionstart selftest went 30/30 →
+25/25: the two `slim_index` cases, the two over-budget sampling cases and the two
+host-shape echo cases retired, replaced by one case pinning that no index reaches the
+context and one pinning that the Claude and Codex shapes now receive a byte-identical
+payload — a difference there would mean a host-specific branch is still alive. Six
+further cases that used "this index line is present" as their liveness anchor were
+re-anchored on a card that fails its type contract, because on an empty context every
+"…is not present" assertion is vacuously true. `tests/governance_regression.py`'s
+degraded-vault case moved to the same anchor. No exam question depended on any of it:
+`exam_runner` drives UserPromptSubmit, PreToolUse and Stop, never SessionStart —
+corpus 330/330 and seeds 15/15, 5/5 unchanged, **0 questions retired**.
+
+Boundary: the index is not lost, it moved to the layer that was already paying for it.
+Keeping it there is the sync tool's job, not the hook's — if a host file ever stops
+carrying its index section, SessionStart will not notice and will not compensate.

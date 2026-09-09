@@ -3,6 +3,16 @@
 ## Unreleased
 - gitignore: ignore the transient .hook-trust-*/ directory that hook_trust selftest creates in the repo root (it made the worktree-clean gate flap while another selftest was running).
 
+### U-I-b：開場不再回音短入口索引（owner 2026-09-09；FAILURE_MODES §40）
+
+- owner 原話：「原生功能就會你就會去讀claude.md;CODEX就會去讀agents.md」「不應該塞，這是多餘設計」「沒必要就拿掉阿，反正浪費token的行為都不應該」。前置條件先接通再拆：索引分區已由同步工具寫進 `~/.claude/CLAUDE.md`、`~/.codex/AGENTS.md` 與 titan 專案的 `AGENTS.md`（本單開工前逐檔確認），宿主每一場自己載入，hook 再回音一份就是同一段文字付兩次錢。
+- 移除整條索引回音路徑：`sessionstart_hook._index_echo`／`_claude_native_index_vaults`（Claude／Codex 宿主判斷）／`_joined`／`_fits`／`_SUFFIX_RESERVE`，以及 `payload_fits` 與 `epitype.capture_route` 兩條 import；memspec 退役 `slim_index` 與 `SESSIONSTART_INDEX_TRUNCATED_LINE`。祖先庫索引回音一併消失（它走同一個迴圈）。
+- SessionStart 現在只剩三種行：卡片型別 FAIL、順手補中文別名、夢通知。**沒有一件事要做的那一場整段不注入**（`additionalContext` 可為空，空的就整個不輸出）；stdout 的 JSON 形狀不變（`hookSpecificOutput` → `hookEventName`＋`additionalContext`）。庫選取（cwd 庫＋治理庫）保留——它現在界定卡片檢查掃哪幾個庫，而不是回音哪幾本索引。
+- 真庫副本實量（兩庫、四種事件形狀，依序 Claude×`C:\`、Codex×`C:\`、Claude×titan、Codex×titan）：改前（master `013ec77`）**0／996／996／2624** bytes，改後**全部 0**。真設定＋真家目錄的實機唯讀跑同樣四形狀皆 0 bytes、`rc=0`、stderr 空，兩庫的 `dream_state.json` 與 `no_chinese_cursor.json` sha256 跑前跑後相同（零寫入）。零是當天的實情而不是地板：當天兩庫都沒有卡片型別 FAIL、沒有缺中文別名的卡，夢也在間隔內；有 FAIL 的庫照樣出它那一行。
+- 測試：sessionstart selftest 30/30 → **25/25**（`slim_index` 兩案、超預算取樣兩案、宿主形狀回音兩案退役；新增「索引一個字都不回音」與「Claude 與 Codex 形狀拿到逐位元組相同的注入」——後者差一個位元組就表示還有宿主專屬分支活著）。另有六案原本拿「索引那一行還在」當存活錨，改錨到一張過不了型別合約的卡上：context 空掉之後，「某某不在裡面」在空字串上恆真，等於什麼都沒驗到；`tests/governance_regression.py` 的降級場同理改錨。
+- **考題退役：0 題**——`exam_runner` 只驅動 UserPromptSubmit／PreToolUse／Stop，不經 SessionStart；三份共享題庫掃過無一題依賴索引回音，分母不變。
+- 閘門：run_all **49/49**、privacy PASS 122 檔、corpus 330/330、seeds 15/15 與 5/5。
+
 ### U-M-a：規則卡型別與核心生成器（owner 2026-09-09 最終方案；FAILURE_MODES §39）
 
 - owner 原話：「契約應該是簡單扼要規則」「契約等應該跟整個epitype做整合」。契約長成 18 KB 的散文，一條規則與它的解說、事故、例子混在同一段，所以數不出來、退不掉、也算不出每場的固定成本；而它又活在治理其他所有durable 陳述的那套機制之外（卡片有必填欄位、lint、取代鏈、目錄與上限檢查，契約只有一個檔和一個編輯習慣）。本單只做**產品端**：卡片型別＋生成器＋檢查。**不建真卡、不寫任何契約檔或宿主檔**——哪些句子成為卡、生成器指向哪個檔，是本機作業（U-M-b）。

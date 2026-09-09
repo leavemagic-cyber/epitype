@@ -1,9 +1,9 @@
 import sys, time; sys.dont_write_bytecode = True; _STARTED_AT = time.monotonic(); [getattr(stream, "reconfigure", lambda **_: None)(encoding="utf-8", errors="replace") for stream in (sys.stdin, sys.stdout, sys.stderr)]  # cp950 consoles must not break hook entrypoints.
-"""Claude SessionStart adapter: the slim index echo plus the lines that need an action.
+"""Claude SessionStart adapter: only the lines that name something to do.
 
-owner 2026-09-09（FAILURE_MODES §35）：開場不再注入工作帳本、現行裁定、殭屍待辦或任何
-固定說明文字。宿主自己會載入 CLAUDE.md／AGENTS.md 與 cwd 的 MEMORY.md，而每一場都重送
-一份帳本與裁定清單，正是「每一刻只讀該讀的」的反面。留下的每一段都必須有人要做的事。
+owner 2026-09-09（FAILURE_MODES §35、§40）：開場不再注入工作帳本、現行裁定、殭屍待辦、
+任何固定說明文字，也不再回音短入口索引。宿主自己會載入 CLAUDE.md／AGENTS.md（索引分區
+就在裡面），每一場再回音一次是重複付錢。留下的每一段都必須有人要做的事。
 """
 
 import json
@@ -16,7 +16,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from epitype import capture_route, card_lint, memspec
+from epitype import card_lint, memspec
 from _hook_common import (
     bounded_context,
     emit,
@@ -25,7 +25,6 @@ from _hook_common import (
     load_config,
     native_cwd_vaults,
     payload,
-    payload_fits,
     read_event,
     resolve_vaults,
     run_synthetic,
@@ -195,110 +194,22 @@ def _dream_mark_notified(governance, state, completed):
         return False
 
 
-def _claude_native_index_vaults(event, native):
-    """Claude Code hands every hook a transcript_path under ~/.claude/projects/<slug>/
-    and already loads that cwd slug's MEMORY.md into context, so echoing it here
-    doubled up to 3 KB per session (owner 2026-09-09: skip it on Claude). Codex has
-    no native index load and no .claude transcript, so its echo stays; ancestor
-    vaults are not loaded natively either and stay."""
-    path = event.get("transcript_path") if isinstance(event, dict) else None
-    if not isinstance(path, str) or ".claude" not in path.replace("\\", "/").split("/"):
-        return set()
-    cwd = event.get("cwd")
-    if not isinstance(cwd, str) or not cwd.strip():
-        return set()
-    projects = Path.home().joinpath(*capture_route.NATIVE_PROJECTS_SUBPATH)
-    texts = {cwd}
-    try:
-        texts.add(str(Path(cwd).resolve()))
-    except OSError:
-        pass
-    exact = set()
-    for text in texts:
-        try:
-            exact.add((projects / capture_route.project_slug(text) / capture_route.NATIVE_MEMORY_DIRNAME).resolve())
-        except OSError:
-            continue
-    return {vault for vault in native if vault in exact}
-
-
-def _joined(pieces, piece=""):
-    """bounded_context 之後會怎麼接，這裡就先怎麼接——量錯拼法就量錯預算。"""
-    parts = [item for item in pieces if isinstance(item, str) and item]
-    if piece:
-        parts.append(piece)
-    return "\n".join(parts)
-
-
-# 截斷行的位置要先留：bounded_context 放不下某一段時，是把**已選的前面幾段丟掉**
-# 直到截斷行塞得進去。索引段量到剛好滿，下一段（第二個庫的回音）一放不下，前一段索引
-# 就整段被彈出來——實測 2026-09-09：整本回音「裝得下」卻在輸出裡整段消失。
-_SUFFIX_RESERVE = memspec.CONTEXT_TRUNCATED_SUFFIX.format(dropped=9999)
-
-
-def _fits(pieces, piece, budget):
-    return payload_fits(
-        "SessionStart", _joined(pieces, piece) + "\n" + _SUFFIX_RESERVE, budget
-    )
-
-
-def _index_echo(index_path, pieces, budget):
-    """沒有原生載入的宿主（Codex）拿到的短入口：裝得下就整段，裝不下才排序取樣，
-    並在最後一行明說送出多少／全文多少。
-
-    預算按 `payload_fits` 那一份真實 JSON 編碼位元組算，不是字元數、也不是固定
-    「截前 3 KB」——舊碼截了不留痕跡，收件端無從得知偏好有沒有送到（2026-09-09
-    Claude↔Codex 收斂第 8 條）。裝不下就一路縮，縮到連 slim 的路徑頁尾都放不下時
-    整段不送：半段索引配一行沒對上的位元組數，比沒有索引更難判讀。
-    """
-    heading = f"## {memspec.MEMORY_INDEX_FILENAME}"
-    body = index_path.read_text(encoding="utf-8").rstrip()
-    total = len(body.encode("utf-8"))
-    if _fits(pieces, f"{heading}\n{body}", budget):
-        return f"{heading}\n{body}"
-
-    full_path = index_path.resolve()
-
-    def notice(sent):
-        return memspec.SESSIONSTART_INDEX_TRUNCATED_LINE.format(
-            filename=memspec.MEMORY_INDEX_FILENAME, sent=sent, total=total, path=full_path
-        )
-
-    used = len(_joined(pieces).encode("utf-8"))
-    room = budget - used - len(
-        f"{heading}\n\n{notice(total)}\n{_SUFFIX_RESERVE}".encode("utf-8")
-    )
-    while room > 0:
-        try:
-            slim = memspec.slim_index(body, room, full_path)
-        except ValueError:
-            return None
-        piece = "\n".join((heading, slim, notice(len(slim.encode("utf-8")))))
-        if _fits(pieces, piece, budget):
-            return piece
-        room -= max(64, room // 8)
-    return None
-
-
 def _handle(event, started_at):
     config = load_config(started_at)
     if config is None:
         return None
     budget = config[memspec.CONFIG_BUDGET_BYTES_FIELD]
     pieces = []
-    # Session start carries the cwd's own vault(s) plus the governance vault;
-    # another project's index is noise here and was crowding the budget. Recall
-    # still reaches that project's cards by content.
-    # The governance vault is the one holding the working ledger, not whichever
-    # path sorted first: the installer sorts vaults alphabetically, so position
-    # carries no meaning, and a cwd vault that also appears in the configured
-    # list must never be dropped (adversarial review 2026-09-03 #3, #7).
+    # 開場只看這場真的碰得到的庫：cwd 自己的庫加上治理庫。別的專案的卡不是這場的事，
+    # 掃它只是替這場的預算多付一次。喚回仍然按內容找得到那些卡。
+    # 治理庫＝拿著工作帳本的那一個，不是排序第一的那一個：安裝器按字母排，位置不帶
+    # 意義；而同時也被登記的 cwd 庫絕不能被丟掉（adversarial review 2026-09-03 #3、#7）。
     resolved = resolve_vaults(config, event)
     native = native_cwd_vaults(event.get("cwd") if isinstance(event, dict) else None)
     governance = governance_vault(config)
     has_governance_ledger = (governance / memspec.WORK_LEDGER_FILENAME).is_file()
     if not has_governance_ledger:
-        vaults = resolved  # no ledger anywhere: inject every configured vault
+        vaults = resolved  # no ledger anywhere: scan every configured vault
     else:
         vaults = [vault for vault in resolved if vault in native or vault == governance]
 
@@ -341,18 +252,9 @@ def _handle(event, started_at):
         if notice:
             pieces.append(notice)
 
-    # 短入口本身只回音給沒有原生載入它的宿主（Codex）；帳本與現行裁定清單不再注入，
-    # 它們是「要用的時候去讀」的檔，不是每一場都要重送的固定成本（FAILURE_MODES §35）。
-    skip_index = _claude_native_index_vaults(event, native)
-    for vault in vaults:
-        if expired(started_at):
-            return None
-        index_path = vault / memspec.MEMORY_INDEX_FILENAME
-        if index_path.is_file() and vault not in skip_index:
-            echo = _index_echo(index_path, pieces, budget)
-            if echo:
-                pieces.append(echo)
-
+    # 短入口索引也不再回音（owner 2026-09-09「原生功能就會讀 claude.md／agents.md」
+    # 「不應該塞，這是多餘設計」；FAILURE_MODES §40）。索引分區由同步工具寫進宿主檔，
+    # 宿主每一場自己載入；hook 再送一份，是同一段文字付兩次錢。
     if expired(started_at):
         return None
     context = bounded_context("SessionStart", pieces, budget)
@@ -361,27 +263,11 @@ def _handle(event, started_at):
 
 def _selftest():
     checks = []
+    # 一張永遠 FAIL 的卡＝「這場有事要做」的錨。索引回音退役後開場常常整段空白，沒有
+    # 錨的話「context 裡沒有索引」會在空字串上恆真，等於什麼都沒驗到。
+    broken_card = "---\nname: {name}\ndescription: english only and undated\n---\nbody\n"
+
     try:
-        red_body = "# Heading\nordinary one\n🔴 urgent\n🔴🔴 critical\nordinary two\n"
-        red_slim = memspec.slim_index(red_body, 256, "synthetic/MEMORY.md")
-        checks.append(
-            (
-                "red priority retained",
-                "🔴🔴 critical" in red_slim
-                and "🔴 urgent" in red_slim
-                and len(red_slim.encode("utf-8")) <= 256,
-            )
-        )
-
-        plain_body = "# Plain\nalpha\nbeta\ngamma\n"
-        plain_slim = memspec.slim_index(plain_body, 256, "synthetic/plain.md")
-        checks.append(
-            (
-                "unmarked index retained",
-                "alpha" in plain_slim and "beta" in plain_slim and "gamma" in plain_slim,
-            )
-        )
-
         with tempfile.TemporaryDirectory(prefix="epitype-sessionstart-") as temp_dir:
             root = Path(temp_dir).resolve()
             vault = root / "vault"
@@ -394,17 +280,25 @@ def _selftest():
                 "ledger detail\n",
                 encoding="utf-8",
             )
+            (vault / "anchor-card.md").write_text(
+                broken_card.format(name="anchor-card"), encoding="utf-8"
+            )
             config = root / "config.json"
             write_config(config, [vault])
             result = run_synthetic(Path(__file__), {"source": "startup"}, config)
             value = json.loads(result.stdout) if result.stdout.strip() else {}
             context = value.get("hookSpecificOutput", {}).get("additionalContext", "")
+            # §40：索引分區由同步工具寫進 CLAUDE.md／AGENTS.md，宿主每一場自己載入；
+            # hook 再回音一份就是同一段文字付兩次錢（owner 2026-09-09「不應該塞」）。
             checks.append(
                 (
-                    "index echo: a short index goes whole, with no sampling footer",
+                    "§40：短入口索引一個字都不回音，檔案在不在都一樣",
                     result.returncode == 0
-                    and "# Synthetic Index" in context
-                    and "index detail" in context
+                    and "🧾" in context
+                    and (vault / memspec.MEMORY_INDEX_FILENAME).is_file()
+                    and "# Synthetic Index" not in context
+                    and "index detail" not in context
+                    and memspec.MEMORY_INDEX_FILENAME not in context
                     and "Full index:" not in context
                     and "未完整回音" not in context,
                 )
@@ -419,60 +313,6 @@ def _selftest():
                 )
             )
 
-            # 裝不下時的行為才是這段程式的重點：舊碼固定截前 3 KB 又不留痕跡。
-            big_vault = root / "bigvault"
-            big_vault.mkdir()
-            big_body = "# Big Index\n" + "\n".join(
-                f"- line {number} 索引內容 padding padding" for number in range(1200)
-            )
-            (big_vault / memspec.MEMORY_INDEX_FILENAME).write_text(
-                big_body + "\n", encoding="utf-8"
-            )
-            # 索引後面一定要還有段（第二個庫的回音），才測得到那個坑：bounded_context
-            # 放不下下一段時是回頭把已選的段丟掉，所以量到剛好滿的索引會整段被彈出來。
-            # 兩個庫都沒有帳本＝沒有治理庫，兩本都注入（_handle 的 no-ledger 分支）。
-            big_tail = root / "bigtail"
-            big_tail.mkdir()
-            (big_tail / memspec.MEMORY_INDEX_FILENAME).write_text(
-                "# Tail Index\n" + "\n".join(f"- tail {number} 索引內容" for number in range(40)) + "\n",
-                encoding="utf-8",
-            )
-            big_config = root / "big-config.json"
-            write_config(big_config, [big_vault, big_tail])
-            big_result = run_synthetic(Path(__file__), {"source": "startup"}, big_config)
-            big_value = json.loads(big_result.stdout) if big_result.stdout.strip() else {}
-            big_context = big_value.get("hookSpecificOutput", {}).get("additionalContext", "")
-            notice_line = next(
-                (line for line in big_context.splitlines() if "未完整回音" in line), ""
-            )
-            numbers = re.search(r"送出 (\d+)／全文 (\d+)", notice_line)
-            heading = f"## {memspec.MEMORY_INDEX_FILENAME}\n"
-            sampled = ""
-            if numbers and heading in big_context:
-                start = big_context.index(heading) + len(heading)
-                sampled = big_context[start:big_context.index(notice_line)].rstrip("\n")
-            checks.append(
-                (
-                    "oversized index is sampled, and the notice states the real bytes sent",
-                    big_result.returncode == 0
-                    and numbers is not None
-                    and int(numbers.group(1)) == len(sampled.encode("utf-8"))
-                    and int(numbers.group(2)) == len(big_body.encode("utf-8"))
-                    and int(numbers.group(1)) < int(numbers.group(2))
-                    and str((big_vault / memspec.MEMORY_INDEX_FILENAME).resolve()) in big_context
-                    and len(big_context.encode("utf-8")) <= memspec.HOOK_DEFAULT_BUDGET_BYTES,
-                )
-            )
-            checks.append(
-                (
-                    "a following vault's index that cannot fit is dropped whole; the sampled one survives intact",
-                    heading in big_context
-                    and notice_line in big_context
-                    and "# Tail Index" not in big_context
-                    and "tail 0 索引內容" not in big_context,
-                )
-            )
-
             home = root / "home"
             project = root / "work" / "proj"
             project.mkdir(parents=True)
@@ -483,46 +323,40 @@ def _selftest():
                 "# Native Index\nnative index detail\n",
                 encoding="utf-8",
             )
-            native_result = run_synthetic(
-                Path(__file__),
-                {"source": "startup", "cwd": str(project)},
-                config,
-                environment={"HOME": os.fspath(home), "USERPROFILE": os.fspath(home)},
-            )
-            native_value = json.loads(native_result.stdout) if native_result.stdout.strip() else {}
-            native_context = native_value.get("hookSpecificOutput", {}).get("additionalContext", "")
-            checks.append(
+            # §40：cwd 的原生庫索引與祖先／治理庫索引都退役，所以兩種宿主形狀
+            # （Claude＝transcript 在 ~/.claude/projects 底下；Codex＝沒有 transcript）
+            # 拿到的必須是同一份——差一個位元組就表示還有宿主專屬分支活著。
+            shapes = {}
+            for name, extra in (
+                ("codex", {}),
                 (
-                    "cwd-slug native index injected ahead of configured vaults",
-                    native_result.returncode == 0
-                    and native_context.index("native index detail") < native_context.index("index detail")
-                    and "ledger detail" not in native_context,
+                    "claude",
+                    {"transcript_path": str(home / ".claude" / "projects" / slug / "session.jsonl")},
+                ),
+            ):
+                shape_result = run_synthetic(
+                    Path(__file__),
+                    {"source": "startup", "cwd": str(project), **extra},
+                    config,
+                    environment={"HOME": os.fspath(home), "USERPROFILE": os.fspath(home)},
                 )
-            )
-
-            # Owner 2026-09-09: Claude Code loads the cwd slug's MEMORY.md itself, so a
-            # Claude-shaped event (transcript under ~/.claude/projects) skips that echo
-            # while the governance index stays. Codex-shaped events above (no .claude
-            # transcript) keep the echo.
-            claude_result = run_synthetic(
-                Path(__file__),
-                {
-                    "source": "startup",
-                    "cwd": str(project),
-                    "transcript_path": str(home / ".claude" / "projects" / slug / "session.jsonl"),
-                },
-                config,
-                environment={"HOME": os.fspath(home), "USERPROFILE": os.fspath(home)},
-            )
-            claude_value = json.loads(claude_result.stdout) if claude_result.stdout.strip() else {}
-            claude_context = claude_value.get("hookSpecificOutput", {}).get("additionalContext", "")
+                shape_value = json.loads(shape_result.stdout) if shape_result.stdout.strip() else {}
+                shapes[name] = (
+                    shape_result.returncode,
+                    shape_value.get("hookSpecificOutput", {}).get("additionalContext", ""),
+                )
             checks.append(
                 (
-                    "Claude host skips the natively loaded cwd index, keeps the governance index",
-                    claude_result.returncode == 0
-                    and "native index detail" not in claude_context
-                    and "index detail" in claude_context
-                    and "ledger detail" not in claude_context,
+                    "§40：cwd 原生庫與治理庫的索引都不回音，Claude 與 Codex 形狀拿到同一份",
+                    all(code == 0 for code, _text in shapes.values())
+                    and all(
+                        "native index detail" not in text
+                        and "index detail" not in text
+                        and "ledger detail" not in text
+                        for _code, text in shapes.values()
+                    )
+                    and shapes["codex"][1] == shapes["claude"][1]
+                    and "🧾" in shapes["claude"][1],
                 )
             )
 
@@ -535,11 +369,11 @@ def _selftest():
             overdue_context = overdue_value.get("hookSpecificOutput", {}).get("additionalContext", "")
             checks.append(
                 (
-                    "§35：殭屍待辦不再進開場（改由 epitype pending 與夢點名），索引照舊",
+                    "§35：殭屍待辦不再進開場（改由 epitype pending 與夢點名）",
                     overdue_result.returncode == 0
                     and "⏳" not in overdue_context
                     and "殭屍待辦" not in overdue_context
-                    and "index detail" in overdue_context,
+                    and "🧾" in overdue_context,
                 )
             )
 
@@ -549,10 +383,7 @@ def _selftest():
             card_vault.mkdir()
             (card_vault / memspec.MEMORY_INDEX_FILENAME).write_text("# Cards\ncard index detail\n", encoding="utf-8")
             broken = card_vault / "broken-card.md"
-            broken.write_text(
-                "---\nname: broken-card\ndescription: english only and undated\n---\nbody\n",
-                encoding="utf-8",
-            )
+            broken.write_text(broken_card.format(name="broken-card"), encoding="utf-8")
             card_config = root / "card-config.json"
             write_config(card_config, [card_vault])
             broken_result = run_synthetic(Path(__file__), {"source": "startup"}, card_config)
@@ -567,14 +398,14 @@ def _selftest():
             clean_context = clean_value.get("hookSpecificOutput", {}).get("additionalContext", "")
             checks.append(
                 (
-                    "card-type lint adds one line when a card FAILs and no line when every card is clean",
+                    "card-type lint adds one line when a card FAILs; a vault with nothing to do injects nothing at all",
                     broken_result.returncode == 0
                     and clean_result.returncode == 0
                     and "🧾 卡片型別檢查：FAIL 1" in broken_context
                     and broken_context.count("🧾") == 1
-                    and "card index detail" in broken_context
-                    and "🧾" not in clean_context
-                    and "card index detail" in clean_context,
+                    and "card index detail" not in broken_context
+                    and clean_context == ""
+                    and not clean_result.stdout.strip(),
                 )
             )
 
@@ -611,7 +442,7 @@ def _selftest():
                     and all(f"english-{letter}.md" in first_context for letter in "abc")
                     and "english-d.md" not in first_context
                     and "🧾" not in first_context
-                    and "translate index detail" in first_context,
+                    and "translate index detail" not in first_context,
                 )
             )
             checks.append(
@@ -636,6 +467,9 @@ def _selftest():
             second.mkdir()
             (second / memspec.MEMORY_INDEX_FILENAME).write_text("# Second\nsecond index detail\n", encoding="utf-8")
             (second / memspec.WORK_LEDGER_FILENAME).write_text("second ledger detail\n", encoding="utf-8")
+            (second / "second-card.md").write_text(
+                broken_card.format(name="second-card"), encoding="utf-8"
+            )
             two_config = root / "two-config.json"
             write_config(two_config, [vault, second])
             two_result = run_synthetic(Path(__file__), {"source": "startup"}, two_config)
@@ -643,11 +477,13 @@ def _selftest():
             two_context = two_value.get("hookSpecificOutput", {}).get("additionalContext", "")
             checks.append(
                 (
-                    "only the governance vault's index is injected, not another project's",
+                    "only the governance vault is scanned, not another project's",
                     two_result.returncode == 0
-                    and "index detail" in two_context
+                    and os.fspath(vault) in two_context
+                    and "anchor-card.md" in two_context
+                    and os.fspath(second) not in two_context
+                    and "second-card.md" not in two_context
                     and "second index detail" not in two_context
-                    and "ledger detail" not in two_context
                     and "second ledger detail" not in two_context,
                 )
             )
@@ -662,13 +498,20 @@ def _selftest():
             both_native = both_home / ".claude" / "projects" / both_slug / "memory"
             both_native.mkdir(parents=True)
             (both_native / memspec.MEMORY_INDEX_FILENAME).write_text("# Both\nboth native detail\n", encoding="utf-8")
+            (both_native / "both-native-card.md").write_text(
+                broken_card.format(name="both-native-card"), encoding="utf-8"
+            )
             gov = root / "gov-vault"
             gov.mkdir()
             (gov / memspec.MEMORY_INDEX_FILENAME).write_text("# Gov\ngov index detail\n", encoding="utf-8")
             (gov / memspec.WORK_LEDGER_FILENAME).write_text("gov ledger detail\n", encoding="utf-8")
+            (gov / "gov-card.md").write_text(broken_card.format(name="gov-card"), encoding="utf-8")
             other = root / "aaa-other-project"
             other.mkdir()
             (other / memspec.MEMORY_INDEX_FILENAME).write_text("# Other\nother index detail\n", encoding="utf-8")
+            (other / "other-card.md").write_text(
+                broken_card.format(name="other-card"), encoding="utf-8"
+            )
             both_config = root / "both-config.json"
             write_config(both_config, [other, gov, both_native])
             both_result = run_synthetic(
@@ -683,8 +526,12 @@ def _selftest():
                 (
                     "cwd vault survives being configured too; governance is the ledger holder",
                     both_result.returncode == 0
-                    and "both native detail" in both_context
-                    and "gov index detail" in both_context
+                    and "🧾 卡片型別檢查：FAIL 2" in both_context
+                    and "both-native-card.md" in both_context
+                    and "gov-card.md" in both_context
+                    and "other-card.md" not in both_context
+                    and "both native detail" not in both_context
+                    and "gov index detail" not in both_context
                     and "gov ledger detail" not in both_context
                     and "other index detail" not in both_context,
                 )
@@ -696,6 +543,9 @@ def _selftest():
             decision_vault.mkdir()
             (decision_vault / memspec.MEMORY_INDEX_FILENAME).write_text(
                 "# Decisions\ndecision index detail\n", encoding="utf-8"
+            )
+            (decision_vault / "anchor-card.md").write_text(
+                broken_card.format(name="anchor-card"), encoding="utf-8"
             )
             (decision_vault / "decision-live.md").write_text(
                 "---\nname: Decision Live\ndescription: 2026-09-09 決策摘要\n"
@@ -721,13 +571,14 @@ def _selftest():
                 )
             checks.append(
                 (
-                    "§35：現行裁定清單不再進開場（一般場與壓縮續場皆同），索引照舊",
+                    "§35：現行裁定清單不再進開場（一般場與壓縮續場皆同）",
                     all(code == 0 for code, _ in decision_contexts)
                     and all(
                         "現行裁定" not in text
                         and "rule-live" not in text
                         and "只有 6s 是標準合約" not in text
-                        and "decision index detail" in text
+                        and "decision index detail" not in text
+                        and "🧾" in text
                         for _code, text in decision_contexts
                     ),
                 )
@@ -743,6 +594,9 @@ def _selftest():
             (promise_vault / "plan.md").write_text(
                 "---\nname: plan\ndescription: synthetic plan\n---\n- 2026-07-22 未辦（owner 自行）：SWSetup\n",
                 encoding="utf-8",
+            )
+            (promise_vault / "anchor-card.md").write_text(
+                broken_card.format(name="anchor-card"), encoding="utf-8"
             )
             legacy_ledger = promise_vault / memspec.FTS_INDEX_DIRECTORY / "commitments.jsonl"
             legacy_ledger.parent.mkdir(parents=True, exist_ok=True)
@@ -765,7 +619,8 @@ def _selftest():
                         and "未兌現承諾" not in promise_context
                         and "我等一下會補上" not in promise_context
                         and "殭屍待辦" not in promise_context
-                        and "promise index detail" in promise_context,
+                        and "promise index detail" not in promise_context
+                        and "🧾" in promise_context,
                     )
                 )
 
@@ -910,9 +765,9 @@ def _selftest():
                     "a finished dream is announced once, with its numbers and pack path, and never again",
                     notice_result.returncode == 0
                     and expected_notice in notice_context
-                    and "dream index detail" in notice_context
-                    and "🌙" not in repeat_context
-                    and "dream index detail" in repeat_context,
+                    and notice_context == expected_notice
+                    and "dream index detail" not in notice_context
+                    and repeat_context == "",
                 )
             )
 
@@ -935,9 +790,9 @@ def _selftest():
             checks.append(
                 (
                     "壓縮續場不說夢；§35：乾淨跑完的那一場也不說（沒有人要做的事就不出聲）",
-                    "🌙" not in compact_notice_context
-                    and "🌙" not in clean_notice_context
-                    and "dream index detail" in clean_notice_context,
+                    compact_notice_context == ""
+                    and clean_notice_context == ""
+                    and "dream index detail" not in clean_notice_context,
                 )
             )
 
@@ -978,9 +833,8 @@ def _selftest():
                     overdue_dream.returncode == 0
                     and memspec.DREAM_NOTICE_OVERDUE_LINE.format(last="2026-09-06")
                     in overdue_dream_context
-                    and "🌙" not in running_dream_context
-                    and "🌙" not in off_dream_context
-                    and "dream index detail" in off_dream_context,
+                    and running_dream_context == ""
+                    and off_dream_context == "",
                 )
             )
 
@@ -999,6 +853,26 @@ def _selftest():
                     "本文一行。\n",
                     encoding="utf-8",
                 )
+            # 索引回音退役後，這個庫唯一保證出得了聲的是夢通知：300 張卡的型別檢查可能
+            # 吃完自己的 1 s 預算而整段省略，而這一案要釘的是「輸出的 JSON 形狀」，不能
+            # 靠一條會隨機器快慢消失的行。
+            bulk_dream_dir = bulk_vault / memspec.DREAM_DIRECTORY
+            bulk_dream_dir.mkdir()
+            (bulk_dream_dir / memspec.DREAM_STATE_FILENAME).write_text(
+                json.dumps({
+                    memspec.DREAM_STATE_COMPLETED_EPOCH_FIELD: time.time(),
+                    memspec.DREAM_STATE_COMPLETED_FIELD: "2026-09-06T03:30:00+00:00",
+                    memspec.DREAM_STATE_DATE_FIELD: "2026-09-06",
+                    memspec.DREAM_STATE_COMPLETE_FIELD: True,
+                    memspec.DREAM_STATE_ERRORS_FIELD: {},
+                    memspec.DREAM_STATE_PACK_FIELD: os.fspath(
+                        bulk_dream_dir / memspec.DREAM_PACK_FILENAME
+                    ),
+                    memspec.DREAM_STATE_HEADLINE_FIELD: {"card_fail": 2, "missing_aliases": 7,
+                                                         "drafts": 1},
+                }, ensure_ascii=False),
+                encoding="utf-8",
+            )
             bulk_config = root / "bulk-config.json"
             write_config(bulk_config, [bulk_vault])
             bulk_started = time.monotonic()
@@ -1013,7 +887,9 @@ def _selftest():
                 bulk_config,
                 # Codex 的事件帶 cwd，而 cwd 的每一層祖先都會去 home 底下找同名的原生
                 # 庫；不改 home 的話這一項會把跑測試那台機器的真實庫拌進來。
-                environment={"USERPROFILE": os.fspath(root), "HOME": os.fspath(root)},
+                # nightly＝夢的通知照出，但不起任何背景程序。
+                environment={"USERPROFILE": os.fspath(root), "HOME": os.fspath(root),
+                             memspec.DREAM_MODE_ENV: memspec.DREAM_MODE_NIGHTLY},
             )
             bulk_elapsed = time.monotonic() - bulk_started
             bulk_value = json.loads(bulk_result.stdout) if bulk_result.stdout.strip() else {}
@@ -1026,7 +902,8 @@ def _selftest():
                     and isinstance(bulk_inner, dict)
                     and set(bulk_inner) == {"hookEventName", "additionalContext"}
                     and bulk_inner["hookEventName"] == "SessionStart"
-                    and "bulk index detail" in bulk_inner["additionalContext"],
+                    and "🌙" in bulk_inner["additionalContext"]
+                    and "bulk index detail" not in bulk_inner["additionalContext"],
                 )
             )
             # 上限＝開場自用預算＋子程序啟動與 import 的固定成本，仍遠低於宿主的 10 s。
@@ -1056,7 +933,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 30
+    total = 25
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

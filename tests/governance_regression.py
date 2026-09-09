@@ -174,10 +174,11 @@ class GovernanceRegression(unittest.TestCase):
 
     def test_degraded_governance_writers_are_paused(self):
         self.card()
-        # 開場注入的唯一來源是短入口回音（§35 之後帳本與裁定塊都不注入），所以降級場
-        # 「照樣送得出東西」要有索引可送，才驗得到「讀得到的庫仍可用、只有寫入被暫停」。
-        (self.vault / memspec.MEMORY_INDEX_FILENAME).write_text(
-            "# Fixture\nfixture index detail\n", encoding="utf-8")
+        # §40 之後開場只剩「有事要做」的行（短入口回音也退役了），所以降級場「照樣送得出
+        # 東西」要有一張過不了型別檢查的卡，才驗得到「讀得到的庫仍可用、只有寫入被暫停」。
+        (self.vault / "broken-card.md").write_text(
+            "---\nname: broken-card\ndescription: english only and undated\n---\nbody\n",
+            encoding="utf-8")
         common.write_config(self.config, [self.root / "missing", self.vault])
         with contextlib.redirect_stderr(io.StringIO()):
             config = common.load_config(time.monotonic())
@@ -191,7 +192,9 @@ class GovernanceRegression(unittest.TestCase):
                 cleared.assert_called_once_with("fixture")
             with patch.object(start, "_dream_spawn") as spawn, \
                  patch.object(start, "_dream_notice") as notice:
-                self.assertIsNotNone(start._handle({}, time.monotonic()))
+                value = start._handle({}, time.monotonic())
+                self.assertIsNotNone(value)
+                self.assertIn("🧾", value["hookSpecificOutput"]["additionalContext"])
                 spawn.assert_not_called()
                 notice.assert_not_called()
         self.assertFalse((self.vault / memspec.GATE_LOG_FILENAME).exists())

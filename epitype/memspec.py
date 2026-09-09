@@ -104,12 +104,6 @@ HOOK_MAX_OUTPUT_BYTES = 10 * 1024
 # 路徑，現在只服務 forbidden。）
 FORBIDDEN_REGEX_MAX_CHARS = 1024
 GATE_DEFECT_MAX_LINES = 3
-# 手寫短入口對非原生載入的宿主（Codex）整段回音：裝得下就整段，裝不下才排序取樣
-# 並在最後一行明說少了多少位元組。舊碼一律截前 3 KB 不留痕跡，收件端無從得知
-# 偏好有沒有送到（2026-09-09 Claude↔Codex 收斂第 8 條）。
-SESSIONSTART_INDEX_TRUNCATED_LINE = (
-    "⚠ {filename} 未完整回音：送出 {sent}／全文 {total} bytes；其餘見 {path}"
-)
 EPITYPE_CONFIG_ENV = "EPITYPE_CONFIG"
 CONFIG_VAULTS_FIELD = "vaults"
 CONFIG_BUDGET_BYTES_FIELD = "budget_bytes"
@@ -1116,47 +1110,6 @@ def config_options(path=None):
     except (OSError, ValueError):
         return {}
     return value if isinstance(value, dict) else {}
-
-
-def slim_index(body, budget, full_path):
-    """Return a priority-packed UTF-8 index with its full source path last."""
-    if not isinstance(body, str):
-        raise TypeError("body must be text")
-    limit = int(budget)
-    if limit <= 0:
-        raise ValueError("budget must be positive")
-
-    footer = f"Full index: {os.fspath(full_path)}"
-    footer_size = len(footer.encode("utf-8"))
-    if footer_size > limit:
-        raise ValueError("budget cannot contain the full index path")
-
-    def priority(line):
-        if line.startswith("🔴🔴"):
-            return 0
-        if line.startswith("🔴"):
-            return 1
-        if line.startswith("#"):
-            return 2
-        return 3
-
-    # Hazard: a real-file regression once treated the absence of red markers as
-    # an empty result. Every line remains a candidate, so an all-unmarked index
-    # still fills the available budget instead of disappearing.
-    ranked = sorted(
-        enumerate(body.splitlines()),
-        key=lambda item: (priority(item[1]), item[0]),
-    )
-    selected = []
-    used = footer_size
-    for index, line in ranked:
-        line_size = len(line.encode("utf-8")) + 1
-        if used + line_size <= limit:
-            selected.append((index, line))
-            used += line_size
-
-    selected_lines = [line for _, line in sorted(selected)]
-    return "\n".join(selected_lines + [footer])
 
 
 def _lock_path(target):
