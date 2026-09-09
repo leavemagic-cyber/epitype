@@ -1488,3 +1488,61 @@ moved to §13 and the next steps to §14. The selftest points `HOME`, `USERPROFI
 `EPITYPE_CONFIG` at its own temporary directory and restores them in a `finally` — §8
 reads the home directory and §11 reads the config, so without that the test would scan
 the real one.
+
+## 37. "Nobody carries this quote" was measured by the one route almost nobody uses
+
+§36's fourth section asks whether any decision card carries an event card's quote, and
+it answered by looking for the event card's **filename or `decision_key`** in a decision
+card's body, `source`, `superseded_by` or `aliases`. That is how a machine would link two
+cards. It is not how these cards were written: a decision card carries a quote by
+**copying the sentence into `owner_quote`**, and an event card that has been dealt with
+records its home in its own **`carried_by`** field. Neither leaves a filename anywhere.
+
+So the section reported every trusted event card in both vaults — 91 and 53 on the day
+§36 was written, every single one of them. A list that flags everything says nothing, and
+its next-steps line ("N quotes read as standing rulings with nobody behind them") reads as
+an alarm rather than a queue. The defect is the same shape as the one §36 itself warns
+about in the other direction: a match rule narrower than the corpus it judges produces a
+verdict about the rule, not about the corpus.
+
+The fix is three carry routes, any one of which clears a card:
+
+1. **Named** — the original route, unchanged (full filename or `decision_key`).
+2. **Quoted verbatim** — a decision card's `owner_quote` overlaps the event card's body.
+   Both sides are normalised the same way: NFKC first, then everything that is not a
+   letter, digit or combining mark is dropped, then casefold. That is one rule for
+   whitespace, full-width/half-width forms, quotation marks and punctuation, and it
+   hardcodes no language's punctuation — the real pair that exposed the defect differs
+   only by a stray `<` inside the sentence. `owner_quote` is also split at Unicode quote
+   and bracket characters before matching, because one field routinely packs several
+   quotes from several sources (`「B」（Q7）；「…」`), and the whole field is a substring of
+   nothing. The overlap must run at least `UNCARRIED_QUOTE_MIN_CHARS` (12) characters in
+   whichever direction is shorter: a four-character overlap (「先對過帳」) happens between
+   any two Chinese sentences, and accepting it would silently switch the section off.
+3. **Self-declared** — the event card's own `carried_by` names its carrier. Whether that
+   card exists is `epitype cards`' question; this section only asks whether anybody has
+   taken the quote somewhere.
+
+Each row also gains a **suspected-noise** column: auto-capture files the payload of a
+cross-CLI transport probe as a ruling (`Return only {"probe":"ok"}. Do not use tools.`),
+and those read like owner rulings while being nobody's sentence. A body matching one of
+`memspec.EVENT_NOISE_MARKERS` is marked, and nothing else happens to it — deleting or
+demoting stays a human action, like every other row in §§8–12.
+
+Measured on this machine on 2026-09-09 (`epitype dream --dry-run`, both registered
+vaults, section 12 counts): **56 + 40 = 96 before, 29 + 23 = 52 after**. The before
+numbers are lower than §36's 91/53 because 41 of those cards had since been demoted with
+`verified: false`, which the section already skipped. Of the 44 cards the fix cleared, 33
++ 18 declared a `carried_by` (a field the vaults were already using, mostly naming a
+`feedback` card), and the verbatim-quote route matched 3 cards in the governance vault —
+all three already cleared by another route, so its measured contribution today is zero.
+It is kept because it is the route the decision cards actually use: all 19 decision cards
+in the governance vault copy their ruling into `owner_quote`, while naming the event file
+clears only 6 of them, and the next card written that way will have no `carried_by` to
+fall back on.
+
+Regressions: six cases in `epitype/dream.py --selftest` (48 → 53) — the section lists
+only what no route clears; each of the three routes clears one card (named, quoted in
+part, self-declared); an overlap shorter than the twelve-character floor is not a carry
+and its card stays listed; and the transport-probe template is the only row marked as
+noise.

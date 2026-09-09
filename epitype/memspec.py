@@ -487,6 +487,23 @@ VERIFIED_TRUE = "true"
 CAPTURE_PROVENANCE_FIELDS = (
     PROVENANCE_FIELD, VERIFIED_FIELD, VERIFIED_BY_FIELD, VERIFIED_AT_FIELD,
 )
+# 2026-09-09 實測事故：夢第 12 節問「這句原話有沒有決策卡承接」時只認決策卡的
+# source／superseded_by／aliases 與正文提名，兩個真庫 144 張事件卡因此全部被列成
+# 「無人承接」——通用庫 19 張決策卡有 18 張是用 owner_quote 逐字引原話承接的。
+# 這一欄是事件卡端唯一能自己寫的承接憑證：值＝承接它的 decision_key 或卡名。
+CARRIED_BY_FIELD = "carried_by"
+# 自動捕捉會把跨 CLI 傳輸探針的整段 payload 寫成一張 ruling（真庫 2026-09-08 兩張），
+# 讀起來像 owner 的裁定。這些是固定樣板字串，不是任何語言的自然句，所以列成常數比
+# 猜語意可靠；比對一律 casefold 後做子字串。夢只標記給人看，不刪卡、不改卡。
+EVENT_NOISE_MARKERS = (
+    '{"probe":',
+    "transport",
+    "do not use tools",
+    "reply only",
+    "return only",
+    "health check",
+    "傳輸探針",
+)
 FORBIDDEN_FIELD = "forbidden"
 VERIFY_FIELD = "verify"
 VALID_UNTIL_FIELD = "valid_until"

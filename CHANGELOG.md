@@ -35,6 +35,15 @@
 - 報告：五節各一節 markdown，`_next_steps` 納入五項候選數（每一條都寫成「人工判斷」而不是「夢會處理」）。**編號位移**：主記憶整形由 `## 8.` 改為 `## 13.`（`memspec.INDEX_SHAPING_HEADING`），夢的下一步由 `## 9.` 改為 `## 14.`。`build_report` 多一個 `config` 參數（預設 `configured_options()`，讀不到設定就是 `{}`），逐節簽名改為 `(vaults, today, since_date, config)`。
 - `--dry-run` 對真庫可跑（五節全唯讀）。回歸：`epitype/dream.py --selftest` 40 → **48**（新增八案：口袋庫只列未登記且有卡的、草稿分齡分組與最舊排序、三種混雜形狀且 ```圍籬不誤判、缺鍵寫未設定且不判斷、設鍵後列出超出量且兩個檔案一位元組沒動、只列沒有決策卡承接的那一份、下一步帶齊五項、報告渲染 8–12 節與 13／14 的位移）。selftest 現在把 `HOME`／`USERPROFILE`／`EPITYPE_CONFIG` 一起指進自己的暫存目錄並在 `finally` 還原——第 8 節會從家目錄推口袋庫、第 11 節會讀設定，不隔離就會掃到 owner 的真實家目錄與真設定。
 
+### U-K2：夢第 12 節的承接判定補上真正在用的那兩條路（owner 2026-09-09；FAILURE_MODES §37）
+
+- 缺陷：第 12 節問「這句原話有沒有決策卡承接」，卻只認決策卡的正文與 `source`／`superseded_by`／`aliases` 提到事件檔名或 `decision_key`——而卡片實際上是用另外兩種方式承接的：決策卡把原話逐字抄進 `owner_quote`（通用庫 19 張決策卡全部有這一欄，提名只清得掉 6 張卡），事件卡把承接者寫在自己的 `carried_by`。兩種都不留檔名，所以 §36 寫成那天兩庫的事件卡是 91／53＝**全部**被列成「無人承接」。全部命中的清單等於沒有清單。
+- 承接改為三條路，任一成立就不列：**提名**（原有，完整檔名或 `decision_key`）、**逐字引用**（決策卡 `owner_quote` 與事件卡正文任一方向的子字串）、**自報**（事件卡 frontmatter 的 `carried_by`，新常數 `memspec.CARRIED_BY_FIELD`；那張卡在不在是 `epitype cards` 的題目，這一節不查）。
+- 逐字引用的比對規則：兩邊都先 NFKC，再只留字母／數字／結合記號（Unicode 類別 L／N／M）、casefold——去空白、去引號、統一全形半形是同一個動作，不寫死任何一種語言的標點（真庫那一對只差正文中間多一個 `<`）。`owner_quote` 先在 Unicode 引號／括號類別（Pi/Pf/Ps/Pe，另加 ASCII `"` 與 `'`）切成片段再比對，因為同一欄常串了好幾段不同出處的原話（`「B」（Q7）；「…」`），整欄不是任何一份原話的子字串。重疊長度地板 `UNCARRIED_QUOTE_MIN_CHARS`＝12 字元（取較短的一邊）：4 個字的重疊在任兩段中文裡都撞得到，收它等於把這一節關掉。
+- 第 12 節每列多一欄 `noise`（疑似雜訊）：正文命中 `memspec.EVENT_NOISE_MARKERS`（`{"probe":`、`transport`、`do not use tools`、`reply only`、`return only`、`health check`、`傳輸探針`，一律 casefold 子字串）就標記——自動捕捉會把跨 CLI 傳輸探針的整段 payload 寫成 ruling。**只標記**：夢不刪、不降級，counts 多一個 `noise_candidates`，下一步那一行附帶「其中 N 份疑似傳輸探針雜訊」。
+- 真庫實量（`--dry-run`、兩庫、第 12 節 counts）：**改前 56＋40＝96，改後 29＋23＝52**。改前數字低於 §36 的 91／53，是因為其間有 41 張卡被標了 `verified: false`（本來就跳過），不是本單造成的。清掉的 44 張裡 33＋18 張是靠 `carried_by`（庫裡本來就在用的欄位，多半指向 `feedback` 卡），逐字引用命中 3 張、全部已被別條路清掉，所以它今天的淨貢獻是 0——保留是因為那是決策卡真正在用的寫法（19 張全部有 `owner_quote`），下一張這樣寫的卡沒有 `carried_by` 可退。noise 今天標 0 張：真庫已知的兩張探針卡都自報 `verified: false`，第 12 節本來就不列。
+- 回歸：`epitype/dream.py --selftest` 48 → **53**（新增六案：三條承接路各一案、只列沒有任何一條路清掉的、短於 12 字的重疊不算承接、只有探針樣板被標 noise）。`_decision_reference_text` 改名 `_decision_carriers` 並改回傳 `(承接文字, owner_quote 片段)`，同一次掃描出兩份證據，不為新規則多掃一輪卡。
+
 - 夢多一個順路任務「主記憶整形」（owner 2026-09-09：「我們不是有類似夢的機制，不就是剛好處理這個?」；FAILURE_MODES §33）：`MEMORY.md` 被 §31 修短之後會自己長回來——宿主「存卡後在 MEMORY.md 加一行」的預設、別場 session 直接編輯——而事前用寫檔閘擋會連手寫短入口本來就長成那樣的 `- [name](card.md)` 一起擋掉。改由 03:30 那場夢事後整形：允許段（`memspec.INDEX_ALLOWED_SECTIONS`＝習慣與偏好／找不到就搜／索引卡／專案規則，各含英文寫法）內一律不動；允許段以外、且連到的卡 `_views/current.md` 或 `history/closed.md` 已經列出的整行，原文照搬進 `<vault>/_drafts/index_pruned/YYYYMMDD.md`（附時間、來源段、原因），不刪。
 - 視圖沒列到的連結不搬，只列進報告：那可能是幾分鐘前才寫好、目錄還沒生成的新卡。整形排在順路重生 `_views/` 之後，因為「目錄已經承載這張卡」就是它唯一的判準，判準不能是舊的。
 - 寫法是受控的小範圍改寫，不是重寫：讀→記 mtime＋大小→算→寫前再比 mtime＋大小→帶原內容比對的換名寫入（`card_io.replace_if_unchanged`，取鎖）→再讀核對。任一步對不上就整份放棄、報告記一行、下次夢重試。紀錄檔先寫、`MEMORY.md` 後改，所以被拒的換名不會弄丟行；下一次靠「原文行已在檔內」去重，不疊第二份。`--dry-run` 只印會搬幾行，一個位元組都不動。

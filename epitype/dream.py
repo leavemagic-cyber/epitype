@@ -26,6 +26,7 @@ import sys
 import tempfile
 import threading
 import time
+import unicodedata
 import uuid
 
 try:
@@ -67,6 +68,14 @@ CAP_COMMAND = "人工判斷超上限的檔案要精簡還是提高上限；夢�
 DECISION_CARRIER_FIELDS = ("source", memspec.SUPERSEDED_BY_FIELD, memspec.ALIASES_FIELD)
 UNCARRIED_MAX_PER_VAULT = 30
 UNCARRIED_EXCERPT_CHARS = 80
+# 逐字引用要算承接，重疊的部分至少要有這麼多個字：短重疊（「好」「先對過帳」）在任何
+# 兩段中文裡都撞得到，用它當承接證據等於把這一節關掉。
+UNCARRIED_QUOTE_MIN_CHARS = 12
+# owner_quote 常把好幾段原話串在同一欄（`「B」（Q7）；「…」`），所以要先切開再比對。
+# 界線用 unicode 的引號／括號類別判斷（Pi/Pf/Ps/Pe），只有 ASCII 的 " 與 ' 是 Po、
+# 類別認不出來，才另外列；不寫死某一種語言的引號。
+QUOTE_DELIMITER_CATEGORIES = ("Pi", "Pf", "Ps", "Pe")
+QUOTE_DELIMITER_CHARS = "\"'"
 UNCARRIED_COMMAND = "人工判斷這句原話該不該升成決策卡（或標 verified: false 降級）；夢不自動升卡"
 
 
@@ -711,13 +720,48 @@ def _section_caps(vaults, today, since_date, config):
 # --------------------------------------------------------------------------- section 12
 
 
-def _decision_reference_text(vault):
-    """所有 decision 卡的正文與 source／superseded_by／aliases 值連成一份大字串。
+def _carry_normalized(text):
+    """比對承接用的正規化：先收全形／半形，再只留字母、數字與結合記號。
 
-    問的是「這句原話有沒有被任何一張決策卡接住」，所以不必知道是哪一張接的——只要
-    有一張提到它的檔名或 decision_key 就算有人承接。
+    去空白、去引號、統一標點是同一個動作——凡不是「字」的字元一律不留，所以不必
+    列舉「」『』"" 或任何一種語言的標點，換一種語言的原話走的還是這一條路。
+    """
+    folded = unicodedata.normalize("NFKC", text)
+    return "".join(char for char in folded if unicodedata.category(char)[0] in "LNM").casefold()
+
+
+def _quote_fragments(raw):
+    """一張決策卡 owner_quote 裡夠長的逐字片段：整欄，加上引號界起來的每一段。
+
+    只比對整欄會漏掉最常見的寫法——同一欄串了好幾段原話，每一段各有出處，整欄
+    自然不是任何一份原話的子字串。切開之後夾在引號之間的雜訊（`（Q7）；`）也會
+    變成片段，但長度不足就進不了集合，不會冒充承接證據。
+    """
+    pieces = [raw]
+    current = []
+    for char in raw:
+        if unicodedata.category(char) in QUOTE_DELIMITER_CATEGORIES or char in QUOTE_DELIMITER_CHARS:
+            if current:
+                pieces.append("".join(current))
+                current = []
+            continue
+        current.append(char)
+    pieces.append("".join(current))
+    normalized = {_carry_normalized(piece) for piece in pieces}
+    return {piece for piece in normalized if len(piece) >= UNCARRIED_QUOTE_MIN_CHARS}
+
+
+def _decision_carriers(vault):
+    """(承接文字, owner_quote 逐字片段)：判斷「這句原話有沒有被接住」的兩份證據。
+
+    問的是「有沒有任何一張決策卡接住它」，不必知道是哪一張。第一份是提名——決策卡
+    的正文與 source／superseded_by／aliases 值連成一份大字串，提到檔名或 decision_key
+    就算承接。第二份是逐字引用：真庫 19 張決策卡全部把原話抄進 owner_quote，多數
+    一個檔名都沒寫——只認第一份，FAILURE_MODES §36 寫成那天兩庫的事件卡是 91／53，
+    也就是全部被列成「無人承接」。第三條路在事件卡那一端（`carried_by`）。
     """
     chunks = []
+    fragments = set()
     for path in memsearch.card_files(vault):
         try:
             text = path.read_text(encoding="utf-8-sig")
@@ -731,10 +775,39 @@ def _decision_reference_text(vault):
             value = fields.get(field, "")
             if value:
                 chunks.append(value)
-    return "\n".join(chunks)
+        quote = fields.get(memspec.OWNER_QUOTE_FIELD, "")
+        if quote:
+            fragments |= _quote_fragments(quote)
+    return "\n".join(chunks), fragments
 
 
-def _uncarried_quotes_of(vault, carried_text):
+def _quoted_verbatim(body, fragments):
+    """決策卡的 owner_quote 是否逐字引了這份原話（任一方向的子字串都算）。
+
+    兩個方向都要：決策卡可能只引原話的一段（引用較短），也可能把一句短原話抄進一段
+    較長的引文裡（原話較短）。兩邊都得先過 `UNCARRIED_QUOTE_MIN_CHARS` 這道長度地板。
+    """
+    normalized = _carry_normalized(body)
+    if len(normalized) < UNCARRIED_QUOTE_MIN_CHARS:
+        return False
+    return any(fragment in normalized or normalized in fragment for fragment in fragments)
+
+
+def _noise_marker_of(body):
+    """命中的雜訊樣板（`memspec.EVENT_NOISE_MARKERS`），沒命中就是空字串。
+
+    只標記、不改檔：自動捕捉把跨 CLI 傳輸探針的 payload 整段寫成 ruling，讀起來像
+    owner 的裁定，但那不是 owner 說的話。刪不刪、降不降級仍然是人的判斷。
+    """
+    folded = body.casefold()
+    for marker in memspec.EVENT_NOISE_MARKERS:
+        if marker.casefold() in folded:
+            return marker
+    return ""
+
+
+def _uncarried_quotes_of(vault, carriers):
+    carried_text, quote_fragments = carriers
     found = []
     for directory, _card_type in memspec.EVENT_CARD_DIRECTORIES:
         root = Path(vault) / directory
@@ -756,12 +829,20 @@ def _uncarried_quotes_of(vault, carried_text):
             names = [path.name] + ([key] if key else [])
             if any(name in carried_text for name in names):
                 continue
-            body = " ".join(_body_of(text).split())
+            # 事件卡自報承接者：卡面上寫了 carried_by 就是有人指名接住它，不必再
+            # 回頭確認那張決策卡在不在——卡在不在是 `epitype decisions` 的題目。
+            if fields.get(memspec.CARRIED_BY_FIELD, "").strip():
+                continue
+            body = _body_of(text)
+            if _quoted_verbatim(body, quote_fragments):
+                continue
+            flat = " ".join(body.split())
             found.append({
                 "vault": str(vault),
                 "path": path.relative_to(vault).as_posix(),
                 "captured_at": fields.get(memspec.CAPTURED_AT_FIELD, "").strip(),
-                "excerpt": body[:UNCARRIED_EXCERPT_CHARS],
+                "noise": _noise_marker_of(body),
+                "excerpt": flat[:UNCARRIED_EXCERPT_CHARS],
             })
     found.sort(key=lambda item: (item["captured_at"], item["path"]), reverse=True)
     return found
@@ -774,19 +855,28 @@ def _section_uncarried_quotes(vaults, today, since_date, config):
     前綴端出去（adapters/claude/recall_hook.py），只有自報 `verified: false` 的那些
     降級成歷史捕捉。所以一張沒人核、也沒有決策卡承接的原話，讀起來仍像現行裁定——
     這正是 Claude↔Codex 收斂加的那一項要先找出來的東西。
+
+    承接有三條路，任一成立就不列：決策卡提名（檔名或 decision_key）、決策卡在
+    owner_quote 逐字引了它、事件卡自己寫了 `carried_by`。每一列另附「疑似雜訊」欄，
+    標出讀起來像裁定、其實是傳輸探針樣板的那幾張——標記而已，夢一個檔都不改。
     """
     results, errors = _bounded(
-        vaults, lambda vault: _uncarried_quotes_of(vault, _decision_reference_text(vault))
+        vaults, lambda vault: _uncarried_quotes_of(vault, _decision_carriers(vault))
     )
     examples = []
     by_vault = {}
     total = 0
+    noise = 0
     for vault, found in results:
         by_vault[str(vault)] = len(found)
         total += len(found)
+        noise += sum(1 for item in found if item["noise"])
         examples.extend(found[:UNCARRIED_MAX_PER_VAULT])
     return {
-        "counts": {"uncarried_quotes": total, "by_vault": by_vault, "listed_cap_per_vault": UNCARRIED_MAX_PER_VAULT},
+        "counts": {
+            "uncarried_quotes": total, "noise_candidates": noise,
+            "by_vault": by_vault, "listed_cap_per_vault": UNCARRIED_MAX_PER_VAULT,
+        },
         "examples": examples,
         "commands": [UNCARRIED_COMMAND] if total else [],
         "errors": errors,
@@ -1053,9 +1143,11 @@ def _next_steps(sections, shaping=()):
         steps.append(f"上限檢查有 {caps['unset_keys']} 項未設定（config 缺鍵），這幾項這次沒查")
     uncarried = counts(12)
     if uncarried.get("uncarried_quotes", 0) > 0:
+        noise = uncarried.get("noise_candidates", 0)
+        noise_note = f"（其中 {noise} 份疑似傳輸探針雜訊）" if noise else ""
         steps.append(
             f"升決策卡候選 {uncarried['uncarried_quotes']} 份原話會被當裁定端出、卻沒有決策卡承接"
-            " → 人工判斷升卡或降級"
+            f"{noise_note} → 人工判斷升卡或降級"
         )
     kept = sum(item.get("kept", 0) for item in shaping)
     if kept:
@@ -1722,13 +1814,44 @@ def _selftest():
                 "decided_by: owner-explicit\nowner_quote: 就這樣\nsource: rulings/carried.md\n"
                 "aliases:\n- k9\n---\n承接上面那句原話。\n",
             )
+            # 承接的三條路各一案（提名／逐字引用／自報），外加兩個必須仍然列出的反例。
+            for stem, extra, body in (
+                # 決策卡只引了正文的一段，沒寫檔名——真庫 18/19 張決策卡是這個形狀。
+                ("quoted", "", "答（owner 逐字）：庫存要先對過帳才可以出貨，這是硬規定。"),
+                ("selfnamed", f"{memspec.CARRIED_BY_FIELD}: k9\n", "沒有人引用，但卡自己指名了承接者。"),
+                # 4 個字的重疊在引文裡撞得到，長度地板必須擋住它。
+                ("tooshort", "", "先對過帳"),
+                ("noise", "", 'Return only JSON {"probe":"ok"}. Do not use tools.'),
+            ):
+                _write_card(
+                    quotes_vault / memspec.RULING_DIRECTORY / f"{stem}.md",
+                    f"---\nname: {stem}\ndescription: owner ruling auto-captured 2026-09-04: 合成\n"
+                    f"captured_at: 2026-09-04\nsession_id: s1\n{extra}---\n{body}\n",
+                )
+            _write_card(
+                quotes_vault / "quoter.md",
+                "---\ndecision_key: k8\nstatus: active\ncurrent_decision_at: 2026-09-05\n"
+                "decided_by: owner-explicit\n"
+                "owner_quote: 「甲」（Q1）；「庫存要先對過帳才可以出貨」（第二段另有出處）\n"
+                "aliases:\n- k8\n---\n只靠逐字引用承接，正文一個檔名都沒提。\n",
+            )
             quotes_by_id = {s["id"]: s for s in build_report([quotes_vault], today=today)["sections"]}
-            quoted = {item["path"] for item in quotes_by_id[12]["examples"]}
-            checks.append(("section 12 flags only the trusted quote no decision card carries", (
-                quotes_by_id[12]["counts"]["uncarried_quotes"] == 1
-                and quoted == {"rulings/uncarried.md"}
-                and quotes_by_id[12]["examples"][0]["captured_at"] == "2026-09-01"
-                and "uncarried" in quotes_by_id[12]["examples"][0]["excerpt"]
+            rows = {item["path"]: item for item in quotes_by_id[12]["examples"]}
+            checks.append(("section 12 lists only what no decision card carries, by any of the three routes", (
+                quotes_by_id[12]["counts"]["uncarried_quotes"] == 3
+                and set(rows) == {"rulings/uncarried.md", "rulings/tooshort.md", "rulings/noise.md"}
+                and rows["rulings/uncarried.md"]["captured_at"] == "2026-09-01"
+                and "uncarried" in rows["rulings/uncarried.md"]["excerpt"]
+            )))
+            checks.append(("carried route 1: a decision card naming the file clears it", "rulings/carried.md" not in rows))
+            checks.append(("carried route 2: a decision card quoting part of the body verbatim clears it", "rulings/quoted.md" not in rows))
+            checks.append(("carried route 3: the event card's own carried_by clears it", "rulings/selfnamed.md" not in rows))
+            checks.append(("an overlap shorter than the verbatim floor is not a carry", "rulings/tooshort.md" in rows))
+            checks.append(("the transport-probe template is marked as noise and nothing else is", (
+                quotes_by_id[12]["counts"]["noise_candidates"] == 1
+                and rows["rulings/noise.md"]["noise"] == '{"probe":'
+                and rows["rulings/uncarried.md"]["noise"] == ""
+                and rows["rulings/tooshort.md"]["noise"] == ""
             )))
 
             five_report = build_report([vault, drafts_vault, mixed_vault, quotes_vault], today=today, config={
@@ -2136,7 +2259,7 @@ def _selftest():
                 os.environ[name] = value
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 48
+    total = 53
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
