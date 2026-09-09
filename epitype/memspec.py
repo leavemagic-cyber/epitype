@@ -350,17 +350,11 @@ DECISION_PREFIX = "⚖ 裁定："
 SESSIONSTART_DECISIONS_HEADER = "⚖ 現行裁定（{vault}）"
 SESSIONSTART_DECISIONS_MAX_LINES = 12
 
-# 2026-09-03 owner:「你在過程一直讀這種跟寫出這種有必要嗎?很浪費token吧」。工具呼叫之間的
-# 旁白(「改成 C:/… 重跑一次」)輸出一次、之後每輪當 context 重讀一次;36 小時內全機 7797 段
-# /819k 字。規則:PreToolUse 讀 transcript 尾窗,發現本輪工具呼叫之間的文字段就回一行
-# additionalContext 點名(不改 permissionDecision);開工第一段不算旁白。
-NARRATION_TAIL_BYTES = 64 * 1024
-NARRATION_MIN_CHARS = 8
-NARRATION_PREFIX = "⛔ 旁白"
-NARRATION_ADVICE = "機械重試零旁白；只在需 owner 決定／計畫改變／最終報告時說話"
-NARRATION_MARKER_DIRECTORY = "epitype_narration"
+# PreToolUse 的「同一場只說一次」去重標記（卡片 trigger 壞掉的告示、寫檔閘的拒絕）。
+# 2026-09-09（§30）：旁白計量依 owner 裁定移除，標記機制留給上述兩個告示用。
+NOTICE_MARKER_DIRECTORY = "epitype_notices"
 # 2026-09-03 對抗審查 #4：marker 只建不收會在 temp 無限累積；超過這個年齡就清掉。
-NARRATION_MARKER_TTL_SECONDS = 24 * 3600
+NOTICE_MARKER_TTL_SECONDS = 24 * 3600
 
 # 2026-09-02 事故：7/22 寫進計畫卡的「未辦（owner 自行）」掛到 9/2，每輪盤點都被
 # 重新端出來；待辦有入口沒出口。規則：待辦標記行必須帶可跑的 verify: 或已收尾，

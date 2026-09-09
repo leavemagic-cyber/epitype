@@ -19,7 +19,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from epitype import memsearch, memspec, narration_meter
+from epitype import memsearch, memspec
 from _hook_common import (
     emit,
     encode_payload,
@@ -755,7 +755,7 @@ def _bounded_deny(card):
     return best
 
 
-def _sweep_narration_markers(root, now, keep=None):
+def _sweep_notice_markers(root, now, keep=None):
     """Markers are a same-session dedupe, not a record: drop the aged-out ones."""
     try:
         for session_directory in root.iterdir():
@@ -764,7 +764,7 @@ def _sweep_narration_markers(root, now, keep=None):
             empty = True
             for marker in session_directory.iterdir():
                 try:
-                    if now - marker.stat().st_mtime > memspec.NARRATION_MARKER_TTL_SECONDS:
+                    if now - marker.stat().st_mtime > memspec.NOTICE_MARKER_TTL_SECONDS:
                         marker.unlink()
                     else:
                         empty = False
@@ -776,12 +776,13 @@ def _sweep_narration_markers(root, now, keep=None):
         pass
 
 
-def _narration_marker(session_id, text):
+def _notice_marker(session_id, text):
+    """True the first time this session sees this notice; False afterwards."""
     digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
-    root = Path(tempfile.gettempdir()) / memspec.NARRATION_MARKER_DIRECTORY
+    root = Path(tempfile.gettempdir()) / memspec.NOTICE_MARKER_DIRECTORY
     directory = root / session_component(session_id)
     try:
-        _sweep_narration_markers(root, time.time(), keep=directory)
+        _sweep_notice_markers(root, time.time(), keep=directory)
         directory.mkdir(parents=True, exist_ok=True)
         with (directory / digest).open("x", encoding="ascii") as stream:
             stream.write(digest + "\n")
@@ -790,28 +791,6 @@ def _narration_marker(session_id, text):
     except OSError:
         return True
     return True
-
-
-def _narration_context(event, started_at):
-    """One bounded line when the model narrated between tool calls (owner 2026-09-03).
-
-    Never touches permissionDecision: the tool still goes through the normal
-    permission path; the text only tells the model what it just paid for.
-    """
-    if expired(started_at):
-        return None
-    blocks = narration_meter.current_turn_blocks(event.get("transcript_path"))
-    text = narration_meter.pending_narration(blocks)
-    if text is None:
-        return None
-    if not _narration_marker(event.get("session_id"), text):
-        return None  # a batch of tool calls after one narration is flagged once
-    segments = len(narration_meter.narration_segments(blocks))
-    context = (
-        f"{memspec.NARRATION_PREFIX} {len(text.strip())} 字（本輪第 {max(segments, 1)} 段）："
-        f"{memspec.NARRATION_ADVICE}"
-    )
-    return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": context}}
 
 
 def _write_target(tool_input, cwd):
@@ -1026,7 +1005,7 @@ def _write_marker(session_id, rule, target, text):
     """Same-session dedupe keyed by (rule, file, content digest): a model that
     cannot satisfy a ruling would otherwise be denied the same write forever."""
     digest = hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
-    return _narration_marker(
+    return _notice_marker(
         session_id, f"{memspec.WRITE_GATE_LOG_KIND}\0{rule}\0{target}\0{digest}"
     )
 
@@ -1126,20 +1105,16 @@ def _write_review(event, tool_name, tool_input, config, started_at):
 def _allow_context(event, started_at, defects, notices=()):
     """Context for a call the gate lets through: trigger cards it could not use
     are named once per session (a scar that silently stopped applying is the
-    failure the gate exists to prevent), then the write gate's own advice, then
-    any narration notice."""
+    failure the gate exists to prevent), then the write gate's own advice."""
     lines = []
     session_id = event.get("session_id")
     for name, reason in defects[: memspec.GATE_DEFECT_MAX_LINES]:
         notice = memspec.GATE_DEFECT_NOTICE.format(name=name, reason=reason)
-        if _narration_marker(session_id, notice):
+        if _notice_marker(session_id, notice):
             lines.append(notice)
     for notice in list(dict.fromkeys(notices))[: memspec.GATE_DEFECT_MAX_LINES]:
-        if _narration_marker(session_id, notice):
+        if _notice_marker(session_id, notice):
             lines.append(notice)
-    narration = _narration_context(event, started_at)
-    if narration is not None:
-        lines.append(narration["hookSpecificOutput"]["additionalContext"])
     if not lines:
         return None
     return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": "\n".join(lines)}}
@@ -1532,8 +1507,11 @@ def _selftest():
                 else:
                     os.environ[memspec.EPITYPE_CONFIG_ENV] = previous_config
 
+            # Owner 2026-09-09 (§30): the narration meter is gone. A transcript
+            # whose turn is full of mid-run prose must produce no context at all,
+            # and a matching card must still deny.
             def transcript_rows(*rows):
-                path = root / f"narration-{uuid.uuid4().hex}.jsonl"
+                path = root / f"transcript-{uuid.uuid4().hex}.jsonl"
                 path.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n", encoding="utf-8")
                 return os.fspath(path)
 
@@ -1550,36 +1528,15 @@ def _selftest():
                 result_row,
                 assistant("text", "那次失敗是我的路徑錯，改成 C:/… 重跑一次。"),
             )
-            narration_session = "narration-" + uuid.uuid4().hex
-            flagged = run_synthetic(
+            quiet = run_synthetic(
                 Path(__file__),
-                {"tool_name": "Read", "tool_input": {"path": "synthetic.txt"}, "transcript_path": narrated, "session_id": narration_session},
+                {"tool_name": "Read", "tool_input": {"path": "synthetic.txt"}, "transcript_path": narrated, "session_id": uuid.uuid4().hex},
                 config,
             )
-            flagged_value = json.loads(flagged.stdout) if flagged.stdout.strip() else {}
-            flagged_output = flagged_value.get("hookSpecificOutput", {})
-            checks.append(
-                (
-                    "narration between tool calls is named without touching the permission decision",
-                    flagged.returncode == 0
-                    and flagged_output.get("additionalContext", "").startswith(memspec.NARRATION_PREFIX)
-                    and memspec.NARRATION_ADVICE in flagged_output.get("additionalContext", "")
-                    and "permissionDecision" not in flagged_output,
-                )
-            )
-            repeat = run_synthetic(
-                Path(__file__),
-                {"tool_name": "Read", "tool_input": {"path": "synthetic.txt"}, "transcript_path": narrated, "session_id": narration_session},
-                config,
-            )
-            checks.append(("same narration is flagged once per session", repeat.returncode == 0 and not repeat.stdout.strip()))
-            opening = transcript_rows(prompt_row, assistant("text", "先看檔案再改，這是開工說明。"))
-            clean = run_synthetic(
-                Path(__file__),
-                {"tool_name": "Read", "tool_input": {"path": "synthetic.txt"}, "transcript_path": opening, "session_id": uuid.uuid4().hex},
-                config,
-            )
-            checks.append(("opening line before the first tool call is not narration", clean.returncode == 0 and not clean.stdout.strip()))
+            checks.append((
+                "prose between tool calls adds no context: the narration meter is gone",
+                quiet.returncode == 0 and not quiet.stdout.strip() and not quiet.stderr.strip(),
+            ))
             deny_first = run_synthetic(
                 Path(__file__),
                 {"tool_name": "Bash", "tool_input": {"command": "remove target"}, "transcript_path": narrated, "session_id": uuid.uuid4().hex},
@@ -1588,27 +1545,23 @@ def _selftest():
             deny_value = json.loads(deny_first.stdout) if deny_first.stdout.strip() else {}
             checks.append(
                 (
-                    "a matching card still denies ahead of narration context",
+                    "a matching card still denies, transcript or no transcript",
                     deny_value.get("hookSpecificOutput", {}).get("permissionDecision") == "deny"
                     and "additionalContext" not in deny_value.get("hookSpecificOutput", {}),
                 )
             )
 
-            sweep_root = Path(tempfile.gettempdir()) / memspec.NARRATION_MARKER_DIRECTORY
+            sweep_root = Path(tempfile.gettempdir()) / memspec.NOTICE_MARKER_DIRECTORY
             aged_session = sweep_root / ("aged-" + uuid.uuid4().hex)
             aged_session.mkdir(parents=True, exist_ok=True)
             aged_marker = aged_session / "0123456789abcdef"
             aged_marker.write_text("aged\n", encoding="ascii")
-            aged_time = time.time() - memspec.NARRATION_MARKER_TTL_SECONDS - 60
+            aged_time = time.time() - memspec.NOTICE_MARKER_TTL_SECONDS - 60
             os.utime(aged_marker, (aged_time, aged_time))
-            run_synthetic(
-                Path(__file__),
-                {"tool_name": "Read", "tool_input": {"path": "synthetic.txt"}, "transcript_path": narrated, "session_id": uuid.uuid4().hex},
-                config,
-            )
+            _notice_marker("sweep-" + uuid.uuid4().hex, "synthetic notice")
             checks.append(
                 (
-                    "aged narration markers are swept instead of accumulating",
+                    "aged notice markers are swept instead of accumulating",
                     not aged_marker.exists() and not aged_session.exists(),
                 )
             )
@@ -2227,7 +2180,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 75
+    total = 73
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

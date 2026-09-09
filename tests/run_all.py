@@ -19,7 +19,6 @@ SELFTESTS = (
     Path("epitype") / "gates_report.py",
     Path("epitype") / "pending_lint.py",
     Path("epitype") / "commitments.py",
-    Path("epitype") / "narration_meter.py",
     Path("epitype") / "harvest.py",
     Path("epitype") / "capture_route.py",
     Path("epitype") / "alias_batch.py",
