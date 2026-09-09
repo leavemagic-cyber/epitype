@@ -14,7 +14,7 @@ Storage and ranking receive most of the engineering attention. Retrieval timing 
 
 ### Epitype countermeasure
 
-`UserPromptSubmit` performs contextual card recall, while `PreToolUse` evaluates trigger-bearing scar cards against the current tool name and input before each covered action. This is narrower than claiming that every rule is injected before every possible action: prompt recall and scar interception are distinct paths. At the CLI boundary, read commands never create a missing index or disguise that state as zero hits; they return an explicit no-index error and leave first-write ownership to `build`.
+`UserPromptSubmit` performs contextual card recall, while `PreToolUse` checks the content a file write is about to commit against the settled rulings and the card contract. This is narrower than claiming that every rule is injected before every possible action: recall is a retrieval path and the write gate is a content gate, and neither one refuses a shell command — that is the host's own native rules (§34). At the CLI boundary, read commands never create a missing index or disguise that state as zero hits; they return an explicit no-index error and leave first-write ownership to `build`.
 
 CJK punctuation must delimit Latin query terms: `請查：identifier。` cannot search for the literal `：identifier。`. Recall splits those prose delimiters while preserving ASCII punctuation inside technical identifiers and paths. This does not provide semantic translation or fix missing bilingual aliases.
 
@@ -63,15 +63,16 @@ Memory is usually delivered as advisory context. Enforcement hooks may exist, bu
 
 ### Epitype countermeasure
 
-A scar card may carry `trigger.tool`, `trigger.input`, and `advice`. Shell tools match executable and unquoted argument positions by default, so trigger text in an argument is blocked too; only quoted string literals, heredoc bodies, and comments are excluded. `trigger.match: fulltext` explicitly restores whole-input matching. A match drives a bounded deny response, offers a safer alternative, and appends an audit row. The distinct claim is memory-derived interception criteria; the hook and deny mechanism themselves are not claimed as novel.
+2026-09-09 (§34) settled where the enforcement belongs. A card is advisory context; it never refuses a tool call. Two things Epitype does refuse, both content the model is about to commit and neither expressible as a host rule: the write gate checks the text a file write would land against the owner's settled `forbidden` patterns and against `card_lint`'s contract for the card's own type, and the Stop gate checks the last assistant message of a turn against the same rulings through the same validator. Both append an audit row naming the rule, the ruling and the filename — never the content. Irreversible *actions* — destructive git, killing the host process, reading credential material — are the host's own native rules (Claude `permissions.deny`, Codex `execpolicy`), which refuse the call before it runs and cannot be turned off by a malformed card.
 
 ### Self-verification
 
 ```powershell
 python adapters/claude/pretooluse_gate.py --selftest
+python adapters/claude/stop_gate.py --selftest
 ```
 
-The selftest covers a matching denial, advice text, an audit row, a non-match, and fail-open handling of a malformed card.
+The write gate's selftest covers a forbidden-content denial, the ruling text in the reason, an audit row that carries no content, the card contract's FAIL and WARN levels, the same-session dedupe, and fail-open handling of an unusable pattern — plus the negative half of §34: a card that still declares `trigger:` denies nothing and audits nothing.
 
 ## 4. Evaluation measures recall, not conduct
 
@@ -215,7 +216,7 @@ A hook must answer within the host's timeout and within its own deadline (three 
 
 ### Epitype countermeasure
 
-The vault scan lists directories with `os.scandir` and recognises symlinks and junctions from the entry's own attributes; nothing is resolved, and `_`- and `.`-prefixed parts are never entered. The stale check reads nothing inside its grace window. The action gate keeps a manifest cache of which cards declare a trigger (`<vault>/.epitype/gate_triggers.json`) and re-reads only cards that changed; a card whose trigger cannot be compiled is named to the model once per session rather than dropped. The memsearch selftest lists 300 cards and asserts that no path is resolved.
+The vault scan lists directories with `os.scandir` and recognises symlinks and junctions from the entry's own attributes; nothing is resolved, and `_`- and `.`-prefixed parts are never entered. The stale check reads nothing inside its grace window. The Stop gate keeps a manifest cache of which cards declare a decision key and re-reads only cards that changed; a ruling whose `forbidden` pattern cannot be compiled is named to the model once per session rather than dropped. The memsearch selftest lists 300 cards and asserts that no path is resolved. (Before §34 the write gate kept a second such cache, `<vault>/.epitype/gate_triggers.json`, for trigger-bearing cards; nothing reads or writes it any more, and existing files are left in place.)
 
 ### Self-verification
 
@@ -847,6 +848,11 @@ than deleting its evidence or treating it as a real owner decision.
 
 ## 24. Git option suffixes and diagnostic patterns mistaken for operations
 
+**Historical.** The mechanism this section repairs was removed on 2026-09-09
+(§34); the incident is kept because it is the evidence for that removal, and
+because the same trap waits for anyone who tries to classify a command with a
+regular expression. `tests/git_gate_regression.py` retired with the mechanism.
+
 A scar matching arbitrary text between `git` and `checkout` also matched the
 clone flag `--no-checkout`. When unsupported PowerShell syntax triggered the
 adapter's conservative full-text fallback, a quoted diagnostic regex matched
@@ -1046,6 +1052,9 @@ compaction recovery, dream, harvest, aliases, card lint and the exam runner. The
 per-session dedupe markers the PreToolUse gate needs for trigger-card defects and
 write-gate denials keep working under `NOTICE_MARKER_*`.
 
+**Superseded later the same day:** scar triggers did not survive — §34 removed them
+outright. Everything else in this list still holds.
+
 Existing `.epitype/commitments.jsonl` files are **not deleted** — the data stays
 on disk, and nothing reads it any more. Gates after the change: run_all 48/48
 (52 before), privacy PASS, corpus 330/330, seeds 15/15 and 5/5, doctor HEALTH
@@ -1139,7 +1148,6 @@ types, so `epitype cards` does not WARN on them.
 | Stop decision gate | `stop_gate._decision_frontmatter` requires `decision_key`; `_read_decision` requires `status: active` | a captured card declares neither |
 | Write gate rule A | `pretooluse_gate._forbidden_write` iterates `stop_gate._decisions` | same cards, same bar |
 | Write gate rule B | `_vault_card_path` skips any `_`/`.` path part | a proposal carries no card contract |
-| PreToolUse authorization | `_trigger_card_paths` keeps only cards declaring `trigger:` | a captured card declares none |
 | SessionStart ruling list | `_active_decisions` requires `decision_key` + `status: active` | same bar |
 | Recall | a captured card keeps its pinned seat but is labelled 「歷史捕捉（非完整對話／現行裁定）」, never `DECISION_PREFIX` | authority order is 親裁 > 自動捕捉 |
 
@@ -1241,3 +1249,104 @@ line still in place and nothing appended; plus the three the first review caught
 BOM'd file's allowed section stays byte-identical, a preamble link line stays while
 the same file's out-of-section line still moves, and a CRLF line reaches the record
 with its `\r\n` intact and twice when it sat under two sections.
+
+## 34. The card-driven action gate was a layer that should not exist (2026-09-09)
+
+### Symptom
+
+A memory card carried a `trigger.tool` regex, a `trigger.input` regex and `advice`;
+`PreToolUse` compiled every such card on every tool call, matched the pair against
+the tool name and its input, and returned a bounded denial on a hit. Nine cards in
+the owner's own vault ran that way — destructive git, `git add -A`, killing the host
+process, reading credential material, and five environment traps.
+
+### Owner's ruling, verbatim
+
+> 「我認為沒有所謂攔截層，應該都是變成類似規則或記憶卡，沒必要多設計攔截層出來」
+
+> 「機械阻斷<-這個就是多餘設計，我認為這種就是核心記憶」
+
+The Q4 answer kept the Stop decision gate and the write-content gate; only the
+card-trigger interception was struck.
+
+### Root cause
+
+The gate was built because a rule written in prose does not stop a hand. That
+observation is correct, and the conclusion drawn from it was not: it produced a
+*third* enforcement layer in front of two that already covered the same calls —
+the host's native rules, which refuse an irreversible action before it runs, and
+the contract the model reads. Three consequences followed.
+
+1. **It could not do the job it claimed.** A regex over a command string is not a
+   shell parser. §24 is the receipt: a pattern narrow enough to catch
+   `reset --hard` also caught the clone option `--no-checkout` and a diagnostic
+   regular expression that executed nothing, while an unparsed wrapper fell back to
+   whole-input matching and denied a quoted mention. Both directions were wrong at
+   once, and the fix each time was a longer pattern.
+2. **It was paid for on every tool call.** Reading the trigger cards, compiling two
+   regexes each and classifying command positions ran before every covered call,
+   inside a nine-second fail-open deadline — for a decision the host had already
+   made, or would make, in its own configuration.
+3. **A card that failed open was silent.** A malformed trigger disabled the guard
+   and left a notice; a hung one was killed by the host and the call proceeded. A
+   guard that can be switched off by a typo in a memory card is not a guard.
+
+The prerequisite that made removal safe was in place first: Claude's
+`permissions.deny` already covers credential material, destructive git, `git add -A`
+and killing the host process, and Codex's native `execpolicy` rule file
+(`~/.codex/rules/epitype_guard.rules`) was installed and verified on the real
+machine. The standing rule that follows: **Epitype gates content, never actions.**
+Irreversible actions belong to the host's own native rules; what stays here is the
+pair of gates over what the model is about to write or say, which no host rule can
+express.
+
+### Removed
+
+| Kind | Item |
+|---|---|
+| gate path | `pretooluse_gate`: `_trigger_card_paths`, `_parse_trigger_card`, `_declares_trigger`, `_write_trigger_cache`, `_inline_mapping`, `_bounded_deny`, `_append_audit`, `_append_parse_defect`, `_parse_defect_seen_today` |
+| command parsing | `_command_candidates`, `_shell_segments`, `_without_heredoc_bodies`, `_heredoc_markers`, `_python_embedded_commands`, `_command_match_position`, `_uses_command_matching`, `SHELL_TOOL_NAMES` |
+| constants | `memspec.TRIGGER_TOOL_FIELD`, `TRIGGER_INPUT_FIELD`, `TRIGGER_MATCH_FIELD`, `TRIGGER_COMMAND_MATCH`, `TRIGGER_FULLTEXT_MATCH`, `TRIGGER_TOOL_PATH`, `TRIGGER_INPUT_PATH`, `GATE_DEFECT_NOTICE`; `TRIGGER_REGEX_MAX_CHARS` renamed `FORBIDDEN_REGEX_MAX_CHARS` |
+| state files | `<vault>/.epitype/gate_triggers.json` and `gate_parse_defect_seen.json` are neither read nor written; existing files are left on disk |
+| card contract | `scar` no longer requires `trigger.tool`/`trigger.input`; `trigger` is not a type signal any more, and a card that still declares one gets one `card_lint` WARN (`deprecated-field`) rather than a FAIL |
+| test | `tests/git_gate_regression.py` (retired: it graded the command matcher against 31 git command shapes) |
+| test | `tests/capture_admission_regression.py` consumer 3 (「PreToolUse 授權判定只讀宣告 trigger 的卡」); the other four consumers stay |
+| template | the four example cards keep their incident and advice and lose their trigger; `templates/power/examples/scar-destructive-git.md` now records why a lexical pattern was the wrong shape |
+
+Kept and moved rather than removed: the bounded-regex validator that rejects
+catastrophic backtracking, renamed `_compile_bounded_regex` — it is the shared
+reading of a decision card's `forbidden` patterns for both gates — and the YAML flow
+splitter, now `memspec.split_flow_items`, which the Stop gate and `dream.py` had
+been borrowing from the trigger parser.
+
+### Exam questions retired
+
+**89 graded gate questions changed verdict, none deleted.** Every `gate` question in
+the graded corpora installed a trigger card and asserted a denial, so each one now
+asserts the opposite and is a regression test for this removal: `corpus_300.json`
+59 of 80 flipped from `deny` to `allow` (the other 21 already expected `allow`), and
+`seeds_20260902_morning_review.json` 5 of 9. Denominators are unchanged — corpus
+330/330, seeds 15/15 and 5/5 — and the categories keep their counts. The packaged
+`exam/sample_corpus.json` kept its three gate questions at 16 total but rebuilt them
+on the write gate: two denials (English and Chinese) against an active ruling's
+`forbidden` pattern, and one allow for content that follows the ruling.
+
+One repeatability defect surfaced while rebuilding them: the write gate blocks a
+given `(session, rule, file, content)` exactly once, so a corpus replayed twice saw
+the second run allowed. `_run_gate` now gives each question its own session id and
+clears the markers afterwards, the same treatment `_run_stop` already had
+(`_hook_common.clear_notice_markers`).
+
+### Gates after the change
+
+run_all 48/48 (49 before, minus the retired git-gate regression), privacy PASS,
+corpus 330/330, seeds 15/15 and 5/5. Selftest denominators: pretooluse 30 (73
+before), card_lint 42 (41 before), exam runner 7, stop 22 unchanged.
+
+### Boundary
+
+This removes Epitype's claim to stop an action; it does not remove the hazard. The
+guarantee now rests entirely on the host's native rules, which are configuration
+outside this repository and are not tested by these gates. A host installed without
+them has no action-level protection from Epitype — and, per §24, never really had
+the protection the trigger cards appeared to offer.

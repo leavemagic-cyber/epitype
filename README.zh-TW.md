@@ -23,7 +23,7 @@ Epitype 把同一組原生 vault 接到五個 host 事件：
 |---|---|
 | `SessionStart` | 記憶索引或工作帳本存在時，在大小上限內注入內容。 |
 | `UserPromptSubmit` | 在共用輸出預算內，從每個已解析的 vault 取回最多五張相關卡片。簡短的 owner 授權語句會逐字保存、去重並立即進索引；捕捉當下不替原話加上解釋。 |
-| `PreToolUse` | 用工具與輸入比對傷疤卡 trigger。命中時回傳有界拒絕、較安全的做法與一列稽核紀錄。 |
+| `PreToolUse` | 寫檔閘：檔案寫入落盤前，先用現行裁定與卡片型別合約檢查要寫進去的內容。擋下時回傳那條裁定與一列稽核紀錄。 |
 | `PreCompact` | 在 context 壓縮前，從 transcript 尾端製作小型復原地圖。 |
 | `Stop` | 回合結束決策閘：回覆若再提已否決選項或再問已裁定的事就擋下。 |
 
@@ -38,8 +38,8 @@ Epitype 把同一組原生 vault 接到五個 host 事件：
 `verified: false`；轉正＝改成 `verified: true` 並補 `verified_by`／`verified_at` 再搬檔，
 回放不會替你做這件事。
 
-`verified: false` 的卡不是任何東西的依據：Stop 決策閘、寫檔閘、PreToolUse 授權判定、
-開場現行裁定清單讀的都是宣告 `decision_key`／`trigger` 的卡，捕捉卡從來不宣告這些。
+`verified: false` 的卡不是任何東西的依據：Stop 決策閘、寫檔閘與開場現行裁定清單
+讀的都是宣告 `decision_key` 的卡，捕捉卡從來不宣告這個。
 喚回照樣端得出來，但掛的是「歷史捕捉」而不是現行裁定。細節與量測見
 `docs/FAILURE_MODES.md` §32。
 
@@ -49,9 +49,9 @@ Epitype 把同一組原生 vault 接到五個 host 事件：
 
 決策卡使用穩定的 `decision_key`，並記錄 `active` 或 `superseded` 狀態、生效時間與決定來源。每個 key 應只有一張 active 卡。`query`、`recall` 與 prompt hook 預設排除已被取代的卡，但保留歷史來源；只有在查沿革時才明確加上 `--include-superseded`。
 
-### 傷疤可以攔下動作
+### 傷疤，以及真正攔得住動作的是什麼
 
-傷疤是由實際事故產生的規則。適合攔截的卡片加上 `trigger.tool`、`trigger.input` 與可執行的 `advice` 後，就能成為窄範圍動作閘。命令比對預設只看可執行位置與未加引號的引數，所以引號字串、註解或 heredoc 內文出現觸發詞時不會誤攔；需要逐字全文比對的卡片可明確選用 full-text 模式。
+傷疤是由實際事故產生的規則：一個 `incident`（哪次踩到）加上可執行的 `advice`（改走哪條路）。卡片是被讀回一個回合的內容，不是拒絕——它擋不住任何一次工具呼叫，用字串樣式假裝擋得住只會同時製造誤擋與虛假的安全感。不可逆動作交給宿主自己的原生規則（Claude `permissions.deny`、Codex `execpolicy`），在呼叫發生前就拒絕。Epitype 只擋內容：下面的寫檔閘，與回合結束的 Stop 閘。
 
 ### 安裝沿用原生記憶
 
@@ -195,7 +195,7 @@ epitype uninstall
 
 - hook 只能治理 host 有提供的事件與工具；直接讀檔不會經過 Epitype 的現行決定過濾。
 - 執行時間與輸出上限要求 Epitype 選擇內容，不會在每個 prompt 塞入整座 vault。
-- 動作閘的準確度取決於傷疤 trigger 與 advice。卡片格式有誤時會 fail open，不接管 host。
+- Epitype 擋的是內容而不是動作：它不會拒絕任何一條 shell 指令或讀檔。不可逆動作由宿主原生規則負責。卡片格式有誤時會 fail open，不接管 host。
 - 目前測過的 host 邊界是 Claude Code 與 Codex；host 升級後仍需重新做整合驗證。
 - 隨箱測試使用合成資料，驗的是行為與失敗處理，不是長期實地成效。
 

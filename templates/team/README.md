@@ -6,7 +6,7 @@ Use this template when several trusted writers share one vault.
 
 - `vault/MEMORY.md`, `vault/SCARS.md`, and `vault/_WORK_LEDGER.md` keep stable habits, incident reflexes, and pending work separate.
 - `vault/habits/`, `vault/scars/`, and `vault/decisions/` hold fuller cards.
-- `examples/` contains synthetic team conventions, one decision card, and one trigger card. Examples remain outside the live vault until reviewed.
+- `examples/` contains synthetic team conventions, one decision card, and one scar card. Examples remain outside the live vault until reviewed.
 
 ## Shared-write contract
 
@@ -28,7 +28,7 @@ From the repository root:
 ```powershell
 python epitype/memspec.py --selftest
 python epitype/decision_lint.py templates/team/examples --audit
-python adapters/claude/pretooluse_gate.py --selftest
+python epitype/card_lint.py templates/team/examples
 ```
 
 The lock selftest uses concurrent synthetic writers. It does not prove that an external editor participates in the lock contract.

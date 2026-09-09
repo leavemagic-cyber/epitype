@@ -1,16 +1,15 @@
 ---
 name: Guard synthetic shared configuration
-description: Intercept replacement of a shared sample configuration until it is read and merged under the common lock.
+description: 2026-09-09 a shared sample configuration is read and merged under the common lock, never replaced.
 metadata:
   type: scar
 aliases: [shared config guard, merge before replace]
 scope: infra
-trigger:
-  tool: ^(Bash|Shell|shell_command)$
-  input: (?i)\b(overwrite|replace)\b.*\bshared-config\b
 advice: Read the current shared configuration, acquire the common writer lock, and merge only the intended field.
+incident: Synthetic example, 2026-09-09: a shared sample configuration was replaced wholesale and lost another writer's field.
 ---
 
 # Guard synthetic shared configuration
 
-This synthetic trigger models a team write hazard without naming a real system or file.
+This synthetic example models a team write hazard without naming a real system
+or file.

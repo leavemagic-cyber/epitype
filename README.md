@@ -23,7 +23,7 @@ Epitype connects the same native vaults to five host events:
 |---|---|
 | `SessionStart` | Injects a bounded memory index and work ledger when those files exist. |
 | `UserPromptSubmit` | Recalls up to five relevant cards from each resolved vault within the shared output budget. Short owner statements are stored verbatim, deduplicated, and indexed; their meaning is not inferred during capture. |
-| `PreToolUse` | Matches scar-card triggers against the tool and its input. A match returns a bounded denial, safer advice, and an audit row. |
+| `PreToolUse` | Write gate: checks the content a file write is about to commit against the settled rulings and the card contract. A block returns the ruling and an audit row. |
 | `PreCompact` | Builds a small recovery map from the transcript tail before context compaction. |
 | `Stop` | Round-end decision gate: blocks a reply that re-proposes a rejected option or re-asks a ruled question. |
 
@@ -41,8 +41,8 @@ recalled, waiting for a person. Both kinds carry `provenance: auto-captured` and
 `verified_by`/`verified_at`) and moving the file — a replay refuses to do it.
 
 No `verified: false` card is authority for anything: the Stop decision gate, the
-write gate, the PreToolUse authorization check and the SessionStart ruling list all
-read cards that declare `decision_key`/`trigger`, which a captured card never does.
+write gate and the SessionStart ruling list all read cards that declare
+`decision_key`, which a captured card never does.
 Recall still surfaces it, labelled as history rather than as a standing decision.
 Details and the measured trade in `docs/FAILURE_MODES.md` §32.
 
@@ -52,9 +52,9 @@ Details and the measured trade in `docs/FAILURE_MODES.md` §32.
 
 Decision cards have a stable `decision_key`, an `active` or `superseded` status, an effective time, and a named decision source. Exactly one card should be active for each key. `query`, `recall`, and the prompt hook exclude superseded cards by default while retaining them for provenance. Use `--include-superseded` only when you want the history.
 
-### Scars that can stop an action
+### Scars, and what actually stops an action
 
-A scar is an incident-born rule. Adding `trigger.tool`, `trigger.input`, and actionable `advice` turns a suitable scar into a narrow action gate. Command matching inspects executable and unquoted argument positions by default, so a trigger word inside a quoted string, comment, or heredoc body does not block the command. Cards that need literal full-text matching can opt in explicitly.
+A scar is an incident-born rule: the `incident` it came from and actionable `advice` that names the safer route. A card is context read back into a turn, not a refusal — it cannot stop a tool call, and a lexical pattern pretending otherwise produces both false denials and false confidence. Irreversible actions belong to the host's own native rules (Claude `permissions.deny`, Codex `execpolicy`), which refuse the call before it runs. Epitype refuses only content: the write gate below, and the Stop gate at the end of a turn.
 
 ### Native-first installation
 
@@ -198,7 +198,7 @@ Read [Uninstall Epitype](docs/UNINSTALL.md) before restoring a backup manually.
 
 - Hooks can govern only events and tools the host exposes. Direct file reads remain outside Epitype's current-decision filter.
 - The time and output ceilings require selection; Epitype never injects the entire vault into every prompt.
-- Action gates are only as precise as their scar triggers and advice. Malformed cards fail open rather than taking control of the host.
+- Epitype gates content, not actions: it never refuses a shell command or a read. Irreversible actions are the host's own native rules to refuse. Malformed cards fail open rather than taking control of the host.
 - Claude Code and Codex are the tested host boundary. A host upgrade still needs integration testing.
 - The bundled tests are synthetic. They exercise behavior and failure handling, not long-term field performance.
 

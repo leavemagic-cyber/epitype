@@ -1,5 +1,5 @@
 import sys; [getattr(stream, "reconfigure", lambda **_: None)(encoding="utf-8", errors="replace") for stream in (sys.stdout, sys.stderr)]  # cp950 consoles.
-"""One card, one reading: the index, the lints, and the action gate must agree
+"""One card, one reading: the index, the lints, and the write gate must agree
 on where a card's frontmatter ends and what its fields say.
 
 Five card shapes that used to split the readers — a BOM with CRLF, a `...`
@@ -16,8 +16,7 @@ if str(REPO_ROOT) not in sys.path:
 if str(REPO_ROOT / "adapters" / "claude") not in sys.path:
     sys.path.insert(0, str(REPO_ROOT / "adapters" / "claude"))
 
-from epitype import decision_lint, memsearch, memspec, pending_lint, scar_census  # noqa: E402
-import pretooluse_gate  # noqa: E402
+from epitype import card_lint, decision_lint, memsearch, memspec, pending_lint, scar_census  # noqa: E402
 
 CARDS = {
     "bom-crlf.md": "﻿---\r\nname: bom card\r\ndescription: 2026-06-01 待辦 written in frontmatter\r\nstatus: active\r\n---\r\nbody line\r\n",
@@ -50,7 +49,11 @@ def _readings(path):
     """(name, description, status, frontmatter line count) as each reader sees them."""
     indexed = memsearch._read_card(path)
     linted, problem = decision_lint._parse_frontmatter(path)
-    gate_lines = pretooluse_gate._frontmatter(path)
+    # 寫檔閘規則 B 讀卡片走的就是 card_lint 這個入口（已讀進來的一份文字判型別＋欄位），
+    # 所以「動作閘那一份讀法」在 U-J 之後由它代表。
+    _gate_type, gated = card_lint.card_type_of(
+        path.name, path.read_text(encoding="utf-8-sig"), path
+    )
     census, _body = scar_census._frontmatter_fields(path)
     front_lines, _closing = memspec.split_frontmatter(path.read_text(encoding="utf-8"))
     return {
@@ -61,7 +64,7 @@ def _readings(path):
             linted.get(memspec.DECISION_STATUS_FIELD, ""),
             len(front_lines),
         ),
-        "gate": (linted.get("name", ""), linted.get("description", ""), linted.get(memspec.DECISION_STATUS_FIELD, ""), len(gate_lines)),
+        "gate": (gated.get("name", ""), gated.get("description", ""), gated.get(memspec.DECISION_STATUS_FIELD, ""), len(front_lines)),
         "scar_census": (census.get("name", ""), linted.get("description", ""), linted.get(memspec.DECISION_STATUS_FIELD, ""), len(front_lines)),
     }, problem
 

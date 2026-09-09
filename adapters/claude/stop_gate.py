@@ -101,7 +101,7 @@ def _sequence_fields(front_lines, top_level_field, inline_items):
     memspec.frontmatter_fields yields top-level scalars only, memsearch yields
     aliases only, and card_lint yields item counts only — none of the three yields
     `forbidden`'s values. The primitives are still the shared ones (split_frontmatter,
-    parse_scalar, the gate's own comma splitter), so a card cannot be one shape here
+    parse_scalar, memspec.split_flow_items), so a card cannot be one shape here
     and another shape to the lints."""
     wanted = (memspec.ALIASES_FIELD, memspec.FORBIDDEN_FIELD)
     values = {key: [] for key in wanted}
@@ -154,8 +154,6 @@ def _read_decision(path):
     U38: reads via memspec.frontmatter_fields/memspec.TOP_LEVEL_FIELD directly —
     the same primitives decision_lint._parse_frontmatter wraps — so this gate no
     longer pays decision_lint's argparse/dataclasses import even deferred."""
-    from pretooluse_gate import _inline_items
-
     front_lines = _decision_frontmatter(path)
     if front_lines is None:
         return None
@@ -163,7 +161,7 @@ def _read_decision(path):
     key = _one_line(fields.get(memspec.DECISION_KEY_FIELD))
     if not key or _one_line(fields.get(memspec.DECISION_STATUS_FIELD)) != memspec.ACTIVE_DECISION_STATUS:
         return None
-    sequences = _sequence_fields(front_lines, memspec.TOP_LEVEL_FIELD, _inline_items)
+    sequences = _sequence_fields(front_lines, memspec.TOP_LEVEL_FIELD, memspec.split_flow_items)
     decided_by = _one_line(fields.get(memspec.DECIDED_BY_FIELD))
     quote = _one_line(fields.get(memspec.OWNER_QUOTE_FIELD))
     if not quote and decided_by != memspec.OWNER_EXPLICIT_DECIDER:
@@ -322,12 +320,12 @@ def _forbidden_fragment(decision, message, defects):
     A pattern the shared validator rejects is dropped and named on stderr, never
     silently: an unusable pattern is a ruling that stopped being enforced, and the
     turn still ends rather than being blocked by a card nobody can fix."""
-    from pretooluse_gate import _compile_trigger_regex
+    from pretooluse_gate import _compile_bounded_regex
 
     quoted = _quoted_spans(message)
     for pattern in decision.forbidden:
         try:
-            regex = _compile_trigger_regex(pattern)
+            regex = _compile_bounded_regex(pattern)
         except Exception as exc:
             defects.append(
                 memspec.STOP_GATE_PATTERN_DEFECT.format(

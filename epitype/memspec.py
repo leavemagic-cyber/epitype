@@ -98,10 +98,10 @@ SESSIONSTART_BUDGET_SECONDS = 5.0
 SESSIONSTART_SEGMENT_FLOOR_SECONDS = 0.25
 HOOK_DEFAULT_BUDGET_BYTES = 8 * 1024
 HOOK_MAX_OUTPUT_BYTES = 10 * 1024
-TRIGGER_REGEX_MAX_CHARS = 1024
-# A trigger card the gate cannot use is named to the model once per session:
-# a scar that silently stopped applying is the failure the gate exists to prevent.
-GATE_DEFECT_NOTICE = "⚠ Epitype 動作閘：卡片 {name} 的 trigger 無法使用（{reason}），這條傷疤暫不生效；修正卡片後自動恢復。"
+# 決策卡 forbidden 正則的長度上限。Stop 閘與寫檔閘都在 hook 期限內編譯它，沒有上限
+# 的樣式等於一道可以被拖死的閘。（2026-09-09 U-J：這個上限原本屬於已移除的 trigger
+# 路徑，現在只服務 forbidden。）
+FORBIDDEN_REGEX_MAX_CHARS = 1024
 GATE_DEFECT_MAX_LINES = 3
 # 手寫短入口對非原生載入的宿主（Codex）整段回音：裝得下就整段，裝不下才排序取樣
 # 並在最後一行明說少了多少位元組。舊碼一律截前 3 KB 不留痕跡，收件端無從得知
@@ -117,12 +117,11 @@ UNTRUSTED_ADVISORY = (
 )
 # 2026-09-09 owner 裁定（FAILURE_MODES §30）：產品不再內建任何行為守則文字。
 # 生成前守則（QUESTION_PREFLIGHT／TURN_CONTINUITY）已移除，行為層靠卡片與考題。
+# 2026-09-09 owner 裁定（FAILURE_MODES §34）：卡片 trigger 的機械攔截整條拆除，不可逆
+# 動作交宿主原生規則。欄位名只留給 card_lint 認出「已停用欄位」，沒有任何閘再讀它。
 TRIGGER_FIELD = "trigger"
-TRIGGER_TOOL_FIELD = "tool"
-TRIGGER_INPUT_FIELD = "input"
-TRIGGER_MATCH_FIELD = "match"
-TRIGGER_COMMAND_MATCH = "command"
-TRIGGER_FULLTEXT_MATCH = "fulltext"
+DEPRECATED_CARD_FIELDS = (TRIGGER_FIELD,)
+DEPRECATED_FIELD_REASON = "{field} 是已停用欄位，任何工具都不再讀取它"
 ADVICE_FIELD = "advice"
 MEMORY_INDEX_FILENAME = "MEMORY.md"
 WORK_LEDGER_FILENAME = "_WORK_LEDGER.md"
@@ -491,8 +490,6 @@ PENDING_NAME_PREFIX = "pending-"
 METADATA_FIELD = "metadata"
 METADATA_TYPE_FIELD = "metadata.type"
 METADATA_MODIFIED_FIELD = "metadata.modified"
-TRIGGER_TOOL_PATH = TRIGGER_FIELD + "." + TRIGGER_TOOL_FIELD
-TRIGGER_INPUT_PATH = TRIGGER_FIELD + "." + TRIGGER_INPUT_FIELD
 # 到期日是作者親手寫的，過期只 WARN；協定 §3.5 允許歸檔、永遠不允許刪。
 CARD_EXPIRY_FIELDS = (GRANT_EXPIRES_FIELD, VALID_UNTIL_FIELD)
 # 通用卡的日期任一即可；沒有任何日期的卡無法判斷它講的是哪個時點的事實。
@@ -530,7 +527,9 @@ CARD_REQUIRED_FIELDS = {
         DECIDED_BY_FIELD,
         ALIASES_FIELD,
     ),
-    CARD_TYPE_SCAR: (TRIGGER_TOOL_PATH, TRIGGER_INPUT_PATH, ADVICE_FIELD, INCIDENT_FIELD),
+    # 2026-09-09 U-J：trigger.tool／trigger.input 隨機械攔截一併退役，傷疤卡剩下
+    # 「哪次事故」與「改走哪條路」兩個必填欄位。
+    CARD_TYPE_SCAR: (ADVICE_FIELD, INCIDENT_FIELD),
     CARD_TYPE_GRANT: CARD_EVENT_REQUIRED_FIELDS,
     CARD_TYPE_CORRECTION: CARD_EVENT_REQUIRED_FIELDS,
     CARD_TYPE_RULING: CARD_EVENT_REQUIRED_FIELDS,
@@ -740,8 +739,6 @@ WRITE_GATE_FIELD_EXAMPLES = {
     OWNER_QUOTE_FIELD: "owner_quote: 虛擬必須鏡像實盤",
     ALIASES_FIELD: "aliases: [虛擬盤, 鏡像實盤]",
     FORBIDDEN_FIELD: "forbidden: [兩套參數]",
-    TRIGGER_TOOL_PATH: "trigger: {tool: ^Bash$}",
-    TRIGGER_INPUT_PATH: "trigger: {input: rm\\s+-rf}",
     ADVICE_FIELD: "advice: 改用 Write 落檔",
     INCIDENT_FIELD: "incident: 2026-09-06 三個 session 各踩一次",
     CAPTURED_AT_FIELD: "captured_at: 2026-09-06T00:00:00Z",
@@ -809,6 +806,42 @@ def parse_scalar(raw_value):
             return "", "雙引號字串未閉合"
         return value[1:-1].replace('\\"', '"').replace("\\\\", "\\"), None
     return value, None
+
+
+def split_flow_items(body):
+    """The items of a YAML flow sequence or mapping body, split on the commas that
+    are not inside a quoted value.
+
+    2026-09-09 U-J moved this here from the PreToolUse adapter: it was the trigger
+    parser's own splitter, but the Stop gate's `forbidden`/`aliases` reading and
+    `dream.py`'s decision sweep both borrowed it, and a splitter every reader shares
+    belongs in the spec module rather than in a host adapter."""
+    items = []
+    current = []
+    quote = None
+    escaped = False
+    for character in body:
+        if quote is not None:
+            current.append(character)
+            if escaped:
+                escaped = False
+            elif character == "\\" and quote == '"':
+                escaped = True
+            elif character == quote:
+                quote = None
+            continue
+        if character in ('"', "'"):
+            quote = character
+            current.append(character)
+        elif character == ",":
+            items.append("".join(current).strip())
+            current = []
+        else:
+            current.append(character)
+    if quote is not None:
+        raise ValueError("unterminated quoted value")
+    items.append("".join(current).strip())
+    return [item for item in items if item]
 
 
 def join_block_scalar(style, lines):

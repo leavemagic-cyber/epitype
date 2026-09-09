@@ -68,20 +68,21 @@
       "setup": {
         "vault_cards": [
           {
-            "path": "gates/copy-first.md",
-            "content": "---\nname: Copy First Sample\ntrigger:\n  tool: ^Write$\n  input: overwrite draft\nadvice: Review a copy first.\n---\nSynthetic safety example.\n"
+            "path": "decisions/sample-channel.md",
+            "content": "---\nname: Sample release channel\ndescription: 2026-09-09 the synthetic sample ships on the stable channel\ndecision_key: sample-release-channel\nstatus: active\ncurrent_decision_at: 2026-09-09\ndecided_by: owner-explicit\nowner_quote: The synthetic sample ships on the stable channel.\naliases: [sample channel, release channel]\nforbidden: [preview channel]\n---\nSynthetic decision card.\n"
           }
         ]
       },
       "input": {
         "tool_name": "Write",
         "tool_input": {
-          "action": "overwrite draft"
+          "file_path": "synthetic-plan.txt",
+          "content": "Ship the synthetic sample on the preview channel instead."
         }
       },
       "expect": {
         "decision": "deny",
-        "advice_contains": "Review a copy first."
+        "advice_contains": "preview channel"
       }
     },
     {
@@ -90,20 +91,21 @@
       "setup": {
         "vault_cards": [
           {
-            "path": "gates/list-first.md",
-            "content": "---\nname: 先列出合成目錄\ntrigger:\n  tool: ^Bash$\n  input: 移除合成目錄\nadvice: 請先列出目錄並核對範圍。\n---\n中立的安全示例。\n"
+            "path": "decisions/sample-nightly.md",
+            "content": "---\nname: 合成夜間批次裁定\ndescription: 2026-09-09 合成夜間批次一天只跑一次\ndecision_key: sample-nightly-batch\nstatus: active\ncurrent_decision_at: 2026-09-09\ndecided_by: owner-explicit\nowner_quote: 合成夜間批次一天只跑一次。\naliases: [夜間批次, 合成批次]\nforbidden: [跑第二次]\n---\n中立的合成決策卡。\n"
           }
         ]
       },
       "input": {
-        "tool_name": "Bash",
+        "tool_name": "Write",
         "tool_input": {
-          "command": "移除合成目錄"
+          "file_path": "synthetic-note.txt",
+          "content": "合成夜間批次改成跑第二次補資料。"
         }
       },
       "expect": {
         "decision": "deny",
-        "advice_contains": "先列出目錄"
+        "advice_contains": "跑第二次"
       }
     },
     {
@@ -112,15 +114,16 @@
       "setup": {
         "vault_cards": [
           {
-            "path": "gates/write-only.md",
-            "content": "---\nname: Write Event Sample\ntrigger:\n  tool: ^Write$\n  input: replace sample\nadvice: Keep the prior sample available.\n---\nSynthetic gate card.\n"
+            "path": "decisions/sample-channel.md",
+            "content": "---\nname: Sample release channel\ndescription: 2026-09-09 the synthetic sample ships on the stable channel\ndecision_key: sample-release-channel\nstatus: active\ncurrent_decision_at: 2026-09-09\ndecided_by: owner-explicit\nowner_quote: The synthetic sample ships on the stable channel.\naliases: [sample channel, release channel]\nforbidden: [preview channel]\n---\nSynthetic decision card.\n"
           }
         ]
       },
       "input": {
-        "tool_name": "Read",
+        "tool_name": "Write",
         "tool_input": {
-          "path": "synthetic-note.txt"
+          "file_path": "synthetic-plan.txt",
+          "content": "Ship the synthetic sample on the stable channel, as already decided."
         }
       },
       "expect": {

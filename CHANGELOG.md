@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### U-J：拆掉傷疤卡 trigger 的機械攔截（owner 2026-09-09；FAILURE_MODES §34）
+
+- owner 裁定原話：「我認為沒有所謂攔截層，應該都是變成類似規則或記憶卡，沒必要多設計攔截層出來」「機械阻斷<-這個就是多餘設計，我認為這種就是核心記憶」。PreToolUse 不再讀卡片的 `trigger:`、不再比對工具名與指令字串、不再因此擋下任何一次呼叫；留下的只有寫檔內容閘（規則 A 現行裁定 `forbidden`、規則 B 卡片型別合約）與它的 `_GATE_LOG.jsonl` 稽核。**不可逆動作交給宿主原生規則**（Claude `permissions.deny`、Codex `execpolicy` `~/.codex/rules/epitype_guard.rules`），在呼叫發生前就拒絕。
+- 根因：那是第三層。字串樣式當不了 shell 解析器（§24 就是收據：擋 `reset --hard` 的樣式同時擋掉 clone 的 `--no-checkout` 與一段只在做診斷的正則），成本卻攤在每一次工具呼叫上，而且一個打錯的 trigger 就能把守衛靜靜關掉。
+- 移除：`_trigger_card_paths`／`_parse_trigger_card`／`_declares_trigger`／`_write_trigger_cache`／`_inline_mapping`／`_bounded_deny`／`_append_audit`／`_append_parse_defect` 與整組命令解析（`_command_candidates`、`_shell_segments`、heredoc 剝除、`python -c` 內嵌命令、命令位置判定、`SHELL_TOOL_NAMES`）。常數移除 `memspec.TRIGGER_TOOL_FIELD`／`TRIGGER_INPUT_FIELD`／`TRIGGER_MATCH_FIELD`／`TRIGGER_COMMAND_MATCH`／`TRIGGER_FULLTEXT_MATCH`／`TRIGGER_TOOL_PATH`／`TRIGGER_INPUT_PATH`／`GATE_DEFECT_NOTICE`；`TRIGGER_REGEX_MAX_CHARS` 更名 `FORBIDDEN_REGEX_MAX_CHARS`（它現在只服務 `forbidden`）。`<vault>/.epitype/gate_triggers.json` 與 `gate_parse_defect_seen.json` 不再讀寫，既有檔留在磁碟不刪。
+- 保留但改名／搬家：防災難性回溯的正則驗證器 → `pretooluse_gate._compile_bounded_regex`（兩道閘讀 `forbidden` 的同一份）；YAML flow 逗號切分器 → `memspec.split_flow_items`（Stop 閘與 `dream.py` 本來就跟 trigger 解析器借這一支）。
+- 卡片契約：`scar` 型別的必填欄位由 `trigger.tool`／`trigger.input`／`advice`／`incident` 縮為 `advice`／`incident`；`trigger` 不再是型別的結構訊號，卡片還留著它只換來一則 `card_lint` WARN（`deprecated-field`，語言中立模板 `memspec.DEPRECATED_FIELD_REASON`），不是 FAIL。
+- 退役：`tests/git_gate_regression.py`（整支只驗命令比對，31 個 git 指令形狀）；`tests/capture_admission_regression.py` 的第 3 條消費端查證（其餘四條保留）。範本四張示例卡保留 incident 與 advice、去掉 trigger，`templates/power/examples/scar-destructive-git.md` 改記「為什麼字串樣式是錯的形狀」。
+- 考題：**89 題改判、0 題刪除**。graded 題庫裡每一題 `gate` 都是「裝一張 trigger 卡→期待 deny」，現在全部反過來成為本單的回歸——`corpus_300.json` 80 題中 59 題由 `deny` 改 `allow`（另 21 題本來就是 `allow`），`seeds_20260902_morning_review.json` 9 題中 5 題。分母不變。隨箱 `exam/sample_corpus.json` 的三題 gate 就地改建在寫檔閘上（中英各一題命中現行裁定 `forbidden` 而被擋、一題照裁定寫而放行），總題數仍 16。
+- 順手修掉的可重跑性缺陷：寫檔閘對同一組（session、規則、檔案、內容）只擋一次，同一份題庫連跑兩次時第二次會變成放行。`exam_runner._run_gate` 改為每題自己一個 session id、跑完清掉標記（與 `_run_stop` 同一套；新增 `_hook_common.clear_notice_markers`）。
+- 閘門：run_all 由 49/49 降為 **48/48**（退役一支回歸）、privacy PASS、corpus 330/330、seeds 15/15 與 5/5。selftest 分母：pretooluse 73 → **30**、card_lint 41 → **42**、exam runner 7/7、stop 22/22 不變。
+
 - 夢多一個順路任務「主記憶整形」（owner 2026-09-09：「我們不是有類似夢的機制，不就是剛好處理這個?」；FAILURE_MODES §33）：`MEMORY.md` 被 §31 修短之後會自己長回來——宿主「存卡後在 MEMORY.md 加一行」的預設、別場 session 直接編輯——而事前用寫檔閘擋會連手寫短入口本來就長成那樣的 `- [name](card.md)` 一起擋掉。改由 03:30 那場夢事後整形：允許段（`memspec.INDEX_ALLOWED_SECTIONS`＝習慣與偏好／找不到就搜／索引卡／專案規則，各含英文寫法）內一律不動；允許段以外、且連到的卡 `_views/current.md` 或 `history/closed.md` 已經列出的整行，原文照搬進 `<vault>/_drafts/index_pruned/YYYYMMDD.md`（附時間、來源段、原因），不刪。
 - 視圖沒列到的連結不搬，只列進報告：那可能是幾分鐘前才寫好、目錄還沒生成的新卡。整形排在順路重生 `_views/` 之後，因為「目錄已經承載這張卡」就是它唯一的判準，判準不能是舊的。
 - 寫法是受控的小範圍改寫，不是重寫：讀→記 mtime＋大小→算→寫前再比 mtime＋大小→帶原內容比對的換名寫入（`card_io.replace_if_unchanged`，取鎖）→再讀核對。任一步對不上就整份放棄、報告記一行、下次夢重試。紀錄檔先寫、`MEMORY.md` 後改，所以被拒的換名不會弄丟行；下一次靠「原文行已在檔內」去重，不疊第二份。`--dry-run` 只印會搬幾行，一個位元組都不動。
@@ -14,7 +26,7 @@
 - 其餘「現行規則仍會捕捉」的句子改寫提案：`<vault>/_drafts/captured_pending/YYYYMMDD/<原本的檔名>.md`。`_` 開頭的路徑段本來就不在 `memsearch._scan_vault` 的掃描範圍，所以提案不進索引、不被喚回、也不受寫檔閘的卡片契約管——沒有第二條排除規則要同步。線上 hook 與離線回放（harvest）共用 `capture.write_capture` 這一處判定，落點一致；`--dry-run` 多印一種 `WOULD PROPOSE`。
 - 轉正是人的動作，不是回放：`harvest --reevaluate --apply` 對 `verified: false` 的提案印 **HOLD** 不搬（提案本來就是「今天的規則也會捕捉」，那正是它被扣住的原因），dream 第 4 節改列待審份數與人工審閱指令，不再對捕捉提案提供 `--reevaluate` 那條命令。
 - 每張自動寫的卡（入庫與提案皆同）frontmatter 帶 `provenance: auto-captured` 與 `verified: false`；轉正時改 `verified: true` 並補 `verified_by`／`verified_at`。四個欄位列入事件卡型別的選填欄，`epitype cards` 不因此 WARN。
-- 消費端逐處查證後釘進回歸：Stop 決策閘（`decision_key`＋`status: active`）、寫檔閘規則 A（同一批決策卡）與規則 B（`_` 路徑段不算卡）、PreToolUse 授權判定（只讀宣告 `trigger:` 的卡）、SessionStart 現行裁定清單（同決策卡門檻）都吃不到 `verified: false` 的卡；喚回照舊給它 pinned 席位但只掛「歷史捕捉（非完整對話／現行裁定）」前綴，不掛決策前綴。
+- 消費端逐處查證後釘進回歸：Stop 決策閘（`decision_key`＋`status: active`）、寫檔閘規則 A（同一批決策卡）與規則 B（`_` 路徑段不算卡）、PreToolUse 授權判定（只讀宣告 `trigger:` 的卡；**這一條已被同版的 U-J 取代——那條路徑整條移除了**）、SessionStart 現行裁定清單（同決策卡門檻）都吃不到 `verified: false` 的卡；喚回照舊給它 pinned 席位但只掛「歷史捕捉（非完整對話／現行裁定）」前綴，不掛決策前綴。
 - 精準度（`tests/capture_precision.py --local`，254 句人工標記；`exam/exam_runner.py` 跑不了這份題庫——它要 `questions` 清單）：判定那條不變（精準 0.807、召回 0.850）；自動入庫那條精準 0.750、召回 0.240、value 0.600，自動入庫卡由 119 張降為 40 張、判錯的由 23 張降為 10 張、不值得留的由 34 張降為 16 張，79 句改成提案。**比例沒有變好**——同一份標記上被扣住的那堆反而比入庫的那堆漂亮（0.835／0.772 對 0.750／0.600）；這次換到的是「未經人核的材料少了三分之二不再自動進喚回」，不是更乾淨的比例。owner 已接受召回下降。
 - 回歸：新增 `tests/capture_admission_regression.py`（8 案，含四道閘的逐處查證）納入 run_all（48/48 → **49/49**）；`epitype/harvest.py --selftest` 20→23、`adapters/claude/recall_hook.py --selftest` 45→46、`tests/capture_integration_regression.py` 每個題目多驗落點與兩個新欄位。
 

@@ -188,7 +188,7 @@ class CaptureAdmissionRegression(unittest.TestCase):
 
     # ------------------------------------------------------------------ consumers
     def test_an_unverified_card_is_authority_for_no_gate(self):
-        """一張帶著決策／trigger 字樣的捕捉卡，四道閘一個都不能認。"""
+        """一張帶著決策字樣的捕捉卡，三道閘一個都不能認、喚回也只能給歷史席。"""
         forbidden_phrase = "admissionforbidden"
         card = self.capture(
             f"不是！那個一律不要用 {forbidden_phrase}，以後都改用第二種")
@@ -208,12 +208,11 @@ class CaptureAdmissionRegression(unittest.TestCase):
             config, started,
         )
         self.assertIsNone(write_value)
-        # 3. PreToolUse 授權判定只讀宣告 trigger 的卡。
-        self.assertEqual(
-            [path.name for path in pretooluse_gate._trigger_card_paths(self.vault)], [])
-        # 4. 開場的現行裁定清單同樣要求 decision_key + active。
+        # 3. 開場的現行裁定清單同樣要求 decision_key + active。
+        #    （2026-09-09 U-J：原本第 3 條「PreToolUse 只讀宣告 trigger 的卡」隨那條
+        #    攔截路徑一併退役，PreToolUse 現在只剩上面第 2 條的寫檔閘。）
         self.assertEqual(sessionstart._active_decisions(self.vault, started), [])
-        # 5. 喚回端得出來，但只能掛「歷史捕捉」前綴，不能佔決策席。
+        # 4. 喚回端得出來，但只能掛「歷史捕捉」前綴，不能佔決策席。
         memsearch.build_index(self.vault)
         value = recall._handle(
             {"prompt": forbidden_phrase, "session_id": "recall-gate", "cwd": str(self.root)},

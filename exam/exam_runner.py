@@ -19,7 +19,7 @@ for _import_root in (_REPO_ROOT, _EPITYPE_DIR, _ADAPTER_DIR):
         sys.path.insert(0, str(_import_root))
 
 from epitype import decision_lint, memsearch, memspec
-from _hook_common import clear_recall_markers
+from _hook_common import clear_notice_markers, clear_recall_markers
 
 
 _CATEGORIES = {"recall", "abstention", "gate", "stop", "lint", "supersession"}
@@ -165,9 +165,19 @@ def _run_hook(script, vault, root, event):
 
 
 def _run_gate(vault, root, event):
+    """The write gate's verdict for one synthetic tool call.
+
+    The gate blocks one (session, rule, file, content) exactly once and marks it in
+    the shared temp marker directory, so a corpus replayed twice would see the
+    second run allowed. Each question therefore runs under its own session id, and
+    the markers it wrote are dropped again either way."""
     if not isinstance(event, dict):
         raise ValueError("gate input must be a tool event object")
-    stdout = _run_hook(_GATE_SCRIPT, vault, root, event)
+    marked = f"exam-gate-{uuid.uuid4().hex}"
+    try:
+        stdout = _run_hook(_GATE_SCRIPT, vault, root, {**event, "session_id": marked})
+    finally:
+        clear_notice_markers(marked)
     if not stdout.strip():
         return "allow", ""
     output = json.loads(stdout).get("hookSpecificOutput", {})

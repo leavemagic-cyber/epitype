@@ -1,6 +1,6 @@
 # Architecture
 
-Epitype is a governance layer over native CLI memory. Native stores remain the storage authority; Epitype adds structure, retrieval timing, action interception, auditability, and release checks.
+Epitype is a governance layer over native CLI memory. Native stores remain the storage authority; Epitype adds structure, retrieval timing, two content gates, auditability, and release checks. Irreversible actions are not its job: those belong to the host's own native rules (Claude `permissions.deny`, Codex `execpolicy`), which refuse the call before it runs.
 
 ## The three-block memory model
 
@@ -9,7 +9,7 @@ The three blocks have different change rates and different failure modes. Keepin
 | Block | Contains | Normal lifetime | Governance rule |
 |---|---|---|---|
 | Primary memory | Stable habits, preferences, and operating conventions | Long-lived | Keep only guidance that is broadly reusable and cheap enough to remain visible |
-| Scars | Incident-born reflexes, including optional tool and input triggers | Independent lifecycle | Admit from evidence, intercept narrowly, and retire after the hazard is mechanically prevented |
+| Scars | Incident-born reflexes: the incident, and the safer route to take instead | Independent lifecycle | Admit from evidence, state the safer route narrowly, and retire after the hazard is mechanically prevented |
 | Pending ledger | Open work, blockers, owners, and next checks | Short-lived | Update as work changes; never promote an unfinished item into durable policy by accident |
 
 Decision cards are a cross-cutting record type. They may live beside the domain they govern, but their current/superseded state is checked independently from the three-block placement.
@@ -69,11 +69,11 @@ whole pass rather than overwriting another writer.
 Epitype uses four routes because no single retrieval mode is correct for every piece of memory.
 
 1. **Resident.** A small native index or stable rule block remains visible. Size limits keep residency selective instead of turning it into an unbounded prompt prefix.
-2. **Point-in-time injection.** A hook injects selected context at a lifecycle event. Prompt recall and tool-trigger evaluation belong here; PreCompact writes a distinct, bounded recovery map per session or transcript so concurrent sessions do not overwrite one another.
+2. **Point-in-time injection.** A hook injects selected context at a lifecycle event. Prompt recall and the two content gates belong here; PreCompact writes a distinct, bounded recovery map per session or transcript so concurrent sessions do not overwrite one another.
 3. **Agent-directed retrieval.** The resident index points to a fuller card, and the agent opens that card through the host's normal read path. This route is useful for detail that should not be permanently resident, but it is not sufficient for a rule that must intercept an action.
 4. **Search.** `memsearch.py` builds a local trigram FTS index at `<vault>/.epitype/memory_fts.sqlite3` and supports explicit query or prompt-oriented recall. Only `build` creates an index; `query` and `recall` atomically move an existing legacy `.cairn` index into place before reading, fall back to that legacy snapshot with `index_migration_pending` if the move is blocked, and otherwise report no-index distinctly from a valid zero-hit result. Existing stale indexes retain the bounded incremental refresh path, with the refresh disclosed in the response. Search is a retrieval aid, not an authority source and not permission to act.
 
-All injected memory is advisory data. It cannot override higher-priority instructions or grant tool authority. Hook output is capped at 10 KiB and hook execution is designed to fail open within the host's ten-second limit (the hook's own deadline is nine seconds, so a late answer is delivered rather than killed). Because failing open is silent, the work a call may do is bounded by design: one directory listing of each vault, one FTS query, and the handful of trigger cards a manifest cache names — never a card-by-card read, and never a resolved path (see failure mode 9).
+All injected memory is advisory data. It cannot override higher-priority instructions or grant tool authority. Hook output is capped at 10 KiB and hook execution is designed to fail open within the host's ten-second limit (the hook's own deadline is nine seconds, so a late answer is delivered rather than killed). Because failing open is silent, the work a call may do is bounded by design: one directory listing of each vault, one FTS query, and the decision cards a manifest cache names — never a card-by-card read, and never a resolved path (see failure mode 9).
 
 ## Decision cards
 
@@ -103,14 +103,14 @@ One table, read off `CARD_REQUIRED_FIELDS` in `epitype/memspec.py`. `card_lint.p
 | `type` | Required frontmatter fields |
 |---|---|
 | `decision` | `decision_key`, `status`, `current_decision_at`, `decided_by`, `aliases` |
-| `scar` | `trigger.tool`, `trigger.input`, `advice`, `incident` |
+| `scar` | `advice`, `incident` |
 | `grant`, `correction`, `ruling` | `name`, `description`, `captured_at`, `session_id` |
 | `pending` | `owner`, `verify`, `exit` |
 | `feedback`, `project`, `reference`, `user`, `habit` | `name`, `description` |
 
-A card's type is inferred, not declared: a structural signal first (`decision_key`, a `trigger.*` field), then the event directory it sits in, then a self-reported `metadata.type`. Optional fields per type live beside the table in `CARD_OPTIONAL_FIELDS`.
+A card's type is inferred, not declared: a structural signal first (`decision_key`), then the event directory it sits in, then a self-reported `metadata.type`. Optional fields per type live beside the table in `CARD_OPTIONAL_FIELDS`. `trigger` is a retired field: a card that still carries one is linted with a single WARN and read by nothing (`docs/FAILURE_MODES.md` §31).
 
-The three event types also carry `provenance: auto-captured` and `verified: false` when a hook or a replay wrote them, plus `verified_by`/`verified_at` once a person has promoted one. Those fields are documentation of origin, not a gate input: the gates read `decision_key` and `trigger`, which is why a captured sentence can never become authority on its own (`docs/FAILURE_MODES.md` §32).
+The three event types also carry `provenance: auto-captured` and `verified: false` when a hook or a replay wrote them, plus `verified_by`/`verified_at` once a person has promoted one. Those fields are documentation of origin, not a gate input: both gates read `decision_key`, which is why a captured sentence can never become authority on its own (`docs/FAILURE_MODES.md` §32).
 
 ## Capture: admission and the proposal area
 
@@ -121,14 +121,22 @@ Everything else lands under `<vault>/_drafts/captured_pending/YYYYMMDD/` with th
 ## Scar lifecycle
 
 1. **Incident.** Record an observable failure, its boundary, and enough evidence to reproduce or audit it. A transcript scanner may propose a candidate, but it does not write a scar automatically.
-2. **Reflex.** Turn the narrow lesson into a scar card. If the failure can precede a tool action, add a `trigger.tool` regex, a `trigger.input` regex, and actionable `advice` that provides a safer route.
-3. **Mechanization.** Move stable prevention into code, a hook, a deterministic check, or another machine-enforced guard. A scar does not count as mechanized merely because its prose is prominent.
+2. **Reflex.** Turn the narrow lesson into a scar card: the `incident` it came from and actionable `advice` that provides a safer route. A card is context read back into a turn, never a refusal — a card cannot stop a tool call.
+3. **Mechanization.** Move stable prevention into code, a deterministic check, or the host's own native rules (Claude `permissions.deny`, Codex `execpolicy`), which refuse the call before it runs. A scar does not count as mechanized merely because its prose is prominent.
 4. **Retirement.** Remove the reflex from the resident scar block after the mechanism covers the original hazard. Preserve the incident and test evidence outside the resident path so the reason for the guard remains auditable.
 
-The interceptor tests the scar-card form, bounded deny response, alternative advice, and audit row:
+## The two gates
+
+Epitype refuses exactly two things, both about content the model is about to commit, and neither expressible as a host rule:
+
+- **Write gate** (`PreToolUse`, `adapters/claude/pretooluse_gate.py`). Before a file write lands, the new text is checked against the settled rulings — rule A blocks content that re-states what the owner already ruled out — and a card written into a registered vault must satisfy `card_lint`'s contract for its own type (rule B: FAIL blocks, WARN advises). Every block appends one audit row to `<vault>/_GATE_LOG.jsonl` naming the rule, the ruling, and the filename — never the content. Anything else proceeds untouched.
+- **Stop gate** (`adapters/claude/stop_gate.py`). At the end of a turn, the last assistant message is checked against the same decision cards and the same `forbidden` patterns, through one shared validator, so a sentence that cannot be written into a file cannot be said at the end of a turn either.
+
+Both gates fail open, and both are exercised by their own synthetic events:
 
 ```powershell
 python adapters/claude/pretooluse_gate.py --selftest
+python adapters/claude/stop_gate.py --selftest
 ```
 
 ## Waking and dreaming

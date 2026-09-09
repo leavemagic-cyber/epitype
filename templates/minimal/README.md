@@ -17,7 +17,7 @@ Use this template for one person, one machine, and one native memory vault.
 3. Review an example before copying it into a vault card directory. Rename it and replace every synthetic statement with your own reviewed content.
 4. Point Epitype's configured vault list at that native vault through the normal installer or configuration flow.
 
-The trigger example is deliberately narrow. A trigger card needs a tool regex, an input regex, and advice that gives a safer next path. It does not grant authority and cannot override host instructions.
+The scar example is deliberately narrow. A scar card names the incident it came from and the safer next path. It is advisory context, not an enforcement mechanism: it does not grant authority, cannot override host instructions, and cannot refuse a tool call. Rules that must hold mechanically belong in the host's own configuration.
 
 ## Verify
 
@@ -25,7 +25,7 @@ From the repository root:
 
 ```powershell
 python epitype/decision_lint.py templates/minimal/examples
-python adapters/claude/pretooluse_gate.py --selftest
+python epitype/card_lint.py templates/minimal/examples
 ```
 
-The first command validates any decision cards in the example set. The second validates the trigger-card interception contract with the adapter's own synthetic event.
+The first command validates any decision cards in the example set. The second checks every example against the required fields for its own card type.

@@ -155,9 +155,8 @@ def _card_type(relative, fields, nested):
     """順序判定；結構訊號優先於自報型別，自報的 metadata.type 才是最後手段。"""
     if memspec.DECISION_KEY_FIELD in fields:
         return memspec.CARD_TYPE_DECISION
-    trigger_prefix = memspec.TRIGGER_FIELD + "."
-    if memspec.TRIGGER_FIELD in fields or any(key.startswith(trigger_prefix) for key in nested):
-        return memspec.CARD_TYPE_SCAR
+    # 2026-09-09 U-J：`trigger:` 不再是結構訊號——那條攔截路徑整條拆了，卡片還留著這個
+    # 欄位也只是舊寫法。傷疤卡現在只由 metadata.type 自報。
     directories = relative.split("/")[:-1]
     for directory, card_type in memspec.EVENT_CARD_DIRECTORIES:
         if directory in directories:
@@ -187,6 +186,19 @@ def card_type_of(relative, text, path=None):
     front_lines, _closing = memspec.split_frontmatter(text)
     nested = {} if front_lines is None else _nested_and_lists(front_lines, path)[0]
     return _card_type(relative, fields, nested), fields
+
+
+def _declares_field(field, fields, nested, counts):
+    """卡片有沒有寫下這個欄位——空值、巢狀子欄位、序列都算寫了。
+
+    必填欄位問的是「有沒有內容」，已停用欄位問的是「在不在」：`trigger:` 底下掛著
+    子欄位、或寫成空值等著接續行，都是同一個要點名的舊寫法。"""
+    prefix = field + "."
+    return (
+        field in fields
+        or field in counts
+        or any(key == field or key.startswith(prefix) for key in nested)
+    )
 
 
 def _has_value(field, fields, nested, counts):
@@ -369,6 +381,11 @@ def _check_card(path, relative, today):
             f"status={status} 不在 {'|'.join(allowed)}（{card_type} 型）",
         ))
 
+    for field in memspec.DEPRECATED_CARD_FIELDS:
+        if _declares_field(field, fields, nested, counts):
+            findings.append((
+                WARN, "deprecated-field", memspec.DEPRECATED_FIELD_REASON.format(field=field)
+            ))
     for field in memspec.CARD_REQUIRED_FIELDS[card_type]:
         if not _has_value(field, fields, nested, counts):
             findings.append((FAIL, "required", f"缺必填欄位 {field}"))
@@ -746,7 +763,9 @@ _FIXTURES = {
     "  - (建議|要不要|是否|應該).{0,12}(納入|採用|改成)兩套參數\n  - 建議改成兩套參數\n"
     "  - 這串裸名詞剛好超過八個字\n---\nbody\n",
     "scar-bad.md": "---\nname: scar-bad\ndescription: 2026-09-01 壞傷疤卡\ntrigger:\n  tool: \"^(Bash)$\"\nmetadata:\n  type: scar\n---\nbody\n",
-    "scar-good.md": "---\nname: scar-good\ndescription: 2026-09-01 好傷疤卡\ntrigger: {tool: \"^(Bash)$\", input: \"rm -rf\"}\nadvice: 改用 Write 落檔\nincident: 2026-09-02 三個 session 各踩一次\nvalid_until: 2026-08-01\n---\nbody\n",
+    "scar-good.md": "---\nname: scar-good\ndescription: 2026-09-01 好傷疤卡\nadvice: 改用 Write 落檔\nincident: 2026-09-02 三個 session 各踩一次\nvalid_until: 2026-08-01\nmetadata:\n  type: scar\n---\nbody\n",
+    # 2026-09-09 U-J：只剩 trigger 的舊卡不再被判成傷疤卡，欄位本身只點名一次。
+    "trigger-retired.md": "---\nname: trigger-retired\ndescription: 2026-09-09 只留著舊 trigger 的卡\naliases:\n  - 舊攔截欄位\ntrigger: {tool: \"^(Bash)$\", input: \"rm -rf\"}\nmetadata:\n  type: feedback\n---\nbody\n",
     "grants/grant-ok.md": "---\nname: grant-ok\ndescription: owner grant auto-captured 2026-09-02: 你可以繼續\ncaptured_at: 2026-09-02T07:37:47Z\nsession_id: synthetic-session\n---\nbody\n",
     "grants/grant-bad.md": "---\nname: grant-bad\ndescription: owner grant auto-captured 2026-09-02: 缺會期\ncaptured_at: 2026-09-02T07:37:47Z\nexpires_at: 2026-09-03\n---\nbody\n",
     "corrections/correction-bad.md": "---\nname: correction-bad\ncaptured_at: 2026-09-02T07:37:47Z\nsession_id: synthetic-session\n---\nbody\n",
@@ -837,16 +856,24 @@ def _selftest():
 
             rules, card = _findings_of(report, "scar-bad.md")
             checks.append((
-                "scar FAIL: 缺 trigger.input、advice、incident",
+                "scar FAIL: 缺 advice、incident；殘留的 trigger 只是已停用欄位的 WARN",
                 card is not None
                 and card["type"] == memspec.CARD_TYPE_SCAR
-                and rules == {(FAIL, "required")}
-                and sum(1 for item in card["findings"] if item["level"] == FAIL) == 3,
+                and rules == {(FAIL, "required"), (WARN, "deprecated-field")}
+                and sum(1 for item in card["findings"] if item["level"] == FAIL) == 2,
             ))
             rules, card = _findings_of(report, "scar-good.md")
             checks.append((
-                "scar WARN only: flow mapping 的 trigger 讀得到，只剩過期警告",
+                "scar WARN only: 自報型別＋advice＋incident 齊備，只剩過期警告",
                 card is not None and rules == {(WARN, "expired")},
+            ))
+            rules, card = _findings_of(report, "trigger-retired.md")
+            checks.append((
+                "U-J：只宣告 trigger 的卡不再被判成 scar，欄位本身只換來一則 WARN",
+                card is not None
+                and card["type"] == memspec.CARD_TYPE_FEEDBACK
+                and rules == {(WARN, "deprecated-field")}
+                and memspec.TRIGGER_FIELD in _reason_of(report, "trigger-retired.md", "deprecated-field"),
             ))
 
             rules, card = _findings_of(report, "grants/grant-ok.md")
@@ -1153,7 +1180,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 41
+    total = 42
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

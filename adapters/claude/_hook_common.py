@@ -25,10 +25,11 @@ def recall_marker_directory(session_id):
     return Path(tempfile.gettempdir()) / memspec.RECALL_MARKER_DIRECTORY / session_component(session_id)
 
 
-def clear_recall_markers(session_id):
-    """Compaction drops the injected context, so the same-session dedupe is
-    dropped with it: a correction injected before compaction must return after."""
-    directory = recall_marker_directory(session_id)
+def notice_marker_directory(session_id):
+    return Path(tempfile.gettempdir()) / memspec.NOTICE_MARKER_DIRECTORY / session_component(session_id)
+
+
+def _clear_marker_directory(directory):
     try:
         for marker in directory.iterdir():
             if marker.is_file() and not marker.is_symlink():
@@ -36,6 +37,19 @@ def clear_recall_markers(session_id):
         directory.rmdir()
     except OSError:
         pass
+
+
+def clear_recall_markers(session_id):
+    """Compaction drops the injected context, so the same-session dedupe is
+    dropped with it: a correction injected before compaction must return after."""
+    _clear_marker_directory(recall_marker_directory(session_id))
+
+
+def clear_notice_markers(session_id):
+    """The write gate blocks one (session, rule, file, content) exactly once. A
+    replay — the exam runner asking the same question twice — must get the same
+    answer both times, so the markers one run wrote are dropped again."""
+    _clear_marker_directory(notice_marker_directory(session_id))
 
 
 def event_session_id(event):

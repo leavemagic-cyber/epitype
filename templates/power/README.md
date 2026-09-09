@@ -5,7 +5,7 @@ Use this template for the full three-block layout plus scar census and exam-gate
 ## Layout
 
 - `vault/` is an empty primary-memory, scar, pending-ledger, habit-card, scar-card, and decision-card skeleton.
-- `examples/` contains three synthetic cards, including a trigger-driven interception card.
+- `examples/` contains four synthetic cards: one decision, one habit, and two scars.
 - `census.json` is a runnable configuration for the empty scar skeleton.
 - `exam/` explains the boundary between this template and the packaged exam runner in `exam/exam_runner.py`.
 
@@ -23,7 +23,7 @@ From the repository root, validate the synthetic examples and build the empty ce
 ```powershell
 python epitype/decision_lint.py templates/power/examples --audit
 python epitype/scar_census.py build --config templates/power/census.json --out templates/power/census.generated.md
-python adapters/claude/pretooluse_gate.py --selftest
+python epitype/card_lint.py templates/power/examples
 ```
 
 `census.generated.md` is generated evidence and may be removed after inspection. Run `python exam/exam_runner.py --strict` for the bundled synthetic corpus; do not treat the reserved template directory itself as executable evidence.
