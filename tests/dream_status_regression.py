@@ -57,7 +57,9 @@ class DreamStatusRegression(unittest.TestCase):
         with patch.object(dream.time, "monotonic", side_effect=lambda: next(ticks, 1.0)):
             state, notice = self.run_pack("--time-budget-seconds", "0.001")
         self.assert_incomplete(state, notice)
-        self.assertEqual(len(state["section_errors"]), 12)
+        # 盤點 12 節 + 檢討包（第 15 節）：時限耗盡時每一節都要留下缺口紀錄。
+        self.assertEqual(len(state["section_errors"]), len(dream._SECTION_IDS))
+        self.assertIn(str(dream.REVIEW_PACK_SECTION_ID), state["section_errors"])
         self.assertTrue(all(row["error"] == dream.TIME_BUDGET_ERROR
                             for row in state["section_errors"].values()))
         pack = json.loads(self.pack.read_text(encoding="utf-8"))

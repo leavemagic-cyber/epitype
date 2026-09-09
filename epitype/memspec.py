@@ -504,6 +504,20 @@ EVENT_NOISE_MARKERS = (
     "health check",
     "傳輸探針",
 )
+# `carried_by`（第 12 節）與 `matched_card`（第 15 節）問的不是同一件事，別合成一欄：
+# 前者＝「哪張決策卡承接了這句原話」，後者＝「這一則糾正指到哪一條規則」。一句被 A 卡
+# 逐字引用，糾正的卻可能是 B 卡。
+# 2026-09-09 U-P（回饋檢討機制第 1 行）：在這之前一張捕捉卡唯一的身分是「哪一句話」
+# （檔名裡的文句雜湊），所以 owner 在三場對話各講一次同一句話只會留下一張卡——卡數
+# 因此不等於事故數，要算「同一件事被糾正幾次」就只能回到原始事件位置。event_id 是
+# （宿主＋對話＋訊息位置＋文句）的穩定雜湊，origin 是同一份身分的可讀式
+# `host/session/position`；兩欄都由 epitype/capture.py 一處產生，線上與回放共用。
+EVENT_ID_FIELD = "event_id"
+ORIGIN_FIELD = "origin"
+# 糾正明確指到某條規則時才寫的欄位（Claude↔Codex 收斂 #2：不明確就留空，不強迫每場
+# 搜）。目前沒有任何路徑寫它；夢的檢討包只讀，讀不到就算「未對到卡」。
+MATCHED_CARD_FIELD = "matched_card"
+CAPTURE_EVENT_IDENTITY_FIELDS = (EVENT_ID_FIELD, ORIGIN_FIELD, MATCHED_CARD_FIELD)
 FORBIDDEN_FIELD = "forbidden"
 VERIFY_FIELD = "verify"
 VALID_UNTIL_FIELD = "valid_until"
@@ -576,9 +590,10 @@ CARD_REQUIRED_FIELDS = {
 CARD_OPTIONAL_FIELDS = {
     CARD_TYPE_DECISION: (FORBIDDEN_FIELD, VERIFY_FIELD, VALID_UNTIL_FIELD),
     CARD_TYPE_SCAR: (ALIASES_FIELD,),
-    CARD_TYPE_GRANT: (GRANT_EXPIRES_FIELD,) + CAPTURE_PROVENANCE_FIELDS,
-    CARD_TYPE_CORRECTION: CAPTURE_PROVENANCE_FIELDS,
-    CARD_TYPE_RULING: CAPTURE_PROVENANCE_FIELDS,
+    CARD_TYPE_GRANT: (GRANT_EXPIRES_FIELD,) + CAPTURE_PROVENANCE_FIELDS
+    + CAPTURE_EVENT_IDENTITY_FIELDS,
+    CARD_TYPE_CORRECTION: CAPTURE_PROVENANCE_FIELDS + CAPTURE_EVENT_IDENTITY_FIELDS,
+    CARD_TYPE_RULING: CAPTURE_PROVENANCE_FIELDS + CAPTURE_EVENT_IDENTITY_FIELDS,
     CARD_TYPE_PENDING: (),
     CARD_TYPE_FEEDBACK: (ALIASES_FIELD,),
     CARD_TYPE_PROJECT: (ALIASES_FIELD,),
@@ -1348,6 +1363,13 @@ DREAM_LOCK_FILENAME = "dream.lock"
 DREAM_LOG_FILENAME = "dream.log"
 DREAM_PACK_FILENAME = "dream_pack_latest.md"
 DREAM_PACK_JSON_FILENAME = "dream_pack_latest.json"
+# ── U-P 回饋檢討（夢第 15 節）──
+# 考題跑完把「哪一題、過沒過、對到哪張卡、題庫是哪個版本」留在治理庫，夢才有得讀；
+# 只有 EPITYPE_CONFIG 指路時才寫（見 exam/exam_runner.py），否則考題不碰任何真庫。
+EXAM_RESULTS_FILENAME = "exam_results_latest.json"
+# 候選滿這個數才值得開一場檢討（Claude↔Codex 收斂第 5 條）。5 是攤薄兩家讀包成本的
+# 操作初值，不是量測出來的最佳值；改這個數字＝改開檢討場的頻率，owner 一次核定。
+REVIEW_PACK_TRIGGER = 5
 DREAM_MODE_PIGGYBACK = "piggyback"
 DREAM_MODE_NIGHTLY = "nightly"
 DREAM_MODE_OFF = "off"

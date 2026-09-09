@@ -3,11 +3,14 @@ import sys; sys.dont_write_bytecode = True; [getattr(stream, "reconfigure", lamb
 
 import argparse
 from copy import deepcopy
+from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
 import subprocess
 import tempfile
+import time
 import uuid
 
 
@@ -19,10 +22,21 @@ for _import_root in (_REPO_ROOT, _EPITYPE_DIR, _ADAPTER_DIR):
         sys.path.insert(0, str(_import_root))
 
 from epitype import decision_lint, memsearch, memspec
-from _hook_common import clear_notice_markers, clear_recall_markers
+from _hook_common import (
+    clear_notice_markers,
+    clear_recall_markers,
+    governance_vault,
+    load_config,
+)
 
 
 _CATEGORIES = {"recall", "abstention", "gate", "stop", "lint", "supersession"}
+# 題目對卡的映射（U-P 第 3 行）：一題失敗時要回得到「這一題在管哪一條規則」。只認題目
+# 層級明寫的欄位。`setup.vault_cards` 是這一題的合成庫，不是它在管的規則卡；拿它充數
+# 會讓「未映射題數」永遠是 0，而那個數字正是這一項要量出來的缺口。
+QUESTION_CARD_FIELDS = ("cards", "card", memspec.DECISION_KEY_FIELD)
+RESULTS_VERSION = 1
+RESULTS_SKIPPED = "RESULTS SKIPPED"
 _SAMPLE_CORPUS = Path(__file__).with_name("sample_corpus.json")
 _GATE_SCRIPT = _ADAPTER_DIR / "pretooluse_gate.py"
 _STOP_SCRIPT = _ADAPTER_DIR / "stop_gate.py"
@@ -295,6 +309,17 @@ def _judge_supersession(vault, written, question_input, expect):
     return None
 
 
+def _question_cards(question):
+    """這一題對到的規則卡，題目沒寫就是空清單（＝未映射，總結會把它算出來）。"""
+    found = []
+    for field in QUESTION_CARD_FIELDS:
+        value = question.get(field) if isinstance(question, dict) else None
+        for item in value if isinstance(value, list) else [value]:
+            if isinstance(item, str) and item.strip() and item.strip() not in found:
+                found.append(item.strip())
+    return found
+
+
 def _run_question(question):
     if not isinstance(question, dict):
         raise ValueError("question must be an object")
@@ -329,7 +354,7 @@ def _run_question(question):
             failure = _judge_supersession(
                 vault, written, question.get("input"), expect
             )
-    return question_id, failure
+    return question_id, failure, _question_cards(question)
 
 
 def run_corpus(corpus):
@@ -344,13 +369,15 @@ def run_corpus(corpus):
         question_id = question.get("id") if isinstance(question, dict) else f"#{index}"
         identity = question_id if isinstance(question_id, str) else f"#{index}"
         if identity in seen:
-            results.append((str(question_id), "duplicate question id"))
+            results.append((str(question_id), "duplicate question id", []))
             continue
         seen.add(identity)
         try:
             results.append(_run_question(question))
         except Exception as exc:
-            results.append((str(question_id), f"{type(exc).__name__}: {exc}"))
+            results.append(
+                (str(question_id), f"{type(exc).__name__}: {exc}", _question_cards(question))
+            )
     return results
 
 
@@ -361,18 +388,73 @@ def _load_corpus(path):
 
 def _emit_results(results):
     passed = 0
-    for question_id, failure in results:
+    unmapped = 0
+    for question_id, failure, cards in results:
+        if not cards:
+            unmapped += 1
+        suffix = f" | cards={','.join(cards)}" if cards else ""
         if failure is None:
             passed += 1
-            print(f"PASS {question_id}")
+            print(f"PASS {question_id}{suffix}")
         else:
-            print(f"FAIL {question_id}: {failure}")
+            print(f"FAIL {question_id}: {failure}{suffix}")
     print(f"SCORE {passed}/{len(results)}")
+    # 沒有對到規則卡的題目要自己說出來：夢的檢討包只把失敗連回有映射的那些，未映射的
+    # 那批是「查不到是哪條規則在管」的缺口，不是零缺口（U-P 第 3 行）。
+    print(f"UNMAPPED {unmapped}/{len(results)}")
     return passed
 
 
 def _result_exit_code(results, strict):
-    return 1 if strict and any(failure is not None for _, failure in results) else 0
+    return 1 if strict and any(failure is not None for _, failure, _cards in results) else 0
+
+
+def _corpus_version(path):
+    """規則版本＝題庫檔內容的 sha256 前 12 碼：題庫改一個字，這次的數字就換一個版本。"""
+    try:
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()[:12]
+    except OSError:
+        return ""
+
+
+def _record_results(corpus_path, results):
+    """把這次的題號／通過／對到的卡／規則版本留在治理庫，夢的檢討包才有得讀。
+
+    只在 `EPITYPE_CONFIG` 指路時寫，而且只寫那份設定的治理庫：考題會在別人的機器、CI
+    與暫存庫上跑，沒有指路就不該猜一個真庫來寫（`~/.epitype/config.json` 那個預設在這
+    裡刻意不採用）。寫不成只是少一份輸入，判分完全不受影響——但缺口要印出來，不能靜
+    靜地少一份（CORE-10）。
+    """
+    if not os.environ.get(memspec.EPITYPE_CONFIG_ENV):
+        return [f"{RESULTS_SKIPPED} {memspec.EPITYPE_CONFIG_ENV} 未設定"]
+    payload = {
+        "version": RESULTS_VERSION,
+        "corpus": Path(corpus_path).name,
+        "rules_version": _corpus_version(corpus_path),
+        "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "counts": {
+            "total": len(results),
+            "passed": sum(1 for _id, failure, _cards in results if failure is None),
+            "failed": sum(1 for _id, failure, _cards in results if failure is not None),
+            "unmapped": sum(1 for _id, _failure, cards in results if not cards),
+        },
+        "results": [
+            {"id": question_id, "passed": failure is None, "cards": cards}
+            for question_id, failure, cards in results
+        ],
+    }
+    try:
+        vault = governance_vault(load_config(time.monotonic()), for_write=True)
+        target = Path(vault) / memspec.DREAM_DIRECTORY / memspec.EXAM_RESULTS_FILENAME
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_name(target.name + ".tmp")
+        temporary.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8", newline="\n"
+        )
+        os.replace(temporary, target)
+    except Exception as exc:
+        return [f"{RESULTS_SKIPPED} {type(exc).__name__}: {exc}"]
+    return [f"RESULTS {target}"]
 
 
 def _selftest():
@@ -385,16 +467,19 @@ def _selftest():
             (
                 "sample corpus passes",
                 len(sample_results) == 16
-                and all(failure is None for _, failure in sample_results),
+                and all(failure is None for _, failure, _cards in sample_results),
             )
         )
 
         def graded(identifier, mutate=None):
             """One sample question re-run alone, optionally with `mutate` breaking it."""
+            return run_alone(identifier, mutate)[1]
+
+        def run_alone(identifier, mutate=None):
             corpus = {"questions": [deepcopy(sample["questions"][by_id[identifier]])]}
             if mutate is not None:
                 mutate(corpus["questions"][0])
-            return run_corpus(corpus)[0][1]
+            return run_corpus(corpus)[0]
 
         checks.append(("a real turn-end block is graded PASS", graded("stop-zh-block") is None))
         checks.append(
@@ -448,11 +533,81 @@ def _selftest():
                 and _result_exit_code(broken_results, strict=False) == 0,
             )
         )
+
+        # ── U-P 第 3 行：題目對卡映射 ──
+        mapped_id = sample["questions"][0]["id"]
+        mapped = run_alone(
+            mapped_id,
+            lambda question: question.update({"cards": ["decisions/one.md", "decisions/one.md"]}),
+        )
+        keyed = run_alone(
+            mapped_id, lambda question: question.update({memspec.DECISION_KEY_FIELD: "one-key"})
+        )
+        checks.append((
+            "a question that names its rule card carries that card out with its result",
+            mapped[2] == ["decisions/one.md"]
+            and keyed[2] == ["one-key"]
+            and all(not cards for _id, _failure, cards in sample_results),
+        ))
+        checks.append((
+            "the synthetic vault's own fixture cards are never sold as the question's mapping",
+            not _question_cards(sample["questions"][0])
+            and bool(sample["questions"][0]["setup"]["vault_cards"]),
+        ))
+
+        # ── U-P 第 3 行：機器可讀結果檔（絕不碰真庫：自己開一個暫存治理庫）──
+        with tempfile.TemporaryDirectory(prefix="epitype-exam-results-") as results_dir:
+            root = Path(results_dir).resolve()
+            vault = root / "vault"
+            vault.mkdir()
+            config = root / "config.json"
+            config.write_text(
+                json.dumps({memspec.CONFIG_VAULTS_FIELD: [os.fspath(vault)]}, ensure_ascii=False),
+                encoding="utf-8", newline="\n",
+            )
+            corpus_file = root / "corpus.json"
+            corpus_file.write_text(
+                json.dumps({"questions": [sample["questions"][by_id[mapped_id]]]}, ensure_ascii=False),
+                encoding="utf-8", newline="\n",
+            )
+            target = vault / memspec.DREAM_DIRECTORY / memspec.EXAM_RESULTS_FILENAME
+            expected_version = _corpus_version(corpus_file)
+            saved = os.environ.get(memspec.EPITYPE_CONFIG_ENV)
+            try:
+                os.environ.pop(memspec.EPITYPE_CONFIG_ENV, None)
+                unset_lines = _record_results(corpus_file, mapped_results := [mapped])
+                unwritten = not target.exists()
+                os.environ[memspec.EPITYPE_CONFIG_ENV] = os.fspath(config)
+                written_lines = _record_results(corpus_file, mapped_results)
+                value = json.loads(target.read_text(encoding="utf-8"))
+            finally:
+                if saved is None:
+                    os.environ.pop(memspec.EPITYPE_CONFIG_ENV, None)
+                else:
+                    os.environ[memspec.EPITYPE_CONFIG_ENV] = saved
+        checks.append((
+            "the results file lands in the configured governance vault, with the corpus version",
+            len(written_lines) == 1
+            and not written_lines[0].startswith(RESULTS_SKIPPED)
+            and written_lines[0].startswith("RESULTS ")
+            and value["rules_version"] == expected_version
+            and len(value["rules_version"]) == 12
+            and value["results"] == [
+                {"id": mapped[0], "passed": mapped[1] is None, "cards": mapped[2]}
+            ]
+            and value["counts"]["unmapped"] == 0,
+        ))
+        checks.append((
+            "no configured vault means no results file at all, and the gap is printed",
+            unwritten
+            and len(unset_lines) == 1
+            and unset_lines[0].startswith(RESULTS_SKIPPED),
+        ))
     except Exception as exc:
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 7
+    total = 11
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
@@ -467,6 +622,10 @@ def main(argv=None):
     parser.add_argument("corpus", nargs="?", default=str(_SAMPLE_CORPUS))
     parser.add_argument("--strict", action="store_true", help="exit 1 if any question fails")
     parser.add_argument("--selftest", action="store_true", help="run synthetic engine checks")
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help=f"只判分，不寫 {memspec.EXAM_RESULTS_FILENAME}",
+    )
     args = parser.parse_args(argv)
     if args.selftest:
         return _selftest()
@@ -476,6 +635,9 @@ def main(argv=None):
         print(f"ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
     _emit_results(results)
+    if not args.dry_run:
+        for line in _record_results(args.corpus, results):
+            print(line)
     return _result_exit_code(results, args.strict)
 
 

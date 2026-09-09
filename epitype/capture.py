@@ -213,6 +213,95 @@ def grant_digest(sentence):
     return hashlib.sha256(one_line(sentence).encode("utf-8")).hexdigest()[:12]
 
 
+# ── 事件識別（U-P）──
+# 宿主沒有任何欄位自報自己是誰，所以只看轉錄檔的落點：Codex 寫
+# `<home>/.codex/sessions/.../rollout-*.jsonl`，Claude 寫 `<home>/.claude/projects/...`。
+# 判不出來就寫 unknown，不猜；三個值都是宿主名稱，不是行為守則。
+HOST_CLAUDE = "claude"
+HOST_CODEX = "codex"
+HOST_UNKNOWN = "unknown"
+ORIGIN_UNKNOWN = "-"
+ORIGIN_SEPARATOR = "/"
+CODEX_ROLLOUT_PREFIX = "rollout-"
+CODEX_HOME_MARKER = "/.codex/"
+CLAUDE_HOME_MARKER = "/.claude/"
+POSITION_LINE_PREFIX = "L"
+POSITION_BYTES_PREFIX = "B"
+MESSAGE_INDEX_KEY = "message_index"
+
+
+def event_host(event):
+    """Which host produced this event, judged only by the transcript's location."""
+    text = one_line(event.get("transcript_path")).replace("\\", ORIGIN_SEPARATOR).casefold()
+    if not text:
+        return HOST_UNKNOWN
+    if (
+        CODEX_HOME_MARKER in text
+        or text.rsplit(ORIGIN_SEPARATOR, 1)[-1].startswith(CODEX_ROLLOUT_PREFIX)
+    ):
+        return HOST_CODEX
+    if CLAUDE_HOME_MARKER in text:
+        return HOST_CLAUDE
+    return HOST_UNKNOWN
+
+
+def event_session(event):
+    """這場對話的識別碼。
+
+    Claude 的 UserPromptSubmit 帶 `session_id`，Codex 形狀的鏡像欄是 `sessionId`；
+    兩個都缺時退回轉錄檔名——Codex 的 `rollout-<時間>-<id>` 本身就是那場對話唯一的
+    名字。全缺就回空字串，而空字串在去重那邊會退回舊的整庫比對：分不出來源時不能
+    假設兩張卡是兩件事。
+    """
+    value = event.get("session_id", event.get("sessionId"))
+    if isinstance(value, str) and value.strip():
+        return one_line(value)
+    try:
+        return one_line(Path(event["transcript_path"]).stem)
+    except (KeyError, TypeError, ValueError):
+        return ""
+
+
+def event_position(event):
+    """這則發言在來源紀錄裡的位置。
+
+    離線回放知道行號（`message_index`）。線上 hook 什麼都不知道，只知道「寫到這一刻
+    為止的轉錄檔有多長」——那是同一場對話裡逐回合單調遞增的位置證據，而且只花一次
+    stat。讀不到就回 `-`（位置未知，不是位置 0）。
+    """
+    index = event.get(MESSAGE_INDEX_KEY)
+    if isinstance(index, int) and not isinstance(index, bool) and index >= 0:
+        return f"{POSITION_LINE_PREFIX}{index}"
+    try:
+        return f"{POSITION_BYTES_PREFIX}{Path(event['transcript_path']).stat().st_size}"
+    except (KeyError, TypeError, ValueError, OSError):
+        return ORIGIN_UNKNOWN
+
+
+def event_identity(event, digest):
+    """(event_id, origin, session)：這一則捕捉事件的身分。
+
+    文句雜湊也進 event_id，因為一則事件可能落在同一個位置卻是不同句話（位置判不出來
+    時整場對話共用一個 `-`）；少了它，同一場對話的第二句話會被當成第一句的重送。
+    """
+    host = event_host(event)
+    session = event_session(event)
+    position = event_position(event)
+    origin = ORIGIN_SEPARATOR.join((host, session or ORIGIN_UNKNOWN, position))
+    material = "\0".join((host, session, position, digest)).encode("utf-8")
+    return hashlib.sha256(material).hexdigest()[:12], origin, session
+
+
+def card_session(fields):
+    """一張既有卡的來源對話：優先讀 origin 的中段（捕捉當下真的判出來的來源），
+    沒有 origin 的舊卡退回 session_id 欄。"""
+    origin = one_line(fields.get(memspec.ORIGIN_FIELD))
+    if origin.count(ORIGIN_SEPARATOR) >= 2:
+        middle = origin.split(ORIGIN_SEPARATOR, 1)[1].rsplit(ORIGIN_SEPARATOR, 1)[0]
+        return "" if middle == ORIGIN_UNKNOWN else middle
+    return one_line(fields.get(memspec.SESSION_FIELD))
+
+
 def owner_side(body, summary=None):
     """The owner's own half of a classified capture — what the templates judge.
 
@@ -259,18 +348,35 @@ def pending_directory(vault, stamp):
     return Path(vault).joinpath(*memspec.CAPTURE_PENDING_SUBPATH, stamp[:10].replace("-", ""))
 
 
-def existing_capture(vault, directory_name, kind, digest):
-    """同 digest 的既有卡（去重規則的唯一實作），沒有就 None。同一句話寫兩張卡＝
-    喚回時兩條佔位，所以線上與回放必須問同一個問題。提案區也要問：提案的日期子目錄
-    每天不同，只看正式目錄的話同一句話會每天長出一份新提案。"""
+def existing_capture(vault, directory_name, kind, digest, session_id=None, event_id=None):
+    """同一件事的既有卡（去重規則的唯一實作），沒有就 None。
+
+    問的是「這是不是同一個事件」，不是「這句話出現過沒有」。2026-09-09（U-P）之前
+    同文句一律不重寫，所以 owner 在三場對話各講一次同一句話只留下一張卡，事故次數
+    再也數不回來（Codex 指出的接線缺口）。現在：同 `event_id` ＝同一則事件重送，不
+    重寫；同一場對話裡的同一句話也仍然只留一張（同一場講兩次是同一件事）；跨場的同
+    一句話各自留卡。`session_id` 空＝判不出來源，退回舊的整庫比對——分不出事件時不
+    能假設它們是兩件事。提案區也要問：提案的日期子目錄每天不同，只看正式目錄的話同
+    一件事會每天長出一份新提案。
+
+    檔名尾巴的 event_id 是 U-P 之後才有的，所以比對用 `-{digest}*` 才連舊卡一起看得
+    到；線上與回放共用這一處，兩邊才會得出同一個答案。
+    """
     try:
-        found = next(iter(sorted((vault / directory_name).glob(f"{kind}-*-{digest}.md"))), None)
-        if found is not None:
-            return found
         pending = Path(vault).joinpath(*memspec.CAPTURE_PENDING_SUBPATH)
-        return next(iter(sorted(pending.glob(f"*/{kind}-*-{digest}.md"))), None)
+        found = sorted((vault / directory_name).glob(f"{kind}-*-{digest}*.md"))
+        found.extend(sorted(pending.glob(f"*/{kind}-*-{digest}*.md")))
     except OSError:
         return None
+    for path in found:
+        if not session_id:
+            return path
+        fields, _problem = memspec.frontmatter_fields(path)
+        if event_id and one_line(fields.get(memspec.EVENT_ID_FIELD)) == event_id:
+            return path
+        if card_session(fields) == session_id:
+            return path
+    return None
 
 
 def capture_owner_sentence(prompt, vault, event, started_at, kind, replay=None, question=None):
@@ -298,15 +404,21 @@ def write_capture(vault, directory_name, kind, digest, label, body, event, start
     admitted, _template = auto_admitted(
         owner_side(body, summary) if source_text is None else source_text
     )
+    event_id, origin, session = event_identity(event, digest)
     try:
-        if existing_capture(vault, directory_name, kind, digest) is not None:
+        if existing_capture(
+            vault, directory_name, kind, digest, session_id=session, event_id=event_id
+        ) is not None:
             _report(replay, STATUS_DUPLICATE)
             return None
         # 回放時用原話當時的時間，否則整批歷史卡會全部標成今天，日期就不再是證據。
         stamp = (replay.stamp if replay is not None else None) or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         directory = vault / directory_name if admitted else pending_directory(vault, stamp)
         directory.mkdir(parents=True, exist_ok=True)
-        name = f"{kind}-{stamp[:10].replace('-', '')}-{digest}"
+        # 檔名尾巴帶 event_id：同一句話在兩場對話裡各講一次，同一天就會撞到同一個
+        # `{kind}-{日期}-{digest}` 檔名，而撞名在下面是「已經有了」——第二件事故會
+        # 靜靜消失。事件識別進了檔名，兩張卡才各自存在。
+        name = f"{kind}-{stamp[:10].replace('-', '')}-{digest}-{event_id}"
         target = directory / f"{name}.md"
         # The description is what recall injects; it must carry the owner's words,
         # not just a label, or the model has to open the file to learn anything.
@@ -323,6 +435,10 @@ def write_capture(vault, directory_name, kind, digest, label, body, event, start
             # cwd 是落點的證據，也是事後歸戶（capture_route）唯一能依據的來源專案。
             f"{memspec.CWD_FIELD}: {one_line(event.get('cwd'))}\n"
             f"session_id: {one_line(event.get('session_id', event.get('sessionId')))}\n"
+            # 事件身分（U-P）：卡數不等於事故數，所以每張卡都要說得出自己是哪一則
+            # 事件、來自哪個宿主的哪一場對話的哪個位置。夢的檢討包按這兩欄去重計數。
+            f"{memspec.EVENT_ID_FIELD}: {event_id}\n"
+            f"{memspec.ORIGIN_FIELD}: {origin}\n"
             # 機器抓的、還沒人核過：轉正的人把 verified 改 true 並補 verified_by／
             # verified_at，這兩欄就是「這張卡能不能當依據」的卡面憑證。
             f"{memspec.PROVENANCE_FIELD}: {memspec.PROVENANCE_AUTO_CAPTURED}\n"

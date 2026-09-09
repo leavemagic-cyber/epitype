@@ -219,12 +219,23 @@ def _record_stamp(item, fallback):
     return fallback
 
 
-def _record_event(item, session_id):
+def _record_event(item, session_id, transcript_path="", message_index=None):
+    """線上 hook 收到的那個事件字典，回放這邊自己補齊。
+
+    轉錄檔路徑與行號是回放獨有的證據：線上只能用「轉錄檔現在多長」推位置，回放知道
+    這句話落在哪個檔的第幾行。兩邊都餵進 capture.event_identity，事件識別才是同一條
+    規則（同一則事件重放不會多長一張卡）。
+    """
     cwd = item.get("cwd")
-    return {
+    event = {
         "cwd": cwd if isinstance(cwd, str) else "",
         "session_id": item.get("sessionId") if isinstance(item.get("sessionId"), str) else session_id,
     }
+    if transcript_path:
+        event["transcript_path"] = transcript_path
+    if message_index is not None:
+        event[capture.MESSAGE_INDEX_KEY] = message_index
+    return event
 
 
 def _card_fields(path):
@@ -415,7 +426,8 @@ def harvest(home, vaults, docs=(), since=None, limit=None, dry_run=False):
             if not found:
                 continue
             source = f"{key}:{number}"
-            event = _record_event(item, session_id)
+            event = _record_event(item, session_id, key, number)
+            event_session = capture.event_session(event)
             # 落點按 cwd 算一次就快取：一場對話幾百句話算的是同一個答案，而每次算都要
             # 去問檔案系統「這個庫登記了嗎」。
             if event["cwd"] not in routes:
@@ -428,13 +440,16 @@ def harvest(home, vaults, docs=(), since=None, limit=None, dry_run=False):
                 # 一句話一張卡：治理庫也要問，否則 2026-09-06 之前落在治理庫的同一
                 # 句話會在專案庫裡再長出一張。
                 if any(
-                    capture.existing_capture(item_vault, directory, kind, digest) is not None
+                    capture.existing_capture(
+                        item_vault, directory, kind, digest, session_id=event_session
+                    ) is not None
                     for item_vault in dict.fromkeys((target, vault))
                 ):
                     counts["duplicates"] += 1
                     continue
                 if dry_run:
                     stamp = _record_stamp(item, fallback)
+                    event_id, _origin, _session = capture.event_identity(event, digest)
                     landing = "" if target == vault else f" -> {os.fspath(target)}"
                     admitted, _template = capture.auto_admitted(capture.owner_side(body, summary))
                     where = directory if admitted else "/".join(
@@ -442,7 +457,7 @@ def harvest(home, vaults, docs=(), since=None, limit=None, dry_run=False):
                     )
                     print(
                         f"{'WOULD WRITE' if admitted else 'WOULD PROPOSE'} "
-                        f"{where}/{kind}-{stamp[:10].replace('-', '')}-{digest}.md "
+                        f"{where}/{kind}-{stamp[:10].replace('-', '')}-{digest}-{event_id}.md "
                         f"{source}{landing}"
                     )
                     if admitted:
@@ -646,6 +661,18 @@ def _card_summary(path):
     return match.group(1).strip() if match else ""
 
 
+def _is_card_for(path, kind, digest):
+    """True when this filename is already this kind's card for this sentence.
+
+    捕捉卡的檔名是 `{kind}-{日期}-{digest}`，U-P 之後再接 `-{event_id}`，撞名時還會多
+    一個 `-2`；「本來就在對的地方」只能看前三段，看整個檔名會把每一張新卡都判成要改名。
+    """
+    stem = Path(path).name
+    stem = stem[:-3] if stem.endswith(".md") else stem
+    parts = stem.split("-")
+    return len(parts) >= 3 and parts[0] == kind and parts[2] == digest
+
+
 def _move_card(path, vault, kind, digest, counts, counter="moved"):
     """Move one passing card under vault/<kind>/, renaming it when the kind changed.
 
@@ -669,11 +696,22 @@ def _move_card(path, vault, kind, digest, counts, counter="moved"):
     if not (len(stamp) == 8 and stamp.isdigit()):
         stamp = time.strftime("%Y%m%d", time.gmtime())
     name = f"{kind}-{stamp}-{digest}"
-    target = Path(vault) / CARD_DIRECTORIES[kind] / f"{name}.md"
-    if target.resolve() == path.resolve():
-        return "unchanged", target
+    directory = Path(vault) / CARD_DIRECTORIES[kind]
+    target = directory / f"{name}.md"
+    # 「已經在對的地方」與「目的地被佔了」都改用 kind＋digest 判，不用檔名相等判：
+    # U-P 之後捕捉卡的檔名尾巴帶事件識別（`{kind}-{日期}-{digest}-{event_id}.md`），
+    # 照舊名去猜會兩件事一起錯——庫裡的卡被當成不在對的地方而重新命名，撞名的「一句
+    # 兩卡」則被當成沒撞名，直接再放一張進去。
+    if _is_card_for(path, kind, digest) and path.parent.resolve() == directory.resolve():
+        return "unchanged", path
+    occupied = next(
+        (item for item in sorted(directory.glob(f"{kind}-*-{digest}*.md"))
+         if item.resolve() != path.resolve()),
+        None,
+    )
     outcome = "moved"
-    if target.exists() and target.resolve() != path.resolve():
+    if occupied is not None:
+        target = occupied
         if _card_summary(path) == _card_summary(target):
             existing = target  # the already-landed card `path` duplicates
             duplicate_dir = Path(vault).joinpath(*DUPLICATES_SUBPATH, kind)
@@ -1105,7 +1143,8 @@ def _selftest():
                 encoding="utf-8",
             )
             existing_correction_card = next(
-                (vault / memspec.CORRECTION_DIRECTORY).glob(f"correction-*-{capture.grant_digest(correction)}.md")
+                # 檔名尾巴是 U-P 的事件識別，所以照 `-{digest}*` 找（同 existing_capture）。
+                (vault / memspec.CORRECTION_DIRECTORY).glob(f"correction-*-{capture.grant_digest(correction)}*.md")
             )
             dup_reeval_counts, dup_reeval_lines = reevaluate(dup_pile, vault, apply=True)
             duplicate_landing = vault.joinpath(*DUPLICATES_SUBPATH, "correction", dup_source.name)

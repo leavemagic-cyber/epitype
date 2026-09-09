@@ -1546,3 +1546,64 @@ only what no route clears; each of the three routes clears one card (named, quot
 part, self-declared); an overlap shorter than the twelve-character floor is not a carry
 and its card stays listed; and the transport-probe template is the only row marked as
 noise.
+
+## 38. Nothing measures whether the feedback ever worked
+
+Epitype captures owner corrections, blocks turns and writes, and grades itself against
+a corpus. Nothing reads any of that back. Owner 2026-09-09: 「應該有回饋檢討機制，你跟
+CODEX設計一下」. The Claude↔Codex convergence that followed settled the shape —
+feedback keeps its provenance, the dream assembles candidates, a review sitting happens
+only once enough candidates accumulate, and the owner decides a whole batch at once; no
+session gains a single mandatory action — and Codex named two wiring gaps that had to
+be in the first unit. Both were real, and both are measured here.
+
+**Gap one: card count could never mean incident count.** Capture deduplicated on the
+sentence digest alone, so the same sentence said in three different conversations left
+exactly one card. Every downstream question the review loop needs to ask — 「同一件事被
+糾正第二次了嗎」 — was unanswerable from the vault, because the second and third
+incidents were dropped at write time as "already have this". Worse, the filename was
+`{kind}-{date}-{digest}.md`: two conversations on the same day would have collided on
+the filename even if the digest check had let them through.
+
+The fix is the smallest one that restores the count: each event gets an identity of its
+own (`event_id` = host + conversation + message position + sentence; `origin` = the same
+identity in readable form), the identity goes into both the frontmatter and the
+filename, and deduplication asks "same event" instead of "same sentence". Same
+conversation, same sentence stays one card — saying something twice in one turn is one
+incident. Position is the transcript's byte length at capture time for a live hook and
+the record's line number for a replay; when neither can be read it is `-`, never `0`.
+
+**Gap two: an exam failure could not name the rule it failed.** The runner printed
+`PASS`/`FAIL` and an id. `exam_runner.py` now carries whatever mapping the question
+declares (`cards`/`card`/`decision_key`) out with each result and prints
+`UNMAPPED n/total`. On this machine, that number is currently **350/350** — no shared
+corpus question declares a rule card yet, and the honest report of that is the point:
+the review pack can only connect failures that have a mapping, and says so instead of
+reporting zero. The fixtures in `setup.vault_cards` are deliberately *not* used as the
+mapping; they are the question's synthetic vault, and reading them as the rule would
+make "unmapped" permanently zero — a metric that always says "fine" is not a metric.
+
+**The countermeasure is report-only, like §36.** Dream §15 lines the four sources up
+against the cards they point at and counts; it judges no type (A/B/C is the review
+sitting's call), changes no card, moves no layer, and never injects anything into a
+session. Two numbers are deliberately shown but not counted toward the trigger: the
+§8–§12 candidates, which already have their own next-step lines, and events with no
+`matched_card`, which are exactly what §12 measures. Counting either would double-count
+and, at the real vaults' scale, keep the threshold permanently satisfied — a trigger
+that is always on is the same failure as a metric that always says "fine".
+
+Measured the same day on both registered vaults (`epitype dream --dry-run`, read-only):
+governance **3 rows / 3 items** against a trigger of 5, from 91 events (29 of them
+`verified: false`, **91 with no `matched_card`**) and 15 blocks; project vault **1 row /
+1 item**, 53 events (12 unverified, 53 unmapped), 1 block. Both said 「沒有
+`exam_results_latest.json`」, since no exam run had yet written one to a real vault. The
+review pack therefore reports what it can actually attribute — the blocked decisions —
+and states the rest as a gap: the `matched_card` field exists in the contract and no
+path writes it yet, which is the convergence's own choice (a correction only names a
+rule when it names one; nothing is forced to search every session).
+
+**The trigger value is not evidence.** Five is Codex's operating starting point for
+amortising the cost of two readers going through a pack, adopted so the loop has a
+number to run with; it is not measured, and `memspec.REVIEW_PACK_TRIGGER` is the one
+place to change it once per-pack tokens, effective dispositions, and waiting time say
+something.

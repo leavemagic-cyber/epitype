@@ -30,12 +30,16 @@ import unicodedata
 import uuid
 
 try:
-    from . import alias_batch, card_io, card_lint, decision_lint, memsearch, memspec, pending_lint
+    from . import (
+        alias_batch, card_io, card_lint, decision_lint, gates_report, memsearch, memspec,
+        pending_lint,
+    )
 except ImportError:  # Direct script execution keeps the CLI contract.
     import alias_batch
     import card_io
     import card_lint
     import decision_lint
+    import gates_report
     import memsearch
     import memspec
     import pending_lint
@@ -77,6 +81,24 @@ UNCARRIED_QUOTE_MIN_CHARS = 12
 QUOTE_DELIMITER_CATEGORIES = ("Pi", "Pf", "Ps", "Pe")
 QUOTE_DELIMITER_CHARS = "\"'"
 UNCARRIED_COMMAND = "人工判斷這句原話該不該升成決策卡（或標 verified: false 降級）；夢不自動升卡"
+
+# 第 15 節（U-P，owner 2026-09-09「應該有回饋檢討機制」）：把四種來源的證據對齊到卡上
+# 並數次數。只列候選——不判型別（A／B／C 由檢討場判）、不改卡、不動層、不注入對話。
+REVIEW_PACK_SECTION_ID = 15
+REVIEW_PACK_TITLE = "檢討包 / review pack"
+REVIEW_PACK_MAX_ROWS = 50
+REVIEW_PACK_BLOCK_KINDS = (memspec.STOP_GATE_LOG_KIND, memspec.WRITE_GATE_LOG_KIND)
+REVIEW_PACK_READY_NOTE = "檢討包達門檻（{count}/{trigger}）"
+REVIEW_PACK_BELOW_NOTE = "未達門檻（{count}/{trigger}）"
+REVIEW_PACK_NEXT_STEP = (
+    "檢討包達門檻（{count}/{trigger}）→ 人工開一場檢討（Claude 整理＋Codex 挑戰，"
+    "owner 一包核決）；夢只給候選，不判型別、不改卡、不動層"
+)
+REVIEW_PACK_COMMAND = "人工逐列判來源、原因與最小修法；沒有對應的自動 CLI 指令"
+REVIEW_PACK_UNMAPPED_NOTE = "{count} 則事件沒有 {field} 欄，對不到卡（不強迫每場搜）"
+REVIEW_PACK_UNVERIFIED_NOTE = "{count} 則事件 {field}: {value}（待核，不算已核實事故）"
+REVIEW_PACK_NO_EXAM_NOTE = "沒有 {filename}，這一節的考題失敗數是「未量」而不是 0"
+REVIEW_PACK_EXAM_UNMAPPED_NOTE = "{count} 題失敗但題目沒寫對到哪張卡"
 
 
 # --------------------------------------------------------------------------- helpers
@@ -883,6 +905,201 @@ def _section_uncarried_quotes(vaults, today, since_date, config):
     }
 
 
+# --------------------------------------------------------------------------- section 15
+
+
+def _review_events_of(vault):
+    """庫裡每張事件卡的證據列：對到哪張卡、是哪一則事件、什麼時候、核實了沒。
+
+    `matched_card` 是「這一則糾正明確指到哪一條規則」；收斂第 2 條刻意不強迫每場搜，
+    所以沒有那一欄就是對不到卡——那種列進「未對到卡」，不會被算到某張卡頭上。
+    `event_id` 沒有的舊卡用它的路徑當身分：一張卡至少是一則事件，去重時不能互相蓋掉。
+    """
+    rows = []
+    for path in memsearch.card_files(vault):
+        relative = path.relative_to(vault).as_posix()
+        if _EVENT_TYPE_BY_DIR.get(relative.split("/", 1)[0]) is None:
+            continue
+        fields, _problem = memspec.frontmatter_fields(path)
+        rows.append({
+            "card": fields.get(memspec.MATCHED_CARD_FIELD, "").strip(),
+            # 事件身分跨庫比對：event_id 已經含宿主與對話，同一則事件被寫進兩個庫也只
+            # 算一次；沒有 event_id 的舊卡退回「這個庫的這個路徑」。
+            "event": fields.get(memspec.EVENT_ID_FIELD, "").strip() or f"{vault}::{relative}",
+            "date": fields.get(memspec.CAPTURED_AT_FIELD, "").strip()[:10],
+            # 只有卡面自報 `verified: false` 才算未核（沒有這一欄的是人手寫的卡）；
+            # 判法與第 12 節、喚回端的降級規則同一條。
+            "verified": fields.get(memspec.VERIFIED_FIELD, "").strip().casefold()
+            != memspec.VERIFIED_FALSE,
+        })
+    return rows
+
+
+def _review_blocks_of(vault):
+    """`_GATE_LOG.jsonl` 裡 Stop 閘與寫檔閘擋下的列，帶它記到的裁定鍵或卡名。
+
+    日誌的讀法沿用 epitype/gates_report.py（同一份 kind／label 語意），這一節才不會
+    對同一個檔算出跟擋下報告不同的數字。
+    """
+    rows, _bad = gates_report.load_rows(Path(vault) / memspec.GATE_LOG_FILENAME)
+    return [
+        {
+            "card": row.label,
+            "date": row.timestamp.astimezone(timezone.utc).date().isoformat(),
+        }
+        for row in rows
+        if row.kind in REVIEW_PACK_BLOCK_KINDS and row.label
+    ]
+
+
+def _exam_results(governance):
+    """治理庫裡最近一次考題結果，讀不到就 None（＝未量，不是零失敗）。"""
+    path = Path(governance) / memspec.DREAM_DIRECTORY / memspec.EXAM_RESULTS_FILENAME
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    results = value.get("results")
+    if not isinstance(value, dict) or not isinstance(results, list):
+        return None
+    failures = []
+    for item in results:
+        if not isinstance(item, dict) or item.get("passed") is not False:
+            continue
+        raw = item.get("cards")
+        failures.append({
+            "id": str(item.get("id", "")),
+            "cards": [
+                text.strip() for text in (raw if isinstance(raw, list) else ())
+                if isinstance(text, str) and text.strip()
+            ],
+        })
+    return {
+        "rules_version": str(value.get("rules_version", "")),
+        "date": str(value.get("generated_at", ""))[:10],
+        "failures": failures,
+    }
+
+
+def _section_review_pack(vaults, today, since_date, config, sections):
+    """檢討包：被證據指到的每張卡一列，加上「有幾件事在等人判」。
+
+    來源四種：事件卡（`matched_card`／`event_id`／`verified`）、閘門紀錄的 stop_block
+    與 write_block、考題結果檔的失敗題、以及第 8–12 節的候選計數。
+
+    「待判問題」＝列出來的卡數，因為檢討場是逐列判的：一列＝一張卡＋它身上所有的證據。
+    兩種東西刻意不進這個數字，否則同一件事會被算兩次、門檻也會永遠成立——(1) 第 8–12
+    節的候選（那五節各自已經有自己的下一步行）；(2) 對不到卡的事件（沒有 `matched_card`
+    就沒有列可判，而「這句原話沒有決策卡承接」正是第 12 節在數的東西）。兩者的數字都
+    留在 counts 與備註裡，看得到、但不冒充待判項。
+    """
+    rows = {}
+    notes = []
+
+    def row(card):
+        return rows.setdefault(card, {
+            "card": card, "events": 0, "unverified_events": 0,
+            "blocks": 0, "exam_failures": 0, "last_seen": "",
+        })
+
+    def touch(entry, date_text):
+        if date_text and date_text > entry["last_seen"]:
+            entry["last_seen"] = date_text
+
+    event_results, errors = _bounded(vaults, _review_events_of)
+    seen = set()
+    events = unverified = unmapped = 0
+    for _vault, found in event_results:
+        for item in found:
+            if item["event"] in seen:
+                continue  # 同一則事件重送過，或同一句話落在兩個庫：只算一次
+            seen.add(item["event"])
+            events += 1
+            if not item["verified"]:
+                unverified += 1
+            if not item["card"]:
+                unmapped += 1
+                continue
+            entry = row(item["card"])
+            entry["events" if item["verified"] else "unverified_events"] += 1
+            touch(entry, item["date"])
+
+    block_results, block_errors = _bounded(vaults, _review_blocks_of)
+    errors.extend(block_errors)
+    blocks = 0
+    for _vault, found in block_results:
+        for item in found:
+            blocks += 1
+            entry = row(item["card"])
+            entry["blocks"] += 1
+            touch(entry, item["date"])
+
+    exam = _exam_results(governance_vault(vaults))
+    exam_failures = exam_unmapped = 0
+    for item in (exam or {}).get("failures", ()):
+        exam_failures += 1
+        if not item["cards"]:
+            exam_unmapped += 1
+            continue
+        for card in item["cards"]:
+            entry = row(card)
+            entry["exam_failures"] += 1
+            touch(entry, exam["date"])
+
+    by_id = {section["id"]: (section.get("counts") or {}) for section in sections}
+    candidates = {
+        "pocket_vaults": by_id.get(8, {}).get("pocket_vaults", 0),
+        "drafts_over_7_days": by_id.get(9, {}).get("over_7_days", 0),
+        "mixed_cards": by_id.get(10, {}).get("mixed_cards", 0),
+        "over_cap": by_id.get(11, {}).get("over_cap", 0),
+        "uncarried_quotes": by_id.get(12, {}).get("uncarried_quotes", 0),
+    }
+
+    listed = sorted(
+        rows.values(),
+        key=lambda item: (-(item["events"] + item["blocks"] + item["exam_failures"]), item["card"]),
+    )
+    review_items = len(listed)
+    trigger = memspec.REVIEW_PACK_TRIGGER
+    at_threshold = review_items >= trigger
+    notes.append(
+        (REVIEW_PACK_READY_NOTE if at_threshold else REVIEW_PACK_BELOW_NOTE).format(
+            count=review_items, trigger=trigger
+        )
+    )
+    if unmapped:
+        notes.append(REVIEW_PACK_UNMAPPED_NOTE.format(
+            count=unmapped, field=memspec.MATCHED_CARD_FIELD))
+    if unverified:
+        notes.append(REVIEW_PACK_UNVERIFIED_NOTE.format(
+            count=unverified, field=memspec.VERIFIED_FIELD, value=memspec.VERIFIED_FALSE))
+    if exam is None:
+        notes.append(REVIEW_PACK_NO_EXAM_NOTE.format(filename=memspec.EXAM_RESULTS_FILENAME))
+    elif exam_unmapped:
+        notes.append(REVIEW_PACK_EXAM_UNMAPPED_NOTE.format(count=exam_unmapped))
+    return {
+        "counts": {
+            "cards": len(listed),
+            "review_items": review_items,
+            "trigger": trigger,
+            "at_threshold": at_threshold,
+            "events": events,
+            "unverified_events": unverified,
+            "unmapped_events": unmapped,
+            "blocks": blocks,
+            "exam_failures": exam_failures,
+            "exam_unmapped": exam_unmapped,
+            "exam_rules_version": (exam or {}).get("rules_version", ""),
+            "dream_candidates": candidates,
+            "listed_cap": REVIEW_PACK_MAX_ROWS,
+        },
+        "examples": listed[:REVIEW_PACK_MAX_ROWS],
+        "commands": [REVIEW_PACK_COMMAND] if at_threshold else [],
+        "errors": errors,
+        "note": "；".join(notes),
+    }
+
+
 # --------------------------------------------------------------------------- 主記憶整形（順路任務）
 
 
@@ -1090,6 +1307,8 @@ _SECTIONS = (
     (11, "上限檢查", _section_caps),
     (12, "原話無決策卡承接（升決策卡候選）", _section_uncarried_quotes),
 )
+# 第 15 節不在上面那張表裡：它要讀前面幾節算完的候選數，所以由 build_report 最後跑。
+_SECTION_IDS = tuple(section_id for section_id, _title, _fn in _SECTIONS) + (REVIEW_PACK_SECTION_ID,)
 
 
 def _next_steps(sections, shaping=()):
@@ -1149,6 +1368,14 @@ def _next_steps(sections, shaping=()):
             f"升決策卡候選 {uncarried['uncarried_quotes']} 份原話會被當裁定端出、卻沒有決策卡承接"
             f"{noise_note} → 人工判斷升卡或降級"
         )
+    # 檢討包只在候選滿額時佔一行：未達門檻的數字留在第 15 節裡，不進下一步（也不進
+    # SessionStart——開場只讀 state 的 headline 欄，那三個欄位沒有動）。
+    review = counts(REVIEW_PACK_SECTION_ID)
+    if review.get("at_threshold"):
+        steps.append(REVIEW_PACK_NEXT_STEP.format(
+            count=review.get("review_items", 0),
+            trigger=review.get("trigger", memspec.REVIEW_PACK_TRIGGER),
+        ))
     kept = sum(item.get("kept", 0) for item in shaping)
     if kept:
         steps.append(memspec.INDEX_SHAPING_KEPT_STEP.format(count=kept))
@@ -1168,18 +1395,26 @@ def build_report(vaults, today=None, since_date=None, deadline=None, shaping=Non
     # 設定讀一次就好：第 8 節要「登記了哪些庫」、第 11 節要三個上限鍵。讀不到就是空
     # 的——盤點本身不該因為設定檔壞掉而整份不跑（那才是 CORE-10 說的靜靜少一節）。
     config = configured_options() if config is None else config
-    sections = []
-    for section_id, title, fn in _SECTIONS:
+
+    def run(section_id, title, call):
         # 時限到了就把剩下的節標成略過：背景程序寧可交半份標明缺口的包，也不要
         # 在一個大庫上跑到天亮（CORE-10：缺口要說出來，不是靜靜少一節）。
         if deadline is not None and time.monotonic() >= deadline:
-            sections.append({"id": section_id, "title": title, "error": TIME_BUDGET_ERROR})
-            continue
+            return {"id": section_id, "title": title, "error": TIME_BUDGET_ERROR}
         try:
-            data = fn(vaults, today, since_date, config)
-            sections.append({"id": section_id, "title": title, "error": None, **data})
+            return {"id": section_id, "title": title, "error": None, **call()}
         except Exception as exc:
-            sections.append({"id": section_id, "title": title, "error": f"{type(exc).__name__}: {exc}"})
+            return {"id": section_id, "title": title, "error": f"{type(exc).__name__}: {exc}"}
+
+    sections = [
+        run(section_id, title, lambda fn=fn: fn(vaults, today, since_date, config))
+        for section_id, title, fn in _SECTIONS
+    ]
+    # 檢討包最後跑：它要把第 8–12 節算完的候選數一起列出來當背景。
+    sections.append(run(
+        REVIEW_PACK_SECTION_ID, REVIEW_PACK_TITLE,
+        lambda: _section_review_pack(vaults, today, since_date, config, sections),
+    ))
     shaping = list(shaping or ())
     return {
         "vaults": [str(vault) for vault in vaults],
@@ -1191,6 +1426,28 @@ def build_report(vaults, today=None, since_date=None, deadline=None, shaping=Non
     }
 
 
+def _render_section(lines, section):
+    lines.append(f"## {section['id']}. {section['title']}")
+    if section.get("error"):
+        lines.append(f"（此節失敗：{section['error']}）")
+        lines.append("")
+        return
+    lines.append("counts: " + json.dumps(section.get("counts", {}), ensure_ascii=False))
+    for error in section.get("errors") or ():
+        lines.append(f"（部分 vault 略過：{error}）")
+    examples = section.get("examples") or []
+    if examples:
+        lines.append(f"examples (前 {len(examples)} 筆):")
+        for item in examples:
+            lines.append(f"- {item}")
+    for command in section.get("commands") or ():
+        lines.append(f"建議指令：{command}")
+    note = section.get("note")
+    if note:
+        lines.append(f"備註：{note}")
+    lines.append("")
+
+
 def _render_markdown(report):
     lines = [f"# Epitype Dream Pack — {report['today']}", ""]
     lines.append("Vaults:")
@@ -1198,26 +1455,11 @@ def _render_markdown(report):
         lines.append(f"- {vault}")
     lines.append(f"事件卡老化門檻（--since）：{report['since']}")
     lines.append("")
+    # 第 13、14 節（整形與下一步）在 U-K 就已經佔住那兩個號碼，所以第 15 節接在它們
+    # 後面印，號碼才跟閱讀順序一致；盤點節照樣先印。
     for section in report["sections"]:
-        lines.append(f"## {section['id']}. {section['title']}")
-        if section.get("error"):
-            lines.append(f"（此節失敗：{section['error']}）")
-            lines.append("")
-            continue
-        lines.append("counts: " + json.dumps(section.get("counts", {}), ensure_ascii=False))
-        for error in section.get("errors") or ():
-            lines.append(f"（部分 vault 略過：{error}）")
-        examples = section.get("examples") or []
-        if examples:
-            lines.append(f"examples (前 {len(examples)} 筆):")
-            for item in examples:
-                lines.append(f"- {item}")
-        for command in section.get("commands") or ():
-            lines.append(f"建議指令：{command}")
-        note = section.get("note")
-        if note:
-            lines.append(f"備註：{note}")
-        lines.append("")
+        if section["id"] != REVIEW_PACK_SECTION_ID:
+            _render_section(lines, section)
     lines.append(memspec.INDEX_SHAPING_HEADING)
     shaping = report.get("index_shaping") or ()
     for item in shaping:
@@ -1237,6 +1479,10 @@ def _render_markdown(report):
     for step in report["next_steps"]:
         lines.append(f"- {step}")
     lines.append("")
+
+    for section in report["sections"]:
+        if section["id"] == REVIEW_PACK_SECTION_ID:
+            _render_section(lines, section)
     return "\n".join(lines)
 
 
@@ -1547,7 +1793,7 @@ def _report_errors(report):
     """保留每節及逐庫錯誤；沒有執行的檢查不能折算成零問題。"""
     sections = {section["id"]: section for section in report["sections"]}
     errors = {}
-    for section_id, _title, _fn in _SECTIONS:
+    for section_id in _SECTION_IDS:
         section = sections.get(section_id)
         if section is None:
             errors[str(section_id)] = {"error": "section missing", "errors": []}
@@ -1853,6 +2099,137 @@ def _selftest():
                 and rows["rulings/uncarried.md"]["noise"] == ""
                 and rows["rulings/tooshort.md"]["noise"] == ""
             )))
+
+            # ── 第 15 節（U-P）：五種來源各一、去重、門檻兩側 ──
+            review_vault = Path(temp_dir).resolve() / "review-vault"
+            review_vault.mkdir()
+
+            def _event(name, directory, card="", verified=memspec.VERIFIED_TRUE,
+                       event_id="", captured="2026-09-05"):
+                _write_card(
+                    review_vault / directory / f"{name}.md",
+                    f"---\nname: {name}\ndescription: owner auto-captured {captured}: synthetic\n"
+                    f"{memspec.CAPTURED_AT_FIELD}: {captured}T00:00:00Z\n"
+                    f"{memspec.SESSION_FIELD}: review-session\n"
+                    + (f"{memspec.EVENT_ID_FIELD}: {event_id}\n" if event_id else "")
+                    + (f"{memspec.MATCHED_CARD_FIELD}: {card}\n" if card else "")
+                    + f"{memspec.VERIFIED_FIELD}: {verified}\n---\nsynthetic body\n",
+                )
+
+            # 同一則事件在兩個庫各留一份／重放一次：event_id 相同，只能算一次。
+            _event("correction-20260905-aaaaaaaaaaaa-eventone", memspec.CORRECTION_DIRECTORY,
+                   card="decisions/one.md", event_id="eventone1234")
+            _event("correction-20260906-bbbbbbbbbbbb-eventone", memspec.CORRECTION_DIRECTORY,
+                   card="decisions/one.md", event_id="eventone1234", captured="2026-09-06")
+            _event("ruling-20260905-cccccccccccc-eventtwo", memspec.RULING_DIRECTORY,
+                   card="decisions/two.md", event_id="eventtwo1234",
+                   verified=memspec.VERIFIED_FALSE)
+            _event("grant-20260905-dddddddddddd-eventfour", memspec.GRANT_DIRECTORY,
+                   event_id="eventfour123")
+            _event("grant-20260905-ffffffffffff-eventfive", memspec.GRANT_DIRECTORY,
+                   card="decisions/five.md", event_id="eventfive123")
+            (review_vault / memspec.GATE_LOG_FILENAME).write_text(
+                "\n".join(json.dumps(row, ensure_ascii=False) for row in (
+                    {"timestamp": "2026-09-07T01:00:00+00:00",
+                     "kind": memspec.STOP_GATE_LOG_KIND, "decision": "decisions/three.md"},
+                    {"timestamp": "2026-09-08T01:00:00+00:00",
+                     "kind": memspec.WRITE_GATE_LOG_KIND, "decision": "decisions/one.md"},
+                    # 動作閘的 deny 不是這一節要數的東西（U-P 只讀 Stop 與寫檔兩種）。
+                    {"timestamp": "2026-09-08T02:00:00+00:00", "card": "decisions/deny-only.md"},
+                )) + "\n",
+                encoding="utf-8",
+            )
+            exam_results = review_vault / memspec.DREAM_DIRECTORY / memspec.EXAM_RESULTS_FILENAME
+            exam_results.parent.mkdir(parents=True, exist_ok=True)
+            exam_results.write_text(
+                json.dumps({
+                    "version": 1, "rules_version": "abcdef123456",
+                    "generated_at": "2026-09-09T00:00:00Z",
+                    "results": [
+                        {"id": "q-pass", "passed": True, "cards": ["decisions/one.md"]},
+                        {"id": "q-fail", "passed": False, "cards": ["decisions/four.md"]},
+                        {"id": "q-fail-unmapped", "passed": False, "cards": []},
+                    ],
+                }, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            review_before = sorted(
+                (path.relative_to(review_vault).as_posix(), path.read_bytes())
+                for path in review_vault.rglob("*") if path.is_file()
+            )
+            review_report = build_report([review_vault], today=today)
+            review = {s["id"]: s for s in review_report["sections"]}[REVIEW_PACK_SECTION_ID]
+            review_rows = {item["card"]: item for item in review["examples"]}
+            checks.append((
+                "section 15 lines every source up on the card it points at, one row per card",
+                review["error"] is None
+                and review["counts"]["events"] == 4
+                and review_rows["decisions/one.md"]["events"] == 1
+                and review_rows["decisions/one.md"]["blocks"] == 1
+                and review_rows["decisions/one.md"]["last_seen"] == "2026-09-08"
+                and review_rows["decisions/two.md"] == {
+                    "card": "decisions/two.md", "events": 0, "unverified_events": 1,
+                    "blocks": 0, "exam_failures": 0, "last_seen": "2026-09-05"}
+                and review_rows["decisions/three.md"]["blocks"] == 1
+                and review_rows["decisions/four.md"]["exam_failures"] == 1
+                and review_rows["decisions/five.md"]["events"] == 1
+                and "decisions/deny-only.md" not in review_rows,
+            ))
+            checks.append((
+                "an unverified quote and an event with no matched card are listed, never counted as incidents",
+                review["counts"]["unverified_events"] == 1
+                and review["counts"]["unmapped_events"] == 1
+                and review["counts"]["exam_unmapped"] == 1
+                and review["counts"]["exam_rules_version"] == "abcdef123456"
+                and memspec.MATCHED_CARD_FIELD in review["note"]
+                and memspec.VERIFIED_FALSE in review["note"],
+            ))
+            checks.append((
+                "the trigger fires at five deduplicated rows and says so in the next steps",
+                review["counts"]["cards"] == 5
+                and review["counts"]["review_items"] == 5
+                and review["counts"]["trigger"] == memspec.REVIEW_PACK_TRIGGER
+                and review["counts"]["at_threshold"] is True
+                and any("檢討包達門檻" in step for step in review_report["next_steps"])
+                and review["commands"] == [REVIEW_PACK_COMMAND],
+            ))
+            review_markdown = _render_markdown(review_report)
+            checks.append((
+                "the review pack renders as section 15, carries the 8-12 candidates, changes no file",
+                review_markdown.index("## 14. 夢的下一步")
+                < review_markdown.index(f"## {REVIEW_PACK_SECTION_ID}. {REVIEW_PACK_TITLE}")
+                # 第 8–12 節的候選與「對不到卡的事件」都只當背景列出來，不進門檻計數：
+                # 那五節各自已經有自己的下一步行，再算一次就是同一件事算兩次（四張已核
+                # 事件卡沒有決策卡承接＝第 12 節的四份候選，門檻數字仍然是 5 列）。
+                and review["counts"]["dream_candidates"]["uncarried_quotes"] == 4
+                and review["counts"]["review_items"] == 5
+                and sorted(
+                    (path.relative_to(review_vault).as_posix(), path.read_bytes())
+                    for path in review_vault.rglob("*") if path.is_file()
+                ) == review_before,
+            ))
+
+            thin_vault = Path(temp_dir).resolve() / "thin-review-vault"
+            (thin_vault / memspec.CORRECTION_DIRECTORY).mkdir(parents=True)
+            _write_card(
+                thin_vault / memspec.CORRECTION_DIRECTORY / "correction-20260905-eeeeeeeeeeee.md",
+                f"---\nname: correction-20260905-eeeeeeeeeeee\ndescription: owner correction 2026-09-05\n"
+                f"{memspec.CAPTURED_AT_FIELD}: 2026-09-05T00:00:00Z\n"
+                f"{memspec.SESSION_FIELD}: thin\n{memspec.MATCHED_CARD_FIELD}: decisions/one.md\n"
+                "---\nbody\n",
+            )
+            thin_report = build_report([thin_vault], today=today)
+            thin = {s["id"]: s for s in thin_report["sections"]}[REVIEW_PACK_SECTION_ID]
+            checks.append((
+                "below the trigger the pack says how far off it is and adds no next step",
+                thin["counts"]["review_items"] == 1
+                and thin["counts"]["at_threshold"] is False
+                and thin["note"].startswith(
+                    REVIEW_PACK_BELOW_NOTE.format(count=1, trigger=memspec.REVIEW_PACK_TRIGGER))
+                and memspec.EXAM_RESULTS_FILENAME in thin["note"]
+                and not any("檢討包" in step for step in thin_report["next_steps"])
+                and thin["commands"] == [],
+            ))
 
             five_report = build_report([vault, drafts_vault, mixed_vault, quotes_vault], today=today, config={
                 memspec.CONFIG_INDEX_CAP_BYTES_FIELD: 10,
@@ -2259,7 +2636,7 @@ def _selftest():
                 os.environ[name] = value
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 53
+    total = 58
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

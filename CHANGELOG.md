@@ -3,6 +3,17 @@
 ## Unreleased
 - gitignore: ignore the transient .hook-trust-*/ directory that hook_trust selftest creates in the repo root (it made the worktree-clean gate flap while another selftest was running).
 
+### U-P：回饋檢討機制的前四行（owner 2026-09-09；FAILURE_MODES §38）
+
+- owner 原話：「應該有回饋檢討機制，你跟CODEX設計一下」。設計由 Claude↔Codex 收斂（`_materials/DISCUSS_FEEDBACK_REVIEW_LOOP_20260909.md`）：**回饋保留出處、夢整理候選、候選滿額才集中檢討、owner 一包核決；每場不加任何必做動作。** 本單做落地十行的第 1–4 行，全部純程式、report-only、不改卡、不注入對話、不新增每場成本。
+- **事件識別與去重**（`epitype/capture.py`）：捕捉卡新增 `event_id`（宿主＋對話＋訊息位置＋文句的穩定雜湊）與 `origin`（同一份身分的可讀式 `host/session/position`），檔名由 `{kind}-{日期}-{digest}.md` 改為 `{kind}-{日期}-{digest}-{event_id}.md`。去重規則由「同文句不重寫」改為「同 `event_id` 不重寫，同一場對話裡的同文句仍只留一張，跨場各留一張」；判不出來源（session 為空）時退回舊的整庫比對。既有事件檔不動，`existing_capture` 用 `-{digest}*` 比對所以舊卡照樣找得到。宿主由轉錄檔落點判（`.codex/…/rollout-*` vs `.claude/projects/…`），Codex 形狀缺 `session_id`／`sessionId` 時退回 rollout 檔名——**不依賴 SessionEnd**。回放（`harvest`）把轉錄檔路徑與行號一起餵進同一支識別函式，所以線上與回放算出同一個 `event_id`。
+- 連帶修掉一個真缺陷：`harvest._move_card` 用「猜得出的檔名」判「已經在對的地方」與「目的地被佔了」，檔名帶了事件識別之後兩件事會一起錯（庫裡的卡被重新命名、「一句兩卡」被當成沒撞名）。改用 kind＋digest 判（新增 `_is_card_for`）。
+- **考題對卡映射**（`exam/exam_runner.py`）：每題結果帶出題目自己宣告的 `cards`／`card`／`decision_key`，總結多一行 `UNMAPPED n/total`（本機現況 **350/350 未映射**，三份共享題庫一題都沒改）。`setup.vault_cards` 刻意不當映射——那是這一題的合成庫，拿它充數會讓未映射數永遠是 0。`run_corpus` 的每筆結果由 2-tuple 改為 `(id, failure, cards)`。新增 `--dry-run`；非 dry-run 且 `EPITYPE_CONFIG` 有指路時，另寫 `<治理庫>/.epitype/exam_results_latest.json`（題號、通過／失敗、cards、`rules_version`＝題庫檔 sha256 前 12 碼）。沒有指路就印 `RESULTS SKIPPED`，不猜真庫。
+- **夢第 15 節「檢討包 / review pack」**（`epitype/dream.py`）：四種來源對齊到卡上——事件卡（`matched_card`／`event_id`／`verified`）、`_GATE_LOG.jsonl` 的 `stop_block`／`write_block`（沿用 `gates_report.load_rows`，數字與擋下報告同源）、`exam_results_latest.json` 的失敗題、第 8–12 節候選數（只當背景）。每張被指到的卡一列：事件數（去重後）｜未核事件數｜擋下數｜考題失敗數｜最近日期。「待判問題」＝列數；達 `memspec.REVIEW_PACK_TRIGGER`（5）時 `_next_steps` 加一行「檢討包達門檻」，未達則寫「未達門檻（n/5）」。**不判型別、不改卡、不動層、不進 SessionStart**（開場只讀 state 的 headline 欄，那三欄沒動）。第 8–12 節候選與「對不到卡的事件」只顯示不計入門檻：兩者都會把同一件事算兩次，而且在真庫規模下會讓門檻永遠成立。
+- 編號：第 13（整形）與 14（下一步）不動，檢討包接在第 14 節之後印，號碼與閱讀順序一致。`build_report` 的節次改由一個 `run()` 包裝跑，第 15 節最後跑（它要讀前面算完的候選數）；`_report_errors` 改走 `_SECTION_IDS`，時限耗盡時 13 節都留缺口紀錄。
+- 真庫實測（`--dry-run`，唯讀）：治理庫 3 列／3 件（91 則事件、29 則 `verified: false`、**91 則無 `matched_card`**、15 次擋下），專案庫 1 列／1 件（53 則事件、12 未核、53 無映射、1 次擋下），兩庫都未達門檻並註明「沒有 exam_results_latest.json」。`matched_card` 欄目前沒有任何路徑會寫——那是收斂 #2 的選擇（糾正明確指到規則時才寫），缺口寫在節的備註裡而不是折算成 0。
+- 回歸：`dream.py --selftest` 48 → **53**（五種來源各一、event_id 去重、門檻兩側、渲染順序與「一個檔都沒動」的位元組比對）、`exam_runner --selftest` 7 → **11**、`recall_hook --selftest` 46/46（四處檔名 glob 改 `-{digest}*`，兩處「跑兩次」的固定 session 由隨機改為同一個——換場本來就該各留一張）、`harvest --selftest` 23/23、`tests/capture_integration_regression.py` 6 → **8 案**、`tests/capture_admission_regression.py` 8 → **9 案**。run_all **48/48**、privacy PASS 121 檔、corpus 330/330、seeds 15/15 與 5/5。
+
 ### U-J：拆掉傷疤卡 trigger 的機械攔截（owner 2026-09-09；FAILURE_MODES §34）
 
 - owner 裁定原話：「我認為沒有所謂攔截層，應該都是變成類似規則或記憶卡，沒必要多設計攔截層出來」「機械阻斷<-這個就是多餘設計，我認為這種就是核心記憶」。PreToolUse 不再讀卡片的 `trigger:`、不再比對工具名與指令字串、不再因此擋下任何一次呼叫；留下的只有寫檔內容閘（規則 A 現行裁定 `forbidden`、規則 B 卡片型別合約）與它的 `_GATE_LOG.jsonl` 稽核。**不可逆動作交給宿主原生規則**（Claude `permissions.deny`、Codex `execpolicy` `~/.codex/rules/epitype_guard.rules`），在呼叫發生前就拒絕。
@@ -35,7 +46,7 @@
 - 報告：五節各一節 markdown，`_next_steps` 納入五項候選數（每一條都寫成「人工判斷」而不是「夢會處理」）。**編號位移**：主記憶整形由 `## 8.` 改為 `## 13.`（`memspec.INDEX_SHAPING_HEADING`），夢的下一步由 `## 9.` 改為 `## 14.`。`build_report` 多一個 `config` 參數（預設 `configured_options()`，讀不到設定就是 `{}`），逐節簽名改為 `(vaults, today, since_date, config)`。
 - `--dry-run` 對真庫可跑（五節全唯讀）。回歸：`epitype/dream.py --selftest` 40 → **48**（新增八案：口袋庫只列未登記且有卡的、草稿分齡分組與最舊排序、三種混雜形狀且 ```圍籬不誤判、缺鍵寫未設定且不判斷、設鍵後列出超出量且兩個檔案一位元組沒動、只列沒有決策卡承接的那一份、下一步帶齊五項、報告渲染 8–12 節與 13／14 的位移）。selftest 現在把 `HOME`／`USERPROFILE`／`EPITYPE_CONFIG` 一起指進自己的暫存目錄並在 `finally` 還原——第 8 節會從家目錄推口袋庫、第 11 節會讀設定，不隔離就會掃到 owner 的真實家目錄與真設定。
 
-### U-K2：夢第 12 節的承接判定補上真正在用的那兩條路（owner 2026-09-09；FAILURE_MODES §37）
+### U-K2：夢第 12 節的承接判定補上真正在用的那兩條路（owner 2026-09-09；FAILURE_MODES §38）
 
 - 缺陷：第 12 節問「這句原話有沒有決策卡承接」，卻只認決策卡的正文與 `source`／`superseded_by`／`aliases` 提到事件檔名或 `decision_key`——而卡片實際上是用另外兩種方式承接的：決策卡把原話逐字抄進 `owner_quote`（通用庫 19 張決策卡全部有這一欄，提名只清得掉 6 張卡），事件卡把承接者寫在自己的 `carried_by`。兩種都不留檔名，所以 §36 寫成那天兩庫的事件卡是 91／53＝**全部**被列成「無人承接」。全部命中的清單等於沒有清單。
 - 承接改為三條路，任一成立就不列：**提名**（原有，完整檔名或 `decision_key`）、**逐字引用**（決策卡 `owner_quote` 與事件卡正文任一方向的子字串）、**自報**（事件卡 frontmatter 的 `carried_by`，新常數 `memspec.CARRIED_BY_FIELD`；那張卡在不在是 `epitype cards` 的題目，這一節不查）。

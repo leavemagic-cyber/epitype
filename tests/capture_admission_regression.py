@@ -98,16 +98,40 @@ class CaptureAdmissionRegression(unittest.TestCase):
                               path.read_text(encoding="utf-8"))
 
     def test_a_proposal_is_written_once_across_dates(self):
+        """同一場對話的同一句話，隔天再說一次仍然是同一件事，不長第二份提案。
+
+        提案落在 `captured_pending/<日期>/`，日期子目錄每天不同——只看正式目錄的去重
+        會讓它每天長出一份新提案。U-P 之後去重要問「同不同事件」，所以這裡把場次固定
+        住：換場的同一句話該各留一張，那是 `test_the_same_sentence_in_two_sessions…`。
+        """
         first = self.capture(PROPOSED[0][1], PROPOSED[0][2])
         replay = capture.Replay(stamp="2026-09-10T01:02:03Z")
         again = capture.capture_event(
             PROPOSED[0][1], self.vault,
-            {"cwd": str(self.root), "session_id": "later"}, None,
+            {"cwd": str(self.root), "session_id": "admission-session"}, None,
             question=PROPOSED[0][2], replay=replay,
         )
         self.assertIsNone(again)
         self.assertEqual(replay.status, capture.STATUS_DUPLICATE)
         self.assertEqual(sorted(self.pending_root.rglob("*.md")), [first])
+
+    def test_the_same_sentence_in_two_sessions_keeps_two_proposals(self):
+        """提案區也要數得出事故次數：同一句話在兩場對話裡各講一次＝兩件事。"""
+        first = self.capture(PROPOSED[0][1], PROPOSED[0][2])
+        replay = capture.Replay(stamp="2026-09-09T09:10:11Z")
+        second = capture.capture_event(
+            PROPOSED[0][1], self.vault,
+            {"cwd": str(self.root), "session_id": "another-session"}, None,
+            question=PROPOSED[0][2], replay=replay,
+        )
+        self.assertIsNotNone(second)
+        self.assertEqual(replay.status, capture.STATUS_PENDING)
+        self.assertEqual(sorted(self.pending_root.rglob("*.md")), sorted([first, second]))
+        identities = {
+            memspec.frontmatter_fields(path)[0].get(memspec.EVENT_ID_FIELD)
+            for path in (first, second)
+        }
+        self.assertEqual(len(identities), 2)
 
     def test_proposals_are_not_indexed_or_recalled(self):
         prompt = f"以後都用第一種寫法處理 {NEEDLE}，一律不要混用"
@@ -138,7 +162,9 @@ class CaptureAdmissionRegression(unittest.TestCase):
                 summary=summary, replay=capture.Replay(stamp="2026-09-09T01:02:03Z"),
             )
             live = self.capture(prompt, question)
-            twin = next(replayed.rglob(live.name))
+            # 兩邊的檔名尾巴是各自的事件識別（回放是另一場 session），所以比對用文句
+            # 雜湊找對應的那張卡；驗的是「落在同一種目錄」，不是檔名一字不差。
+            twin = next(replayed.rglob(f"{kind}-*-{digest}*.md"))
             self.assertEqual(
                 twin.relative_to(replayed).parent, live.relative_to(self.vault).parent, prompt)
 

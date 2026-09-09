@@ -92,10 +92,89 @@ class CaptureIntegrationRegression(unittest.TestCase):
             self.assertIn("答（owner 逐字）：" + prompt, text)
             self.assertIn("captured_at: 2026-01-02T03:04:05Z", text)
             self.assertIn("source: synthetic", text)
-            self.assertEqual(path.name, "ruling-20260102-" + capture.grant_digest(prompt) + ".md")
+            digest = capture.grant_digest(prompt)
+            event_id, origin, _session = capture.event_identity(event, digest)
+            # U-P：檔名尾巴是事件識別，不再只有文句雜湊——同一句話在兩場對話裡各講一
+            # 次，同一天會撞到同一個舊檔名，第二件事故就靜靜消失了。
+            self.assertEqual(path.name, f"ruling-20260102-{digest}-{event_id}.md")
+            self.assertIn(f"{memspec.EVENT_ID_FIELD}: {event_id}", text)
+            self.assertIn(f"{memspec.ORIGIN_FIELD}: {origin}", text)
             capture.capture_event(prompt, vault, event, None, replay=replay)
             self.assertEqual(replay.status, capture.STATUS_DUPLICATE)
             self.assertEqual(len(list(vault.rglob("*.md"))), 1)
+
+    def test_the_same_sentence_in_two_sessions_keeps_two_events(self):
+        """卡數＝事故數的前提（U-P）：同句不同場各留一張，同一則事件重送只留一張。
+
+        U-P 之前這裡是「同文句一律不重寫」，所以 owner 在三場對話各講一次同一句話只
+        會留下一張卡——回饋檢討要算「同一件事被糾正第二次」時，次數已經不在庫裡了。
+        """
+        prompt = "不是！那個欄位只放小分類，不要放品名"
+        vault = self.root / "two-sessions"
+        vault.mkdir()
+        first = capture.capture_event(
+            prompt, vault, self.event("sess-a", prompt, None), None,
+            replay=capture.Replay(stamp="2026-01-02T03:04:05Z"),
+        )
+        second = capture.capture_event(
+            prompt, vault, self.event("sess-b", prompt, None), None,
+            replay=capture.Replay(stamp="2026-01-02T05:06:07Z"),
+        )
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        self.assertNotEqual(first, second)
+        self.assertEqual(len(list(vault.rglob("*.md"))), 2)
+
+        # 同一則事件重送（同宿主、同場、同位置、同句）：不重寫。
+        resent = capture.Replay(stamp="2026-01-02T03:04:05Z")
+        self.assertIsNone(capture.capture_event(
+            prompt, vault, self.event("sess-a", prompt, None), None, replay=resent))
+        self.assertEqual(resent.status, capture.STATUS_DUPLICATE)
+        # 同一場對話裡再講一次同一句話仍然只是同一件事。
+        later = capture.Replay(stamp="2026-01-03T03:04:05Z")
+        event = self.event("sess-a", prompt, None)
+        event[capture.MESSAGE_INDEX_KEY] = 99
+        self.assertIsNone(capture.capture_event(prompt, vault, event, None, replay=later))
+        self.assertEqual(later.status, capture.STATUS_DUPLICATE)
+        self.assertEqual(len(list(vault.rglob("*.md"))), 2)
+
+    def test_both_host_shapes_carry_an_event_id_and_origin(self):
+        """UserPromptSubmit 的兩種事件形狀都要說得出自己是哪一則事件（U-P 第 2 行）。
+
+        Codex 形狀沒有 `session_id`（鏡像欄是 `sessionId`），連那個都缺時只剩 rollout
+        檔名——那本身就是那場對話唯一的名字，所以來源仍然推得出來，不必依賴 SessionEnd。
+        """
+        digest = capture.grant_digest("x")
+        claude = {
+            "session_id": "claude-session",
+            "transcript_path": str(self.root / "home" / ".claude" / "projects" / "p" / "s.jsonl"),
+        }
+        codex_mirrored = {
+            "sessionId": "codex-session",
+            "transcript_path": str(
+                self.root / "home" / ".codex" / "sessions" / "2026" / "01" / "02"
+                / "rollout-2026-01-02T03-04-05-sessone.jsonl"
+            ),
+        }
+        codex_headless = {"transcript_path": codex_mirrored["transcript_path"]}
+        seen = []
+        for name, event, host, session in (
+            ("claude", claude, capture.HOST_CLAUDE, "claude-session"),
+            ("codex-mirrored", codex_mirrored, capture.HOST_CODEX, "codex-session"),
+            ("codex-headless", codex_headless, capture.HOST_CODEX,
+             "rollout-2026-01-02T03-04-05-sessone"),
+        ):
+            with self.subTest(shape=name):
+                event_id, origin, resolved = capture.event_identity(event, digest)
+                self.assertEqual(capture.event_host(event), host)
+                self.assertEqual(resolved, session)
+                self.assertTrue(origin.startswith(f"{host}/{session}/"))
+                self.assertEqual(len(event_id), 12)
+                seen.append(event_id)
+        self.assertEqual(len(set(seen)), len(seen))
+        # 位置判不出來（沒有轉錄檔、沒有行號）時寫 `-`，不冒充位置 0。
+        self.assertEqual(capture.event_position({}), capture.ORIGIN_UNKNOWN)
+        self.assertEqual(capture.event_host({}), capture.HOST_UNKNOWN)
 
     def test_non_record_json_does_not_interrupt_capture(self):
         for index, scalar in enumerate((None, [], 5, "text")):

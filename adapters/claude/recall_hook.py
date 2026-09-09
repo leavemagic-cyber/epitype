@@ -652,7 +652,7 @@ def _selftest():
                 routed_result.returncode == 0
                 and any(
                     (grant_vault / memspec.GRANT_DIRECTORY).glob(
-                        f"grant-*-{routed_digest}.md"
+                        f"grant-*-{routed_digest}*.md"
                     )
                 )
                 and not (project_vault / memspec.GRANT_DIRECTORY).exists(),
@@ -686,10 +686,10 @@ def _selftest():
                 "a captured sentence lands in the cwd's registered project vault, not governance",
                 project_routed.returncode == 0
                 and any(
-                    (native_capture / memspec.GRANT_DIRECTORY).glob(f"grant-*-{project_grant_digest}.md")
+                    (native_capture / memspec.GRANT_DIRECTORY).glob(f"grant-*-{project_grant_digest}*.md")
                 )
                 and not any(
-                    (grant_vault / memspec.GRANT_DIRECTORY).glob(f"grant-*-{project_grant_digest}.md")
+                    (grant_vault / memspec.GRANT_DIRECTORY).glob(f"grant-*-{project_grant_digest}*.md")
                 ),
             ))
 
@@ -751,7 +751,7 @@ def _selftest():
             direct_digest = _grant_digest(direct_grant)
             direct_files = list(
                 (grant_vault / memspec.GRANT_DIRECTORY).glob(
-                    f"grant-*-{direct_digest}.md"
+                    f"grant-*-{direct_digest}*.md"
                 )
             )
             direct_text = (
@@ -789,7 +789,7 @@ def _selftest():
             )
             embedded_files = list(
                 (grant_vault / memspec.GRANT_DIRECTORY).glob(
-                    f"grant-*-{_grant_digest(embedded_grant)}.md"
+                    f"grant-*-{_grant_digest(embedded_grant)}*.md"
                 )
             )
             embedded_text = (
@@ -808,15 +808,18 @@ def _selftest():
             )
 
             grant_prompt = "你可以操作 chrome！我同意過，這件事以後不用再問"
+            # 同一場對話裡把同一句話說兩次仍然是同一件事（U-P：去重看事件，不看文句；
+            # 換一場說同一句話則各留一張，那條在 tests/capture_integration_regression）。
+            grant_session = uuid.uuid4().hex
             for _ in range(2):
                 run_synthetic(
                     Path(__file__),
-                    {"prompt": grant_prompt, "session_id": uuid.uuid4().hex},
+                    {"prompt": grant_prompt, "session_id": grant_session},
                     grant_config,
                 )
             grant_files = list(
                 (grant_vault / memspec.GRANT_DIRECTORY).glob(
-                    f"grant-*-{_grant_digest(grant_prompt)}.md"
+                    f"grant-*-{_grant_digest(grant_prompt)}*.md"
                 )
             )
             grant_text = grant_files[0].read_text(encoding="utf-8") if grant_files else ""
@@ -869,15 +872,16 @@ def _selftest():
             # 2026-09-09 owner Q5「C」：喚回這幾條驗的是「入庫的卡怎麼端出來」，題目
             # 一律用白名單形狀；白名單以外的句子落提案區，由下面那條專門驗。
             correction_sentence = "不要亂處理 SWSetup，我不是說過你只能處理AI產生資料"
+            correction_session = uuid.uuid4().hex
             for _ in range(2):
                 run_synthetic(
                     Path(__file__),
-                    {"prompt": f"待刪_雜項 SWSetup 卡到現在。{correction_sentence}", "session_id": uuid.uuid4().hex},
+                    {"prompt": f"待刪_雜項 SWSetup 卡到現在。{correction_sentence}", "session_id": correction_session},
                     grant_config,
                 )
             correction_files = list(
                 (grant_vault / memspec.CORRECTION_DIRECTORY).glob(
-                    f"correction-*-{_grant_digest(correction_sentence)}.md"
+                    f"correction-*-{_grant_digest(correction_sentence)}*.md"
                 )
             )
             correction_text = correction_files[0].read_text(encoding="utf-8") if correction_files else ""
@@ -985,13 +989,14 @@ def _selftest():
                 encoding="utf-8",
             )
             answer = "不是！只有6s是標準合約，其他還是微型，小單期是指1口(微型或標準)"
+            ruling_session = uuid.uuid4().hex
             for _ in range(2):
                 run_synthetic(
                     Path(__file__),
-                    {"prompt": answer, "session_id": uuid.uuid4().hex, "transcript_path": os.fspath(transcript)},
+                    {"prompt": answer, "session_id": ruling_session, "transcript_path": os.fspath(transcript)},
                     grant_config,
                 )
-            ruling_files = list((grant_vault / memspec.RULING_DIRECTORY).glob(f"ruling-*-{_grant_digest(answer)}.md"))
+            ruling_files = list((grant_vault / memspec.RULING_DIRECTORY).glob(f"ruling-*-{_grant_digest(answer)}*.md"))
             ruling_text = ruling_files[0].read_text(encoding="utf-8") if ruling_files else ""
             checks.append(
                 (
