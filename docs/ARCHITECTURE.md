@@ -40,9 +40,9 @@ Levels change by editing a field, not by moving a file, so links stay stable:
   `closed_evidence`); a project card with no status is listed under "needs review"
   rather than passed off as confirmed-current.
 - `decision` → `status: superseded` with `superseded_by`; `active` stays at level 2,
-  where the decision section lists every active decision, because the SessionStart
-  ruling block is bounded (`forbidden` or recent, capped per vault) and is not a
-  complete substitute.
+  where the decision section lists every active decision — since §35 that view and
+  `epitype decisions` are the only places a full list exists, because session start
+  no longer recites one.
 - `feedback`, `reference`, `user`, `habit`, `scar` and event cards are never closed
   by project state; only `superseded` moves them.
 
@@ -69,7 +69,7 @@ whole pass rather than overwriting another writer.
 Epitype uses four routes because no single retrieval mode is correct for every piece of memory.
 
 1. **Resident.** A small native index or stable rule block remains visible. Size limits keep residency selective instead of turning it into an unbounded prompt prefix.
-2. **Point-in-time injection.** A hook injects selected context at a lifecycle event. Prompt recall and the two content gates belong here; PreCompact writes a distinct, bounded recovery map per session or transcript so concurrent sessions do not overwrite one another.
+2. **Point-in-time injection.** A hook injects selected context at a lifecycle event. Prompt recall and the two content gates belong here; PreCompact writes a distinct, bounded recovery map per session or transcript so concurrent sessions do not overwrite one another. SessionStart is deliberately the thinnest of these: it echoes the short index to hosts that do not load it natively, and otherwise emits only lines that name something to do — a card-type FAIL, the by-the-way alias task, a dream that errored, left review candidates, or is past due. Nothing standing (the work ledger, the vault's active rulings, the overdue-pending list) is re-sent at every session; those are read on demand, and a rule that must reach the model when a prompt touches it belongs to recall, not to the prologue (failure mode 35).
 3. **Agent-directed retrieval.** The resident index points to a fuller card, and the agent opens that card through the host's normal read path. This route is useful for detail that should not be permanently resident, but it is not sufficient for a rule that must intercept an action.
 4. **Search.** `memsearch.py` builds a local trigram FTS index at `<vault>/.epitype/memory_fts.sqlite3` and supports explicit query or prompt-oriented recall. Only `build` creates an index; `query` and `recall` atomically move an existing legacy `.cairn` index into place before reading, fall back to that legacy snapshot with `index_migration_pending` if the move is blocked, and otherwise report no-index distinctly from a valid zero-hit result. Existing stale indexes retain the bounded incremental refresh path, with the refresh disclosed in the response. Search is a retrieval aid, not an authority source and not permission to act.
 
@@ -149,7 +149,7 @@ Dreaming is scheduled, not asked for. `dream.mode` in `~/.epitype/config.json` s
 
 The inventory itself is read-only, but the run carries two piggyback tasks that write into each vault: it regenerates `_views/` (nothing is rewritten when the input fingerprint is unchanged), and then it shapes `MEMORY.md` back into a short entry point, reporting both in the packet. Shaping runs second on purpose — "the catalogue already carries this card" is its only test, and a stale catalogue would answer it wrongly.
 
-Apart from those two tasks, the background run's own output stays inside `<governance vault>/.epitype/`: `dream_pack_latest.md`, `dream_pack_latest.json`, `dream_state.json` (completion time, per-section counts, elapsed seconds) and `dream.log`. It gives itself a ten-minute budget and marks any section it did not reach rather than dropping it silently. The next session — but not one resuming after a compaction — opens with one line naming the four headline numbers and the pack path, once; a dream that found nothing still says it ran, because silence cannot be told apart from a dream that never happened. None of this calls a model: the model half of dreaming stays manual, so an installed Epitype never spends model budget on its own.
+Apart from those two tasks, the background run's own output stays inside `<governance vault>/.epitype/`: `dream_pack_latest.md`, `dream_pack_latest.json`, `dream_state.json` (completion time, per-section counts, elapsed seconds) and `dream.log`. It gives itself a ten-minute budget and marks any section it did not reach rather than dropping it silently. The next session — but not one resuming after a compaction — opens with one line, once, and only when someone has to act: the run left headline numbers to review, or it did not finish. A dream that finished clean says nothing; what distinguishes "clean" from "never ran" is the other line, which appears when the dream is past its `interval_hours` and no unexpired lock says one is running (failure mode 35). None of this calls a model: the model half of dreaming stays manual, so an installed Epitype never spends model budget on its own.
 
 ```powershell
 python epitype/dream.py --selftest

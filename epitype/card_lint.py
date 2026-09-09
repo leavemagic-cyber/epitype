@@ -623,7 +623,12 @@ def scan_vaults(vaults, today=None, time_budget=memspec.CARD_LINT_HOOK_BUDGET_SE
 
 
 def summary_line(vaults, today=None, time_budget=memspec.CARD_LINT_HOOK_BUDGET_SECONDS, reports=None):
-    """SessionStart 的一行，沒有 FAIL 也沒有 WARN 就回 None。"""
+    """SessionStart 的一行，沒有任何 FAIL 就回 None。
+
+    2026-09-09（§35）：WARN 不再開口。WARN 是「這張卡可以更好」，那是夢的清單；
+    FAIL 是「喚回端會端出半真的卡」，那才是本場要有人動手的事。WARN 的數字仍附在
+    同一行裡，因為要修 FAIL 的人本來就會一起看。
+    """
     if reports is None:
         reports = scan_vaults(vaults, today, time_budget)
     if reports is None:
@@ -636,7 +641,7 @@ def summary_line(vaults, today=None, time_budget=memspec.CARD_LINT_HOOK_BUDGET_S
         warn += report["warn"]
         if report["fail"] > worst_fail:
             worst_fail, worst = report["fail"], report["vault"]
-    if not (fail or warn) or worst is None:
+    if not fail or worst is None:
         return None
     return memspec.CARD_LINT_NOTICE.format(fail=fail, warn=warn, vault=worst)
 
@@ -1063,6 +1068,7 @@ def _selftest():
                 "SessionStart 一行帶 FAIL／WARN 數與最壞的庫",
                 isinstance(line, str)
                 and "\n" not in line
+                and report["fail"] > 0
                 and f"FAIL {report['fail']}／WARN {report['warn']}" in line
                 and str(vault) in line,
             ))
@@ -1070,6 +1076,17 @@ def _selftest():
                 "乾淨庫沒有那一行；逾時也沒有（半個庫的數字不點名）",
                 summary_line([vault / "grants" / "nowhere"], today=today) is None
                 and summary_line([vault], today=today, time_budget=-1.0) is None,
+            ))
+            # §35：只有 WARN 的庫在開場不出聲——WARN 是夢的清單，不是本場要動手的事。
+            warn_vault = Path(temp_dir).resolve() / "warn-only"
+            warn_vault.mkdir()
+            (warn_vault / "body-dated.md").write_bytes(_FIXTURES["body-dated.md"].encode("utf-8"))
+            warn_report = scan_vault(warn_vault, today=today)
+            checks.append((
+                "只有 WARN 的庫在 SessionStart 不出聲（FAIL 才開口）",
+                warn_report["fail"] == 0
+                and warn_report["warn"] > 0
+                and summary_line([warn_vault], today=today) is None,
             ))
             checks.append((
                 "SessionStart 那一行的 WARN 數不含 INFO",
@@ -1180,7 +1197,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 42
+    total = 43
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

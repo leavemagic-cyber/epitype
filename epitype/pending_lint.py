@@ -97,42 +97,6 @@ def scan_vault(vault, max_age_days=memspec.PENDING_MAX_AGE_DAYS, today=None, dea
     }
 
 
-def summary_line(
-    vaults,
-    max_age_days=memspec.PENDING_MAX_AGE_DAYS,
-    today=None,
-    time_budget=memspec.PENDING_LINT_HOOK_BUDGET_SECONDS,
-):
-    """One bounded line for SessionStart, or None when nothing is overdue.
-
-    逾時回 None，與 card_lint 同一條規則：半個庫的數字比不點名更糟。
-    """
-    deadline = None if time_budget is None else time.monotonic() + time_budget
-    lines = cards = oldest = skipped = 0
-    worst = None
-    for vault in vaults:
-        try:
-            report = scan_vault(vault, max_age_days, today, deadline)
-        except OSError:
-            continue
-        if report["timed_out"]:
-            return None
-        lines += report["zombie_lines"]
-        cards += report["zombie_cards"]
-        skipped += report["oversized_skipped"]
-        if report["oldest_days"] > oldest:
-            oldest, worst = report["oldest_days"], report["vault"]
-    if not lines:
-        return None
-    # A skipped card is said, not hidden: an unscanned card is a card whose
-    # pending lines nobody counted.
-    note = f"，{skipped} 張超過 {MAX_CARD_BYTES // 1024}KB 未掃" if skipped else ""
-    return (
-        f"⏳ 殭屍待辦 {lines} 行／{cards} 卡（最舊 {oldest} 天，逾 {max_age_days} 天未收尾{note}）"
-        f"→ python epitype/pending_lint.py \"{worst}\""
-    )
-
-
 def _print_report(report, output):
     for card in report["cards"]:
         print(f"{card['path']} oldest={card['oldest_days']}d", file=output)
@@ -197,19 +161,6 @@ def _selftest():
                 and report["zombie_cards"] == 2
                 and report["zombie_lines"] == 2,
             ))
-            line = summary_line([vault], today=today)
-            checks.append((
-                "session-start summary is one line naming counts and the worst vault",
-                isinstance(line, str)
-                and "\n" not in line
-                and "2 行／2 卡" in line
-                and "最舊 42 天" in line
-                and str(vault.resolve()) in line,
-            ))
-            checks.append((
-                "clean vault yields no summary",
-                summary_line([vault], max_age_days=10_000, today=today) is None,
-            ))
             out = io.StringIO()
             code = main(["--strict", "--today", "2026-09-02", os.fspath(vault)], output=out)
             checks.append((
@@ -220,7 +171,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 7
+    total = 5
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

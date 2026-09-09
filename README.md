@@ -21,7 +21,7 @@ Epitype connects the same native vaults to five host events:
 
 | Event | What Epitype does |
 |---|---|
-| `SessionStart` | Injects a bounded memory index and work ledger when those files exist. |
+| `SessionStart` | Echoes the bounded memory index to hosts that do not load it natively, plus any line that names something to do (a card-type FAIL, a dream that errored, left candidates, or is past due). Nothing standing is re-sent. |
 | `UserPromptSubmit` | Recalls up to five relevant cards from each resolved vault within the shared output budget. Short owner statements are stored verbatim, deduplicated, and indexed; their meaning is not inferred during capture. |
 | `PreToolUse` | Write gate: checks the content a file write is about to commit against the settled rulings and the card contract. A block returns the ruling and an audit row. |
 | `PreCompact` | Builds a small recovery map from the transcript tail before context compaction. |
@@ -40,9 +40,9 @@ recalled, waiting for a person. Both kinds carry `provenance: auto-captured` and
 `verified: false`, and promotion means editing those fields (`verified: true` plus
 `verified_by`/`verified_at`) and moving the file — a replay refuses to do it.
 
-No `verified: false` card is authority for anything: the Stop decision gate, the
-write gate and the SessionStart ruling list all read cards that declare
-`decision_key`, which a captured card never does.
+No `verified: false` card is authority for anything: the Stop decision gate and the
+write gate both read cards that declare `decision_key`, which a captured card never
+does.
 Recall still surfaces it, labelled as history rather than as a standing decision.
 Details and the measured trade in `docs/FAILURE_MODES.md` §32.
 

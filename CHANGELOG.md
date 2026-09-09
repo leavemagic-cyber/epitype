@@ -14,6 +14,16 @@
 - 順手修掉的可重跑性缺陷：寫檔閘對同一組（session、規則、檔案、內容）只擋一次，同一份題庫連跑兩次時第二次會變成放行。`exam_runner._run_gate` 改為每題自己一個 session id、跑完清掉標記（與 `_run_stop` 同一套；新增 `_hook_common.clear_notice_markers`）。
 - 閘門：run_all 由 49/49 降為 **48/48**（退役一支回歸）、privacy PASS、corpus 330/330、seeds 15/15 與 5/5。selftest 分母：pretooluse 73 → **30**、card_lint 41 → **42**、exam runner 7/7、stop 22/22 不變。
 
+### U-I-a：開場只留要動作的東西
+
+- SessionStart 不再注入工作帳本、現行裁定塊、殭屍待辦行、「🔁 喚回的卡若與現況不符…」提醒行，以及任何固定說明文字（owner 2026-09-09：「不應該塞，這是多餘設計」「原生功能就會你就會去讀claude.md;CODEX就會去讀agents.md」「現行裁定清單（12 行）我認為應該是回歸進入正確地方」「沒必要就拿掉阿，反正浪費token的行為都不應該」；FAILURE_MODES §35）。帳本檔本身不動——它仍是治理庫的辨識標記；裁定改由喚回在命中時帶回（帶 owner 原話），待辦由 `epitype pending` 與夢點名。
+- 卡片型別檢查改成只有 FAIL 才出一行（WARN 的數字照舊附在同一行）；只有 WARN 的庫在開場不出聲。
+- 夢的一行只在要有人動手時出現：夢報錯、夢列了待審候選、夢到期沒跑（判準與起夢同一份 `interval_hours`，lock 未逾時＝正在跑就不算沒跑）。乾淨跑完那一場不再出聲，`DREAM_NOTICE_CLEAN_LINE` 由新的 `DREAM_NOTICE_OVERDUE_LINE` 取代。
+- 真庫副本實量（兩庫、四種事件形狀，Claude／Codex × cwd `C:\` 與 titan）：改前 8015／8060／8153／7986 bytes，四種形狀全部撞到 8 KB 上限並以「…（超出預算，餘 N 段未注入）」結尾，其中兩種形狀連短入口回音都被擠掉；改後 0／2033／1821／3510 bytes，短入口回音不再被擠。索引回音、壓縮後復原、夢 spawn、fail-open、預算與 shim 契約都沒動。
+- 退役：`pending_lint.summary_line`（2 項 selftest 隨之退役，7/7 → 5/5）、`sessionstart_hook` 的 `_active_decisions`／`_decision_block`／`_vault_labels`／`_frontmatter_fields`，以及 memspec 的 `SESSIONSTART_DECISIONS_HEADER`／`SESSIONSTART_DECISIONS_MAX_LINES`／`SESSIONSTART_DECISION_RECENT_DAYS`／`SESSIONSTART_DECISION_REST_LINE`／`CARD_SELF_CORRECT_NOTICE`／`PENDING_LINT_HOOK_BUDGET_SECONDS`／`DREAM_NOTICE_CLEAN_LINE`。`epitype/ledger_gate.py` **不退役**：它是 `epitype ledger append` 的證據閘，與開場注入無關，仍有 CLI 與 package_smoke 兩個消費者。
+- 測試：sessionstart 31/31 → **30/30**（四案由「有這一行」改寫成「永遠沒有這一行」，被移除行為的專屬案例一併退役）、card_lint 42/42 → **43/43**（新增「只有 WARN 不出聲」）、pending_lint 7/7 → **5/5**；`tests/governance_regression.py` 的降級場改以短入口回音驗注入仍送得出、`tests/dream_status_regression.py` 改驗乾淨的夢不出聲、`tests/capture_admission_regression.py` 的第 4 項（開場裁定清單）隨功能退役（同批的第 3 項已由 U-J 退役，該題現在只剩三條消費端）。run_all **48/48**、privacy PASS 121 檔。
+- **考題退役：0 題**——三份題庫都不經 SessionStart（exam_runner 只驅動 UserPromptSubmit／PreToolUse／Stop），corpus 330/330、seeds 15/15 與 5/5 分母不變。
+
 - 夢多一個順路任務「主記憶整形」（owner 2026-09-09：「我們不是有類似夢的機制，不就是剛好處理這個?」；FAILURE_MODES §33）：`MEMORY.md` 被 §31 修短之後會自己長回來——宿主「存卡後在 MEMORY.md 加一行」的預設、別場 session 直接編輯——而事前用寫檔閘擋會連手寫短入口本來就長成那樣的 `- [name](card.md)` 一起擋掉。改由 03:30 那場夢事後整形：允許段（`memspec.INDEX_ALLOWED_SECTIONS`＝習慣與偏好／找不到就搜／索引卡／專案規則，各含英文寫法）內一律不動；允許段以外、且連到的卡 `_views/current.md` 或 `history/closed.md` 已經列出的整行，原文照搬進 `<vault>/_drafts/index_pruned/YYYYMMDD.md`（附時間、來源段、原因），不刪。
 - 視圖沒列到的連結不搬，只列進報告：那可能是幾分鐘前才寫好、目錄還沒生成的新卡。整形排在順路重生 `_views/` 之後，因為「目錄已經承載這張卡」就是它唯一的判準，判準不能是舊的。
 - 寫法是受控的小範圍改寫，不是重寫：讀→記 mtime＋大小→算→寫前再比 mtime＋大小→帶原內容比對的換名寫入（`card_io.replace_if_unchanged`，取鎖）→再讀核對。任一步對不上就整份放棄、報告記一行、下次夢重試。紀錄檔先寫、`MEMORY.md` 後改，所以被拒的換名不會弄丟行；下一次靠「原文行已在檔內」去重，不疊第二份。`--dry-run` 只印會搬幾行，一個位元組都不動。

@@ -387,11 +387,10 @@ CONTEXT_TRUNCATED_SUFFIX = "…（超出預算，餘 {dropped} 段未注入）"
 
 # 2026-09-05 事故：owner 08-13 已裁定的事被 AI 當成待選項端回來。決策卡進了索引，卻只
 # 當普通卡注入、描述截到 120 字，原話一個字都沒到現場。規則：決策卡是 owner 親裁的現況，
-# 喚回時與 rulings 同級置頂且排在自動捕捉之前（親裁 > 自動捕捉），並帶 owner 原話；
-# 每場開場（含壓縮後重注）逐條列出該庫的現行裁定。
+# 喚回時與 rulings 同級置頂且排在自動捕捉之前（親裁 > 自動捕捉），並帶 owner 原話。
+# 2026-09-09（§35）：開場的現行裁定清單已移除——裁定由喚回在命中時帶回，開場逐條重送
+# 只是每一場都付一次的固定成本。
 DECISION_PREFIX = "⚖ 裁定："
-SESSIONSTART_DECISIONS_HEADER = "⚖ 現行裁定（{vault}）"
-SESSIONSTART_DECISIONS_MAX_LINES = 12
 
 # PreToolUse 的「同一場只說一次」去重標記（寫檔閘的拒絕、無法使用的 forbidden 告示）。
 # 2026-09-09（§30／§34）：旁白計量與卡片 trigger 攔截都已移除，標記機制留給寫檔閘用。
@@ -401,14 +400,11 @@ NOTICE_MARKER_TTL_SECONDS = 24 * 3600
 
 # 2026-09-02 事故：7/22 寫進計畫卡的「未辦（owner 自行）」掛到 9/2，每輪盤點都被
 # 重新端出來；待辦有入口沒出口。規則：待辦標記行必須帶可跑的 verify: 或已收尾，
-# 逾期者由 pending_lint 點名並在 SessionStart 以一行摘要提醒。
+# 逾期者由 `epitype pending` 與每晚的夢點名（2026-09-09 §35：開場不再注入那一行）。
 PENDING_MARKER_PATTERN = r"(?:未辦|待辦|⏳|\bTODO\b|待\s*owner|owner\s*自行|待處理|待決)"
 PENDING_CLOSED_PATTERN = r"(?:^\s*[-*]?\s*~~|作廢|已完成|已辦|已處理|已收案|✅|superseded)"
 PENDING_VERIFY_MARKER = "verify:"
 PENDING_MAX_AGE_DAYS = 14
-# 這一行也是全庫磁碟掃描，和 card_lint 同樣要有自己的期限：2026-09-06 之前它是
-# SessionStart 唯一一段完全無界的掃描，兩庫實測 2.8 s，冷快取沒有上限。
-PENDING_LINT_HOOK_BUDGET_SECONDS = 1.0
 PENDING_MARKER_REGEX = re.compile(PENDING_MARKER_PATTERN, re.IGNORECASE)
 PENDING_CLOSED_REGEX = re.compile(PENDING_CLOSED_PATTERN, re.IGNORECASE)
 PENDING_DATE_REGEX = re.compile(r"(20\d\d)-(\d\d)-(\d\d)")
@@ -1357,9 +1353,10 @@ DREAM_NOTICE_LINE = (
     "🌙 夢已整理（{date}）：型別 FAIL {card_fail}／缺別名 {missing_aliases}／"
     "草稿 {drafts} → {pack}"
 )
-# 沒有待處理項也要印一行：不然「夢跑完但乾淨」與「夢從沒跑」在開場長得一樣。
-DREAM_NOTICE_CLEAN_LINE = "🌙 夢已整理（{date}）：沒有待處理項。"
 DREAM_NOTICE_INCOMPLETE_LINE = "🌙 夢未完整檢查（{date}）：仍有未確認結果；詳見 {pack}。"
+# 2026-09-09（§35）：乾淨跑完的那一場不再報告——「跑完但沒事」不需要任何人做任何事。
+# 分辨「乾淨」與「從沒跑」改由這一行負責：只有它是要人動手的狀態。
+DREAM_NOTICE_OVERDUE_LINE = "🌙 夢到期未跑（上次 {last}）→ python epitype/dream.py --scheduled"
 
 
 # --- U57b：沒中文的卡由 AI 自己補；forbidden 別寫裸名詞 ---
@@ -1369,10 +1366,6 @@ CARD_NO_CHINESE_PER_SESSION = 3
 CARD_NO_CHINESE_CURSOR_FILENAME = "no_chinese_cursor.json"
 CARD_NO_CHINESE_CURSOR_FIELD = "last"
 CARD_NO_CHINESE_LINE = "🈳 順手補中文別名（本場 ≤{limit} 張）：{cards}"
-# 同一裁定的另一半：喚回的卡與現況不符就直接改，開場說一次。
-CARD_SELF_CORRECT_NOTICE = (
-    "🔁 喚回的卡若與現況不符：直接修卡（舊內容標 superseded、不刪），不問 owner。"
-)
 
 # 2026-09-06 實測：forbidden 寫成裸名詞，連「為什麼不採用 X」的說明也被 Stop 閘擋下。
 # 三個訊號同時成立才算裸名詞——沒有動詞、夠短、沒有正則元字元。
@@ -1427,13 +1420,6 @@ RECALL_GENERIC_TERMS = frozenset(
         "please", "thanks", "hello", "today", "tomorrow", "yesterday", "now",
     )
 )
-
-# 2026-09-06 真機實測：開場的「現行裁定」12 條各帶完整 owner 原話＝1977 bytes。原話在
-# 喚回命中那張卡時才有用（喚回本來就會帶），開場需要的只是「有哪些現行裁定、哪天定的」。
-# 規則：開場一條裁定只列 key｜日期；並只列近 30 天的、或帶 forbidden（會擋人的）那些，
-# 其餘用一行收尾說還有幾條。
-SESSIONSTART_DECISION_RECENT_DAYS = 30
-SESSIONSTART_DECISION_REST_LINE = '…另 {count} 條現行裁定：python epitype/decision_lint.py "{vault}"'
 
 # ── U64 引用不是再提議（append-only 常數區塊；實作在 stop_gate._forbidden_fragment，
 # pretooluse_gate 的規則 A 經 stop_gate._forbidden_fragment 共用同一份，改一處兩邊都好）

@@ -31,11 +31,10 @@ class DreamStatusRegression(unittest.TestCase):
         self.assertEqual(code, 0)  # Partial packs remain useful delivered artifacts.
         state = json.loads(self.state.read_text(encoding="utf-8"))
         notice = start._dream_notice(self.vault, "startup", self.settings)
-        self.assertIsNotNone(notice)
         return state, notice
 
     def assert_incomplete(self, state, notice):
-        self.assertNotIn("沒有待處理項", notice)
+        self.assertIsNotNone(notice)
         self.assertIn("未完整檢查", notice)
         self.assertIs(state.get("complete"), False)
         self.assertTrue(state.get("section_errors"))
@@ -82,11 +81,12 @@ class DreamStatusRegression(unittest.TestCase):
         self.assertIn(str(other), state["section_errors"]["1"]["errors"][0])
         self.assertEqual(state["sections"]["1"]["missing_aliases"], 0)
 
-    def test_successful_empty_scan_is_clean_and_legacy_unknown_is_not(self):
+    def test_successful_empty_scan_says_nothing_and_legacy_unknown_is_not_clean(self):
+        # §35：跑完而且乾淨＝沒有人要做任何事，開場就不出聲；「跑過了」本身不是通知。
         state, notice = self.run_pack()
         self.assertTrue(state.get("complete"))
         self.assertEqual(state["section_errors"], {})
-        self.assertIn("沒有待處理項", notice)
+        self.assertIsNone(notice)
         del state["complete"]
         state.pop("notified_at", None)
         self.state.write_text(json.dumps(state), encoding="utf-8")

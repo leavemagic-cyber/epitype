@@ -21,7 +21,6 @@ from epitype import capture, card_lint, harvest, memsearch, memspec  # noqa: E40
 import _hook_common as common  # noqa: E402
 import pretooluse_gate  # noqa: E402
 import recall_hook as recall  # noqa: E402
-import sessionstart_hook as sessionstart  # noqa: E402
 import stop_gate  # noqa: E402
 
 # 白名單三型各一句，句子本身是本檔作者編的（privacy_lint 會擋真人原話）。
@@ -208,11 +207,10 @@ class CaptureAdmissionRegression(unittest.TestCase):
             config, started,
         )
         self.assertIsNone(write_value)
-        # 3. 開場的現行裁定清單同樣要求 decision_key + active。
-        #    （2026-09-09 U-J：原本第 3 條「PreToolUse 只讀宣告 trigger 的卡」隨那條
-        #    攔截路徑一併退役，PreToolUse 現在只剩上面第 2 條的寫檔閘。）
-        self.assertEqual(sessionstart._active_decisions(self.vault, started), [])
-        # 4. 喚回端得出來，但只能掛「歷史捕捉」前綴，不能佔決策席。
+        # （原第 3 條「PreToolUse 只讀宣告 trigger 的卡」隨 U-J 的攔截層一併退役，
+        # 原第 4 條「開場的現行裁定清單」隨 U-I-a／§35 一併退役：兩條路徑都不再存在，
+        # 不是通過，而是沒有了。PreToolUse 現在只剩上面第 2 條的寫檔閘。）
+        # 3. 喚回端得出來，但只能掛「歷史捕捉」前綴，不能佔決策席。
         memsearch.build_index(self.vault)
         value = recall._handle(
             {"prompt": forbidden_phrase, "session_id": "recall-gate", "cwd": str(self.root)},

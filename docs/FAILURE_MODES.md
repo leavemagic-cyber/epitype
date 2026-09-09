@@ -1350,3 +1350,69 @@ guarantee now rests entirely on the host's native rules, which are configuration
 outside this repository and are not tested by these gates. A host installed without
 them has no action-level protection from Epitype — and, per §24, never really had
 the protection the trigger cards appeared to offer.
+## 35. Session start became a fixed 8 KB prologue
+
+Every SessionStart injected the same prologue before anything specific to the
+session: the whole work ledger, the vault's standing rulings, an overdue-pending
+line, a "correct the card yourself" reminder, a card-type lint line that also spoke
+for WARN, and a dream line that reported even when the dream had nothing to report.
+Measured on the owner's two real vaults on 2026-09-09 (copies, four event shapes),
+every shape hit the 8 KB budget cap and ended in `…（超出預算，餘 N 段未注入）`:
+8015 / 8060 / 8153 / 7986 bytes. In two of the four shapes the short entry point —
+the one piece a host without a native index load cannot get anywhere else — was
+among the pieces cut.
+
+### Why it happened
+
+Continuity was implemented as re-sending. Each piece was added for a real incident
+(§25's ruling that came back as an option, a ledger nobody read, a pending item with
+no exit), and each time the fix was "make the next session see it at the top". Nobody
+priced the recurring cost: a piece added once is paid at every session start, forever,
+and it is paid first, so it displaces whatever the session actually needed.
+
+Owner 2026-09-09, on the ledger and the ruling block:「不應該塞，這是多餘設計」
+「原生功能就會你就會去讀claude.md;CODEX就會去讀agents.md」「現行裁定清單（12 行）我認為
+應該是回歸進入正確地方」「沒必要就拿掉阿，反正浪費token的行為都不應該」.
+
+### The rule
+
+SessionStart carries the short-index echo and nothing that does not need an action:
+
+- **Work ledger:** not injected. The file stays where it is — it is still the marker
+  that identifies the governance vault — and is read when the work needs it.
+- **Standing rulings:** not injected. Recall already brings a decision card, with the
+  owner's own words, when the prompt touches it (§25); the Stop and write gates read
+  the same cards directly. `epitype decisions` lists them on demand.
+- **Overdue pending lines:** not injected. `epitype pending` and the nightly dream's
+  section 3 name them.
+- **Fixed explanatory text:** none. The self-correction reminder (`🔁`) is gone;
+  behaviour belongs in cards and exams, not in a per-session string (§30).
+- **Card-type lint:** one line only when something FAILs. WARN alone is the dream's
+  list, not this session's job; the WARN count still rides along on the FAIL line.
+- **Dream:** one line only when someone must act — the dream errored, the dream left
+  review candidates, or the dream is past due and is not running. A clean finished
+  dream says nothing; "it ran and found nothing" is not news. Overdue is judged by the
+  same `interval_hours` that decides whether to start one, and a lock younger than
+  `DREAM_LOCK_STALE_SECONDS` means it is running, not missing.
+
+Same measurement after the change: 0 / 2033 / 1821 / 3510 bytes — and the entry point
+is no longer among the cut pieces. The Claude shape whose cwd vault the host already
+loads now injects nothing at all, which is the correct amount.
+
+Retired with the behaviour: `pending_lint.summary_line` and its two selftest checks
+(7/7 → 5/5), the `_active_decisions` / `_decision_block` / `_vault_labels` /
+`_frontmatter_fields` helpers, and the memspec strings they used
+(`SESSIONSTART_DECISIONS_HEADER`, `SESSIONSTART_DECISIONS_MAX_LINES`,
+`SESSIONSTART_DECISION_RECENT_DAYS`, `SESSIONSTART_DECISION_REST_LINE`,
+`CARD_SELF_CORRECT_NOTICE`, `PENDING_LINT_HOOK_BUDGET_SECONDS`,
+`DREAM_NOTICE_CLEAN_LINE`). Four sessionstart selftest cases were rewritten from
+"this appears" into "this never appears", and the removed behaviour's own cases went
+with it (31/31 → 30/30); `card_lint` gained the WARN-only case (41/41 → 42/42).
+No exam question depended on any of it: the exam drives UserPromptSubmit, PreToolUse
+and Stop, never SessionStart — corpus 330/330 and seeds 5/5 unchanged, 0 questions
+retired.
+
+Boundary: this removes a fixed cost, it does not add a retrieval route. A ruling the
+prompt never touches is not recalled, and that is the trade the owner took — the
+decision cards, the ledger and the pending list are all one command away, and the
+hosts load `CLAUDE.md` / `AGENTS.md` on their own.

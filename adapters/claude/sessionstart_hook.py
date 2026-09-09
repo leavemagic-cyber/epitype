@@ -1,7 +1,11 @@
 import sys, time; sys.dont_write_bytecode = True; _STARTED_AT = time.monotonic(); [getattr(stream, "reconfigure", lambda **_: None)(encoding="utf-8", errors="replace") for stream in (sys.stdin, sys.stdout, sys.stderr)]  # cp950 consoles must not break hook entrypoints.
-"""Claude SessionStart adapter for slim index and work-ledger injection."""
+"""Claude SessionStart adapter: the slim index echo plus the lines that need an action.
 
-from datetime import date, timedelta
+owner 2026-09-09（FAILURE_MODES §35）：開場不再注入工作帳本、現行裁定、殭屍待辦或任何
+固定說明文字。宿主自己會載入 CLAUDE.md／AGENTS.md 與 cwd 的 MEMORY.md，而每一場都重送
+一份帳本與裁定清單，正是「每一刻只讀該讀的」的反面。留下的每一段都必須有人要做的事。
+"""
+
 import json
 import os
 from pathlib import Path
@@ -12,7 +16,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from epitype import capture_route, card_lint, memsearch, memspec, pending_lint
+from epitype import capture_route, card_lint, memspec
 from _hook_common import (
     bounded_context,
     emit,
@@ -48,91 +52,6 @@ def _segment_budget(started_at, want):
     return min(want, remaining)
 
 
-def _frontmatter_fields(path):
-    """Top-level frontmatter scalars for one card, discarding the diagnostics.
-
-    U38: the parse itself lives once, in memspec.frontmatter_fields — the same
-    duplicate-key-first-wins and block-scalar rules decision_lint._parse_frontmatter
-    uses. No decision_lint import on this hot path: its argparse/dataclasses
-    cost is real time SessionStart must not pay; memspec alone is what the
-    rest of this hook already imports.
-    """
-    fields, _problem = memspec.frontmatter_fields(path)
-    return fields
-
-
-def _recent(decided_at, today):
-    """近 30 天內定的？沒有日期的一律不算近期。"""
-    try:
-        return (today - date.fromisoformat(decided_at[:10])).days <= (
-            memspec.SESSIONSTART_DECISION_RECENT_DAYS
-        )
-    except ValueError:
-        return False
-
-
-def _active_decisions(vault, started_at):
-    """(current_decision_at, decision_key, 有沒有 forbidden) per active decision card.
-
-    Read from disk rather than from the index: the index carries `status` but not
-    the decision's key, and a vault whose index was never built must still open the
-    session with its standing rulings. None when the hook's deadline arrives
-    mid-scan — half a vault's rulings would read as the whole list.
-
-    2026-09-06 實測：12 條各帶完整 owner 原話＝1977 bytes。原話是喚回命中那張卡時
-    才需要的東西，開場只需要「有哪些現行裁定、哪天定的」。
-    """
-    found = []
-    try:
-        paths = memsearch.card_files(vault)
-    except Exception:
-        return None
-    for path in paths:
-        if _soft_remaining(started_at) <= 0:
-            return None
-        try:
-            fields = _frontmatter_fields(path)
-        except Exception:
-            continue
-        key = " ".join(str(fields.get(memspec.DECISION_KEY_FIELD) or "").split())
-        status = " ".join(str(fields.get(memspec.DECISION_STATUS_FIELD) or "").split())
-        if not key or status != memspec.ACTIVE_DECISION_STATUS:
-            continue
-        found.append(
-            (
-                " ".join(str(fields.get(memspec.CURRENT_DECISION_AT_FIELD) or "").split()),
-                key,
-                # 欄位在不在，不看值：區塊式清單被前置解析攤成空字串。
-                memspec.FORBIDDEN_FIELD in fields,
-            )
-        )
-    found.sort(key=lambda row: row[1])
-    found.sort(key=lambda row: row[0], reverse=True)  # newest first; undated last
-    return found
-
-
-def _decision_block(vault, label, started_at):
-    """The vault's standing rulings as one piece: a header without its rulings,
-    or rulings without the vault they bind, is worse than no block at all."""
-    rows = _active_decisions(vault, started_at)
-    if not rows:
-        return None
-    today = date.today()
-    # 會擋人的裁定（有 forbidden）不論多舊都佔位、也不被上限擠掉；其餘只列近 30 天的，
-    # 舊的靠喚回在命中時帶回來。
-    forbidden = [row for row in rows if row[2]][: memspec.SESSIONSTART_DECISIONS_MAX_LINES]
-    room = memspec.SESSIONSTART_DECISIONS_MAX_LINES - len(forbidden)
-    recent = [row for row in rows if not row[2] and _recent(row[0], today)][:room]
-    listed = sorted(forbidden + recent, key=lambda row: (row[0], row[1]), reverse=True)
-    lines = [memspec.SESSIONSTART_DECISIONS_HEADER.format(vault=label)]
-    for decided_at, key, _forbidden in listed:
-        lines.append("｜".join(part for part in (key, decided_at) if part))
-    dropped = len(rows) - len(listed)
-    if dropped > 0:
-        lines.append(memspec.SESSIONSTART_DECISION_REST_LINE.format(count=dropped, vault=vault))
-    return "\n".join(lines)
-
-
 def _dream_state(governance):
     """狀態檔本身，不 import epitype.dream：那條 import 每一場開場都要付 ~35 ms，
     而開場真正需要的只是「上次幾點跑完」這個數字。"""
@@ -157,26 +76,58 @@ def _dream_spawn(settings, governance, started_at=None, launcher=None, source=No
     if started_at is not None:
         if _soft_remaining(started_at) < memspec.DREAM_SPAWN_RESERVE_SECONDS:
             return False
-    completed = _dream_state(governance).get(memspec.DREAM_STATE_COMPLETED_EPOCH_FIELD)
-    hours = settings.get(
-        memspec.DREAM_INTERVAL_HOURS_FIELD, memspec.DREAM_DEFAULT_INTERVAL_HOURS
-    )
-    if not isinstance(completed, bool) and isinstance(completed, (int, float)):
-        if (time.time() - completed) < hours * 3600:
-            return False
+    if not _dream_due(_dream_state(governance), settings):
+        return False
     from epitype import dream  # 只有到期的那一場付這個 import 的錢
 
     return dream.spawn(governance, launcher=launcher)
 
 
+def _dream_due(state, settings):
+    """從沒跑過，或距上次完成超過 interval_hours＝到期。起夢與「到期未跑」那一行共用
+    這一份判準：兩邊各寫一份，就會出現「不起夢也不說」或「起了還說沒跑」。"""
+    completed = state.get(memspec.DREAM_STATE_COMPLETED_EPOCH_FIELD)
+    hours = settings.get(
+        memspec.DREAM_INTERVAL_HOURS_FIELD, memspec.DREAM_DEFAULT_INTERVAL_HOURS
+    )
+    if isinstance(completed, bool) or not isinstance(completed, (int, float)):
+        return True
+    return (time.time() - completed) >= hours * 3600
+
+
+def _dream_running(governance):
+    """lock 還沒逾時＝夢正在跑，那不是「沒跑」。判法與 dream._lock_is_stale 同一條
+    （started 讀不到就退回檔案 mtime）；不 import epitype.dream，開場付不起那個 import。"""
+    path = governance / memspec.DREAM_DIRECTORY / memspec.DREAM_LOCK_FILENAME
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        started = value.get("started") if isinstance(value, dict) else None
+    except (OSError, ValueError):
+        started = None
+    if isinstance(started, bool) or not isinstance(started, (int, float)):
+        try:
+            started = path.stat().st_mtime
+        except OSError:
+            return False
+    return (time.time() - started) < memspec.DREAM_LOCK_STALE_SECONDS
+
+
 def _dream_notice(governance, source, settings):
-    """夢跑完後的下一場開場印一行，只印一次。壓縮續場不印——那不是新的一場。
-    沒有待處理項也印一行短的：不然「夢跑完但乾淨」與「夢從沒跑」長得一樣。"""
+    """夢的一行只在有人要做事時出現：夢報錯、夢列了待審候選、夢到期卻沒跑。
+    乾淨跑完的那一場什麼都不說（owner 2026-09-09：沒必要就拿掉）。
+    壓縮續場不印——那不是新的一場。"""
     if settings.get(memspec.DREAM_MODE_FIELD) == memspec.DREAM_MODE_OFF:
         return None
     if isinstance(source, str) and source == "compact":
         return None
     state = _dream_state(governance)
+    return _dream_finished_notice(governance, state) or _dream_overdue_notice(
+        governance, state, settings
+    )
+
+
+def _dream_finished_notice(governance, state):
+    """夢跑完後的下一場印一行，只印一次；乾淨的那一場只記已通知、不印。"""
     completed = state.get(memspec.DREAM_STATE_COMPLETED_FIELD)
     if not isinstance(completed, str) or not completed:
         return None
@@ -200,10 +151,28 @@ def _dream_notice(governance, source, settings):
             or state.get(memspec.DREAM_STATE_ERRORS_FIELD)):
         return memspec.DREAM_NOTICE_INCOMPLETE_LINE.format(date=when, pack=pack)
     if not any(numbers.values()):
-        return memspec.DREAM_NOTICE_CLEAN_LINE.format(date=when)
+        return None
     return memspec.DREAM_NOTICE_LINE.format(
         date=when, pack=pack, **numbers
     )
+
+
+def _dream_overdue_notice(governance, state, settings):
+    """夢到期卻沒跑：一行，帶上次完成的日期與可跑的命令。
+    沒有登記模式（mode 不是 piggyback／nightly）不說，那台機器沒有人在等夢；
+    正在跑（lock 還沒逾時）也不說——起了夢的那一場說「沒跑」是假話。"""
+    if settings.get(memspec.DREAM_MODE_FIELD) not in (
+        memspec.DREAM_MODE_PIGGYBACK,
+        memspec.DREAM_MODE_NIGHTLY,
+    ):
+        return None
+    if not _dream_due(state, settings) or _dream_running(governance):
+        return None
+    last = state.get(memspec.DREAM_STATE_DATE_FIELD)
+    if not isinstance(last, str) or not last:
+        completed = state.get(memspec.DREAM_STATE_COMPLETED_FIELD)
+        last = completed[:10] if isinstance(completed, str) and completed else ""
+    return memspec.DREAM_NOTICE_OVERDUE_LINE.format(last=last or "-")
 
 
 def _dream_mark_notified(governance, state, completed):
@@ -224,16 +193,6 @@ def _dream_mark_notified(governance, state, completed):
         except OSError:
             pass
         return False
-
-
-def _vault_labels(vaults):
-    """Directory names, falling back to the full path where a name repeats: every
-    native cwd vault is called `memory`, so the short name alone can be a lie."""
-    names = [vault.name for vault in vaults]
-    return [
-        name if names.count(name) == 1 else str(vault)
-        for vault, name in zip(vaults, names)
-    ]
 
 
 def _claude_native_index_vaults(event, native):
@@ -272,8 +231,8 @@ def _joined(pieces, piece=""):
 
 
 # 截斷行的位置要先留：bounded_context 放不下某一段時，是把**已選的前面幾段丟掉**
-# 直到截斷行塞得進去。索引段量到剛好滿，下一段（帳本第一行）一放不下，索引就整段
-# 被彈出來——實測 2026-09-09：整本回音「裝得下」卻在輸出裡整段消失。
+# 直到截斷行塞得進去。索引段量到剛好滿，下一段（第二個庫的回音）一放不下，前一段索引
+# 就整段被彈出來——實測 2026-09-09：整本回音「裝得下」卻在輸出裡整段消失。
 _SUFFIX_RESERVE = memspec.CONTEXT_TRUNCATED_SUFFIX.format(dropped=9999)
 
 
@@ -328,8 +287,8 @@ def _handle(event, started_at):
     budget = config[memspec.CONFIG_BUDGET_BYTES_FIELD]
     pieces = []
     # Session start carries the cwd's own vault(s) plus the governance vault;
-    # another project's index and ledger are noise here and were crowding the
-    # budget. Recall still reaches that project's cards by content.
+    # another project's index is noise here and was crowding the budget. Recall
+    # still reaches that project's cards by content.
     # The governance vault is the one holding the working ledger, not whichever
     # path sorted first: the installer sorts vaults alphabetically, so position
     # carries no meaning, and a cwd vault that also appears in the configured
@@ -351,17 +310,10 @@ def _handle(event, started_at):
         except Exception:
             pass  # 夢起不來絕不影響開場注入
 
-    # One line, first, so the budget cannot drop it: pending items with an entry
-    # and no exit are exactly what resurfaces as wrong memory later.
-    seconds = _segment_budget(started_at, memspec.PENDING_LINT_HOOK_BUDGET_SECONDS)
-    if seconds is not None:
-        overdue = pending_lint.summary_line(vaults, time_budget=seconds)
-        if overdue:
-            pieces.append(overdue)
-
     # A card missing its type's required fields is a card the recall side will
-    # hand over half-true. One line, and only when the scan finished inside its
-    # own budget: half a vault's numbers are worse than no numbers.
+    # hand over half-true. One line, only when something actually FAILs, and only
+    # when the scan finished inside its own budget: half a vault's numbers are
+    # worse than no numbers.
     # 同一趟掃描也餵下面那行順手任務：掃兩次就是同一份預算付兩次。
     seconds = _segment_budget(started_at, memspec.CARD_LINT_HOOK_BUDGET_SECONDS)
     if seconds is not None:
@@ -380,10 +332,7 @@ def _handle(event, started_at):
             if translate:
                 pieces.append(translate)
 
-    # 同一裁定的另一半，一場說一次：喚回的卡與現況不符就直接改，不要端回來問。
-    pieces.append(memspec.CARD_SELF_CORRECT_NOTICE)
-
-    # 夢的一行跟其他一行摘要放在一起，排在裁定之前：它是狀態，不是規則。
+    # 夢的一行跟其他一行摘要放在一起：它是狀態，不是規則。
     if _soft_remaining(started_at) > 0:
         try:
             notice = _dream_notice(governance_vault(config, for_write=True), source, dream)
@@ -392,17 +341,8 @@ def _handle(event, started_at):
         if notice:
             pieces.append(notice)
 
-    # 2026-09-05 事故：owner 08-13 親裁的事被端回來當選項。A standing ruling the model
-    # cannot see is a ruling it re-opens, so every session — including the one that
-    # resumes after a compaction — opens with the vault's active decisions, in the
-    # owner's own words, before any index.
-    for vault, label in zip(vaults, _vault_labels(vaults)):
-        if _soft_remaining(started_at) <= 0:
-            break
-        block = _decision_block(vault, label, started_at)
-        if block:
-            pieces.append(block)
-
+    # 短入口本身只回音給沒有原生載入它的宿主（Codex）；帳本與現行裁定清單不再注入，
+    # 它們是「要用的時候去讀」的檔，不是每一場都要重送的固定成本（FAILURE_MODES §35）。
     skip_index = _claude_native_index_vaults(event, native)
     for vault in vaults:
         if expired(started_at):
@@ -412,12 +352,6 @@ def _handle(event, started_at):
             echo = _index_echo(index_path, pieces, budget)
             if echo:
                 pieces.append(echo)
-
-        ledger_path = vault / memspec.WORK_LEDGER_FILENAME
-        if ledger_path.is_file():
-            ledger = ledger_path.read_text(encoding="utf-8")
-            pieces.append(f"## {memspec.WORK_LEDGER_FILENAME}")
-            pieces.extend(ledger.splitlines())
 
     if expired(started_at):
         return None
@@ -467,13 +401,21 @@ def _selftest():
             context = value.get("hookSpecificOutput", {}).get("additionalContext", "")
             checks.append(
                 (
-                    "index and ledger injection: a short index goes whole, with no sampling footer",
+                    "index echo: a short index goes whole, with no sampling footer",
                     result.returncode == 0
                     and "# Synthetic Index" in context
                     and "index detail" in context
-                    and "ledger detail" in context
                     and "Full index:" not in context
                     and "未完整回音" not in context,
+                )
+            )
+            # §35：帳本檔還在（它是治理庫的標記），但它的內容一個字都不進開場。
+            checks.append(
+                (
+                    "the work ledger is never injected, however present the file is",
+                    (vault / memspec.WORK_LEDGER_FILENAME).is_file()
+                    and "ledger detail" not in context
+                    and memspec.WORK_LEDGER_FILENAME not in context,
                 )
             )
 
@@ -486,14 +428,17 @@ def _selftest():
             (big_vault / memspec.MEMORY_INDEX_FILENAME).write_text(
                 big_body + "\n", encoding="utf-8"
             )
-            # 索引後面一定要還有段（帳本行），才測得到那個坑：bounded_context 放不下
-            # 下一段時是回頭把已選的段丟掉，所以量到剛好滿的索引會整段被彈出來。
-            (big_vault / memspec.WORK_LEDGER_FILENAME).write_text(
-                "\n".join(f"ledger row {number}" for number in range(40)) + "\n",
+            # 索引後面一定要還有段（第二個庫的回音），才測得到那個坑：bounded_context
+            # 放不下下一段時是回頭把已選的段丟掉，所以量到剛好滿的索引會整段被彈出來。
+            # 兩個庫都沒有帳本＝沒有治理庫，兩本都注入（_handle 的 no-ledger 分支）。
+            big_tail = root / "bigtail"
+            big_tail.mkdir()
+            (big_tail / memspec.MEMORY_INDEX_FILENAME).write_text(
+                "# Tail Index\n" + "\n".join(f"- tail {number} 索引內容" for number in range(40)) + "\n",
                 encoding="utf-8",
             )
             big_config = root / "big-config.json"
-            write_config(big_config, [big_vault])
+            write_config(big_config, [big_vault, big_tail])
             big_result = run_synthetic(Path(__file__), {"source": "startup"}, big_config)
             big_value = json.loads(big_result.stdout) if big_result.stdout.strip() else {}
             big_context = big_value.get("hookSpecificOutput", {}).get("additionalContext", "")
@@ -520,10 +465,11 @@ def _selftest():
             )
             checks.append(
                 (
-                    "the sampled index survives the later pieces: room is left for the cut suffix",
+                    "a following vault's index that cannot fit is dropped whole; the sampled one survives intact",
                     heading in big_context
-                    and memspec.CONTEXT_TRUNCATED_SUFFIX.split("{")[0] in big_context
-                    and notice_line in big_context,
+                    and notice_line in big_context
+                    and "# Tail Index" not in big_context
+                    and "tail 0 索引內容" not in big_context,
                 )
             )
 
@@ -550,14 +496,14 @@ def _selftest():
                     "cwd-slug native index injected ahead of configured vaults",
                     native_result.returncode == 0
                     and native_context.index("native index detail") < native_context.index("index detail")
-                    and "ledger detail" in native_context,
+                    and "ledger detail" not in native_context,
                 )
             )
 
             # Owner 2026-09-09: Claude Code loads the cwd slug's MEMORY.md itself, so a
             # Claude-shaped event (transcript under ~/.claude/projects) skips that echo
-            # while the governance index and ledger stay. Codex-shaped events above
-            # (no .claude transcript) keep the echo.
+            # while the governance index stays. Codex-shaped events above (no .claude
+            # transcript) keep the echo.
             claude_result = run_synthetic(
                 Path(__file__),
                 {
@@ -572,11 +518,11 @@ def _selftest():
             claude_context = claude_value.get("hookSpecificOutput", {}).get("additionalContext", "")
             checks.append(
                 (
-                    "Claude host skips the natively loaded cwd index, keeps governance index and ledger",
+                    "Claude host skips the natively loaded cwd index, keeps the governance index",
                     claude_result.returncode == 0
                     and "native index detail" not in claude_context
                     and "index detail" in claude_context
-                    and "ledger detail" in claude_context,
+                    and "ledger detail" not in claude_context,
                 )
             )
 
@@ -589,9 +535,10 @@ def _selftest():
             overdue_context = overdue_value.get("hookSpecificOutput", {}).get("additionalContext", "")
             checks.append(
                 (
-                    "overdue pending line comes first, before the index",
+                    "§35：殭屍待辦不再進開場（改由 epitype pending 與夢點名），索引照舊",
                     overdue_result.returncode == 0
-                    and overdue_context.startswith("⏳ 殭屍待辦 1 行／1 卡")
+                    and "⏳" not in overdue_context
+                    and "殭屍待辦" not in overdue_context
                     and "index detail" in overdue_context,
                 )
             )
@@ -678,10 +625,10 @@ def _selftest():
             )
             checks.append(
                 (
-                    "喚回的卡與現況不符就直接修卡——這條規則每一場說一次，壓縮續場也說",
-                    memspec.CARD_SELF_CORRECT_NOTICE in first_context
-                    and memspec.CARD_SELF_CORRECT_NOTICE in compact_translate_context
-                    and "superseded" in memspec.CARD_SELF_CORRECT_NOTICE,
+                    "§35：開場不再放固定說明文字（🔁 自行修卡那一行也不放），一般場與壓縮續場都不放",
+                    "🔁" not in first_context
+                    and "🔁" not in compact_translate_context
+                    and not hasattr(memspec, "CARD_SELF_CORRECT_NOTICE"),
                 )
             )
 
@@ -696,11 +643,11 @@ def _selftest():
             two_context = two_value.get("hookSpecificOutput", {}).get("additionalContext", "")
             checks.append(
                 (
-                    "only the governance vault's index and ledger are injected, not another project's",
+                    "only the governance vault's index is injected, not another project's",
                     two_result.returncode == 0
                     and "index detail" in two_context
-                    and "ledger detail" in two_context
                     and "second index detail" not in two_context
+                    and "ledger detail" not in two_context
                     and "second ledger detail" not in two_context,
                 )
             )
@@ -738,119 +685,56 @@ def _selftest():
                     both_result.returncode == 0
                     and "both native detail" in both_context
                     and "gov index detail" in both_context
-                    and "gov ledger detail" in both_context
+                    and "gov ledger detail" not in both_context
                     and "other index detail" not in both_context,
                 )
             )
 
-            # 2026-09-05 事故：owner 08-13 親裁的事被端回來當選項。開場要逐條列出該庫
-            # 的現行裁定，帶原話、新→舊，壓縮後重注的那一場也一樣。
+            # owner 2026-09-09（§35）：現行裁定清單退場。裁定由喚回在命中時帶回（帶原話），
+            # 開場不再逐條重送——連會擋人的 forbidden 那種也不送，一般場與壓縮續場都一樣。
             decision_vault = root / "decision-vault"
             decision_vault.mkdir()
             (decision_vault / memspec.MEMORY_INDEX_FILENAME).write_text(
                 "# Decisions\ndecision index detail\n", encoding="utf-8"
             )
-            # 日期相對今天算，否則這份題目會隨時間自己過期（近 30 天的判斷是時間函數）。
-            today = date.today()
-            recent_days = [
-                (today - timedelta(days=index)).isoformat() for index in range(14)
-            ]
-            stale_day = (
-                today - timedelta(days=memspec.SESSIONSTART_DECISION_RECENT_DAYS + 10)
-            ).isoformat()
-            for index in range(14):
-                (decision_vault / f"decision-{index:02d}.md").write_text(
-                    f"---\nname: Decision {index}\ndescription: 2026 決策摘要 {index}\n"
-                    f"{memspec.DECISION_KEY_FIELD}: rule-{index:02d}\n"
-                    f"{memspec.DECISION_STATUS_FIELD}: {memspec.ACTIVE_DECISION_STATUS}\n"
-                    f"{memspec.CURRENT_DECISION_AT_FIELD}: {recent_days[13 - index]}\n"
-                    f"{memspec.DECIDED_BY_FIELD}: {memspec.OWNER_EXPLICIT_DECIDER}\n"
-                    f"{memspec.OWNER_QUOTE_FIELD}: 只有 6s 是標準合約 {index}\n---\nbody\n",
-                    encoding="utf-8",
-                )
-            # 舊的沒 forbidden＝不列，只進「另 N 條」；舊的有 forbidden＝會擋人，照列。
-            for name, key, forbidden in (
-                ("decision-stale", "rule-stale", ""),
-                ("decision-stale-forbidden", "rule-stale-forbidden",
-                 f"{memspec.FORBIDDEN_FIELD}:\n  - 再提議改回舊制\n"),
-            ):
-                (decision_vault / f"{name}.md").write_text(
-                    f"---\nname: {key}\ndescription: 舊決策\n"
-                    f"{memspec.DECISION_KEY_FIELD}: {key}\n"
-                    f"{memspec.DECISION_STATUS_FIELD}: {memspec.ACTIVE_DECISION_STATUS}\n"
-                    f"{memspec.CURRENT_DECISION_AT_FIELD}: {stale_day}\n"
-                    f"{memspec.DECIDED_BY_FIELD}: {memspec.OWNER_EXPLICIT_DECIDER}\n"
-                    f"{forbidden}---\nbody\n",
-                    encoding="utf-8",
-                )
-            (decision_vault / "decision-retired.md").write_text(
-                "---\nname: Decision Retired\ndescription: 舊制\n"
-                f"{memspec.DECISION_KEY_FIELD}: rule-retired\n"
-                f"{memspec.DECISION_STATUS_FIELD}: {memspec.SUPERSEDED_DECISION_STATUS}\n"
-                f"{memspec.SUPERSEDED_BY_FIELD}: decision-00.md\n"
-                f"{memspec.CURRENT_DECISION_AT_FIELD}: 2026-01-01\n---\nbody\n",
+            (decision_vault / "decision-live.md").write_text(
+                "---\nname: Decision Live\ndescription: 2026-09-09 決策摘要\n"
+                f"{memspec.DECISION_KEY_FIELD}: rule-live\n"
+                f"{memspec.DECISION_STATUS_FIELD}: {memspec.ACTIVE_DECISION_STATUS}\n"
+                f"{memspec.CURRENT_DECISION_AT_FIELD}: 2026-09-09\n"
+                f"{memspec.DECIDED_BY_FIELD}: {memspec.OWNER_EXPLICIT_DECIDER}\n"
+                f"{memspec.OWNER_QUOTE_FIELD}: 只有 6s 是標準合約\n"
+                f"{memspec.FORBIDDEN_FIELD}:\n  - 再提議改回舊制\n---\nbody\n",
                 encoding="utf-8",
             )
             decision_config = root / "decision-config.json"
             write_config(decision_config, [decision_vault])
-            decision_result = run_synthetic(Path(__file__), {"source": "startup"}, decision_config)
-            decision_value = json.loads(decision_result.stdout) if decision_result.stdout.strip() else {}
-            decision_context = decision_value.get("hookSpecificOutput", {}).get("additionalContext", "")
-            decision_header = memspec.SESSIONSTART_DECISIONS_HEADER.format(vault=decision_vault.name)
-            decision_lines = [
-                line for line in decision_context.splitlines() if line.startswith("rule-")
-            ]
-            checks.append(
-                (
-                    "active decisions open the session as key｜date, newest first, above the index",
-                    decision_result.returncode == 0
-                    and decision_header in decision_context
-                    and decision_lines[:2] == [
-                        f"rule-13｜{recent_days[0]}",
-                        f"rule-12｜{recent_days[1]}",
-                    ]
-                    and "只有 6s 是標準合約" not in decision_context
-                    and "rule-retired" not in decision_context
-                    and decision_context.index(decision_header)
-                    < decision_context.index("decision index detail"),
+            decision_contexts = []
+            for decision_source in ("startup", "compact"):
+                decision_result = run_synthetic(
+                    Path(__file__), {"source": decision_source}, decision_config
                 )
-            )
-            checks.append(
-                (
-                    "old decisions are dropped unless they carry forbidden, and the cut is said",
-                    len(decision_lines) == memspec.SESSIONSTART_DECISIONS_MAX_LINES
-                    and f"rule-stale-forbidden｜{stale_day}" in decision_context
-                    and f"rule-stale｜{stale_day}" not in decision_context
-                    and memspec.SESSIONSTART_DECISION_REST_LINE.format(
-                        count=4, vault=decision_vault
-                    ) in decision_context,
+                decision_value = json.loads(decision_result.stdout) if decision_result.stdout.strip() else {}
+                decision_contexts.append(
+                    (decision_result.returncode,
+                     decision_value.get("hookSpecificOutput", {}).get("additionalContext", ""))
                 )
-            )
-            compact_result = run_synthetic(Path(__file__), {"source": "compact"}, decision_config)
-            compact_value = json.loads(compact_result.stdout) if compact_result.stdout.strip() else {}
-            compact_context = compact_value.get("hookSpecificOutput", {}).get("additionalContext", "")
             checks.append(
                 (
-                    "the session that resumes after a compaction gets the same decisions",
-                    compact_result.returncode == 0
-                    and decision_header in compact_context
-                    and f"rule-13｜{recent_days[0]}" in compact_context,
-                )
-            )
-            plain_result = run_synthetic(Path(__file__), {"source": "startup"}, config)
-            plain_value = json.loads(plain_result.stdout) if plain_result.stdout.strip() else {}
-            plain_context = plain_value.get("hookSpecificOutput", {}).get("additionalContext", "")
-            checks.append(
-                (
-                    "a vault with no active decision card gets no block at all",
-                    plain_result.returncode == 0
-                    and "現行裁定" not in plain_context
-                    and "index detail" in plain_context,
+                    "§35：現行裁定清單不再進開場（一般場與壓縮續場皆同），索引照舊",
+                    all(code == 0 for code, _ in decision_contexts)
+                    and all(
+                        "現行裁定" not in text
+                        and "rule-live" not in text
+                        and "只有 6s 是標準合約" not in text
+                        and "decision index detail" in text
+                        for _code, text in decision_contexts
+                    ),
                 )
             )
             # Owner 2026-09-09 (§30): the AI commitment ledger is gone. A vault
             # holding a ledger file gets no line from it, at startup or after
-            # compaction; the owner's own pending line is unaffected.
+            # compaction — and since §35 neither does an overdue pending line.
             promise_vault = root / "promise-vault"
             promise_vault.mkdir()
             (promise_vault / memspec.MEMORY_INDEX_FILENAME).write_text(
@@ -880,7 +764,8 @@ def _selftest():
                         promise_result.returncode == 0
                         and "未兌現承諾" not in promise_context
                         and "我等一下會補上" not in promise_context
-                        and "⏳ 殭屍待辦" in promise_context,
+                        and "殭屍待辦" not in promise_context
+                        and "promise index detail" in promise_context,
                     )
                 )
 
@@ -1049,9 +934,53 @@ def _selftest():
             )
             checks.append(
                 (
-                    "the compaction-resumed session says nothing about the dream; a clean dream still says it ran",
+                    "壓縮續場不說夢；§35：乾淨跑完的那一場也不說（沒有人要做的事就不出聲）",
                     "🌙" not in compact_notice_context
-                    and memspec.DREAM_NOTICE_CLEAN_LINE.format(date="2026-09-06") in clean_notice_context,
+                    and "🌙" not in clean_notice_context
+                    and "dream index detail" in clean_notice_context,
+                )
+            )
+
+            # §35：到期沒跑才是要人動手的狀態——上一段那個乾淨的夢剛跑完（在間隔內）
+            # 所以不說；把完成時間推到間隔外就說一行，帶上次日期與可跑的命令。
+            _write_dream_state(
+                _time.time() - 25 * 3600, {field: 0 for field in memspec.DREAM_HEADLINE_FIELDS},
+                notified="2026-09-06T03:30:00+00:00",
+            )
+            overdue_dream = run_synthetic(
+                Path(__file__), {"source": "startup"}, dream_config, environment=nightly_env
+            )
+            overdue_dream_value = json.loads(overdue_dream.stdout) if overdue_dream.stdout.strip() else {}
+            overdue_dream_context = overdue_dream_value.get("hookSpecificOutput", {}).get(
+                "additionalContext", ""
+            )
+            # 夢正在跑（lock 還沒逾時）就不是「沒跑」，同一份 state 不該再出那一行。
+            lock_file.write_text(
+                json.dumps({"pid": os.getpid(), "started": _time.time()}), encoding="utf-8"
+            )
+            running_dream = run_synthetic(
+                Path(__file__), {"source": "startup"}, dream_config, environment=nightly_env
+            )
+            running_dream_value = json.loads(running_dream.stdout) if running_dream.stdout.strip() else {}
+            running_dream_context = running_dream_value.get("hookSpecificOutput", {}).get(
+                "additionalContext", ""
+            )
+            lock_file.unlink()
+            off_dream = run_synthetic(
+                Path(__file__), {"source": "startup"}, dream_config,
+                environment={memspec.DREAM_MODE_ENV: memspec.DREAM_MODE_OFF},
+            )
+            off_dream_value = json.loads(off_dream.stdout) if off_dream.stdout.strip() else {}
+            off_dream_context = off_dream_value.get("hookSpecificOutput", {}).get("additionalContext", "")
+            checks.append(
+                (
+                    "到期沒跑的夢說一行；正在跑不說；mode=off 不說",
+                    overdue_dream.returncode == 0
+                    and memspec.DREAM_NOTICE_OVERDUE_LINE.format(last="2026-09-06")
+                    in overdue_dream_context
+                    and "🌙" not in running_dream_context
+                    and "🌙" not in off_dream_context
+                    and "dream index detail" in off_dream_context,
                 )
             )
 
@@ -1127,7 +1056,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 31
+    total = 30
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

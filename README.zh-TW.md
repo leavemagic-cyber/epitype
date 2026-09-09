@@ -21,7 +21,7 @@ Epitype 把同一組原生 vault 接到五個 host 事件：
 
 | 事件 | Epitype 的動作 |
 |---|---|
-| `SessionStart` | 記憶索引或工作帳本存在時，在大小上限內注入內容。 |
+| `SessionStart` | 對沒有原生載入索引的宿主回音短入口（在大小上限內），另外只出「有事要做」的行（卡片型別 FAIL、夢報錯／有待審候選／到期沒跑）。常駐內容一律不重送。 |
 | `UserPromptSubmit` | 在共用輸出預算內，從每個已解析的 vault 取回最多五張相關卡片。簡短的 owner 授權語句會逐字保存、去重並立即進索引；捕捉當下不替原話加上解釋。 |
 | `PreToolUse` | 寫檔閘：檔案寫入落盤前，先用現行裁定與卡片型別合約檢查要寫進去的內容。擋下時回傳那條裁定與一列稽核紀錄。 |
 | `PreCompact` | 在 context 壓縮前，從 transcript 尾端製作小型復原地圖。 |
@@ -38,8 +38,8 @@ Epitype 把同一組原生 vault 接到五個 host 事件：
 `verified: false`；轉正＝改成 `verified: true` 並補 `verified_by`／`verified_at` 再搬檔，
 回放不會替你做這件事。
 
-`verified: false` 的卡不是任何東西的依據：Stop 決策閘、寫檔閘與開場現行裁定清單
-讀的都是宣告 `decision_key` 的卡，捕捉卡從來不宣告這個。
+`verified: false` 的卡不是任何東西的依據：Stop 決策閘與寫檔閘讀的都是宣告
+`decision_key` 的卡，捕捉卡從來不宣告這個。
 喚回照樣端得出來，但掛的是「歷史捕捉」而不是現行裁定。細節與量測見
 `docs/FAILURE_MODES.md` §32。
 
