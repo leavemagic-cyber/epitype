@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- 整潔（U-J2）：閘門紀錄與 `forbidden` 正則驗證器搬進 `adapters/claude/_hook_common.py` 並改公開名（`compile_bounded_regex`、`append_gate_log`、`with_session`、`GATE_LOG_MAX_BYTES`），Stop 閘不再跨 adapter 借 `pretooluse_gate` 的私有名。純搬家：函式本體逐位元組不變，紀錄格式與輪替門檻（2 MiB → `.1`）照舊。
 - gitignore: ignore the transient .hook-trust-*/ directory that hook_trust selftest creates in the repo root (it made the worktree-clean gate flap while another selftest was running).
 
 ### U-H：喚回只端卡片，原話留在最底層（owner 2026-09-09；FAILURE_MODES §41）

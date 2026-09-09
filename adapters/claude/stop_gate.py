@@ -26,7 +26,9 @@ if str(_REPO_ROOT) not in sys.path:
 
 from epitype import memspec
 from _hook_common import (
+    append_gate_log,
     clear_recall_markers,
+    compile_bounded_regex,
     emit,
     expired,
     governance_vault,
@@ -35,6 +37,7 @@ from _hook_common import (
     read_event,
     recall_marker_directory,
     run_synthetic,
+    with_session,
     write_config,
 )
 
@@ -320,12 +323,10 @@ def _forbidden_fragment(decision, message, defects):
     A pattern the shared validator rejects is dropped and named on stderr, never
     silently: an unusable pattern is a ruling that stopped being enforced, and the
     turn still ends rather than being blocked by a card nobody can fix."""
-    from pretooluse_gate import _compile_bounded_regex
-
     quoted = _quoted_spans(message)
     for pattern in decision.forbidden:
         try:
-            regex = _compile_bounded_regex(pattern)
+            regex = compile_bounded_regex(pattern)
         except Exception as exc:
             defects.append(
                 memspec.STOP_GATE_PATTERN_DEFECT.format(
@@ -408,12 +409,10 @@ def _claim_marker(session_id, decision_key, message):
 
 def _audit(config, decision_key, rule, started_at, session_id=None):
     try:
-        from pretooluse_gate import _append_gate_log, _with_session
-
         row = {"kind": memspec.STOP_GATE_LOG_KIND, "decision": decision_key, "rule": rule}
-        _append_gate_log(
+        append_gate_log(
             governance_vault(config, for_write=True),
-            _with_session(row, session_id),
+            with_session(row, session_id),
             started_at,
         )
     except Exception:

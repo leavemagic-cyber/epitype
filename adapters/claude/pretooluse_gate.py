@@ -6,14 +6,11 @@ interception is gone. Irreversible actions are the host's own native rules
 (Claude `permissions.deny`, Codex `execpolicy`); what stays here is the gate over
 the content a call is about to write, which no host rule can express."""
 
-from datetime import datetime, timezone
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
-from re import _constants as _re_constants
-from re import _parser as _re_parser
 import tempfile
 import uuid
 
@@ -23,6 +20,9 @@ if str(_REPO_ROOT) not in sys.path:
 
 from epitype import memspec
 from _hook_common import (
+    GATE_LOG_MAX_BYTES,
+    append_gate_log,
+    compile_bounded_regex,
     emit,
     expired,
     load_config,
@@ -30,111 +30,9 @@ from _hook_common import (
     read_event,
     resolve_vaults,
     run_synthetic,
+    with_session,
     write_config,
 )
-
-_REPEAT_OPS = frozenset(
-    (
-        _re_constants.MAX_REPEAT,
-        _re_constants.MIN_REPEAT,
-        _re_constants.POSSESSIVE_REPEAT,
-    )
-)
-_GROUPREF_OPS = frozenset(
-    (
-        _re_constants.GROUPREF,
-        _re_constants.GROUPREF_EXISTS,
-        _re_constants.GROUPREF_IGNORE,
-        _re_constants.GROUPREF_LOC_IGNORE,
-        _re_constants.GROUPREF_UNI_IGNORE,
-    )
-)
-
-
-def _validate_regex_tree(items, inside_repeat=False):
-    """Reject the shapes that can backtrack exponentially on a crafted message:
-    a repetition or an alternation nested inside an unbounded repetition, and
-    backreferences. A hung gate is killed by the host and the call proceeds, so
-    such a pattern would be a bypass. Adjacent repetitions (`\\s+\\S+`) and anything
-    under a bounded `?` stay accepted: at worst polynomial, and real rulings use
-    them; the rejection itself is surfaced by the caller, never silent."""
-    for opcode, argument in items:
-        if opcode in _REPEAT_OPS:
-            unbounded = argument[1] > 1
-            if unbounded and inside_repeat:
-                raise ValueError("pattern nests one repetition inside another")
-            _validate_regex_tree(argument[2], inside_repeat=inside_repeat or unbounded)
-        elif opcode == _re_constants.BRANCH:
-            if inside_repeat:
-                raise ValueError("pattern repeats an alternation")
-            for branch in argument[1]:
-                _validate_regex_tree(branch, inside_repeat=inside_repeat)
-        elif opcode == _re_constants.SUBPATTERN:
-            _validate_regex_tree(argument[-1], inside_repeat=inside_repeat)
-        elif opcode in (_re_constants.ASSERT, _re_constants.ASSERT_NOT):
-            _validate_regex_tree(argument[1], inside_repeat=inside_repeat)
-        elif opcode == getattr(_re_constants, "ATOMIC_GROUP", object()):
-            _validate_regex_tree(argument, inside_repeat=inside_repeat)
-        elif opcode in _GROUPREF_OPS:
-            raise ValueError("pattern backreferences are not supported")
-
-
-def _compile_bounded_regex(pattern):
-    """The shared validator for a decision card's `forbidden` patterns — the Stop
-    gate and this gate's rule A compile through this one reading, so a pattern that
-    is unusable at the end of a turn is unusable in a file write too."""
-    if len(pattern) > memspec.FORBIDDEN_REGEX_MAX_CHARS:
-        raise ValueError("pattern exceeds the length limit")
-    parsed = _re_parser.parse(pattern, 0)
-    _validate_regex_tree(parsed)
-    return re.compile(pattern)
-
-
-# 2026-09-06 真機實測：治理 vault 的 _GATE_LOG.jsonl 灌到 13,061 列（同一批壞卡每次呼叫
-# 都補一列，三天沒消）。那條寫入路徑已隨 trigger 攔截退役（2026-09-09 U-J），上限留著：
-# 稽核檔仍會長，超過就把整份改名成 .1（保留一份，不刪，不接力鏈成 .2 .3…）。
-_GATE_LOG_MAX_BYTES = 2 * 1024 * 1024
-
-
-def _with_session(row, session_id):
-    """Row plus session_id when the hook event actually carried one; omitted
-    entirely otherwise so old-shaped log lines and new ones stay distinguishable."""
-    if isinstance(session_id, str) and session_id:
-        return {**row, "session_id": session_id}
-    return row
-
-
-def _rotate_gate_log_if_oversized(target):
-    """Called with the log's file lock already held. A stat/replace failure is
-    swallowed: a rotation that cannot happen must never block the audit write."""
-    try:
-        if target.stat().st_size <= _GATE_LOG_MAX_BYTES:
-            return
-    except OSError:
-        return
-    try:
-        os.replace(target, target.with_name(target.name + ".1"))
-    except OSError:
-        pass
-
-
-def _append_gate_log(vault, row, started_at):
-    target = vault / memspec.GATE_LOG_FILENAME
-    remaining = memspec.HOOK_TIMEOUT_SECONDS - (time.monotonic() - started_at)
-    if remaining <= 0:
-        raise TimeoutError("hook deadline reached")
-    value = {
-        "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        **row,
-    }
-    with memspec.file_lock(target, min(0.25, remaining)) as acquired:
-        if not acquired:
-            raise OSError("gate audit lock unavailable")
-        _rotate_gate_log_if_oversized(target)
-        with target.open("a", encoding="utf-8", newline="\n") as stream:
-            stream.write(json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n")
-            stream.flush()
-            os.fsync(stream.fileno())
 
 
 def _best_effort_audit(callback, *arguments):
@@ -412,9 +310,9 @@ def _write_marker(session_id, rule, target, text):
 def _append_write_block(vault, rule, subject, target, started_at, session_id=None):
     """Audit a blocked write by rule, subject, and filename only — the content is
     exactly the material a ruling is about and does not belong in the ledger."""
-    _append_gate_log(
+    append_gate_log(
         vault,
-        _with_session(
+        with_session(
             {
                 "kind": memspec.WRITE_GATE_LOG_KIND,
                 "rule": rule,
@@ -616,8 +514,8 @@ def _selftest():
             rotate_vault = root / "rotate-vault"
             rotate_vault.mkdir()
             rotate_log = rotate_vault / memspec.GATE_LOG_FILENAME
-            rotate_log.write_text("x" * (_GATE_LOG_MAX_BYTES + 1024) + "\n", encoding="utf-8")
-            _append_gate_log(rotate_vault, {"card": "rotate-check"}, time.monotonic())
+            rotate_log.write_text("x" * (GATE_LOG_MAX_BYTES + 1024) + "\n", encoding="utf-8")
+            append_gate_log(rotate_vault, {"card": "rotate-check"}, time.monotonic())
             rotated_path = rotate_vault / (memspec.GATE_LOG_FILENAME + ".1")
             rotated_rows = [
                 json.loads(line)
@@ -628,7 +526,7 @@ def _selftest():
                 (
                     "a gate log past GATE_LOG_MAX_BYTES rotates to .1 before the next row lands",
                     rotated_path.is_file()
-                    and rotated_path.stat().st_size > _GATE_LOG_MAX_BYTES
+                    and rotated_path.stat().st_size > GATE_LOG_MAX_BYTES
                     and len(rotated_rows) == 1
                     and rotated_rows[0].get("card") == "rotate-check",
                 )
@@ -639,7 +537,7 @@ def _selftest():
             # hang the hook, and a hung hook is a bypass.
             def regex_accepted(pattern):
                 try:
-                    _compile_bounded_regex(pattern)
+                    compile_bounded_regex(pattern)
                 except (ValueError, re.error):
                     return False
                 return True
