@@ -2,9 +2,11 @@ import sys; sys.dont_write_bytecode = True; [getattr(stream, "reconfigure", lamb
 """Run synthetic Epitype recall, abstention, gate, stop, lint, and supersession questions."""
 
 import argparse
+import contextlib
 from copy import deepcopy
 from datetime import datetime, timezone
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -327,6 +329,13 @@ def _question_cards(question):
     return found
 
 
+def _question_mechanism(question):
+    """純機制題（U-P2）的機制標籤，例如 encoding／budget／fail-open／advisory；沒有就
+    空字串。有這個字才不算「未映射」——它是「不對應規則卡」，不是漏了映射（U-P3）。"""
+    value = question.get("mechanism") if isinstance(question, dict) else None
+    return value.strip() if isinstance(value, str) else ""
+
+
 def _run_question(question):
     if not isinstance(question, dict):
         raise ValueError("question must be an object")
@@ -361,7 +370,7 @@ def _run_question(question):
             failure = _judge_supersession(
                 vault, written, question.get("input"), expect
             )
-    return question_id, failure, _question_cards(question)
+    return question_id, failure, _question_cards(question), _question_mechanism(question)
 
 
 def run_corpus(corpus):
@@ -376,15 +385,16 @@ def run_corpus(corpus):
         question_id = question.get("id") if isinstance(question, dict) else f"#{index}"
         identity = question_id if isinstance(question_id, str) else f"#{index}"
         if identity in seen:
-            results.append((str(question_id), "duplicate question id", []))
+            results.append((str(question_id), "duplicate question id", [], ""))
             continue
         seen.add(identity)
         try:
             results.append(_run_question(question))
         except Exception as exc:
-            results.append(
-                (str(question_id), f"{type(exc).__name__}: {exc}", _question_cards(question))
-            )
+            results.append((
+                str(question_id), f"{type(exc).__name__}: {exc}",
+                _question_cards(question), _question_mechanism(question),
+            ))
     return results
 
 
@@ -395,25 +405,34 @@ def _load_corpus(path):
 
 def _emit_results(results):
     passed = 0
+    mechanism = 0
     unmapped = 0
-    for question_id, failure, cards in results:
+    for question_id, failure, cards, mechanism_label in results:
         if not cards:
-            unmapped += 1
-        suffix = f" | cards={','.join(cards)}" if cards else ""
+            if mechanism_label:
+                mechanism += 1
+            else:
+                unmapped += 1
+        suffix = f" | cards={','.join(cards)}" if cards else (
+            f" | mechanism={mechanism_label}" if mechanism_label else ""
+        )
         if failure is None:
             passed += 1
             print(f"PASS {question_id}{suffix}")
         else:
             print(f"FAIL {question_id}: {failure}{suffix}")
     print(f"SCORE {passed}/{len(results)}")
-    # 沒有對到規則卡的題目要自己說出來：夢的檢討包只把失敗連回有映射的那些，未映射的
-    # 那批是「查不到是哪條規則在管」的缺口，不是零缺口（U-P 第 3 行）。
-    print(f"UNMAPPED {unmapped}/{len(results)}")
+    # 沒有對到規則卡的題目要自己說出來，但純機制題（cards 空、mechanism 有字，U-P2）不是
+    # 「查不到是哪條規則在管」，是「不對應規則卡」——兩者分開計，UNMAPPED 才量得出真缺口
+    # （U-P3）。
+    total = len(results)
+    mapped = total - mechanism - unmapped
+    print(f"MAPPED {mapped}/{total} | MECHANISM {mechanism}/{total} | UNMAPPED {unmapped}/{total}")
     return passed
 
 
 def _result_exit_code(results, strict):
-    return 1 if strict and any(failure is not None for _, failure, _cards in results) else 0
+    return 1 if strict and any(failure is not None for _, failure, _cards, _mech in results) else 0
 
 
 def _corpus_version(path):
@@ -441,13 +460,14 @@ def _record_results(corpus_path, results):
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "counts": {
             "total": len(results),
-            "passed": sum(1 for _id, failure, _cards in results if failure is None),
-            "failed": sum(1 for _id, failure, _cards in results if failure is not None),
-            "unmapped": sum(1 for _id, _failure, cards in results if not cards),
+            "passed": sum(1 for _id, failure, _cards, _mech in results if failure is None),
+            "failed": sum(1 for _id, failure, _cards, _mech in results if failure is not None),
+            "mechanism": sum(1 for _id, _f, cards, mech in results if not cards and mech),
+            "unmapped": sum(1 for _id, _f, cards, mech in results if not cards and not mech),
         },
         "results": [
-            {"id": question_id, "passed": failure is None, "cards": cards}
-            for question_id, failure, cards in results
+            {"id": question_id, "passed": failure is None, "cards": cards, "mechanism": mech}
+            for question_id, failure, cards, mech in results
         ],
     }
     try:
@@ -473,8 +493,8 @@ def _selftest():
         checks.append(
             (
                 "sample corpus passes",
-                len(sample_results) == 16
-                and all(failure is None for _, failure, _cards in sample_results),
+                len(sample_results) == 17
+                and all(failure is None for _, failure, _cards, _mech in sample_results),
             )
         )
 
@@ -554,12 +574,25 @@ def _selftest():
             "a question that names its rule card carries that card out with its result",
             mapped[2] == ["decisions/one.md"]
             and keyed[2] == ["one-key"]
-            and all(not cards for _id, _failure, cards in sample_results),
+            and all(not cards for _id, _failure, cards, _mech in sample_results),
         ))
         checks.append((
             "the synthetic vault's own fixture cards are never sold as the question's mapping",
             not _question_cards(sample["questions"][0])
             and bool(sample["questions"][0]["setup"]["vault_cards"]),
+        ))
+
+        # ── U-P3：純機制題（cards 空、mechanism 有字）算 MECHANISM，不算 UNMAPPED ──
+        mechanism_result = run_alone("mechanism-en-encoding")
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            _emit_results([mechanism_result])
+        summary_line = buffer.getvalue().splitlines()[-1]
+        checks.append((
+            "a mechanism-only question is counted as MECHANISM, not UNMAPPED",
+            mechanism_result[2] == []
+            and mechanism_result[3] == "encoding"
+            and summary_line == "MAPPED 0/1 | MECHANISM 1/1 | UNMAPPED 0/1",
         ))
 
         # ── U-P 第 3 行：機器可讀結果檔（絕不碰真庫：自己開一個暫存治理庫）──
@@ -600,7 +633,7 @@ def _selftest():
             and value["rules_version"] == expected_version
             and len(value["rules_version"]) == 12
             and value["results"] == [
-                {"id": mapped[0], "passed": mapped[1] is None, "cards": mapped[2]}
+                {"id": mapped[0], "passed": mapped[1] is None, "cards": mapped[2], "mechanism": mapped[3]}
             ]
             and value["counts"]["unmapped"] == 0,
         ))
@@ -614,7 +647,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 11
+    total = 12
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

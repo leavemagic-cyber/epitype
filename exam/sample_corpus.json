@@ -396,6 +396,23 @@
           "pinboard-quote"
         ]
       }
+    },
+    {
+      "id": "mechanism-en-encoding",
+      "category": "abstention",
+      "mechanism": "encoding",
+      "setup": {
+        "vault_cards": [
+          {
+            "path": "notes/lantern.md",
+            "content": "---\nname: Lantern Sample\ndescription: Neutral paper lantern note\nscope: data\n---\nA neutral card about arranging paper lanterns.\n"
+          }
+        ]
+      },
+      "input": "Locate violet telescope calibration notes",
+      "expect": {
+        "top_k_empty": true
+      }
     }
   ]
 }
