@@ -24,6 +24,17 @@ class DreamStatusRegression(unittest.TestCase):
         self.pack = self.vault / ".epitype" / "pack.json"
         self.state = self.pack.parent / memspec.DREAM_STATE_FILENAME
         self.settings = {memspec.DREAM_MODE_FIELD: memspec.DREAM_MODE_NIGHTLY}
+        # 第 8 節從家目錄推口袋庫、第 11 節讀設定的上限鍵：不指進暫存目錄，這份回歸
+        # 就會去掃跑測試的人的真實家目錄，結果隨機器而異。
+        home = self.root / "home"
+        (home / memspec.HOST_STATE_DIRECTORY / memspec.HOST_PROJECTS_DIRECTORY).mkdir(parents=True)
+        config = self.root / "config.json"
+        config.write_text(json.dumps({memspec.CONFIG_VAULTS_FIELD: [str(self.vault)]}), encoding="utf-8")
+        for name, value in (("HOME", str(home)), ("USERPROFILE", str(home)),
+                            (memspec.EPITYPE_CONFIG_ENV, str(config))):
+            patched = patch.dict(os.environ, {name: value})
+            patched.start()
+            self.addCleanup(patched.stop)
 
     def run_pack(self, *args, vaults=None):
         code = dream.main(["--json", "--out", str(self.pack), *args,
@@ -46,7 +57,7 @@ class DreamStatusRegression(unittest.TestCase):
         with patch.object(dream.time, "monotonic", side_effect=lambda: next(ticks, 1.0)):
             state, notice = self.run_pack("--time-budget-seconds", "0.001")
         self.assert_incomplete(state, notice)
-        self.assertEqual(len(state["section_errors"]), 7)
+        self.assertEqual(len(state["section_errors"]), 12)
         self.assertTrue(all(row["error"] == dream.TIME_BUDGET_ERROR
                             for row in state["section_errors"].values()))
         pack = json.loads(self.pack.read_text(encoding="utf-8"))

@@ -56,6 +56,14 @@ class DreamLockRegression(unittest.TestCase):
         self.path = dream.dream_root(self.vault) / memspec.DREAM_LOCK_FILENAME
         self.path.parent.mkdir()
         self.ctx = multiprocessing.get_context("spawn")
+        # 第 8 節從家目錄推口袋庫；鎖的行為與它無關，但這份回歸不該順手掃跑測試的人
+        # 的真實家目錄（速度與可重現性都會跟著機器跑）。
+        home = self.root / "home"
+        (home / memspec.HOST_STATE_DIRECTORY / memspec.HOST_PROJECTS_DIRECTORY).mkdir(parents=True)
+        for name in ("HOME", "USERPROFILE"):
+            patched = patch.dict(os.environ, {name: str(home)})
+            patched.start()
+            self.addCleanup(patched.stop)
 
     def stale(self, pid=0):
         self.path.write_text(json.dumps({"pid": pid, "started":

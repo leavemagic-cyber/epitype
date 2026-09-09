@@ -46,6 +46,29 @@ RECENT_WINDOW_DAYS = 7
 DRAFT_DIRNAME = "_drafts"
 _EVENT_TYPE_BY_DIR = dict(memspec.EVENT_CARD_DIRECTORIES)  # {"grants": "grant", ...}
 
+# 第 8–12 節（U-K，owner 2026-09-09）：全部只列候選，一個檔都不搬、不改、不刪。夢的
+# 這五節回答的是「有什麼東西沒經過確認就留在那裡」，處置一律是人的動作。
+POCKET_VAULT_MAX_ROWS = 50
+POCKET_VAULT_CANDIDATE = "歸戶候選"
+POCKET_VAULT_NOTE = "只列候選：夢不搬、不改、不刪任何口袋庫的檔案"
+POCKET_VAULT_COMMAND = "人工判斷每個口袋庫該歸哪一戶（登記進 config 的 vaults，或確認它就該留在原地）；沒有自動 CLI 指令"
+DRAFT_AGING_WARN_DAYS = 7
+DRAFT_AGING_STALE_DAYS = 30
+DRAFT_OLDEST_ROWS = 5
+DRAFT_ROOT_GROUP = "(root)"
+DRAFT_AGING_COMMAND = "人工審閱最舊的那幾份 _drafts/**：轉正、歸檔或留著都行，但要有人看過"
+MIXED_MAX_PER_VAULT = 50
+MIXED_REASON_HEADINGS = "正文有 {count} 個 `## ` 小標"
+MIXED_REASON_BYTES = "正文 {bytes} 位元組 > {cap}"
+MIXED_REASON_DESCRIPTION = "description {chars} 字元且用「＋」「；」串了多件事"
+MIXED_COMMAND = "人工判斷要不要拆成多張卡（一張卡＝一個記憶或規則）；夢不自動拆"
+CAP_UNSET_NOTE = "{field} 未設定，這一項跳過"
+CAP_COMMAND = "人工判斷超上限的檔案要精簡還是提高上限；夢不改檔"
+DECISION_CARRIER_FIELDS = ("source", memspec.SUPERSEDED_BY_FIELD, memspec.ALIASES_FIELD)
+UNCARRIED_MAX_PER_VAULT = 30
+UNCARRIED_EXCERPT_CHARS = 80
+UNCARRIED_COMMAND = "人工判斷這句原話該不該升成決策卡（或標 verified: false 降級）；夢不自動升卡"
+
 
 # --------------------------------------------------------------------------- helpers
 
@@ -74,7 +97,7 @@ def _iso_date_of(value):
 # --------------------------------------------------------------------------- section 1
 
 
-def _section_missing_aliases(vaults, today, since_date):
+def _section_missing_aliases(vaults, today, since_date, config):
     results, errors = _bounded(vaults, lambda v: alias_batch._export_candidates(v, True, None))
     entries = []
     for vault, candidates in results:
@@ -93,7 +116,7 @@ def _section_missing_aliases(vaults, today, since_date):
 # --------------------------------------------------------------------------- section 2
 
 
-def _section_card_lint(vaults, today, since_date):
+def _section_card_lint(vaults, today, since_date, config):
     results, errors = _bounded(vaults, lambda v: card_lint.scan_vault(v, today))
     fail = warn = fail_cards = 0
     cards = []
@@ -116,7 +139,7 @@ def _section_card_lint(vaults, today, since_date):
 # --------------------------------------------------------------------------- section 3
 
 
-def _section_pending(vaults, today, since_date):
+def _section_pending(vaults, today, since_date, config):
     results, errors = _bounded(vaults, lambda v: pending_lint.scan_vault(v, today=today))
     zombie_cards = zombie_lines = oldest = 0
     entries = []
@@ -146,7 +169,7 @@ def _drafts_of(vault):
     return sorted(root.rglob("*.md"))
 
 
-def _section_drafts(vaults, today, since_date):
+def _section_drafts(vaults, today, since_date, config):
     results, errors = _bounded(vaults, _drafts_of)
     by_subdir = {}
     entries = []
@@ -218,7 +241,7 @@ def _stop_gate_forbidden_reader():
     return has_forbidden
 
 
-def _section_decisions(vaults, today, since_date):
+def _section_decisions(vaults, today, since_date, config):
     results, errors = _bounded(vaults, decision_lint.lint_vault)
     has_forbidden_reader = _stop_gate_forbidden_reader()
     active = superseded = 0
@@ -269,7 +292,7 @@ def _event_cards_of(vault):
     return found
 
 
-def _section_event_aging(vaults, today, since_date):
+def _section_event_aging(vaults, today, since_date, config):
     results, errors = _bounded(vaults, _event_cards_of)
     counts_by_type = {card_type: 0 for card_type in _EVENT_TYPE_BY_DIR.values()}
     aging_by_type = {card_type: 0 for card_type in _EVENT_TYPE_BY_DIR.values()}
@@ -351,7 +374,7 @@ def _recent_cards_of(vault):
     return entries
 
 
-def _section_recent(vaults, today, since_date):
+def _section_recent(vaults, today, since_date, config):
     results, errors = _bounded(vaults, _recent_cards_of)
     recent = []
     for vault, entries in results:
@@ -363,6 +386,409 @@ def _section_recent(vaults, today, since_date):
         "counts": {"recent_7d": len(recent)},
         "examples": recent[:EXAMPLE_LIMIT],
         "commands": [],
+        "errors": errors,
+    }
+
+
+# --------------------------------------------------------------------------- section 8
+
+
+def _projects_roots(vaults):
+    """可能裝著口袋庫的 `<家目錄>/.claude/projects` 目錄，以及各自要找的庫目錄名。
+
+    家目錄不寫死：先從每個登記庫的路徑往上找 `.claude/projects` 這一對目錄名——認得
+    出來就連庫目錄名（`memory`）也一起從那個登記庫身上讀，換 slug 規則不必改程式。
+    一個登記庫都認不出來時（庫登記在別處）才退回 HOME 底下的同一個位置。
+
+    只認這個形狀是刻意的：改成「登記庫的祖父目錄就是根」會讓一個放在 `C:\\a\\b` 的
+    庫把 `C:\\` 底下每個目錄都當成專案目錄掃一遍。
+    """
+    roots = {}
+    for vault in vaults:
+        path = Path(vault).resolve()
+        for parent in path.parents:
+            if (
+                parent.name == memspec.HOST_PROJECTS_DIRECTORY
+                and parent.parent.name == memspec.HOST_STATE_DIRECTORY
+                and parent.is_dir()
+            ):
+                roots.setdefault(parent, set()).add(path.name)
+                break
+    fallback = Path.home() / memspec.HOST_STATE_DIRECTORY / memspec.HOST_PROJECTS_DIRECTORY
+    if fallback.is_dir():
+        roots.setdefault(fallback.resolve(), set()).add(memspec.HOST_MEMORY_DIRECTORY)
+    return roots
+
+
+def _pocket_vault_cards(directory):
+    """(*.md 卡數, 最新 mtime)——沿用 vault 掃描邊界：`_`／`.` 開頭的路徑段不算。
+
+    只數檔案、不解 frontmatter：這一節要回答的是「這裡有沒有東西沒人管」，一個
+    ~200 個專案目錄的家目錄不該為此付整庫解析的錢（夢有十分鐘總預算）。
+    """
+    count = 0
+    newest = None
+    pending = [os.fspath(directory)]
+    while pending:
+        current = pending.pop()
+        try:
+            with os.scandir(current) as entries:
+                listed = list(entries)
+        except OSError:
+            continue
+        for entry in listed:
+            if entry.name.startswith(("_", ".")):
+                continue
+            try:
+                info = entry.stat(follow_symlinks=False)
+                # 連結／junction 一律不進去也不計數，與 memsearch 的 vault 邊界同一條
+                # 規則：一個連結形狀的項目不該把目錄外的檔案算成這個庫的卡。
+                if memsearch._is_link(entry, info):
+                    continue
+                if entry.is_dir(follow_symlinks=False):
+                    pending.append(entry.path)
+                elif entry.name.lower().endswith(".md"):
+                    count += 1
+                    newest = info.st_mtime if newest is None else max(newest, info.st_mtime)
+            except OSError:
+                continue
+    return count, newest
+
+
+def _section_pocket_vaults(vaults, today, since_date, config):
+    """未登記卻裝著卡的目錄＝口袋庫；只列歸戶候選，不搬不改。
+
+    owner 2026-09-09：「我不知道會有多少地方在產生非整理的記憶」。登記清單答不了這個
+    問題——它只列得出已經知道的庫。所以這一節反過來從磁碟數，再扣掉登記的。
+    """
+    # 登記清單直接讀設定，不走 configured_vaults()：那個入口為「一個庫都沒登記」丟
+    # 例外，而在這裡「沒登記」正是要回答的問題，不是這一節跑不下去的理由。
+    registered = {Path(vault).resolve() for vault in vaults}
+    raw_registered = config.get(memspec.CONFIG_VAULTS_FIELD)
+    for item in (raw_registered if isinstance(raw_registered, list) else ()):
+        if not isinstance(item, str) or not item.strip():
+            continue
+        try:
+            registered.add(Path(item).expanduser().resolve())
+        except (OSError, RuntimeError):
+            continue
+    errors = []
+    found = []
+    seen = set()  # 兩個根指到同一個目錄時只算一次。
+    roots = _projects_roots(vaults)
+    for root, leaves in sorted(roots.items()):
+        try:
+            with os.scandir(root) as entries:
+                projects = sorted(entry.path for entry in entries if entry.is_dir(follow_symlinks=False))
+        except OSError as exc:
+            errors.append(f"{root}: {type(exc).__name__}: {exc}")
+            continue
+        for project in projects:
+            for leaf in sorted(leaves):
+                candidate = Path(project) / leaf
+                if not candidate.is_dir():
+                    continue
+                resolved = candidate.resolve()
+                if resolved in registered or resolved in seen:
+                    continue
+                seen.add(resolved)
+                cards, newest = _pocket_vault_cards(resolved)
+                if cards < 1:
+                    continue
+                found.append({
+                    "path": str(resolved),
+                    "cards": cards,
+                    "newest_mtime": datetime.fromtimestamp(newest, tz=timezone.utc).isoformat(timespec="seconds"),
+                    "candidate": POCKET_VAULT_CANDIDATE,
+                })
+    found.sort(key=lambda item: (-item["cards"], item["path"]))
+    return {
+        "counts": {
+            "pocket_vaults": len(found),
+            "pocket_cards": sum(item["cards"] for item in found),
+            "roots_scanned": len(roots),
+        },
+        "examples": found[:POCKET_VAULT_MAX_ROWS],
+        "commands": [POCKET_VAULT_COMMAND] if found else [],
+        "errors": errors,
+        "note": POCKET_VAULT_NOTE,
+    }
+
+
+# --------------------------------------------------------------------------- section 9
+
+
+def _draft_aging_of(vault, today):
+    entries = []
+    for path in _drafts_of(vault):
+        try:
+            stamp = path.stat().st_mtime
+        except OSError:
+            continue
+        age = (today - datetime.fromtimestamp(stamp, tz=timezone.utc).date()).days
+        relative = path.relative_to(vault).as_posix()
+        parts = relative.split("/")
+        entries.append({
+            "vault": str(vault),
+            "path": relative,
+            "subdir": parts[1] if len(parts) > 2 else DRAFT_ROOT_GROUP,
+            "age_days": age,
+        })
+    return entries
+
+
+def _section_draft_aging(vaults, today, since_date, config):
+    """草稿的年齡分布。第 4 節數的是「有幾份待審」，這一節數的是「積了多久」。
+
+    2026-09-09 實測治理庫積了 370 份草稿沒人管；份數本身不會告訴你那是昨天的一批還是
+    半年前就躺在那裡，而後者才是「沒經過確認的東西回不到該在的層」的樣子。
+    """
+    results, errors = _bounded(vaults, lambda vault: _draft_aging_of(vault, today))
+    entries = []
+    by_subdir = {}
+    for _vault, found in results:
+        for item in found:
+            entries.append(item)
+            bucket = by_subdir.setdefault(item["subdir"], {"total": 0, "over_7": 0, "over_30": 0})
+            bucket["total"] += 1
+            if item["age_days"] > DRAFT_AGING_WARN_DAYS:
+                bucket["over_7"] += 1
+            if item["age_days"] > DRAFT_AGING_STALE_DAYS:
+                bucket["over_30"] += 1
+    entries.sort(key=lambda item: (-item["age_days"], item["vault"], item["path"]))
+    over_7 = sum(1 for item in entries if item["age_days"] > DRAFT_AGING_WARN_DAYS)
+    over_30 = sum(1 for item in entries if item["age_days"] > DRAFT_AGING_STALE_DAYS)
+    return {
+        "counts": {
+            "total_drafts": len(entries),
+            "over_7_days": over_7,
+            "over_30_days": over_30,
+            "by_subdir": by_subdir,
+        },
+        "examples": entries[:DRAFT_OLDEST_ROWS],
+        "commands": [DRAFT_AGING_COMMAND] if over_7 else [],
+        "errors": errors,
+    }
+
+
+# --------------------------------------------------------------------------- section 10
+
+
+def _body_of(text):
+    """卡片正文（frontmatter 之後）；沒有 frontmatter 就整份都是正文。"""
+    stripped = text.lstrip("\N{ZERO WIDTH NO-BREAK SPACE}")
+    _front, closing = memspec.split_frontmatter(stripped)
+    lines = stripped.splitlines()
+    return "\n".join(lines if closing is None else lines[closing + 1:])
+
+
+def _body_heading_count(body):
+    """正文裡的 `## ` 小標數；```圍籬內的不算（卡片會貼 markdown 範例）。"""
+    count = 0
+    fenced = False
+    for line in body.splitlines():
+        if line.strip().startswith(memspec.GRANT_FENCED_CODE_MARKER):
+            fenced = not fenced
+            continue
+        if not fenced and line.startswith("## "):
+            count += 1
+    return count
+
+
+def _mixed_cards_of(vault):
+    flagged = []
+    for path in memsearch.card_files(vault):
+        try:
+            text = path.read_text(encoding="utf-8-sig")
+        except (OSError, UnicodeError):
+            continue
+        fields, _problem = memspec.frontmatter_text(text)
+        body = _body_of(text)
+        reasons = []
+        headings = _body_heading_count(body)
+        if headings >= memspec.CARD_MIXED_HEADING_MIN:
+            reasons.append(MIXED_REASON_HEADINGS.format(count=headings))
+        body_bytes = len(body.encode("utf-8"))
+        if body_bytes > memspec.CARD_BODY_MIXED_BYTES:
+            reasons.append(MIXED_REASON_BYTES.format(bytes=body_bytes, cap=memspec.CARD_BODY_MIXED_BYTES))
+        description = fields.get(memspec.DESCRIPTION_FIELD, "")
+        if (
+            len(description) > memspec.CARD_MIXED_DESCRIPTION_MAX_CHARS
+            and any(joiner in description for joiner in memspec.CARD_MIXED_DESCRIPTION_JOINERS)
+        ):
+            reasons.append(MIXED_REASON_DESCRIPTION.format(chars=len(description)))
+        if reasons:
+            flagged.append({
+                "vault": str(vault),
+                "path": path.relative_to(vault).as_posix(),
+                "reasons": reasons,
+            })
+    flagged.sort(key=lambda item: item["path"])
+    return flagged
+
+
+def _section_mixed_cards(vaults, today, since_date, config):
+    """拆卡候選：一張卡看起來裝了不只一件事。夢只列，不拆——拆是人的判斷。"""
+    results, errors = _bounded(vaults, _mixed_cards_of)
+    examples = []
+    by_vault = {}
+    total = 0
+    for vault, flagged in results:
+        by_vault[str(vault)] = len(flagged)
+        total += len(flagged)
+        examples.extend(flagged[:MIXED_MAX_PER_VAULT])
+    return {
+        "counts": {"mixed_cards": total, "by_vault": by_vault, "listed_cap_per_vault": MIXED_MAX_PER_VAULT},
+        "examples": examples,
+        "commands": [MIXED_COMMAND] if total else [],
+        "errors": errors,
+    }
+
+
+# --------------------------------------------------------------------------- section 11
+
+
+def _positive_int(value):
+    """設定裡的位元組上限；不是正整數就當沒設（True 是 int 的子類，要擋掉）。"""
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    return value
+
+
+def _section_caps(vaults, today, since_date, config):
+    """上限＝檢討值＋兩成（owner 2026-09-09）。夢只查有沒有超過，超過只列候選。
+
+    三個鍵都選填，而且缺鍵一律寫一行「未設定」而不是套內建門檻：一個產品猜出來的
+    上限被寫成「超上限」，讀的人會以為那是 owner 的判斷。
+    """
+    notes = []
+    entries = []
+    errors = []
+    index_cap = _positive_int(config.get(memspec.CONFIG_INDEX_CAP_BYTES_FIELD))
+    if index_cap is None:
+        notes.append(CAP_UNSET_NOTE.format(field=memspec.CONFIG_INDEX_CAP_BYTES_FIELD))
+    else:
+        for vault in vaults:
+            path = Path(vault) / memspec.MEMORY_INDEX_FILENAME
+            try:
+                size = path.stat().st_size
+            except OSError:
+                continue
+            if size > index_cap:
+                entries.append({
+                    "path": str(path), "bytes": size, "cap": index_cap, "over": size - index_cap,
+                })
+    core_files = config.get(memspec.CONFIG_CORE_FILES_FIELD)
+    core_cap = _positive_int(config.get(memspec.CONFIG_CORE_CAP_BYTES_FIELD))
+    if not isinstance(core_files, list) or not core_files:
+        notes.append(CAP_UNSET_NOTE.format(field=memspec.CONFIG_CORE_FILES_FIELD))
+    elif core_cap is None:
+        notes.append(CAP_UNSET_NOTE.format(field=memspec.CONFIG_CORE_CAP_BYTES_FIELD))
+    else:
+        for raw in core_files:
+            if not isinstance(raw, str) or not raw.strip():
+                continue
+            path = Path(raw).expanduser()
+            try:
+                size = path.stat().st_size
+            except OSError as exc:
+                errors.append(f"{path}: {type(exc).__name__}: {exc}")
+                continue
+            if size > core_cap:
+                entries.append({
+                    "path": str(path), "bytes": size, "cap": core_cap, "over": size - core_cap,
+                })
+    entries.sort(key=lambda item: -item["over"])
+    return {
+        "counts": {"over_cap": len(entries), "unset_keys": len(notes)},
+        "examples": entries,
+        "commands": [CAP_COMMAND] if entries else [],
+        "errors": errors,
+        "note": "；".join(notes) if notes else None,
+    }
+
+
+# --------------------------------------------------------------------------- section 12
+
+
+def _decision_reference_text(vault):
+    """所有 decision 卡的正文與 source／superseded_by／aliases 值連成一份大字串。
+
+    問的是「這句原話有沒有被任何一張決策卡接住」，所以不必知道是哪一張接的——只要
+    有一張提到它的檔名或 decision_key 就算有人承接。
+    """
+    chunks = []
+    for path in memsearch.card_files(vault):
+        try:
+            text = path.read_text(encoding="utf-8-sig")
+        except (OSError, UnicodeError):
+            continue
+        card_type, fields = card_lint.card_type_of(path.relative_to(vault).as_posix(), text, path)
+        if card_type != memspec.CARD_TYPE_DECISION:
+            continue
+        chunks.append(_body_of(text))
+        for field in DECISION_CARRIER_FIELDS:
+            value = fields.get(field, "")
+            if value:
+                chunks.append(value)
+    return "\n".join(chunks)
+
+
+def _uncarried_quotes_of(vault, carried_text):
+    found = []
+    for directory, _card_type in memspec.EVENT_CARD_DIRECTORIES:
+        root = Path(vault) / directory
+        if not root.is_dir():
+            continue
+        for path in sorted(root.rglob("*.md")):
+            try:
+                text = path.read_text(encoding="utf-8-sig")
+            except (OSError, UnicodeError):
+                continue
+            fields, _problem = memspec.frontmatter_text(text)
+            verified = fields.get(memspec.VERIFIED_FIELD, "").strip().casefold()
+            if verified == memspec.VERIFIED_FALSE:
+                continue  # 卡面已經自報「未經人核」，喚回也只掛歷史捕捉，不是這一節的事。
+            key = fields.get(memspec.DECISION_KEY_FIELD, "").strip()
+            # 比對用完整檔名（帶 .md）與 decision_key，不用去掉副檔名的字根：`carried`
+            # 是 `uncarried` 的子字串，用字根比對會把「沒人承接」誤判成「有人承接」，
+            # 而這一節寧可多列一份給人看，也不能漏掉一句冒充裁定的原話。
+            names = [path.name] + ([key] if key else [])
+            if any(name in carried_text for name in names):
+                continue
+            body = " ".join(_body_of(text).split())
+            found.append({
+                "vault": str(vault),
+                "path": path.relative_to(vault).as_posix(),
+                "captured_at": fields.get(memspec.CAPTURED_AT_FIELD, "").strip(),
+                "excerpt": body[:UNCARRIED_EXCERPT_CHARS],
+            })
+    found.sort(key=lambda item: (item["captured_at"], item["path"]), reverse=True)
+    return found
+
+
+def _section_uncarried_quotes(vaults, today, since_date, config):
+    """升決策卡候選：會被當裁定端出的原話，卻沒有任何決策卡承接它。
+
+    喚回把 `rulings/`／`corrections/` 的卡掛上「⚖ owner 裁決：」「⚠ owner 曾糾正：」
+    前綴端出去（adapters/claude/recall_hook.py），只有自報 `verified: false` 的那些
+    降級成歷史捕捉。所以一張沒人核、也沒有決策卡承接的原話，讀起來仍像現行裁定——
+    這正是 Claude↔Codex 收斂加的那一項要先找出來的東西。
+    """
+    results, errors = _bounded(
+        vaults, lambda vault: _uncarried_quotes_of(vault, _decision_reference_text(vault))
+    )
+    examples = []
+    by_vault = {}
+    total = 0
+    for vault, found in results:
+        by_vault[str(vault)] = len(found)
+        total += len(found)
+        examples.extend(found[:UNCARRIED_MAX_PER_VAULT])
+    return {
+        "counts": {"uncarried_quotes": total, "by_vault": by_vault, "listed_cap_per_vault": UNCARRIED_MAX_PER_VAULT},
+        "examples": examples,
+        "commands": [UNCARRIED_COMMAND] if total else [],
         "errors": errors,
     }
 
@@ -568,6 +994,11 @@ _SECTIONS = (
     (5, "裁定鏈", _section_decisions),
     (6, "事件卡老化", _section_event_aging),
     (7, "最近 7 天新增卡數", _section_recent),
+    (8, "全庫掃描與口袋庫", _section_pocket_vaults),
+    (9, "草稿老化", _section_draft_aging),
+    (10, "混雜卡（拆卡候選）", _section_mixed_cards),
+    (11, "上限檢查", _section_caps),
+    (12, "原話無決策卡承接（升決策卡候選）", _section_uncarried_quotes),
 )
 
 
@@ -599,6 +1030,33 @@ def _next_steps(sections, shaping=()):
     event = counts(6)
     if event.get("aging_total", 0) > 0:
         steps.append(f"事件卡老化候選 {event['aging_total']} 張 → 人工複核是否歸檔（不刪）")
+    # 第 8–12 節一律只列候選：下一步說的是「有幾件事等人判斷」，不是「夢會處理掉」。
+    pocket = counts(8)
+    if pocket.get("pocket_vaults", 0) > 0:
+        steps.append(
+            f"未登記的口袋庫 {pocket['pocket_vaults']} 個（共 {pocket.get('pocket_cards', 0)} 張卡）"
+            " → 人工判斷歸戶；夢不搬不改"
+        )
+    aging = counts(9)
+    if aging.get("over_7_days", 0) > 0:
+        steps.append(
+            f"草稿老化：{aging['over_7_days']} 份超過 {DRAFT_AGING_WARN_DAYS} 天、"
+            f"{aging.get('over_30_days', 0)} 份超過 {DRAFT_AGING_STALE_DAYS} 天 → 人工審閱 _drafts/**"
+        )
+    mixed = counts(10)
+    if mixed.get("mixed_cards", 0) > 0:
+        steps.append(f"拆卡候選 {mixed['mixed_cards']} 張（一張卡＝一個記憶或規則）→ 人工判斷要不要拆")
+    caps = counts(11)
+    if caps.get("over_cap", 0) > 0:
+        steps.append(f"超上限候選 {caps['over_cap']} 個檔案 → 人工判斷精簡或提高上限；夢不改檔")
+    if caps.get("unset_keys", 0) > 0:
+        steps.append(f"上限檢查有 {caps['unset_keys']} 項未設定（config 缺鍵），這幾項這次沒查")
+    uncarried = counts(12)
+    if uncarried.get("uncarried_quotes", 0) > 0:
+        steps.append(
+            f"升決策卡候選 {uncarried['uncarried_quotes']} 份原話會被當裁定端出、卻沒有決策卡承接"
+            " → 人工判斷升卡或降級"
+        )
     kept = sum(item.get("kept", 0) for item in shaping)
     if kept:
         steps.append(memspec.INDEX_SHAPING_KEPT_STEP.format(count=kept))
@@ -612,9 +1070,12 @@ def _next_steps(sections, shaping=()):
     return steps
 
 
-def build_report(vaults, today=None, since_date=None, deadline=None, shaping=None):
+def build_report(vaults, today=None, since_date=None, deadline=None, shaping=None, config=None):
     today = today or datetime.now(timezone.utc).date()
     since_date = since_date or (today - timedelta(days=DEFAULT_EVENT_AGING_DAYS))
+    # 設定讀一次就好：第 8 節要「登記了哪些庫」、第 11 節要三個上限鍵。讀不到就是空
+    # 的——盤點本身不該因為設定檔壞掉而整份不跑（那才是 CORE-10 說的靜靜少一節）。
+    config = configured_options() if config is None else config
     sections = []
     for section_id, title, fn in _SECTIONS:
         # 時限到了就把剩下的節標成略過：背景程序寧可交半份標明缺口的包，也不要
@@ -623,7 +1084,7 @@ def build_report(vaults, today=None, since_date=None, deadline=None, shaping=Non
             sections.append({"id": section_id, "title": title, "error": TIME_BUDGET_ERROR})
             continue
         try:
-            data = fn(vaults, today, since_date)
+            data = fn(vaults, today, since_date, config)
             sections.append({"id": section_id, "title": title, "error": None, **data})
         except Exception as exc:
             sections.append({"id": section_id, "title": title, "error": f"{type(exc).__name__}: {exc}"})
@@ -680,7 +1141,7 @@ def _render_markdown(report):
         lines.append(memspec.VIEWS_EMPTY_SECTION)
     lines.append("")
 
-    lines.append("## 9. 夢的下一步")
+    lines.append("## 14. 夢的下一步")
     for step in report["next_steps"]:
         lines.append(f"- {step}")
     lines.append("")
@@ -959,6 +1420,19 @@ def configured_vaults(config_path=None):
     return vaults
 
 
+def configured_options(config_path=None):
+    """設定檔整份（讀不到就 {}）——第 8、11 節要的選填鍵都從這裡取。
+
+    `configured_vaults` 會為「沒有登記庫」丟例外，因為那時候夢無事可做；這裡相反：
+    設定不存在只代表沒設上限，盤點照跑，缺的鍵由第 11 節寫一行「未設定」。
+    """
+    try:
+        value = json.loads(Path(config_path or _config_path()).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
 # 開場那一行的欄位名同源 memspec；這裡只說每個名字取哪一節的哪個數字。
 _HEADLINE_SOURCES = {
     "card_fail": (2, "fail"),
@@ -1000,13 +1474,36 @@ def _write_card(path, text):
     path.write_text(text, encoding="utf-8")
 
 
+_SELFTEST_ENV_NAMES = ("HOME", "USERPROFILE", memspec.EPITYPE_CONFIG_ENV)
+
+
 def _selftest():
     checks = []
+    saved_environ = {name: os.environ.get(name) for name in _SELFTEST_ENV_NAMES}
     try:
         with tempfile.TemporaryDirectory(prefix="epitype-dream-") as temp_dir:
             vault = Path(temp_dir).resolve() / "vault"
             vault.mkdir()
             today = date(2026, 9, 6)
+
+            # 第 8 節從家目錄推口袋庫、第 11 節讀設定的上限鍵：兩個入口都要指進這個
+            # 暫存目錄，否則自測會去掃 owner 真正的家目錄與真設定（外層 finally 還原）。
+            home = Path(temp_dir).resolve() / "home"
+            projects = home / memspec.HOST_STATE_DIRECTORY / memspec.HOST_PROJECTS_DIRECTORY
+            projects.mkdir(parents=True)
+            _write_card(
+                projects / "pocket-project" / memspec.HOST_MEMORY_DIRECTORY / "stray.md",
+                "---\nname: stray\ndescription: 2026-06-01 synthetic\n---\nbody\n",
+            )
+            (projects / "empty-project" / memspec.HOST_MEMORY_DIRECTORY).mkdir(parents=True)
+            selftest_config = Path(temp_dir).resolve() / "selftest-config.json"
+            selftest_config.write_text(
+                json.dumps({memspec.CONFIG_VAULTS_FIELD: [os.fspath(vault)]}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            os.environ["HOME"] = os.fspath(home)
+            os.environ["USERPROFILE"] = os.fspath(home)
+            os.environ[memspec.EPITYPE_CONFIG_ENV] = os.fspath(selftest_config)
 
             # section 1: one card with no aliases, one with plenty.
             _write_card(
@@ -1078,8 +1575,8 @@ def _selftest():
             report = build_report([vault], today=today)
             by_id = {section["id"]: section for section in report["sections"]}
 
-            checks.append(("all 7 deterministic sections present with no error", all(
-                by_id[i]["error"] is None for i in range(1, 8)
+            checks.append(("all 12 deterministic sections present with no error", all(
+                by_id[i]["error"] is None for i in range(1, 13)
             )))
             checks.append(("section 1 counts the alias-less card only", by_id[1]["counts"]["missing_aliases"] == 1
                 and by_id[1]["examples"][0]["card_path"] == "feedback/no_alias.md"))
@@ -1112,6 +1609,144 @@ def _selftest():
                 for key in (section.get("counts") or {})
             )))
 
+            # --- 第 8–12 節：只列候選，一個檔都不動 ---
+            # 各自用一個獨立的小庫，才不會讓新題目的資料改動前面七節的數字。
+            checks.append(("section 8 lists the unregistered pocket vault, skipping the empty one and the registered vault", (
+                by_id[8]["counts"]["pocket_vaults"] == 1
+                and by_id[8]["counts"]["pocket_cards"] == 1
+                and by_id[8]["examples"][0]["path"] == os.fspath(
+                    projects / "pocket-project" / memspec.HOST_MEMORY_DIRECTORY)
+                and by_id[8]["examples"][0]["cards"] == 1
+                and memspec.is_iso_date(by_id[8]["examples"][0]["newest_mtime"])
+                and by_id[8]["examples"][0]["candidate"] == POCKET_VAULT_CANDIDATE
+            )))
+
+            drafts_vault = Path(temp_dir).resolve() / "drafts"
+            drafts_vault.mkdir()
+            draft_ages = {
+                "decisions/old.md": date(2026, 1, 1),
+                "decisions/middle.md": date(2026, 8, 20),
+                "notes/fresh.md": date(2026, 9, 5),
+            }
+            for relative, stamped in draft_ages.items():
+                target = drafts_vault / DRAFT_DIRNAME / relative
+                _write_card(target, "draft\n")
+                moment = datetime(stamped.year, stamped.month, stamped.day, tzinfo=timezone.utc).timestamp()
+                os.utime(target, (moment, moment))
+            drafts_by_id = {s["id"]: s for s in build_report([drafts_vault], today=today)["sections"]}
+            checks.append(("section 9 ages the drafts, groups them by first-level subdirectory, and names the oldest first", (
+                drafts_by_id[9]["counts"]["total_drafts"] == 3
+                and drafts_by_id[9]["counts"]["over_7_days"] == 2
+                and drafts_by_id[9]["counts"]["over_30_days"] == 1
+                and drafts_by_id[9]["counts"]["by_subdir"]["decisions"] == {"total": 2, "over_7": 2, "over_30": 1}
+                and drafts_by_id[9]["counts"]["by_subdir"]["notes"] == {"total": 1, "over_7": 0, "over_30": 0}
+                and drafts_by_id[9]["examples"][0]["path"] == "_drafts/decisions/old.md"
+                and drafts_by_id[9]["examples"][0]["age_days"] == 248
+            )))
+
+            mixed_vault = Path(temp_dir).resolve() / "mixed"
+            mixed_vault.mkdir()
+            _write_card(
+                mixed_vault / "two_headings.md",
+                "---\nname: two_headings\ndescription: 2026-06-01 synthetic\naliases:\n- a\n---\n"
+                "## 第一件事\nbody\n\n## 第二件事\nbody\n",
+            )
+            _write_card(
+                mixed_vault / "fenced_example.md",
+                "---\nname: fenced_example\ndescription: 2026-06-01 synthetic\naliases:\n- b\n---\n"
+                "```markdown\n## 範例一\n## 範例二\n```\n說明一件事而已\n",
+            )
+            _write_card(
+                mixed_vault / "too_big.md",
+                "---\nname: too_big\ndescription: 2026-06-01 synthetic\naliases:\n- c\n---\n"
+                + "x" * (memspec.CARD_BODY_MIXED_BYTES + 1) + "\n",
+            )
+            _write_card(
+                mixed_vault / "packed_description.md",
+                "---\nname: packed_description\ndescription: 2026-06-01 "
+                + "甲乙丙丁" * 45 + "；戊己庚辛\naliases:\n- d\n---\nbody\n",
+            )
+            mixed_by_id = {s["id"]: s for s in build_report([mixed_vault], today=today)["sections"]}
+            mixed_paths = {item["path"] for item in mixed_by_id[10]["examples"]}
+            checks.append(("section 10 flags the three mixed shapes and leaves a fenced markdown example alone", (
+                mixed_by_id[10]["counts"]["mixed_cards"] == 3
+                and mixed_paths == {"two_headings.md", "too_big.md", "packed_description.md"}
+                and "fenced_example.md" not in mixed_paths
+                and any("## " in reason for item in mixed_by_id[10]["examples"]
+                        for reason in item["reasons"] if item["path"] == "two_headings.md")
+            )))
+
+            cap_vault = Path(temp_dir).resolve() / "caps"
+            cap_vault.mkdir()
+            (cap_vault / memspec.MEMORY_INDEX_FILENAME).write_text("x" * 50, encoding="utf-8")
+            core_file = Path(temp_dir).resolve() / "core.md"
+            core_file.write_text("y" * 40, encoding="utf-8")
+            unset_by_id = {s["id"]: s for s in build_report([cap_vault], today=today, config={})["sections"]}
+            checks.append(("section 11 without the config keys says so and judges nothing", (
+                unset_by_id[11]["counts"]["over_cap"] == 0
+                and unset_by_id[11]["counts"]["unset_keys"] == 2
+                and memspec.CONFIG_INDEX_CAP_BYTES_FIELD in unset_by_id[11]["note"]
+                and memspec.CONFIG_CORE_FILES_FIELD in unset_by_id[11]["note"]
+            )))
+            capped_by_id = {s["id"]: s for s in build_report([cap_vault], today=today, config={
+                memspec.CONFIG_INDEX_CAP_BYTES_FIELD: 10,
+                memspec.CONFIG_CORE_FILES_FIELD: [os.fspath(core_file)],
+                memspec.CONFIG_CORE_CAP_BYTES_FIELD: 5,
+            })["sections"]}
+            capped = {item["path"]: item for item in capped_by_id[11]["examples"]}
+            checks.append(("section 11 with the keys set lists both over-cap files with their overage, and changes neither", (
+                capped_by_id[11]["counts"]["over_cap"] == 2
+                and capped_by_id[11]["counts"]["unset_keys"] == 0
+                and capped[os.fspath(cap_vault / memspec.MEMORY_INDEX_FILENAME)]["over"] == 40
+                and capped[os.fspath(core_file)]["over"] == 35
+                and (cap_vault / memspec.MEMORY_INDEX_FILENAME).read_text(encoding="utf-8") == "x" * 50
+                and core_file.read_text(encoding="utf-8") == "y" * 40
+            )))
+
+            quotes_vault = Path(temp_dir).resolve() / "quotes"
+            quotes_vault.mkdir()
+            for stem, captured, extra in (
+                ("carried", "2026-09-03", ""),
+                ("uncarried", "2026-09-01", ""),
+                ("unverified", "2026-09-02", f"{memspec.VERIFIED_FIELD}: false\n"),
+            ):
+                _write_card(
+                    quotes_vault / memspec.RULING_DIRECTORY / f"{stem}.md",
+                    f"---\nname: {stem}\ndescription: owner ruling auto-captured {captured}: 合成\n"
+                    f"captured_at: {captured}\nsession_id: s1\n{extra}---\n"
+                    f"owner 說的那句話（{stem}）\n",
+                )
+            _write_card(
+                quotes_vault / "carrier.md",
+                "---\ndecision_key: k9\nstatus: active\ncurrent_decision_at: 2026-09-05\n"
+                "decided_by: owner-explicit\nowner_quote: 就這樣\nsource: rulings/carried.md\n"
+                "aliases:\n- k9\n---\n承接上面那句原話。\n",
+            )
+            quotes_by_id = {s["id"]: s for s in build_report([quotes_vault], today=today)["sections"]}
+            quoted = {item["path"] for item in quotes_by_id[12]["examples"]}
+            checks.append(("section 12 flags only the trusted quote no decision card carries", (
+                quotes_by_id[12]["counts"]["uncarried_quotes"] == 1
+                and quoted == {"rulings/uncarried.md"}
+                and quotes_by_id[12]["examples"][0]["captured_at"] == "2026-09-01"
+                and "uncarried" in quotes_by_id[12]["examples"][0]["excerpt"]
+            )))
+
+            five_report = build_report([vault, drafts_vault, mixed_vault, quotes_vault], today=today, config={
+                memspec.CONFIG_INDEX_CAP_BYTES_FIELD: 10,
+            })
+            five_steps = "\n".join(five_report["next_steps"])
+            checks.append(("the next steps carry all five candidate counts, each as a human call", all(
+                marker in five_steps for marker in ("口袋庫", "草稿老化", "拆卡候選", "未設定", "升決策卡候選")
+            )))
+            five_markdown = _render_markdown(five_report)
+            checks.append(("the pack renders sections 8-12 and moves shaping to 13 and the next steps to 14", all(
+                heading in five_markdown for heading in (
+                    "## 8. 全庫掃描與口袋庫", "## 9. 草稿老化", "## 10. 混雜卡（拆卡候選）",
+                    "## 11. 上限檢查", "## 12. 原話無決策卡承接（升決策卡候選）",
+                    memspec.INDEX_SHAPING_HEADING, "## 14. 夢的下一步",
+                )
+            )))
+
             # --since moved before old_grant's captured_at (2025-01-01) clears it as
             # a candidate: only cards captured *before* the cutoff count as aging.
             loose_report = build_report([vault], today=today, since_date=date(2024, 1, 1))
@@ -1121,7 +1756,7 @@ def _selftest():
             # a broken section function must not take the rest of the report down.
             global _SECTIONS
             saved_sections = _SECTIONS
-            def _boom(vaults, today, since_date):
+            def _boom(vaults, today, since_date, config):
                 raise RuntimeError("boom")
             try:
                 _SECTIONS = tuple((sid, title, _boom if sid == 4 else fn) for sid, title, fn in _SECTIONS)
@@ -1491,9 +2126,17 @@ def _selftest():
             )))
     except Exception as exc:
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
+    finally:
+        # 家目錄與設定的指向是行程層的，失敗路徑也要還原：留著的話，同一個行程裡
+        # 後面跑的東西會對著一個已經被刪掉的暫存目錄找家。
+        for name, value in saved_environ.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 40
+    total = 48
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

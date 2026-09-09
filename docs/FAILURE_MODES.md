@@ -1416,3 +1416,75 @@ Boundary: this removes a fixed cost, it does not add a retrieval route. A ruling
 prompt never touches is not recalled, and that is the trade the owner took — the
 decision cards, the ledger and the pending list are all one command away, and the
 hosts load `CLAUDE.md` / `AGENTS.md` on their own.
+## 36. Unconfirmed material stays where it landed
+
+Epitype has, up to §33, a write side that files things and a read side that serves
+them. Nothing in it asks the opposite question: **what got produced and never
+confirmed, and is still sitting wherever it landed?** Owner 2026-09-09 put that job
+on the dream — it is the pass that returns unconfirmed material to the layer or the
+card it belongs in — and named four shapes of it. Measured on this machine the same
+day with the sections built for it (`epitype dream --dry-run`, both
+registered vaults):
+
+1. **Pocket vaults.** 「我不知道會有多少地方在產生非整理的記憶」. The registered vault
+   list cannot answer that: it enumerates only the places already known. Counting from
+   disk instead found **8 unregistered `<home>/.claude/projects/*/memory` directories
+   holding 134 cards**, none of them reachable by any lint, view, or recall path.
+2. **Draft backlog.** **370 files under the governance vault's `_drafts/**`** (226 of
+   them under `decisions/`, 84 under `harvest/`, 51 under `captured_dropped/`). §4
+   already counted them; a count nobody reads is not a queue, and the count alone does
+   not say whether they are yesterday's batch or half a year old.
+3. **Mixed cards.** 「一張卡就是一個記憶或規則，不要混雜」. **71 cards in the governance
+   vault and 88 in the project vault** carry more than one thing — bodies with up to 11
+   `## ` headings, bodies over 14 KB, descriptions that string several rules together
+   with `＋`/`；`. A mixed card cannot be superseded, expired, or retired as one fact.
+4. **Quotes with nobody behind them.** Recall serves `rulings`/`corrections`/`grants`
+   under `⚖ owner 裁決：` and `⚠ owner 曾糾正：`, and only a card that declares
+   `verified: false` is demoted to a historical capture
+   (`adapters/claude/recall_hook.py`). So an event card that is still trusted but that
+   no decision card mentions reads exactly like a standing ruling. There are **91 of
+   them in the governance vault and 53 in the project vault** — among them a transport
+   probe (`Return only {"probe":"ok"}`) and a one-off instruction, both currently
+   served with the ruling prefix. This is the item the 2026-09-09 Claude↔Codex
+   convergence added: before splitting the automatic-recall quotes, find the quotes
+   that were recalled *as rulings* with no decision card carrying them.
+
+A fifth shape has no measurement yet because it has no threshold: owner 2026-09-09 sets
+a cap as the reviewed value plus twenty percent, and the product must not guess one. The
+cap keys were unset on this machine, so the section says so and judges nothing rather
+than substituting a number of its own.
+
+**The countermeasure** (`epitype/dream.py` §§8–12) is deliberately the weakest one
+available: **every section only lists candidates**. Nothing is moved, split, promoted,
+registered, trimmed, or deleted. That is not timidity — each of the five disposals is a
+judgement the machine cannot make. Which pocket vault belongs to which household, which
+card is two rules and which is one long one, whether a quote is a standing ruling or a
+one-off, and what a cap should be, are all owner decisions; a dream that guessed any of
+them would be manufacturing confirmation, which is the exact failure this section is
+about. So each section ends in a human call, and `_next_steps` says 「人工判斷」 rather
+than naming a command that would apply anything.
+
+Three traps the implementation had to avoid:
+
+- **A hardcoded home.** The projects root is recognised from a registered vault's own
+  path (`.claude/projects` walking up) and only falls back to `HOME`. Taking the looser
+  rule — "the registered vault's grandparent is the root" — would make a vault at
+  `C:\a\b` scan every directory under `C:\`.
+- **A guessed cap.** A cap the product invented, reported as "over cap", would read as
+  the owner's own threshold. Missing keys write one "unset" line and judge nothing.
+- **A stem match.** `carried` is a substring of `uncarried`, so matching a quote's
+  filename without its extension would report "a decision card carries this" for a quote
+  nobody carries — an under-report, in the one direction that hides the problem. Only
+  the full filename and the `decision_key` count.
+
+Regressions: eight cases in `epitype/dream.py --selftest` — the pocket-vault scan lists
+the unregistered directory and skips both the empty one and the registered vault; drafts
+are aged, grouped by first-level subdirectory, and reported oldest first; the three mixed
+shapes are flagged while a fenced markdown example is not; the cap section says "unset"
+and judges nothing without the keys, then lists both over-cap files with their overage
+and leaves both byte-identical with them; only the trusted quote no decision card carries
+is listed; the next steps carry all five counts; and the pack renders §§8–12 with shaping
+moved to §13 and the next steps to §14. The selftest points `HOME`, `USERPROFILE` and
+`EPITYPE_CONFIG` at its own temporary directory and restores them in a `finally` — §8
+reads the home directory and §11 reads the config, so without that the test would scan
+the real one.
