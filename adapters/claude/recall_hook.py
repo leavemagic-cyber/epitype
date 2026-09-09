@@ -477,6 +477,8 @@ def _selftest():
                     "busylockneedle sentence",
                     {"cwd": str(root), "session_id": session_id},
                     time.monotonic(),
+                    # 只有白名單過關的卡才進索引，這條檢查驗的正是「進索引時搶不到鎖」。
+                    source_text="不要再 busylockneedle",
                 )
             checks.append((
                 "a capture that cannot take the index lock ages the index so the next prompt rebuilds",
@@ -864,7 +866,9 @@ def _selftest():
                 encoding="utf-8",
             )
             memsearch.build_index(grant_vault)
-            correction_sentence = "SWSetup 我不是說過，你只能處理AI產生資料，不要亂處理"
+            # 2026-09-09 owner Q5「C」：喚回這幾條驗的是「入庫的卡怎麼端出來」，題目
+            # 一律用白名單形狀；白名單以外的句子落提案區，由下面那條專門驗。
+            correction_sentence = "不要亂處理 SWSetup，我不是說過你只能處理AI產生資料"
             for _ in range(2):
                 run_synthetic(
                     Path(__file__),
@@ -926,20 +930,47 @@ def _selftest():
                 "小口合約意思是1口，不是指微型，6S就是沒有微型，我很清楚",
             )
             widened_ok = True
+            pending_root = grant_vault.joinpath(*memspec.CAPTURE_PENDING_SUBPATH)
             for sentence in widened:
                 run_synthetic(
                     Path(__file__),
                     {"prompt": sentence, "session_id": uuid.uuid4().hex},
                     grant_config,
                 )
-                widened_ok = widened_ok and bool(
-                    list((grant_vault / memspec.CORRECTION_DIRECTORY).glob("correction-*.md"))
-                ) and any(
-                    _matched_sentence(sentence, memspec.CORRECTION_TRIGGER_REGEX)
-                    and _grant_digest(_matched_sentence(sentence, memspec.CORRECTION_TRIGGER_REGEX)) in path.name
-                    for path in (grant_vault / memspec.CORRECTION_DIRECTORY).glob("correction-*.md")
+                # 三句仍然全部被判成糾正；差別只在落點——存下來的句子是「不是!…」開頭
+                # 的那句進 corrections/，另外兩句（箭頭長接話、陳述句）落提案區等人核
+                # （owner 2026-09-09 Q5「C」）。
+                stored = _matched_sentence(sentence, memspec.CORRECTION_TRIGGER_REGEX)
+                widened_ok = widened_ok and bool(stored) and any(
+                    _grant_digest(stored) in path.name
+                    for path in [
+                        *(grant_vault / memspec.CORRECTION_DIRECTORY).glob("correction-*.md"),
+                        *pending_root.rglob("correction-*.md"),
+                    ]
                 )
-            checks.append(("2026-09-02 contract-phase corrections all trigger capture", widened_ok))
+            proposals = sorted(pending_root.rglob("correction-*.md"))
+            checks.append((
+                "2026-09-02 contract-phase corrections all trigger capture; shapeless ones only propose",
+                widened_ok
+                and len(proposals) == 2
+                and all(
+                    f"{memspec.VERIFIED_FIELD}: {memspec.VERIFIED_FALSE}" in path.read_text(encoding="utf-8")
+                    and f"{memspec.PROVENANCE_FIELD}: {memspec.PROVENANCE_AUTO_CAPTURED}" in path.read_text(encoding="utf-8")
+                    for path in proposals
+                ),
+            ))
+            proposal_needle = next(pending_root.rglob("correction-*.md")).stem
+            proposal_recall = run_synthetic(
+                Path(__file__),
+                {"prompt": "6S 標準合約 微型 擋單 設定", "session_id": uuid.uuid4().hex},
+                grant_config,
+            )
+            checks.append((
+                "a proposal is neither indexed nor recalled",
+                proposal_recall.returncode == 0
+                and proposal_needle not in proposal_recall.stdout
+                and memsearch.recall_index(grant_vault, proposal_needle)["count"] == 0,
+            ))
 
             transcript = root / "ruling-transcript.jsonl"
             asked = "請你定一下：小單期是「1 口標準合約」還是維持「換微型合約」？定了我才動，要你裁決。"
@@ -953,7 +984,7 @@ def _selftest():
                 + "\n",
                 encoding="utf-8",
             )
-            answer = "只有6s是標準合約，其他還是微型，小單期是指1口(微型或標準)"
+            answer = "不是！只有6s是標準合約，其他還是微型，小單期是指1口(微型或標準)"
             for _ in range(2):
                 run_synthetic(
                     Path(__file__),
@@ -1512,7 +1543,7 @@ def _selftest():
             shutil.rmtree(marker_directory, ignore_errors=True)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 45
+    total = 46
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

@@ -21,6 +21,7 @@ except ImportError:  # Direct script execution keeps the CLI contract.
 
 # 寫入結果分類：回放要能分辨「新寫」與「早就有了」，線上不看這個值。
 STATUS_WRITTEN = "written"
+STATUS_PENDING = "pending"
 STATUS_DUPLICATE = "duplicate"
 STATUS_REJECTED = "rejected"
 STATUS_ERROR = "error"
@@ -212,11 +213,62 @@ def grant_digest(sentence):
     return hashlib.sha256(one_line(sentence).encode("utf-8")).hexdigest()[:12]
 
 
+def owner_side(body, summary=None):
+    """The owner's own half of a classified capture — what the templates judge.
+
+    A ruling's body carries the assistant's question as well, and letting that half
+    decide would hand the assistant the owner's chop; classify() already splits the
+    owner's answer out as the summary. A grant or correction stores the owner's
+    sentence as the body and has no summary, so the body is the owner's half there.
+    """
+    return body if summary is None else summary
+
+
+def auto_admitted(text):
+    """(True, template) when the owner's own words match one admission template.
+
+    owner 2026-09-09 裁定 Q5「C」：觸發詞命中只是「這句話像裁定」，自動入庫要再過一關
+    ——句子的形狀本身就說得出它是哪一種答覆。三個模板見 memspec.CAPTURE_ADMIT_*。
+    判準只看 owner 自己說的那半（owner_reply），否則 owner 貼回來的助理原文會替他核章。
+    箭頭模板另要求現場真的有回覆標記，不然任何以「好」開頭的句子都會被當成短答。
+    """
+    reply = owner_reply(text)
+    if not reply:
+        return False, memspec.CAPTURE_PENDING_TEMPLATE
+    # 箭頭模板要求現場真的有回覆標記：沒有標記時 owner_reply 回整句，任何以「好」
+    # 開頭的句子都會被當成短答。
+    if (
+        memspec.CAPTURE_REPLY_MARKER_REGEX.search(text or "")
+        and memspec.CAPTURE_ADMIT_ARROW_REGEX.match(reply)
+    ):
+        return True, memspec.CAPTURE_ADMIT_ARROW
+    if memspec.CAPTURE_ADMIT_CORRECTION_REGEX.match(reply):
+        return True, memspec.CAPTURE_ADMIT_CORRECTION
+    # 授權句不限句首：「那個資料夾的整理你可以直接動」的授權動詞落在句中。
+    if memspec.CAPTURE_ADMIT_GRANT_REGEX.search(reply):
+        return True, memspec.CAPTURE_ADMIT_GRANT
+    return False, memspec.CAPTURE_PENDING_TEMPLATE
+
+
+def pending_directory(vault, stamp):
+    """提案落點：`<vault>/_drafts/captured_pending/YYYYMMDD/`。
+
+    `_` 開頭的路徑段是 memsearch._scan_vault 的排除規則，所以提案不進索引、不被喚回、
+    也不會被寫檔閘當成卡片審——不必再加第二道排除規則。
+    """
+    return Path(vault).joinpath(*memspec.CAPTURE_PENDING_SUBPATH, stamp[:10].replace("-", ""))
+
+
 def existing_capture(vault, directory_name, kind, digest):
     """同 digest 的既有卡（去重規則的唯一實作），沒有就 None。同一句話寫兩張卡＝
-    喚回時兩條佔位，所以線上與回放必須問同一個問題。"""
+    喚回時兩條佔位，所以線上與回放必須問同一個問題。提案區也要問：提案的日期子目錄
+    每天不同，只看正式目錄的話同一句話會每天長出一份新提案。"""
     try:
-        return next(iter(sorted((vault / directory_name).glob(f"{kind}-*-{digest}.md"))), None)
+        found = next(iter(sorted((vault / directory_name).glob(f"{kind}-*-{digest}.md"))), None)
+        if found is not None:
+            return found
+        pending = Path(vault).joinpath(*memspec.CAPTURE_PENDING_SUBPATH)
+        return next(iter(sorted(pending.glob(f"*/{kind}-*-{digest}.md"))), None)
     except OSError:
         return None
 
@@ -228,21 +280,32 @@ def capture_owner_sentence(prompt, vault, event, started_at, kind, replay=None, 
     return _capture_classified(found, vault, event, started_at, replay)
 
 
-def write_capture(vault, directory_name, kind, digest, label, body, event, started_at, summary=None, replay=None):
+def write_capture(vault, directory_name, kind, digest, label, body, event, started_at,
+                  summary=None, replay=None, source_text=None):
+    """Write one captured sentence, into the vault or into the proposal area.
+
+    Admission judges the owner's own half (owner_side) — the very sentence about to
+    be stored — so online capture and replay cannot reach different verdicts.
+    `source_text` overrides that only for callers that hand in a body which is not
+    the owner's sentence.
+    """
     # A captured card is persistent, indexed, and re-injected later: credential-shaped
     # text never earns that (adversarial review 2026-09-03 #5). The sentence still
     # exists in the transcript; Epitype simply does not copy it into the vault.
     if memspec.CAPTURE_REJECT_REGEX.search(body):
         _report(replay, STATUS_REJECTED)
         return None
-    directory = vault / directory_name
+    admitted, _template = auto_admitted(
+        owner_side(body, summary) if source_text is None else source_text
+    )
     try:
         if existing_capture(vault, directory_name, kind, digest) is not None:
             _report(replay, STATUS_DUPLICATE)
             return None
-        directory.mkdir(parents=True, exist_ok=True)
         # 回放時用原話當時的時間，否則整批歷史卡會全部標成今天，日期就不再是證據。
         stamp = (replay.stamp if replay is not None else None) or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        directory = vault / directory_name if admitted else pending_directory(vault, stamp)
+        directory.mkdir(parents=True, exist_ok=True)
         name = f"{kind}-{stamp[:10].replace('-', '')}-{digest}"
         target = directory / f"{name}.md"
         # The description is what recall injects; it must carry the owner's words,
@@ -260,6 +323,10 @@ def write_capture(vault, directory_name, kind, digest, label, body, event, start
             # cwd 是落點的證據，也是事後歸戶（capture_route）唯一能依據的來源專案。
             f"{memspec.CWD_FIELD}: {one_line(event.get('cwd'))}\n"
             f"session_id: {one_line(event.get('session_id', event.get('sessionId')))}\n"
+            # 機器抓的、還沒人核過：轉正的人把 verified 改 true 並補 verified_by／
+            # verified_at，這兩欄就是「這張卡能不能當依據」的卡面憑證。
+            f"{memspec.PROVENANCE_FIELD}: {memspec.PROVENANCE_AUTO_CAPTURED}\n"
+            f"{memspec.VERIFIED_FIELD}: {memspec.VERIFIED_FALSE}\n"
             f"{provenance}"
             "---\n"
             f"{body}\n"
@@ -271,12 +338,13 @@ def write_capture(vault, directory_name, kind, digest, label, body, event, start
             temporary = target.with_name(target.name + ".tmp")
             temporary.write_text(card, encoding="utf-8")
             os.replace(temporary, target)
-        _report(replay, STATUS_WRITTEN)
+        _report(replay, STATUS_WRITTEN if admitted else STATUS_PENDING)
         # The staleness grace window would hide the new card from the very next
         # prompt; a captured owner sentence must be recallable immediately. When
         # the index lock is taken by another hook, age the index instead so the
-        # next reader rebuilds it.
-        if (replay.reindex if replay is not None else True) and not expired(started_at):
+        # next reader rebuilds it. A proposal is deliberately unsearchable, so it
+        # has nothing to reindex.
+        if admitted and (replay.reindex if replay is not None else True) and not expired(started_at):
             elapsed = 0.0 if started_at is None else time.monotonic() - started_at
             remaining = memspec.HOOK_TIMEOUT_SECONDS - elapsed
             wait = max(0.0, min(memspec.GRANT_LOCK_SECONDS, remaining - 0.5))

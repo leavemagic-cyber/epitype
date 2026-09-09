@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- 自動捕捉改折衷制（owner 2026-09-09 裁 Q5「C」；FAILURE_MODES §32）：只有形狀明確的三個模板自動入庫——`arrow-answer`（有 `<-`／`<=`／`《` 回覆標記，且 owner 那半以短答開頭：同意／可／不／好／甲乙丙／A–E／yes／no）、`leading-correction`（owner 那半**句首**是不是！／不對，／不要／別再／錯了／stop）、`explicit-grant`（明示第一人稱授權：我同意／同意過／我授權／准你／批准你／允許你／你可以＋動詞／I agree／you may）。判定只看 owner 自己那半（`capture.owner_side`：裁定卡正文帶著助理的提問，不能讓助理替 owner 蓋章），常數在 `memspec.CAPTURE_ADMIT_*`。
+- 其餘「現行規則仍會捕捉」的句子改寫提案：`<vault>/_drafts/captured_pending/YYYYMMDD/<原本的檔名>.md`。`_` 開頭的路徑段本來就不在 `memsearch._scan_vault` 的掃描範圍，所以提案不進索引、不被喚回、也不受寫檔閘的卡片契約管——沒有第二條排除規則要同步。線上 hook 與離線回放（harvest）共用 `capture.write_capture` 這一處判定，落點一致；`--dry-run` 多印一種 `WOULD PROPOSE`。
+- 轉正是人的動作，不是回放：`harvest --reevaluate --apply` 對 `verified: false` 的提案印 **HOLD** 不搬（提案本來就是「今天的規則也會捕捉」，那正是它被扣住的原因），dream 第 4 節改列待審份數與人工審閱指令，不再對捕捉提案提供 `--reevaluate` 那條命令。
+- 每張自動寫的卡（入庫與提案皆同）frontmatter 帶 `provenance: auto-captured` 與 `verified: false`；轉正時改 `verified: true` 並補 `verified_by`／`verified_at`。四個欄位列入事件卡型別的選填欄，`epitype cards` 不因此 WARN。
+- 消費端逐處查證後釘進回歸：Stop 決策閘（`decision_key`＋`status: active`）、寫檔閘規則 A（同一批決策卡）與規則 B（`_` 路徑段不算卡）、PreToolUse 授權判定（只讀宣告 `trigger:` 的卡）、SessionStart 現行裁定清單（同決策卡門檻）都吃不到 `verified: false` 的卡；喚回照舊給它 pinned 席位但只掛「歷史捕捉（非完整對話／現行裁定）」前綴，不掛決策前綴。
+- 精準度（`tests/capture_precision.py --local`，254 句人工標記；`exam/exam_runner.py` 跑不了這份題庫——它要 `questions` 清單）：判定那條不變（精準 0.807、召回 0.850）；自動入庫那條精準 0.750、召回 0.240、value 0.600，自動入庫卡由 119 張降為 40 張、判錯的由 23 張降為 10 張、不值得留的由 34 張降為 16 張，79 句改成提案。**比例沒有變好**——同一份標記上被扣住的那堆反而比入庫的那堆漂亮（0.835／0.772 對 0.750／0.600）；這次換到的是「未經人核的材料少了三分之二不再自動進喚回」，不是更乾淨的比例。owner 已接受召回下降。
+- 回歸：新增 `tests/capture_admission_regression.py`（8 案，含四道閘的逐處查證）納入 run_all（48/48 → **49/49**）；`epitype/harvest.py --selftest` 20→23、`adapters/claude/recall_hook.py --selftest` 45→46、`tests/capture_integration_regression.py` 每個題目多驗落點與兩個新欄位。
+
 - 移除四項行為層功能（owner 2026-09-09 逐題裁定「A」；FAILURE_MODES §30）：生成前守則（QUESTION_PREFLIGHT＋TURN_CONTINUITY＋每場一次的 guide 標記）、操控收尾規則（control_lifecycle）、AI 承諾帳本（commitments：Stop 抽句、SessionStart／PreCompact 提醒、dream 第 4 節）、旁白計量（narration_meter）。SessionStart 與 UserPromptSubmit 不再輸出任何守則文字，PreToolUse 不再附操控指引也不再出「⛔ 旁白」，Stop 不再寫 commitments.jsonl。根因：AI 把每條糾正反射成產品機制、沒算機制本身的 token 成本。
 - v1.2.0 已出貨的承諾帳本（`epitype commitments`）與旁白量測（`epitype narration`）兩個子命令在下一版屬【移除】：兩支 CLI、兩個模組、相關 hook 呼叫全部不再存在。各庫既有的 `.epitype/commitments.jsonl` 不刪、不搬，只是沒有任何路徑再讀它。
 - 退役測試三支（功能依裁定移除，題目隨之失效）：`tests/control_lifecycle_regression.py`、`tests/commitment_persistence_regression.py`、`tests/question_premise_regression.py`（後者的兩項反面守衛——提問工具不得被擋、收尾句不得被 Stop 擋——改以 `tests/no_semantic_gate_regression.py` 延續）。文件退役：`docs/QUESTION_PREMISE_VALIDATION.md`、`docs/TASK_CONTINUITY_VALIDATION.md`。**考題退役：0 題**——六份題庫全掃過，沒有任何題目依賴被移除的功能，分母不變：corpus 330/330、seeds 15/15 與 5/5。

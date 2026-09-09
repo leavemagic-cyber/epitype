@@ -154,13 +154,24 @@ def _section_drafts(vaults, today, since_date):
             by_subdir[subdir] = by_subdir.get(subdir, 0) + 1
             entries.append({"vault": str(vault), "path": relative})
     commands = []
+    pending_root = memspec.CAPTURE_PENDING_SUBPATH[-1]
     for vault, paths in results:
-        if paths:
+        if any(pending_root not in path.parts for path in paths):
             commands.append(
                 f'python epitype/harvest.py --reevaluate "{Path(vault) / DRAFT_DIRNAME / "decisions"}" [--apply]'
             )
+        # 捕捉提案不走 --reevaluate：那條路是「今天的規則還會不會捕捉」，而提案被扣住
+        # 的原因正是它會被捕捉；轉正是人看過、改 verified 的動作（owner 2026-09-09 Q5「C」）。
+        if any(pending_root in path.parts for path in paths):
+            commands.append(memspec.CAPTURE_PENDING_REVIEW_COMMAND.format(
+                path=Path(vault).joinpath(*memspec.CAPTURE_PENDING_SUBPATH)
+            ))
     return {
-        "counts": {"total_drafts": len(entries), "by_subdir": by_subdir},
+        "counts": {
+            "total_drafts": len(entries),
+            "by_subdir": by_subdir,
+            "captured_pending": by_subdir.get(pending_root, 0),
+        },
         "examples": entries[:EXAMPLE_LIMIT],
         "commands": commands,
         "errors": errors,
@@ -377,7 +388,9 @@ def _next_steps(sections):
         steps.append(f"缺別名卡 {alias['missing_aliases']} 張超過門檻，跑別名批次 → epitype aliases export <vault>")
     draft = counts(4)
     if draft.get("total_drafts", 0) > 0:
-        steps.append(f"草稿待審 {draft['total_drafts']} 份 → 人工審閱 _drafts/**")
+        held = draft.get("captured_pending", 0)
+        held_note = f"（其中捕捉提案 {held} 份，未核不得當依據）" if held else ""
+        steps.append(f"草稿待審 {draft['total_drafts']} 份{held_note} → 人工審閱 _drafts/**")
     pending = counts(3)
     if pending.get("zombie_cards", 0) > 0:
         steps.append(f"殭屍待辦 {pending['zombie_lines']} 行／{pending['zombie_cards']} 卡 → epitype pending <vault>")

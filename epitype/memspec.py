@@ -318,6 +318,50 @@ CAPTURE_REJECT_PATTERN = (
 )
 CAPTURE_REJECT_REGEX = re.compile(CAPTURE_REJECT_PATTERN, re.IGNORECASE)
 
+# 2026-09-09 owner 裁定 Q5「C」：觸發詞命中只證明「這句話長得像裁定」，不證明它已經
+# 被核過。捕捉分兩條路——形狀明確的三個模板自動入庫（仍標未核），其餘照樣判定但只寫
+# 提案，等人看過才搬正。判準刻意只認「模板」：句子的形狀本身就說得出它是哪一種答覆，
+# 不必讀上下文。三個模板與反例見 docs/FAILURE_MODES.md §32。
+CAPTURE_PENDING_SUBPATH = ("_drafts", "captured_pending")
+# 模板一：箭頭回覆的短答。owner 貼回助理原文再用 <- / <= / 《 接自己的話時，接的
+# 第一個詞就是答案（同意／可／不／好／甲乙丙／A|B|C）；長篇接話不是短答，不入白名單。
+CAPTURE_ADMIT_ARROW_PATTERN = (
+    r"^(?:同意|不同意|可以|可|不可|好|不好|不要|不用|不行|要|不|對|不對|是|否|准|批准"
+    r"|[A-Ea-e]|[甲乙丙丁戊]|[1-5]|[一二三四五]"
+    r"|yes|no|ok|okay|agree|approved?|denied?)"
+    r"(?:[\s。．，,、：:!！?？;；~～-]|$)"
+)
+# 模板二：句首糾正。「不是！」「不對，」「不要…」在句首＝owner 正在推翻剛剛那件事；
+# 同樣的詞出現在句中可能只是敘述（「這不是問題」），所以只認句首。
+CAPTURE_ADMIT_CORRECTION_PATTERN = (
+    r"^(?:不是[!！,，、。．\s]|不對[!！,，、。．\s]?|不要|不准|不行|不可以|別[再亂]|錯了"
+    r"|停|停手"
+    r"|no[!,，]|not\s+like\s+that|stop\b|don'?t\s+do\s+that)"
+)
+# 模板三：明說「是我在准」的授權句。裸「go ahead」「don't ask me」這種靠語氣的授權
+# 不入白名單——GRANT_TRIGGER 仍會捕捉它們，只是落提案區等人看。
+CAPTURE_ADMIT_GRANT_PATTERN = (
+    r"(?:我同意|同意過|我授權|授權你|授權給你|我核准|我批准|准你|批准你|允許你"
+    r"|你可以(?:操作|使用|用|直接|動|改|刪|執行|做|開|關|讀|寫)(?![，,、。．！!？?；;]|\s*$)"
+    r"|\bI\s+(?:agree|authori[sz]e|approve|consent)\b"
+    r"|\byou\s+(?:may|are\s+allowed\s+to|have\s+my\s+permission)\b"
+    r"|\bpermission\s+granted\b)"
+)
+CAPTURE_ADMIT_ARROW_REGEX = re.compile(CAPTURE_ADMIT_ARROW_PATTERN, re.IGNORECASE)
+CAPTURE_ADMIT_CORRECTION_REGEX = re.compile(CAPTURE_ADMIT_CORRECTION_PATTERN, re.IGNORECASE)
+CAPTURE_ADMIT_GRANT_REGEX = re.compile(CAPTURE_ADMIT_GRANT_PATTERN, re.IGNORECASE)
+CAPTURE_ADMIT_ARROW = "arrow-answer"
+CAPTURE_ADMIT_CORRECTION = "leading-correction"
+CAPTURE_ADMIT_GRANT = "explicit-grant"
+CAPTURE_PENDING_TEMPLATE = "pending-review"
+CAPTURE_PENDING_HOLD_REASON = (
+    "verified: false 的提案；人看過改 verified: true 並補 verified_by／verified_at 才搬正"
+)
+CAPTURE_PENDING_REVIEW_COMMAND = (
+    '人工審閱 "{path}"：留用的卡改 verified: true＋verified_by／verified_at 後移入 '
+    "<vault>/<grants|corrections|rulings>/；不用的整份留在原地"
+)
+
 RULING_TAIL_BYTES = 64 * 1024
 RULING_QUESTION_WINDOW_CHARS = 150   # kept on each side of the request phrase
 RULING_QUESTION_TAIL_CHARS = 400     # the request must sit near the end of the assistant turn
@@ -423,6 +467,19 @@ SESSION_FIELD = "session_id"
 # 與歸戶稽核讀的必須是同一個欄名。
 CWD_FIELD = "cwd"
 INCIDENT_FIELD = "incident"
+# 2026-09-09 owner 裁定 Q5「C」：自動寫的卡要在卡面上說自己是機器抓的、還沒人核過。
+# 消費端（Stop 決策閘、寫檔閘、PreToolUse 授權、開場裁定清單）一律只吃 decision／
+# scar 卡，事件卡本來就進不去；這兩欄是給讀卡的人與 dream 轉正流程看的憑證。
+PROVENANCE_FIELD = "provenance"
+PROVENANCE_AUTO_CAPTURED = "auto-captured"
+VERIFIED_FIELD = "verified"
+VERIFIED_BY_FIELD = "verified_by"
+VERIFIED_AT_FIELD = "verified_at"
+VERIFIED_FALSE = "false"
+VERIFIED_TRUE = "true"
+CAPTURE_PROVENANCE_FIELDS = (
+    PROVENANCE_FIELD, VERIFIED_FIELD, VERIFIED_BY_FIELD, VERIFIED_AT_FIELD,
+)
 FORBIDDEN_FIELD = "forbidden"
 VERIFY_FIELD = "verify"
 VALID_UNTIL_FIELD = "valid_until"
@@ -487,9 +544,9 @@ CARD_REQUIRED_FIELDS = {
 CARD_OPTIONAL_FIELDS = {
     CARD_TYPE_DECISION: (FORBIDDEN_FIELD, VERIFY_FIELD, VALID_UNTIL_FIELD),
     CARD_TYPE_SCAR: (ALIASES_FIELD,),
-    CARD_TYPE_GRANT: (GRANT_EXPIRES_FIELD,),
-    CARD_TYPE_CORRECTION: (),
-    CARD_TYPE_RULING: (),
+    CARD_TYPE_GRANT: (GRANT_EXPIRES_FIELD,) + CAPTURE_PROVENANCE_FIELDS,
+    CARD_TYPE_CORRECTION: CAPTURE_PROVENANCE_FIELDS,
+    CARD_TYPE_RULING: CAPTURE_PROVENANCE_FIELDS,
     CARD_TYPE_PENDING: (),
     CARD_TYPE_FEEDBACK: (ALIASES_FIELD,),
     CARD_TYPE_PROJECT: (ALIASES_FIELD,),
@@ -662,6 +719,8 @@ WRITE_GATE_FIELD_EXAMPLES = {
     VERIFY_FIELD: "verify: python epitype/card_lint.py <vault>",
     PENDING_EXIT_FIELD: "exit: owner 回覆後標記已辦",
     LAST_VERIFIED_AT_FIELD: "last_verified_at: 2026-09-06",
+    PROVENANCE_FIELD: "provenance: auto-captured",
+    VERIFIED_FIELD: "verified: false",
 }
 
 

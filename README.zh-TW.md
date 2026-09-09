@@ -29,6 +29,20 @@ Epitype 把同一組原生 vault 接到五個 host 事件：
 
 注入的記憶只是參考資料，不能推翻 system 或 developer 指令、繞過 host 權限，也不能自行授予工具操作權。每次 hook 輸出最多 10 KiB，執行超過十秒就 fail open，避免記憶層卡住宿主流程。
 
+### 捕捉：入庫，或只是提案
+
+觸發詞命中只證明「這句話長得像裁定」，不證明有人核過，所以只有三個形狀模板放行自動
+入庫——箭頭回覆而 owner 那半以短答開頭、句首就是糾正、明說是第一人稱在授權。其餘仍
+被規則捕捉到的句子改寫成提案，落在 `<vault>/_drafts/captured_pending/YYYYMMDD/`：不進
+索引、不被喚回，等人看過再說。兩種卡都帶 `provenance: auto-captured` 與
+`verified: false`；轉正＝改成 `verified: true` 並補 `verified_by`／`verified_at` 再搬檔，
+回放不會替你做這件事。
+
+`verified: false` 的卡不是任何東西的依據：Stop 決策閘、寫檔閘、PreToolUse 授權判定、
+開場現行裁定清單讀的都是宣告 `decision_key`／`trigger` 的卡，捕捉卡從來不宣告這些。
+喚回照樣端得出來，但掛的是「歷史捕捉」而不是現行裁定。細節與量測見
+`docs/FAILURE_MODES.md` §32。
+
 ## 不只把內容找回來
 
 ### 現行決定只有一份

@@ -1090,3 +1090,72 @@ catalogue does not close that gap, and the exam corpus is what measures it.
 Regressions: `tests/views_regression.py` (11 cases), `epitype/views.py --selftest`
 (12), plus "Closed status moves the view only; the card stays searchable" in
 memsearch and the `--deep` case in card_lint.
+
+## 32. Auto-capture wrote unverified sentences as rulings
+
+The 2026-09-01 blueprint had `scar_scan.py` produce proposals only. U26 turned
+capture into direct filing (measured kind-precision 43% → 81%), and the filed card
+is a real card: indexed, recalled, pinned above ordinary hits. What a trigger match
+actually proves is that a sentence *looks like* a ruling — not that anyone checked
+it. So system notices and probe sentences kept landing as authority: the 3.6 KB
+fake grant of 2026-09-02, and "Transport check only…" opening a session on
+2026-09-09.
+
+Owner 2026-09-09 (Q5, option 「C」), verbatim: 「C」 — 「自動捕捉 owner 原話：只有
+形狀明確的句子自動入庫，其餘進草稿；自動入庫卡永遠標「捕捉、未核」，不得單獨當授權
+依據」.
+
+**The whitelist (`memspec.CAPTURE_ADMIT_*`), judged on the owner's own half.**
+`capture.owner_side()` picks the text about to be stored — a grant or correction
+stores the owner's sentence, a ruling stores the assistant's question too and the
+owner's answer separately — so the assistant's words can never stamp the owner's
+chop. Three templates, each one a shape a reader can name without context:
+
+| Template | Rule | Admits | Holds back |
+|---|---|---|---|
+| `arrow-answer` | a reply marker (`<-` `<=` `《`) is present **and** the owner's half opens with an answer token (同意／可／不／好／甲乙丙／A–E／yes／no) | `…?<-甲，以後都照這個順序` | `6S 維持擋單<我怎麼不知道有這個設定` — a long continuation, not a short answer |
+| `leading-correction` | the owner's half **opens** with a correction (不是！／不對，／不要／別再／錯了／stop) | `不是！那個欄位只放小分類，不要放品名` | `那個路徑我說過只能放第二層，不要亂放` — the same correction, mid-sentence |
+| `explicit-grant` | the owner's half names a first-person authorization (我同意／同意過／我授權／准你／批准你／允許你／你可以＋動詞／I agree／you may) | `那個資料夾的整理你可以直接動` | `go ahead`／`don't ask me` — tone, not a named authorization; still captured, only proposed |
+
+Anything the rules still capture but no template admits is written to
+`<vault>/_drafts/captured_pending/YYYYMMDD/<the same filename>.md`. `_`-prefixed
+path parts are already outside `memsearch._scan_vault`, so a proposal is not
+indexed, not recalled, and not seen by the write gate's card contract — no second
+exclusion rule to keep in sync. Promotion is a person's edit (`verified: true` plus
+`verified_by`/`verified_at`, then move), never a replay: every proposal is one
+today's rules still capture, which is exactly why it was held, so
+`harvest --reevaluate --apply` **HOLD**s it and the dream packet asks for review
+instead of offering that command.
+
+**Every auto-written card says so on its face**: `provenance: auto-captured` and
+`verified: false`, on filed cards and proposals alike, so promotion is a field edit
+rather than a rewrite. `card_lint` lists the four fields as optional for the event
+types, so `epitype cards` does not WARN on them.
+
+**`verified: false` is authority for nothing** — verified per consumer, not assumed:
+
+| Consumer | What it reads | Why a captured card cannot get in |
+|---|---|---|
+| Stop decision gate | `stop_gate._decision_frontmatter` requires `decision_key`; `_read_decision` requires `status: active` | a captured card declares neither |
+| Write gate rule A | `pretooluse_gate._forbidden_write` iterates `stop_gate._decisions` | same cards, same bar |
+| Write gate rule B | `_vault_card_path` skips any `_`/`.` path part | a proposal carries no card contract |
+| PreToolUse authorization | `_trigger_card_paths` keeps only cards declaring `trigger:` | a captured card declares none |
+| SessionStart ruling list | `_active_decisions` requires `decision_key` + `status: active` | same bar |
+| Recall | a captured card keeps its pinned seat but is labelled 「歷史捕捉（非完整對話／現行裁定）」, never `DECISION_PREFIX` | authority order is 親裁 > 自動捕捉 |
+
+**Measured, 254 hand-labelled real sentences** (`tests/capture_precision.py --local`;
+`exam/exam_runner.py` cannot run this corpus — it wants a `questions` list). The
+policy did not raise the ratio, it cut the volume: kind-precision of the filed pile
+0.807 → 0.750 and value(keep) 0.714 → 0.600, while auto-filed cards fall 119 → 40,
+wrong-kind cards 23 → 10, not-worth-keeping cards 34 → 16, and 79 sentences become
+proposals. Recall of the filed lane drops 0.850 → 0.240, which the owner accepted.
+Boundary, stated because it argues against the mechanism: on this corpus the held
+pile scores *better* than the admitted one (kind 0.835 vs 0.750, keep 0.772 vs
+0.600) — "clearly shaped" and "worth keeping long-term" are different axes, and a
+one-off 「我同意診斷」 is shape-perfect. What the change buys is that two thirds of
+unreviewed material stops entering recall unasked, not a cleaner ratio.
+
+Regressions: `tests/capture_admission_regression.py` (8 cases, including the
+consumer-gate sweep), the admission split in `epitype/harvest.py --selftest` and
+`adapters/claude/recall_hook.py --selftest`, and the landing assertion for every
+fixture in `tests/capture_integration_regression.py`.

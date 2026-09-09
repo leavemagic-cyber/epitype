@@ -42,6 +42,9 @@ class CaptureRecallRegression(unittest.TestCase):
             f"owner {kind} auto-captured", quote,
             {"cwd": "synthetic-project", "session_id": "synthetic-source-session"}, None,
             replay=capture.Replay(stamp="2026-01-02T03:04:05Z"),
+            # 這一組驗的是「入庫的卡怎麼端出來」，所以固定走白名單那條路；白名單本身
+            # 由 tests/capture_admission_regression.py 驗（owner 2026-09-09 Q5「C」）。
+            source_text="不要再這樣做",
         )
         if legacy:
             text = path.read_text(encoding="utf-8")

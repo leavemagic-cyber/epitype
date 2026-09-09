@@ -46,6 +46,7 @@ SELFTESTS = (
     Path("tests") / "alias_safety_regression.py",
     Path("tests") / "route_safety_regression.py",
     Path("tests") / "capture_integration_regression.py",
+    Path("tests") / "capture_admission_regression.py",
     Path("tests") / "capture_recall_regression.py",
     Path("tests") / "dream_status_regression.py",
     Path("tests") / "dream_lock_regression.py",

@@ -436,17 +436,27 @@ def harvest(home, vaults, docs=(), since=None, limit=None, dry_run=False):
                 if dry_run:
                     stamp = _record_stamp(item, fallback)
                     landing = "" if target == vault else f" -> {os.fspath(target)}"
+                    admitted, _template = capture.auto_admitted(capture.owner_side(body, summary))
+                    where = directory if admitted else "/".join(
+                        (*memspec.CAPTURE_PENDING_SUBPATH, stamp[:10].replace("-", ""))
+                    )
                     print(
-                        f"WOULD WRITE {directory}/{kind}-{stamp[:10].replace('-', '')}-{digest}.md "
+                        f"{'WOULD WRITE' if admitted else 'WOULD PROPOSE'} "
+                        f"{where}/{kind}-{stamp[:10].replace('-', '')}-{digest}.md "
                         f"{source}{landing}"
                     )
-                    counts[f"{kind}s"] += 1
-                    landed[target] = landed.get(target, 0) + 1
+                    if admitted:
+                        counts[f"{kind}s"] += 1
+                        landed[target] = landed.get(target, 0) + 1
+                    else:
+                        counts["drafts"] += 1
                     continue
                 replay = capture.Replay(
                     stamp=_record_stamp(item, fallback),
                     fields=(("source", source), ("harvested_at", now)),
                 )
+                # 白名單判定在 write_capture 裡（判 owner 自己那半），線上與回放共用
+                # 同一處，回放出來的卡才會和今天線上寫的卡分在同一邊。
                 capture.write_capture(
                     target, directory, kind, digest, label, body,
                     event, None, summary=summary, replay=replay,
@@ -454,6 +464,8 @@ def harvest(home, vaults, docs=(), since=None, limit=None, dry_run=False):
                 if replay.status == capture.STATUS_WRITTEN:
                     counts[f"{kind}s"] += 1
                     landed[target] = landed.get(target, 0) + 1
+                elif replay.status == capture.STATUS_PENDING:
+                    counts["drafts"] += 1
                 elif replay.status == capture.STATUS_DUPLICATE:
                     counts["duplicates"] += 1
                 else:
@@ -502,6 +514,19 @@ def card_utterance(path):
     return answer.strip(), asked[len(CARD_QUESTION_PREFIX):].strip()
 
 
+def _held_pending(path):
+    """True for an unreviewed proposal under `_drafts/captured_pending/`.
+
+    Every card in there is one today's rules still capture — that is exactly why
+    it was held — so a forward replay would silently promote the whole pile back
+    into the vault and undo the admission policy.
+    """
+    if memspec.CAPTURE_PENDING_SUBPATH[-1] not in path.parts:
+        return False
+    fields, _problem = memspec.frontmatter_fields(path)
+    return capture.one_line(fields.get(memspec.VERIFIED_FIELD)).casefold() != memspec.VERIFIED_TRUE
+
+
 def reevaluate(directory, vault, apply=False, quarantine_drops=None):
     """Re-judge cards with today's rules; print keep/drop per card. Two directions:
 
@@ -530,7 +555,7 @@ def reevaluate(directory, vault, apply=False, quarantine_drops=None):
     lines = []
     counts = {
         "cards": 0, "keep": 0, "drop": 0, "moved": 0, "unreadable": 0,
-        "duplicates": 0, "reclassified": 0,
+        "duplicates": 0, "reclassified": 0, "held": 0,
     }
     if quarantine_drops is not None:
         scan = [(kind, Path(directory) / dirname) for kind, dirname in CARD_DIRECTORIES.items()]
@@ -557,6 +582,12 @@ def reevaluate(directory, vault, apply=False, quarantine_drops=None):
             kind, body, summary, digest_source = found
             counts["keep"] += 1
             moved = ""
+            if quarantine_drops is None and apply and _held_pending(path):
+                # 提案區的卡本來就「今天的規則也會捕捉」——那正是它被扣住的原因，不是
+                # 搬正的理由。轉正是人看過、把 verified 改 true 的動作（owner 2026-09-09 Q5「C」）。
+                counts["held"] += 1
+                lines.append(f"HOLD  {was:<10} {path} ({memspec.CAPTURE_PENDING_HOLD_REASON})")
+                continue
             if quarantine_drops is None and apply:
                 outcome, target = _move_card(path, vault, kind, capture.grant_digest(digest_source), counts)
                 if outcome == "duplicate":
@@ -759,13 +790,18 @@ def _selftest():
                                          "content": [{"type": "output_text", "text": text}]}})
 
             grant = "你可以直接改那個測試檔"
-            correction = "我不是說過不要亂改介面"
+            # 2026-09-09（owner Q5「C」）：題目全部改成白名單形狀，因為這一段驗的是
+            # 「回放寫出來的卡和線上一樣」；白名單本身由 pending_ruling 那條與
+            # tests/capture_admission_regression.py 驗。
+            correction = "不要再亂改介面"
             # 2026-09-06：裁定的判準改成「owner 句自己要有決定性內容」，原本的
             # 「用第二案就好」是無範圍應答，新規則本來就該拒收；題目換成帶決定的答覆。
-            ruling_answer = "就用第二案，不要另外開一支"
+            ruling_answer = "不要另外開一支，就用第二案"
+            # 形狀不明確（沒有箭頭短答、不是句首糾正、不是明示授權）＝捕捉得到但只寫提案。
+            pending_ruling = "以後都用第一種寫法，一律不要混用"
             codex_grant = "我授權你直接執行那個腳本"
-            codex_correction = "不是這樣，那個路徑錯了"
-            codex_ruling_answer = "就用 A 方案，不要兩案並行"
+            codex_correction = "不對，那個路徑錯了"
+            codex_ruling_answer = "不要兩案並行，就用 A 方案"
             secret = "你可以直接用這個 api_key: abcdefghijklmnop"
             sidechain = "你可以直接刪掉那個檔"
             oversized = "你可以直接動那個資料表" + "x" * memspec.COMPACT_MAP_MAX_LINE_BYTES
@@ -782,6 +818,7 @@ def _selftest():
                 claude_user(correction),
                 claude_assistant("兩案我都列了，請你裁決"),
                 claude_user(ruling_answer),
+                claude_user(pending_ruling),
                 claude_user(sidechain, isSidechain=True),
                 claude_user(oversized),
                 claude_user(secret),
@@ -837,9 +874,10 @@ def _selftest():
             checks.append((
                 "dry run plans every card and writes nothing",
                 dry_code == 0
-                and dry == {"files": 2, "utterances": 7, "grants": 2, "corrections": 2, "rulings": 2,
-                            "duplicates": 0, "rejected": 1, "drafts": 2}
+                and dry == {"files": 2, "utterances": 8, "grants": 2, "corrections": 2, "rulings": 2,
+                            "duplicates": 0, "rejected": 1, "drafts": 3}
                 and sum(1 for text in dry_lines if text.startswith("WOULD WRITE")) == 6
+                and sum(1 for text in dry_lines if text.startswith("WOULD PROPOSE")) == 1
                 and sum(1 for text in dry_lines if text.startswith("WOULD DRAFT")) == 2
                 and not (vault / memspec.GRANT_DIRECTORY).exists()
                 and not _manifest_path(vault).exists(),
@@ -865,6 +903,28 @@ def _selftest():
                 and any(codex_correction in text for text in bodies.values())
                 and any("請你裁決" in text and ruling_answer in text for text in bodies.values())
                 and any("請你裁決" in text and codex_ruling_answer in text for text in bodies.values()),
+            ))
+
+            # owner 2026-09-09 Q5「C」：形狀不明確的那句照樣判得出 kind，但只寫提案；
+            # 提案在 `_drafts/` 底下（memsearch 排除 `_` 路徑段），所以它不進索引。
+            proposals = sorted(vault.joinpath(*memspec.CAPTURE_PENDING_SUBPATH).rglob("*.md"))
+            proposal_text = "\n".join(path.read_text(encoding="utf-8") for path in proposals)
+            checks.append((
+                "a captured sentence outside the whitelist is proposed, not filed",
+                len(proposals) == 1
+                and proposals[0].name.startswith("ruling-")
+                and proposals[0].parent.name == "20260801"
+                and pending_ruling in proposal_text
+                and f"{memspec.VERIFIED_FIELD}: {memspec.VERIFIED_FALSE}" in proposal_text
+                and not any(pending_ruling in text for text in bodies.values()),
+            ))
+            checks.append((
+                "every card the replay writes says it is machine-captured and unverified",
+                all(
+                    f"{memspec.PROVENANCE_FIELD}: {memspec.PROVENANCE_AUTO_CAPTURED}" in text
+                    and f"{memspec.VERIFIED_FIELD}: {memspec.VERIFIED_FALSE}" in text
+                    for text in bodies.values()
+                ),
             ))
 
             expected_source = f"source: {os.fspath(claude_transcript)}:1"
@@ -922,8 +982,9 @@ def _selftest():
             checks.append((
                 "a re-read transcript re-captures nothing: every card is a duplicate",
                 third_code == 0
-                and third == {"files": 2, "utterances": 7, "grants": 0, "corrections": 0, "rulings": 0,
-                              "duplicates": 6, "rejected": 1, "drafts": 0}
+                # 提案也要算重複：只問正式目錄的話，同一句話會每天長出一份新提案。
+                and third == {"files": 2, "utterances": 8, "grants": 0, "corrections": 0, "rulings": 0,
+                              "duplicates": 7, "rejected": 1, "drafts": 0}
                 and len(sorted((vault / memspec.RULING_DIRECTORY).glob("*.md"))) == 2,
             ))
 
@@ -969,7 +1030,7 @@ def _selftest():
             checks.append((
                 "reevaluate keeps the decisive card, leaves the empty answer where it is",
                 reeval_counts == {"cards": 2, "keep": 1, "drop": 1, "moved": 1, "unreadable": 0,
-                                  "duplicates": 0, "reclassified": 0}
+                                  "duplicates": 0, "reclassified": 0, "held": 0}
                 and reeval_lines[-1].startswith("REEVALUATE ")
                 and (quarantine / "ruling-20260801-deadbeef0001.md").exists()
                 and not (quarantine / "ruling-20260801-deadbeef0002.md").exists()
@@ -978,6 +1039,19 @@ def _selftest():
             ))
             for path in sorted((vault / memspec.RULING_DIRECTORY).glob("ruling-20260801-*.md")):
                 path.unlink()
+
+            # 提案區的卡「今天的規則也會捕捉」正是它被扣住的原因，所以 forward-mode
+            # --apply 不得把它搬進庫：那等於用機器判定取代人核（owner 2026-09-09 Q5「C」）。
+            pending_root = vault.joinpath(*memspec.CAPTURE_PENDING_SUBPATH)
+            hold_counts, hold_lines = reevaluate(pending_root, vault, apply=True)
+            checks.append((
+                "an unverified proposal is held, never promoted by a replay",
+                hold_counts["held"] == 1
+                and hold_counts["moved"] == 0
+                and any(text.startswith("HOLD") for text in hold_lines)
+                and len(sorted(pending_root.rglob("*.md"))) == 1
+                and not sorted((vault / memspec.RULING_DIRECTORY).glob("ruling-20260801-*.md")),
+            ))
 
             # --quarantine-drops (reverse mode): scan the vault's own
             # grants/corrections/rulings instead of a quarantine pile; a card that
@@ -1002,7 +1076,7 @@ def _selftest():
             checks.append((
                 "--quarantine-drops dry-run reports the drop but moves nothing",
                 dry_reeval_counts == {"cards": expected_total, "keep": expected_total - 1, "drop": 1, "moved": 0, "unreadable": 0,
-                                      "duplicates": 0, "reclassified": 0}
+                                      "duplicates": 0, "reclassified": 0, "held": 0}
                 and any(text.startswith("DROP") and "ruling-20260801-deadbeef0003.md" in text for text in dry_reeval_lines)
                 and stale_ruling.exists()
                 and not quarantine_target.exists(),
@@ -1012,7 +1086,7 @@ def _selftest():
             checks.append((
                 "--quarantine-drops apply moves the drop to <dir>/<kind>/ and leaves keeps in place",
                 apply_reeval_counts == {"cards": expected_total, "keep": expected_total - 1, "drop": 1, "moved": 1, "unreadable": 0,
-                                        "duplicates": 0, "reclassified": 0}
+                                        "duplicates": 0, "reclassified": 0, "held": 0}
                 and not stale_ruling.exists()
                 and quarantined_card.exists()
                 and len(sorted((vault / memspec.GRANT_DIRECTORY).glob("*.md"))) == 2
@@ -1038,7 +1112,7 @@ def _selftest():
             checks.append((
                 "reevaluate --apply files a same-sentence collision as a duplicate, not a clobber",
                 dup_reeval_counts == {"cards": 1, "keep": 1, "drop": 0, "moved": 0, "unreadable": 0,
-                                      "duplicates": 1, "reclassified": 0}
+                                      "duplicates": 1, "reclassified": 0, "held": 0}
                 and any(
                     text.startswith("DUPLICATE ") and os.fspath(dup_source) in text
                     and os.fspath(existing_correction_card) in text
@@ -1073,7 +1147,7 @@ def _selftest():
             checks.append((
                 "reevaluate --apply resolves a same-digest, different-sentence collision with a -2 rename",
                 rename_reeval_counts == {"cards": 1, "keep": 1, "drop": 0, "moved": 1, "unreadable": 0,
-                                         "duplicates": 0, "reclassified": 0}
+                                         "duplicates": 0, "reclassified": 0, "held": 0}
                 and any(
                     text.startswith("RENAMED ") and os.fspath(rename_source) in text and os.fspath(renamed_target) in text
                     for text in rename_reeval_lines
@@ -1197,7 +1271,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 20
+    total = 23
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

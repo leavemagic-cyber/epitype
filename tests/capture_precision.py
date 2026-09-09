@@ -28,6 +28,19 @@ def predicted_kind(owner_text, assistant_text=None):
     return NONE if found is None else found[0]
 
 
+def filed_kind(owner_text, assistant_text=None):
+    """The kind that actually lands in the vault, proposals counted as not filed.
+
+    classify() 判「這句話像哪一種」，白名單判「像不像到可以不經人手入庫」。owner
+    2026-09-09 裁定 Q5「C」之後，會影響喚回與消費端的是後者，所以量測台兩條都報。
+    """
+    found = capture.classify(owner_text, assistant_text or None)
+    if found is None:
+        return NONE
+    kind, body, summary, _digest = found
+    return kind if capture.auto_admitted(capture.owner_side(body, summary))[0] else NONE
+
+
 # ---------------------------------------------------------------- synthetic set
 # 每條都是本檔作者編的合成句：不含任何 owner 原話、專案名或人名（privacy_lint 會擋）。
 # expect=None 代表「不該入卡」。八類誤抓各兩條反例，對應 docs/FAILURE_MODES.md 的
@@ -158,22 +171,22 @@ def _selftest():
 
 
 # ------------------------------------------------------------------ local score
-def _score(rows):
+def _score(rows, predictor=predicted_kind, field="predicted_kind"):
     matrix = {}
     for row in rows:
-        got = predicted_kind(row.get("owner_text", ""), row.get("assistant_text") or None)
-        row["predicted_kind"] = got
+        got = predictor(row.get("owner_text", ""), row.get("assistant_text") or None)
+        row[field] = got
         key = (row.get("expected_kind", NONE), got)
         matrix[key] = matrix.get(key, 0) + 1
     return matrix
 
 
-def _report(rows, matrix):
-    captured = [row for row in rows if row["predicted_kind"] != NONE]
-    right = [row for row in captured if row["predicted_kind"] == row.get("expected_kind")]
+def _report(rows, matrix, field="predicted_kind"):
+    captured = [row for row in rows if row[field] != NONE]
+    right = [row for row in captured if row[field] == row.get("expected_kind")]
     keepers = [row for row in rows if row.get("keep") and row.get("expected_kind") in KINDS]
-    kept = [row for row in keepers if row["predicted_kind"] != NONE]
-    kept_right = [row for row in keepers if row["predicted_kind"] == row.get("expected_kind")]
+    kept = [row for row in keepers if row[field] != NONE]
+    kept_right = [row for row in keepers if row[field] == row.get("expected_kind")]
     valued = [row for row in captured if row.get("keep")]
 
     def ratio(part, whole):
@@ -203,13 +216,20 @@ def main(argv=None):
         if arguments.local is None:
             return code
     rows = json.loads(arguments.local.read_text(encoding="utf-8"))
+    print("== classify lane（判定：這句話像哪一種）==")
     matrix = _score(rows)
     precision, recall = _report(rows, matrix)
+    print("\n== auto-filed lane（白名單過關、自動入庫的那些；其餘落 _drafts/captured_pending）==")
+    filed_matrix = _score(rows, filed_kind, "filed_kind")
+    _report(rows, filed_matrix, "filed_kind")
+    proposed = sum(1 for row in rows if row["predicted_kind"] != NONE and row["filed_kind"] == NONE)
+    print(f"proposals(held for review)         = {proposed}")
     if arguments.misses:
         for row in rows:
             if row["predicted_kind"] != row.get("expected_kind"):
                 print(
                     f"  {row.get('expected_kind'):>10} -> {row['predicted_kind']:<10}"
+                    f" filed={row['filed_kind']:<10}"
                     f" keep={row.get('keep')} {row.get('why', '')} | {row.get('owner_text', '')[:70]!r}"
                 )
     return 0

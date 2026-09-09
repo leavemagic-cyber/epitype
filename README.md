@@ -22,12 +22,29 @@ Epitype connects the same native vaults to five host events:
 | Event | What Epitype does |
 |---|---|
 | `SessionStart` | Injects a bounded memory index and work ledger when those files exist. |
-| `UserPromptSubmit` | Recalls up to five relevant cards from each resolved vault within the shared output budget. Short owner-grant statements are stored verbatim, deduplicated, and indexed; their meaning is not inferred during capture. |
+| `UserPromptSubmit` | Recalls up to five relevant cards from each resolved vault within the shared output budget. Short owner statements are stored verbatim, deduplicated, and indexed; their meaning is not inferred during capture. |
 | `PreToolUse` | Matches scar-card triggers against the tool and its input. A match returns a bounded denial, safer advice, and an audit row. |
 | `PreCompact` | Builds a small recovery map from the transcript tail before context compaction. |
 | `Stop` | Round-end decision gate: blocks a reply that re-proposes a rejected option or re-asks a ruled question. |
 
 Injected memory remains advisory. It cannot override system or developer instructions, bypass host permissions, or grant a tool authority by itself. Hook output is capped at 10 KiB and each hook has a ten-second fail-open deadline.
+
+### Capture: filed, or proposed
+
+A trigger match proves a sentence *looks like* a ruling, not that anyone checked it,
+so capture files only what one of three shape templates admits — an arrow reply
+whose owner half opens with a short answer, a correction that opens the sentence, or
+a named first-person authorization. Everything else the rules still capture is
+written to `<vault>/_drafts/captured_pending/YYYYMMDD/` instead: not indexed, not
+recalled, waiting for a person. Both kinds carry `provenance: auto-captured` and
+`verified: false`, and promotion means editing those fields (`verified: true` plus
+`verified_by`/`verified_at`) and moving the file — a replay refuses to do it.
+
+No `verified: false` card is authority for anything: the Stop decision gate, the
+write gate, the PreToolUse authorization check and the SessionStart ruling list all
+read cards that declare `decision_key`/`trigger`, which a captured card never does.
+Recall still surfaces it, labelled as history rather than as a standing decision.
+Details and the measured trade in `docs/FAILURE_MODES.md` §32.
 
 ## Governance beyond recall
 

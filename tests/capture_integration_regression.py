@@ -53,19 +53,32 @@ class CaptureIntegrationRegression(unittest.TestCase):
                 self.assertLessEqual(classifier.call_count, 1)
                 if not replay:
                     continue
-                kind, directory, digest, _label, body, _summary = replay[0]
+                kind, directory, digest, _label, body, summary = replay[0]
                 self.assertEqual(kind, expected)
-                self.assertEqual(cards[0].parent.name, directory)
+                # owner 2026-09-09 Q5「C」：白名單過關的進 <kind>/，其餘只寫提案；線上
+                # 與回放判的是同一句（owner 自己那半），所以落點也必須一樣。
+                admitted, _template = capture.auto_admitted(capture.owner_side(body, summary))
+                if admitted:
+                    self.assertEqual(cards[0].parent.name, directory)
+                else:
+                    self.assertEqual(
+                        cards[0].parent.parent.name, memspec.CAPTURE_PENDING_SUBPATH[-1]
+                    )
+                    self.assertEqual(cards[0].name[: len(kind)], kind)
                 self.assertIn(digest, cards[0].name)
                 text = cards[0].read_text(encoding="utf-8")
                 self.assertTrue(text.endswith(body + "\n"))
                 self.assertIn(f"cwd: {self.root}", text)
                 self.assertIn(f"session_id: {name}", text)
+                self.assertIn(
+                    f"{memspec.PROVENANCE_FIELD}: {memspec.PROVENANCE_AUTO_CAPTURED}", text
+                )
+                self.assertIn(f"{memspec.VERIFIED_FIELD}: {memspec.VERIFIED_FALSE}", text)
                 recall._handle(event, time.monotonic(), [])
                 self.assertEqual(list(vault.rglob("*.md")), cards)
 
     def test_legacy_entrypoints_share_context_and_write_one_card(self):
-        prompt = "就用第二案，以後都不要再問這件事。"
+        prompt = "不要再問這件事，以後一律用第二案。"
         for codex in (False, True):
             vault = self.root / str(codex)
             event = self.event(str(codex), prompt, "請你確認要用哪個方案？", codex)
@@ -89,7 +102,7 @@ class CaptureIntegrationRegression(unittest.TestCase):
             vault = self.root / f"scalar-{index}"
             vault.mkdir()
             common.write_config(self.config, [vault])
-            event = self.event(f"scalar-{index}", "就用第二案，以後都不要再問這件事。", "請你確認要用哪個方案？")
+            event = self.event(f"scalar-{index}", "不要再問這件事，以後一律用第二案。", "請你確認要用哪個方案？")
             transcript = Path(event["transcript_path"])
             transcript.write_text(json.dumps(scalar) + "\n" + transcript.read_text(encoding="utf-8"), encoding="utf-8")
             recall._handle(event, time.monotonic(), [])
@@ -98,7 +111,7 @@ class CaptureIntegrationRegression(unittest.TestCase):
             self.assertEqual(cards[0].parent.name, memspec.RULING_DIRECTORY)
 
     def test_no_request_or_unrelated_request_preserves_correction_priority(self):
-        prompt = "就用第二案，以後都不要再問這件事。"
+        prompt = "不要再問這件事，以後一律用第二案。"
         for index, question in enumerate((None, "今天天氣如何？", "報告引用「請你確認要用哪個方案？」")):
             path = capture.capture_event(prompt, self.root / f"v{index}", {}, None,
                                          question=question, replay=capture.Replay())
