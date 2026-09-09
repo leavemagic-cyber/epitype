@@ -275,6 +275,18 @@ def _joined(pieces, piece=""):
     return "\n".join(parts)
 
 
+# 截斷行的位置要先留：bounded_context 放不下某一段時，是把**已選的前面幾段丟掉**
+# 直到截斷行塞得進去。索引段量到剛好滿，下一段（帳本第一行）一放不下，索引就整段
+# 被彈出來——實測 2026-09-09：整本回音「裝得下」卻在輸出裡整段消失。
+_SUFFIX_RESERVE = memspec.CONTEXT_TRUNCATED_SUFFIX.format(dropped=9999)
+
+
+def _fits(pieces, piece, budget):
+    return payload_fits(
+        "SessionStart", _joined(pieces, piece) + "\n" + _SUFFIX_RESERVE, budget
+    )
+
+
 def _index_echo(index_path, pieces, budget):
     """沒有原生載入的宿主（Codex）拿到的短入口：裝得下就整段，裝不下才排序取樣，
     並在最後一行明說送出多少／全文多少。
@@ -287,7 +299,7 @@ def _index_echo(index_path, pieces, budget):
     heading = f"## {memspec.MEMORY_INDEX_FILENAME}"
     body = index_path.read_text(encoding="utf-8").rstrip()
     total = len(body.encode("utf-8"))
-    if payload_fits("SessionStart", _joined(pieces, f"{heading}\n{body}"), budget):
+    if _fits(pieces, f"{heading}\n{body}", budget):
         return f"{heading}\n{body}"
 
     full_path = index_path.resolve()
@@ -298,14 +310,16 @@ def _index_echo(index_path, pieces, budget):
         )
 
     used = len(_joined(pieces).encode("utf-8"))
-    room = budget - used - len(f"{heading}\n\n{notice(total)}".encode("utf-8"))
+    room = budget - used - len(
+        f"{heading}\n\n{notice(total)}\n{_SUFFIX_RESERVE}".encode("utf-8")
+    )
     while room > 0:
         try:
             slim = memspec.slim_index(body, room, full_path)
         except ValueError:
             return None
         piece = "\n".join((heading, slim, notice(len(slim.encode("utf-8")))))
-        if payload_fits("SessionStart", _joined(pieces, piece), budget):
+        if _fits(pieces, piece, budget):
             return piece
         room -= max(64, room // 8)
     return None
@@ -488,6 +502,12 @@ def _selftest():
             (big_vault / memspec.MEMORY_INDEX_FILENAME).write_text(
                 big_body + "\n", encoding="utf-8"
             )
+            # 索引後面一定要還有段（帳本行），才測得到那個坑：bounded_context 放不下
+            # 下一段時是回頭把已選的段丟掉，所以量到剛好滿的索引會整段被彈出來。
+            (big_vault / memspec.WORK_LEDGER_FILENAME).write_text(
+                "\n".join(f"ledger row {number}" for number in range(40)) + "\n",
+                encoding="utf-8",
+            )
             big_config = root / "big-config.json"
             write_config(big_config, [big_vault])
             big_result = run_synthetic(Path(__file__), {"source": "startup"}, big_config)
@@ -512,6 +532,14 @@ def _selftest():
                     and int(numbers.group(1)) < int(numbers.group(2))
                     and str((big_vault / memspec.MEMORY_INDEX_FILENAME).resolve()) in big_context
                     and len(big_context.encode("utf-8")) <= memspec.HOOK_DEFAULT_BUDGET_BYTES,
+                )
+            )
+            checks.append(
+                (
+                    "the sampled index survives the later pieces: room is left for the cut suffix",
+                    heading in big_context
+                    and memspec.CONTEXT_TRUNCATED_SUFFIX.split("{")[0] in big_context
+                    and notice_line in big_context,
                 )
             )
 
@@ -1121,7 +1149,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 30
+    total = 31
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
