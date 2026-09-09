@@ -123,34 +123,21 @@ def _active_decision(path):
     )
 
 
-_CAPTURE_HISTORY = "歷史捕捉（非完整對話／現行裁定）："
+_EVENT_DIRECTORIES = frozenset(directory for directory, _type in memspec.EVENT_CARD_DIRECTORIES)
 
 
-def _captured_context(path):
-    """Read one bounded snapshot; old captures can be sentences, not whole turns."""
-    try:
-        with Path(path).open("rb") as stream:
-            raw = stream.read(memspec.STOP_GATE_FRONTMATTER_MAX_BYTES + 1)
-        if len(raw) > memspec.STOP_GATE_FRONTMATTER_MAX_BYTES:
-            return "原卡超過讀取上限；先讀原卡核對來源與限制"
-        text = raw.decode("utf-8-sig")
-        fields, problem = memspec.frontmatter_text(text)
-        _front, closing = memspec.split_frontmatter(text)
-        if problem or closing is None:
-            return "原卡格式不完整；先讀原卡核對來源與限制"
-        body = _one_line("\n".join(text.splitlines()[closing + 1:]))
-        if not body:
-            return "原卡正文缺失；先讀原卡核對來源與限制"
-        # Preserve the clipping notice and source pointer as part of the line.
-        if len(body) > 800:
-            body = body[:800] + "…（未完；先讀原卡）"
-        source = [f"{key}={_one_line(fields[key])}" for key in
-                  ("captured_at", memspec.CWD_FIELD, "session_id") if fields.get(key)]
-        if len(source) < 3:
-            source.append("來源欄位不全")
-        return " | ".join([*source, body])
-    except (OSError, UnicodeError):
-        return "未讀得原卡；先讀原卡核對來源與限制"
+def _event_card(hit, path):
+    """True for a verbatim capture file under grants/ corrections/ rulings/.
+
+    U-H (owner 2026-09-09): the quote files are the bottom reading layer — an AI
+    reaches them with `memsearch`, one at a time, when a card it was handed points
+    there. Recall hands out cards only, so a raw sentence nobody curated can no
+    longer arrive at every prompt reading like a standing ruling. The vault-relative
+    path decides it, so the same file cannot be classified two ways.
+    """
+    card_path = _one_line(hit.get("card_path")).replace("\\", "/")
+    directory = card_path.split("/")[0] if "/" in card_path else Path(path).parent.name
+    return directory in _EVENT_DIRECTORIES
 
 
 def _merge_ordinary(groups):
@@ -221,12 +208,10 @@ def _recall(event, started_at, config, delivery_markers=None):
     if capture_vault is not None:
         _capture_event(prompt, capture_vault, event, started_at)
 
-    # A correction or ruling the owner already made outranks any lexical hit:
-    # it goes first, marked, so a stale plan line cannot be re-proposed over it.
-    # An active decision card outranks even those: a captured sentence is what the
-    # owner said once, a decision card is the standing ruling somebody curated
-    # from it (親裁 > 自動捕捉), so decisions take the first seats.
-    decisions = []
+    # An active decision card outranks any lexical hit: it is the standing ruling
+    # somebody curated from what the owner said, so it takes the first seats and is
+    # never dropped by the budget. The verbatim capture it was curated from stays
+    # out of the turn entirely (U-H) — see _event_card.
     pinned = []
     ordinary_groups = []
     legend = []
@@ -248,31 +233,18 @@ def _recall(event, started_at, config, delivery_markers=None):
         ordinary_lines = []
         for hit in result.get("results", ()):
             path = _one_line(hit.get("path"))
-            parent = Path(path).parent.name
-            prefix = {
-                memspec.CORRECTION_DIRECTORY: memspec.CORRECTION_PREFIX,
-                memspec.RULING_DIRECTORY: memspec.RULING_PREFIX,
-            }.get(parent)
-            if prefix == memspec.RULING_PREFIX and list(hit.get("hit_fields") or ()) == ["body"]:
-                # A ruling's body holds the assistant's question as well as the
-                # owner's answer, and the answer already sits in the description; a
-                # ruling matched only in its body matched the question, which is not
-                # the owner's word on this prompt and must not take a pinned seat.
-                # A correction's body is the owner's own sentence, so it keeps its seat.
-                prefix = None
-            # Decided before the caps, for the same reason a correction is: the
-            # owner's standing ruling is never a weak hit.
+            # Decided before the caps: the owner's standing ruling is never a weak hit.
             decision = None
             if _one_line(hit.get(memspec.DECISION_STATUS_FIELD)) == memspec.ACTIVE_DECISION_STATUS:
                 decision = _active_decision(path)
                 if decision is False:
                     continue  # A retired/unreadable ruling is not an ordinary hit.
-                if decision is not None:
-                    prefix = memspec.DECISION_PREFIX
+            if decision is None and _event_card(hit, path):
+                continue  # 原話事件檔只在 memsearch 端出（U-H）；卡片層才進喚回。
             # A card matched only in its body is a weak lexical hit; two per vault
-            # is plenty. What the owner corrected or ruled is never weak, so the
-            # kind is decided before the cap (adversarial review 2026-09-03 #1).
-            if prefix is None:
+            # is plenty. A decision card is never weak, so its kind is decided
+            # before the cap (adversarial review 2026-09-03 #1).
+            if decision is None:
                 if ordinary >= memspec.FTS_TOP_K:
                     continue  # ordinary cards keep the classic top-k window
                 if list(hit.get("hit_fields") or ()) == ["body"]:
@@ -289,27 +261,19 @@ def _recall(event, started_at, config, delivery_markers=None):
                 except (OSError, ValueError):
                     located = path  # never emit an alias the legend cannot resolve
             name = _one_line(hit.get("name"))
-            raw_description = _one_line(hit.get("description"))
-            captured = any(raw_description.startswith(f"owner {kind} auto-captured")
-                           for kind in ("grant", "correction", "ruling"))
-            description = memspec.CAPTURE_LABEL_REGEX.sub("", raw_description)
-            description = description[: memspec.RECALL_DESCRIPTION_MAX_CHARS]
+            description = _one_line(hit.get("description"))[: memspec.RECALL_DESCRIPTION_MAX_CHARS]
             if decision is not None:
                 key, decided_at, quote = decision
                 # The decision's own key and date identify it better than a card
                 # name, and the owner's words go in uncut: a ruling paraphrased
                 # into 120 characters is what let 08-13 come back as an option.
                 parts = (key + (f"（{decided_at}）" if decided_at else ""), quote or description, located)
-            elif captured:
-                parts = (_captured_context(path), located)
             else:
                 # Say each fact once: a name the path already spells is not repeated.
                 parts = (description, located) if located.endswith(f"/{name}.md") else (name, description, located)
-            shown_prefix = _CAPTURE_HISTORY if captured and decision is None else (prefix or "")
-            line = "- " + shown_prefix + " | ".join(part for part in parts if part)
+            prefix = memspec.DECISION_PREFIX if decision is not None else ""
+            line = "- " + prefix + " | ".join(part for part in parts if part)
             if decision is not None:
-                decisions.append(line)
-            elif prefix:
                 pinned.append(line)
             else:
                 ordinary_lines.append((hit.get("matched_term_count", 0), line))
@@ -317,8 +281,6 @@ def _recall(event, started_at, config, delivery_markers=None):
         ordinary_groups.append(ordinary_lines)
         if used:
             legend.append(f"{alias}={vault}")
-    # Authority order is preserved, but delivered lines must not consume slots.
-    pinned = [*decisions, *pinned]
     others = list(_merge_ordinary(ordinary_groups))
     # The legend is what makes V1/... resolvable, so it shares the required first
     # piece with the advisory instead of being droppable on its own.
@@ -857,10 +819,16 @@ def _selftest():
             recalled_context = recalled_value.get("hookSpecificOutput", {}).get("additionalContext", "")
             checks.append(
                 (
-                    "captured grant is recallable",
+                    "captured grant is searchable but never injected",
                     recalled.returncode == 0
                     and bool(grant_files)
-                    and grant_files[0].stem in recalled_context,
+                    and grant_files[0].stem not in recalled_context
+                    and any(
+                        _one_line(item.get("card_path")).endswith(grant_files[0].name)
+                        for item in memsearch.recall_index(
+                            grant_vault, "請喚回 chrome 操作授權"
+                        ).get("results", ())
+                    ),
                 )
             )
 
@@ -918,13 +886,23 @@ def _selftest():
             ]
             checks.append(
                 (
-                    "correction is pinned first and marked even when a plan card matches better",
+                    "a captured correction never reaches the turn; ordinary cards still do",
                     ranked.returncode == 0
                     and bool(correction_files)
-                    and len(ranked_lines) >= 2
-                    and ranked_lines[0].startswith("- " + _CAPTURE_HISTORY)
-                    and correction_files[0].stem in ranked_lines[0]
-                    and any("Drive Plan" in line for line in ranked_lines[1:]),
+                    and bool(ranked_lines)
+                    and not any(correction_files[0].stem in line for line in ranked_lines)
+                    and any("Drive Plan" in line for line in ranked_lines),
+                )
+            )
+            checks.append(
+                (
+                    "the quote file recall skips is still reachable by memsearch",
+                    any(
+                        _one_line(item.get("card_path")).endswith(correction_files[0].name)
+                        for item in memsearch.recall_index(
+                            grant_vault, "SWSetup 未辦 要不要處理"
+                        ).get("results", ())
+                    ),
                 )
             )
 
@@ -1078,14 +1056,11 @@ def _selftest():
             ]
             checks.append(
                 (
-                    "captured ruling is pinned as history, not a current decision",
+                    "a captured ruling is never injected, however well it matches",
                     pinned.returncode == 0
                     and bool(ruling_files)
-                    and any(line.startswith("- " + _CAPTURE_HISTORY) and ruling_files[0].stem in line for line in pinned_lines)
-                    and all(
-                        line.startswith("- " + _CAPTURE_HISTORY)
-                        for line in pinned_lines[: sum(1 for line in pinned_lines if _CAPTURE_HISTORY in line)]
-                    ),
+                    and not any(ruling_files[0].stem in line for line in pinned_lines)
+                    and not any(memspec.RULING_DIRECTORY + "/" in line for line in pinned_lines),
                 )
             )
 
@@ -1111,10 +1086,8 @@ def _selftest():
             ]
             checks.append(
                 (
-                    "a ruling matched only in its body is an ordinary hit, not a pinned owner word",
-                    body_only.returncode == 0
-                    and len(body_only_lines) == 1
-                    and not body_only_lines[0].startswith("- " + memspec.RULING_PREFIX),
+                    "a ruling matched only in its body is not injected either",
+                    body_only.returncode == 0 and body_only_lines == [],
                 )
             )
             body_only_ruling.unlink()
@@ -1142,14 +1115,13 @@ def _selftest():
             caps_value = json.loads(caps_result.stdout) if caps_result.stdout.strip() else {}
             caps_context = caps_value.get("hookSpecificOutput", {}).get("additionalContext", "")
             caps_lines = [line for line in caps_context.splitlines() if line.startswith("- ")]
-            pinned_lines = [line for line in caps_lines if _CAPTURE_HISTORY in line]
             checks.append(
                 (
-                    "body-only cap never drops a correction, and the cap covers every line",
+                    "captured quotes take no seats at all, and the caps cover every line left",
                     caps_result.returncode == 0
-                    and len(pinned_lines) == 4
-                    and len(caps_lines) <= memspec.RECALL_TOTAL_MAX_LINES
-                    and caps_lines[: len(pinned_lines)] == pinned_lines,
+                    and not any(memspec.CORRECTION_DIRECTORY + "/" in line for line in caps_lines)
+                    and len(caps_lines) == memspec.FTS_TOP_K
+                    and len(caps_lines) <= memspec.RECALL_TOTAL_MAX_LINES,
                 )
             )
             checks.append(
@@ -1245,10 +1217,67 @@ def _selftest():
                     len(decision_lines) <= memspec.RECALL_TOTAL_MAX_LINES
                     and decision_lines[: len(decision_pinned)] == decision_pinned
                     and all(
-                        memspec.CORRECTION_PREFIX not in line for line in decision_lines[: len(decision_pinned)]
+                        "dec00000" not in line for line in decision_lines
                     ),
                 )
             )
+
+            # U-H: the exception to "quote files stay out". A capture directory is
+            # where the file sits, not what it is; once somebody curated one into a
+            # decision card it is the standing ruling and goes back to the front.
+            promoted_vault = root / "promoted-vault"
+            (promoted_vault / memspec.RULING_DIRECTORY).mkdir(parents=True)
+            (promoted_vault / memspec.RULING_DIRECTORY / "ruling-20260907-promoted.md").write_text(
+                "---\nname: ruling-20260907-promoted\n"
+                "description: promotedneedle 由 owner 裁定\n"
+                f"{memspec.DECISION_KEY_FIELD}: promoted-key\n"
+                f"{memspec.DECISION_STATUS_FIELD}: {memspec.ACTIVE_DECISION_STATUS}\n"
+                f"{memspec.CURRENT_DECISION_AT_FIELD}: 2026-09-07\n"
+                f"{memspec.DECIDED_BY_FIELD}: {memspec.OWNER_EXPLICIT_DECIDER}\n"
+                f"{memspec.OWNER_QUOTE_FIELD}: promotedneedle 一律照這條走\n---\n"
+                "promotedneedle body\n",
+                encoding="utf-8",
+            )
+            (promoted_vault / memspec.RULING_DIRECTORY / "ruling-20260907-rawquote.md").write_text(
+                "---\nname: ruling-20260907-rawquote\n"
+                "description: owner ruling auto-captured 2026-09-07: promotedneedle 先這樣\n---\n"
+                "promotedneedle 先這樣\n",
+                encoding="utf-8",
+            )
+            memsearch.build_index(promoted_vault)
+            promoted_config = root / "promoted-config.json"
+            write_config(promoted_config, [promoted_vault])
+            promoted_result = run_synthetic(
+                Path(__file__), {"prompt": "promotedneedle", "session_id": uuid.uuid4().hex}, promoted_config
+            )
+            promoted_value = json.loads(promoted_result.stdout) if promoted_result.stdout.strip() else {}
+            promoted_context = promoted_value.get("hookSpecificOutput", {}).get("additionalContext", "")
+            promoted_lines = [line for line in promoted_context.splitlines() if line.startswith("- ")]
+            checks.append(
+                (
+                    "a decision card living under rulings/ is still pinned; the raw quote beside it is not",
+                    promoted_result.returncode == 0
+                    and len(promoted_lines) == 1
+                    and promoted_lines[0].startswith("- " + memspec.DECISION_PREFIX)
+                    and "promoted-key（2026-09-07）" in promoted_lines[0]
+                    and "promotedneedle 一律照這條走" in promoted_lines[0]
+                    and "rawquote" not in promoted_context,
+                )
+            )
+            checks.append(
+                (
+                    "memsearch still returns both files recall separated",
+                    {
+                        _one_line(item.get("card_path"))
+                        for item in memsearch.recall_index(promoted_vault, "promotedneedle").get("results", ())
+                    }
+                    == {
+                        f"{memspec.RULING_DIRECTORY}/ruling-20260907-promoted.md",
+                        f"{memspec.RULING_DIRECTORY}/ruling-20260907-rawquote.md",
+                    },
+                )
+            )
+
             secret_prompt = "你可以直接用 api_key=sk_live_0123456789abcdefghij 這組去連"
             secrets_before = tuple(sorted((grant_vault / memspec.GRANT_DIRECTORY).glob("*.md")))
             run_synthetic(
@@ -1548,7 +1577,7 @@ def _selftest():
             shutil.rmtree(marker_directory, ignore_errors=True)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 46
+    total = 49
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

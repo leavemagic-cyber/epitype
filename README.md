@@ -22,7 +22,7 @@ Epitype connects the same native vaults to five host events:
 | Event | What Epitype does |
 |---|---|
 | `SessionStart` | Only the lines that name something to do (a card-type FAIL, the by-the-way alias task, a dream that errored, left candidates, or is past due). Nothing standing is re-sent, the memory index included: the host loads that itself from `CLAUDE.md` / `AGENTS.md`. A session with nothing to do gets no injection. |
-| `UserPromptSubmit` | Recalls up to five relevant cards from each resolved vault within the shared output budget. Short owner statements are stored verbatim, deduplicated, and indexed; their meaning is not inferred during capture. |
+| `UserPromptSubmit` | Recalls up to five relevant cards from each resolved vault within the shared output budget — cards only; verbatim capture files are searchable, never injected. Short owner statements are stored verbatim, deduplicated, and indexed; their meaning is not inferred during capture. |
 | `PreToolUse` | Write gate: checks the content a file write is about to commit against the settled rulings and the card contract. A block returns the ruling and an audit row. |
 | `PreCompact` | Builds a small recovery map from the transcript tail before context compaction. |
 | `Stop` | Round-end decision gate: blocks a reply that re-proposes a rejected option or re-asks a ruled question. |
@@ -43,8 +43,10 @@ recalled, waiting for a person. Both kinds carry `provenance: auto-captured` and
 No `verified: false` card is authority for anything: the Stop decision gate and the
 write gate both read cards that declare `decision_key`, which a captured card never
 does.
-Recall still surfaces it, labelled as history rather than as a standing decision.
-Details and the measured trade in `docs/FAILURE_MODES.md` §32.
+Recall does not surface it at all: a captured quote is the bottom reading level, so
+`memsearch` returns it when an AI goes looking for the exact words, and the prompt
+hook injects cards only. Details and the measured trade in `docs/FAILURE_MODES.md`
+§32 and §41.
 
 ## Governance beyond recall
 
@@ -142,7 +144,7 @@ The generated database lives at `<vault>/.epitype/memory_fts.sqlite3` and is ign
 | `epitype dream [vaults...] [--since SINCE] [--dry-run] [--scheduled] [--json]` | Read-only offline tidy inventory (missing aliases, card-lint findings, zombie pending lines, unreviewed drafts, aging event cards, unregistered pocket vaults, draft aging, mixed cards to split, files over their configured cap, owner quotes no decision card carries, generated core blocks that have drifted from their rule cards, and a review pack lining owner events, gate blocks and exam failures up against the cards they point at) rendered as a numbered review packet; applies nothing itself. Scheduling is `dream.mode` in config — `piggyback` (default: a detached background run at session start), `nightly` (an OS-scheduled task), or `off` — switched with `epitype install --dream {piggyback,nightly,off} [--at HH:MM]` (nightly default `03:30`). |
 | `epitype gates <vault> [--since Nd\|YYYY-MM-DD] [--json] [--by kind\|decision\|session\|day]` | Turns `_GATE_LOG.jsonl` into a report of what the action gates actually blocked, e.g. `epitype gates C:\path\to\vault --since 2d`. |
 | `epitype cards <vault> [--strict] [--verbose] [--deep] [--json] [--fix-dates [--dry-run]]` | Type-checks memory cards against their required fields. `--deep` adds the vault-level checks: one active card per `decision_key`, valid supersession chains, and every managed card present in both the generated views and the search index. `--fix-dates` is the only flag that writes: it backfills a derived `last_verified_at:` line; preview the exact writes first with `--fix-dates --dry-run`. |
-| `epitype views <vaults...> [--force] [--json]` | Regenerates the browsable catalogue from card fields: `_views/current.md` (cards in use, with the complete list of active decisions) and `_views/history/closed.md` (closed projects and superseded decisions). Never writes `MEMORY.md`, rewrites nothing when the input fingerprint is unchanged, and takes a lock so two generators cannot overlap. See [Three reading levels](docs/ARCHITECTURE.md#three-reading-levels). |
+| `epitype views <vaults...> [--force] [--json]` | Regenerates the browsable catalogue from card fields: `_views/current.md` (cards in use, with the complete list of active decisions) and `_views/history/closed.md` (closed projects and superseded decisions). Never writes `MEMORY.md`, rewrites nothing when the input fingerprint is unchanged, and takes a lock so two generators cannot overlap. See [Four reading levels](docs/ARCHITECTURE.md#four-reading-levels). |
 | `epitype core-gen <vaults...> --out FILE [--cap-bytes N] [--dry-run] [--check] [--json]` | Assembles the resident core block from `type: rule` cards — `floor` numbered by `order`, `resident` grouped into `section` subsections — copying each card's approved `text` byte for byte and writing an approval pack next to it. Refuses to write (non-zero exit) when the assembly is over its cap or a card in a generated layer has no `approved_by`/`approved_at`. `--check` compares the assembly with `--out` instead of writing, for drift audits. See [Core generation](docs/ARCHITECTURE.md#core-generation-rule-cards--the-resident-block). |
 | `epitype aliases {export,apply}` | `export` lists cards missing aliases as a JSON worklist; `apply` writes reviewed `suggested` aliases back, additive only. |
 | `epitype search {build,query,recall}` | Builds the local FTS index and queries it by keyword or natural-language prompt; see [Search the local vault](#search-the-local-vault) above. |

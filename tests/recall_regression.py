@@ -14,6 +14,10 @@ memspec.RECALL_TOTAL_MAX_LINES，喚回注入的總行上限）就算命中。�
 
 量測單位是「單一 vault」。真機的喚回閘會把多個 vault 的結果併成一份注入，
 本測試不模擬那層併合——要量的是索引與排序找不找得到，不是注入預算怎麼分。
+U-H 之後這條界線多了一項實質差別：`rulings/`／`corrections/`／`grants/` 的
+原話事件檔仍在索引裡，但喚回一律不注入，只在 AI 主動 memsearch 時端出。
+期望卡是事件檔的題（mix-scratch、mix-bugfix-grant，以及與規則卡並列的那幾題）
+量的因此是「搜得到嗎」，不是「會不會自動送到眼前」。
 
 用法：
   recall_regression.py --selftest              內建合成 vault 與題庫
@@ -35,7 +39,8 @@ if str(REPO_ROOT) not in sys.path:
 
 from epitype import memsearch, memspec  # noqa: E402
 
-# 命中的門檻＝喚回注入的總行上限：第 9 名的卡在真機上等於沒被喚回。
+# 命中的門檻＝喚回注入的總行上限：排在這之後的卡片，在真機上等於沒被喚回。
+# （事件檔按上面的說明另計：它們量的是 memsearch 搜不搜得到。）
 RECALL_AT = memspec.RECALL_TOTAL_MAX_LINES
 # 診斷要說出期望卡「實際排第幾」，所以候選視窗開到遠大於 RECALL_AT；排序是
 # 先排序後切片，取 200 再切前 8 與直接取前 8 完全同序。

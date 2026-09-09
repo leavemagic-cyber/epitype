@@ -213,7 +213,7 @@ class CaptureAdmissionRegression(unittest.TestCase):
 
     # ------------------------------------------------------------------ consumers
     def test_an_unverified_card_is_authority_for_no_gate(self):
-        """一張帶著決策字樣的捕捉卡，三道閘一個都不能認、喚回也只能給歷史席。"""
+        """一張帶著決策字樣的捕捉卡，三道閘一個都不能認、喚回也一個字都不端。"""
         forbidden_phrase = "admissionforbidden"
         card = self.capture(
             f"不是！那個一律不要用 {forbidden_phrase}，以後都改用第二種")
@@ -236,17 +236,20 @@ class CaptureAdmissionRegression(unittest.TestCase):
         # （原第 3 條「PreToolUse 只讀宣告 trigger 的卡」隨 U-J 的攔截層一併退役，
         # 原第 4 條「開場的現行裁定清單」隨 U-I-a／§35 一併退役：兩條路徑都不再存在，
         # 不是通過，而是沒有了。PreToolUse 現在只剩上面第 2 條的寫檔閘。）
-        # 3. 喚回端得出來，但只能掛「歷史捕捉」前綴，不能佔決策席。
+        # 3. 喚回一個字都不端（U-H）：原話只在 AI 主動 memsearch 時才出現。
         memsearch.build_index(self.vault)
         value = recall._handle(
             {"prompt": forbidden_phrase, "session_id": "recall-gate", "cwd": str(self.root)},
             time.monotonic(), [],
         )
         context = (value or {}).get("hookSpecificOutput", {}).get("additionalContext", "")
-        shown = [line for line in context.splitlines() if card.stem in line]
-        self.assertEqual(len(shown), 1, context)
-        self.assertTrue(shown[0].startswith("- " + recall._CAPTURE_HISTORY), shown[0])
-        self.assertNotIn(memspec.DECISION_PREFIX, shown[0])
+        self.assertNotIn(card.stem, context)
+        self.assertNotIn(memspec.DECISION_PREFIX, context)
+        self.assertIn(
+            f"{card.parent.name}/{card.name}",
+            [item["card_path"] for item in
+             memsearch.recall_index(self.vault, forbidden_phrase).get("results", ())],
+        )
 
 
 if __name__ == "__main__":

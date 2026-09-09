@@ -22,7 +22,7 @@ Epitype 把同一組原生 vault 接到五個 host 事件：
 | 事件 | Epitype 的動作 |
 |---|---|
 | `SessionStart` | 只出「有事要做」的行（卡片型別 FAIL、順手補中文別名、夢報錯／有待審候選／到期沒跑）。常駐內容一律不重送，短入口索引也一樣——那由宿主自己從 `CLAUDE.md`／`AGENTS.md` 載入。沒事要做的那一場整段不注入。 |
-| `UserPromptSubmit` | 在共用輸出預算內，從每個已解析的 vault 取回最多五張相關卡片。簡短的 owner 授權語句會逐字保存、去重並立即進索引；捕捉當下不替原話加上解釋。 |
+| `UserPromptSubmit` | 在共用輸出預算內，從每個已解析的 vault 取回最多五張相關卡片——只端卡片，逐字捕捉的原話檔搜得到但不注入。簡短的 owner 授權語句會逐字保存、去重並立即進索引；捕捉當下不替原話加上解釋。 |
 | `PreToolUse` | 寫檔閘：檔案寫入落盤前，先用現行裁定與卡片型別合約檢查要寫進去的內容。擋下時回傳那條裁定與一列稽核紀錄。 |
 | `PreCompact` | 在 context 壓縮前，從 transcript 尾端製作小型復原地圖。 |
 | `Stop` | 回合結束決策閘：回覆若再提已否決選項或再問已裁定的事就擋下。 |
@@ -40,8 +40,8 @@ Epitype 把同一組原生 vault 接到五個 host 事件：
 
 `verified: false` 的卡不是任何東西的依據：Stop 決策閘與寫檔閘讀的都是宣告
 `decision_key` 的卡，捕捉卡從來不宣告這個。
-喚回照樣端得出來，但掛的是「歷史捕捉」而不是現行裁定。細節與量測見
-`docs/FAILURE_MODES.md` §32。
+喚回一個字都不端：捕捉卡是最底層的原話，AI 要用到時自己 `memsearch` 搜出來，
+UserPromptSubmit 只端卡片。細節與量測見 `docs/FAILURE_MODES.md` §32 與 §41。
 
 ## 不只把內容找回來
 
@@ -139,7 +139,7 @@ epitype search recall "自然語言提示" --vault C:\path\to\vault
 | `epitype dream [vaults...] [--since SINCE] [--dry-run] [--scheduled] [--json]` | 唯讀離線整理盤點（缺別名、卡片 lint 結果、殭屍待辦、待審草稿、老化事件卡，以及未登記的口袋庫、草稿老化、混雜卡拆卡候選、超過設定上限的檔案、沒有決策卡承接的 owner 原話、與規則卡重組結果不一致的生成塊，以及把 owner 事件、閘門擋下與考題失敗對齊到卡上的檢討包），整理成一份編號審核包；本身不套用任何建議。排程模式是 config 的 `dream.mode`——`piggyback`（預設：開場時起一個脫鉤背景程序）、`nightly`（系統排程）、`off`；用 `epitype install --dream {piggyback,nightly,off} [--at HH:MM]` 切換（nightly 預設 `03:30`）。 |
 | `epitype gates <vault> [--since Nd\|YYYY-MM-DD] [--json] [--by kind\|decision\|session\|day]` | 把 `_GATE_LOG.jsonl` 整理成閘門實際擋下什麼的報告，例如 `epitype gates C:\path\to\vault --since 2d`。 |
 | `epitype cards <vault> [--strict] [--verbose] [--deep] [--json] [--fix-dates [--dry-run]]` | 依必填欄位檢查記憶卡。`--deep` 另加庫層級檢查：同一個 `decision_key` 只有一張現行卡、取代鏈完整、每張納管卡都在生成目錄與搜尋索引裡。`--fix-dates` 是唯一會寫檔的旗標：把推得的日期補成一行 `last_verified_at:`；先用 `--fix-dates --dry-run` 預覽會寫什麼。 |
-| `epitype views <vaults...> [--force] [--json]` | 依卡片欄位重生可瀏覽的目錄：`_views/current.md`（現用卡，含完整現行決策清單）與 `_views/history/closed.md`（已結案專案與已取代決策）。永遠不寫 `MEMORY.md`；輸入指紋沒變就不重寫；同庫並行有鎖。說明見 [三個閱讀層級](docs/ARCHITECTURE.md#three-reading-levels)。 |
+| `epitype views <vaults...> [--force] [--json]` | 依卡片欄位重生可瀏覽的目錄：`_views/current.md`（現用卡，含完整現行決策清單）與 `_views/history/closed.md`（已結案專案與已取代決策）。永遠不寫 `MEMORY.md`；輸入指紋沒變就不重寫；同庫並行有鎖。說明見 [四個閱讀層級](docs/ARCHITECTURE.md#four-reading-levels)。 |
 | `epitype core-gen <vaults...> --out FILE [--cap-bytes N] [--dry-run] [--check] [--json]` | 由 `type: rule` 卡組裝常駐核心塊：`floor` 依 `order` 編號、`resident` 依 `section` 分小節，每張卡核准過的 `text` 逐位元組照抄，並在庫內寫一份核准包。組出來超過上限、或生成層的卡缺 `approved_by`／`approved_at` 時拒絕寫出（回非零）。`--check` 只比對不寫檔，供漂移稽核使用。說明見 [核心生成](docs/ARCHITECTURE.md#core-generation-rule-cards--the-resident-block)。 |
 | `epitype aliases {export,apply}` | `export` 把缺別名的卡片列成 JSON 工作清單；`apply` 把審核過的 `suggested` 別名寫回卡片，只新增不刪改。 |
 | `epitype search {build,query,recall}` | 建立本機 FTS 索引，並用關鍵詞或自然語言查詢；詳見上方〈搜尋本機 vault〉。 |

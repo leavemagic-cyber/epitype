@@ -379,6 +379,10 @@
           {
             "path": "notes/weak-3.md",
             "content": "---\nname: Weak Card 3\ndescription: Neutral synthetic sample\nscope: data\n---\nThis body line mentions pinboardmarker only.\n"
+          },
+          {
+            "path": "rulings/pinboard-quote.md",
+            "content": "---\nname: ruling-20260907-pinboard\ndescription: owner ruling auto-captured 2026-09-07: pinboardmarker 先照舊\nscope: data\n---\n問（助理）：pinboardmarker 要改嗎？\n答（owner 逐字）：先照舊。\n"
           }
         ]
       },
@@ -387,6 +391,9 @@
         "pinned_contains": [
           "⚖ 裁定：synthetic-pinboard（2026-07-01）",
           "合成置頂卡要帶原話"
+        ],
+        "pinned_excludes": [
+          "pinboard-quote"
         ]
       }
     }

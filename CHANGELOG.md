@@ -3,6 +3,17 @@
 ## Unreleased
 - gitignore: ignore the transient .hook-trust-*/ directory that hook_trust selftest creates in the repo root (it made the worktree-clean gate flap while another selftest was running).
 
+### U-H：喚回只端卡片，原話留在最底層（owner 2026-09-09；FAILURE_MODES §41）
+
+- owner 原話：「其他全部按需讀：索引指到卡片，卡片只在喚回時出現；卡片下面才是解說，再下面才是原話和對話紀錄，要用到才翻」。UserPromptSubmit 不再注入 `rulings/`／`corrections/`／`grants/` 的原話事件檔——那是第四層（最底層）的原始紀錄，只在 AI 主動 `memsearch` 時才出現。根因是層級錯位不是標籤錯：原話被當卡片層逐句注入，還佔了預算裁不掉的置頂席，所以沒人核過的一句話每次詞面命中就先於卡片抵達現場，「歷史捕捉」四個字改不了它讀起來像現行裁定。
+- **判定**（`adapters/claude/recall_hook._event_card`）：用庫相對路徑的第一段比對 `memspec.EVENT_CARD_DIRECTORIES`，命中就在任何上限／前綴／席位計算之前跳過。**唯一例外**：該檔本身是現行決策卡（`decision_key` ＋ `status: active`，由 `_active_decision` 從卡片重讀，不信索引）時，它是「剛好住在捕捉目錄的卡片層」，照舊佔決策席、帶 owner 原話。
+- 隨之退役：`_captured_context`（整份原話讀進注入行）、`_CAPTURE_HISTORY` 前綴、corrections／rulings 的置頂席與那條「裁定只命中正文不給席」的補丁、`memspec.CORRECTION_PREFIX`／`RULING_PREFIX`／`CAPTURE_LABEL_REGEX`。置頂席現在只有決策卡一種來源，`decisions`／`pinned` 兩份清單併回一份。
+- **完全沒動**：捕捉寫入（U-B 白名單、U-P 的 `event_id`、提案區）、`memsearch` 的索引與 CLI（原話照樣搜得到，這正是它的到達路徑）、Stop 決策閘、寫檔閘。夢第 12 節照舊列出沒有卡片承接的原話——移除注入之後那一節是唯一會指出缺口的地方。
+- **考題改判 1 題、刪 0 題**：`corpus_300.json` 的 `recall-p1-004` 原本期待「⚖ owner 裁決：」出現在置頂視窗，改判為決策卡照舊置頂、`rulings/004-ruling.md` 不得進視窗。為此 `exam/exam_runner.py` 的 recall 判分新增 `pinned_excludes`（`top_k_excludes` 表達不了「搜得到但不得注入」這半件事），隨箱 `exam/sample_corpus.json` 的 `recall-zh-pinned` 同時補上一張原話卡當回歸。`seeds_*` 兩份的事件卡題全部是 `top_k_contains`（量索引，不量注入），一題都沒改。
+- **實測**（兩真庫唯讀複本＝治理庫 435 張、titan 390 張，5 個 prompt，走 `~/.epitype/hooks/recall.py` shim，HOME／EPITYPE_CONFIG 全指暫存）：每句注入位元組 4598／3245／5349／2683／3012 → 2537／2399／1394／2297／2742，合計 **18887 → 11369 位元組（−39.8%）**。行數多半不變（10 行）——空出來的席位由普通卡補滿；只有「小單期」那句由 9 行降到 6 行（原話佔掉 5 席），位元組降 74%。
+- 回歸：`recall_hook --selftest` 46 → **49**（原話不注入、memsearch 照樣搜得到、住在 `rulings/` 的決策卡照舊置頂）、`exam_runner --selftest` 11/11、`tests/capture_recall_regression.py` 8 → **7 案**（整支由「原話怎麼端出來」改寫成「原話不端、但搜得到」）、`tests/capture_admission_regression.py` 9 案、`tests/recall_selection_regression.py` 13 → **14 案**。`tests/recall_regression.py` 量的是索引排序不是注入，數字不變（RECALL@8 45/51＝88.2%），只補上事件檔那幾題現在量的是「搜不搜得到」。
+- 閘門：run_all **49/49**、privacy PASS、corpus 330/330、seeds 15/15 與 5/5。
+
 ### U-I-b：開場不再回音短入口索引（owner 2026-09-09；FAILURE_MODES §40）
 
 - owner 原話：「原生功能就會你就會去讀claude.md;CODEX就會去讀agents.md」「不應該塞，這是多餘設計」「沒必要就拿掉阿，反正浪費token的行為都不應該」。前置條件先接通再拆：索引分區已由同步工具寫進 `~/.claude/CLAUDE.md`、`~/.codex/AGENTS.md` 與 titan 專案的 `AGENTS.md`（本單開工前逐檔確認），宿主每一場自己載入，hook 再回音一份就是同一段文字付兩次錢。

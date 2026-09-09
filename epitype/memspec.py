@@ -189,7 +189,6 @@ GRANT_NEWLINE_REGEX = re.compile(GRANT_NEWLINE_PATTERN)
 # 留下，下一場同題重犯。糾正句與授權句走同一條捕捉路徑；這裡是 runtime 用的窄集，
 # SCAR_CORRECTION_PATTERNS 仍是普查用的寬表（裸「又」「again」誤觸太多，不入窄集）。
 CORRECTION_DIRECTORY = "corrections"
-CORRECTION_PREFIX = "⚠ owner 曾糾正："
 CORRECTION_TRIGGER_PATTERN = (
     # 2026-09-06：裸「別再｜別亂」會被「特別再放一份」這種詞中片段命中；限定「別」
     # 前面不是「特／分／差／個／性」，才是命令式的「別」。
@@ -209,10 +208,10 @@ CORRECTION_TRIGGER_PATTERN = (
 CORRECTION_TRIGGER_REGEX = re.compile(CORRECTION_TRIGGER_PATTERN, re.IGNORECASE)
 
 # 2026-09-02 事故:agent 明說「要你裁決」,owner 答了,答案能否留下全看 agent 記不記得寫卡。
-# 規則:上一則助理訊息含裁決請求時,owner 的回覆逐字入 rulings/,連同被問的題目;喚回時與
-# corrections 一樣置頂。題目只取 transcript 尾窗,避免每句 prompt 都讀整份 transcript。
+# 規則:上一則助理訊息含裁決請求時,owner 的回覆逐字入 rulings/,連同被問的題目。題目只取
+# transcript 尾窗,避免每句 prompt 都讀整份 transcript。原話本身不進喚回(U-H),
+# 只在 memsearch 主動搜尋時端出。
 RULING_DIRECTORY = "rulings"
-RULING_PREFIX = "⚖ owner 裁決："
 # 2026-09-03 誤抓：報告裡提到「裁決」兩字也被當成提問（owner 回「這個在原始版本沒做到?」被存成裁決）。
 # 規則：只認明確的「請你／要你／由你」提問形，裸「裁決」「裁示」不算。
 RULING_QUESTION_PATTERN = (
@@ -381,20 +380,17 @@ NEVER_MATCH_REGEX = re.compile(r"(?!x)x")
 RECALL_DESCRIPTION_MAX_CHARS = 120
 RECALL_BODY_ONLY_MAX_PER_VAULT = 2
 RECALL_TOTAL_MAX_LINES = 8
-# Pinned cards (corrections, rulings) are looked for in a deeper window than the
+# Pinned cards (active decisions) are looked for in a deeper window than the
 # ordinary top-k (FTS_TOP_K, below), or one ranked sixth by word frequency would
 # never be seen. Three times the ordinary window.
 RECALL_PINNED_SCAN_LIMIT = 15
 RECALL_LEGEND_PREFIX = "vaults: "
-# The capture label is already said by the line's marker and directory; only
-# the date is kept in the injected description.
-CAPTURE_LABEL_REGEX = re.compile(r"^owner (?:grant|correction|ruling) auto-captured (?=\d{4}-\d{2}-\d{2}: )")
 # When a budget cuts the injected context, the cut is said, never silent.
 CONTEXT_TRUNCATED_SUFFIX = "…（超出預算，餘 {dropped} 段未注入）"
 
 # 2026-09-05 事故：owner 08-13 已裁定的事被 AI 當成待選項端回來。決策卡進了索引，卻只
 # 當普通卡注入、描述截到 120 字，原話一個字都沒到現場。規則：決策卡是 owner 親裁的現況，
-# 喚回時與 rulings 同級置頂且排在自動捕捉之前（親裁 > 自動捕捉），並帶 owner 原話。
+# 喚回時置頂且不受預算裁切，並帶 owner 原話。
 # 2026-09-09（§35）：開場的現行裁定清單已移除——裁定由喚回在命中時帶回，開場逐條重送
 # 只是每一場都付一次的固定成本。
 DECISION_PREFIX = "⚖ 裁定："

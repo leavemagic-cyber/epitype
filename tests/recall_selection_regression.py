@@ -126,6 +126,23 @@ class RecallSelectionRegression(unittest.TestCase):
         self.assertEqual([line.rsplit("/", 1)[-1] for line in lines],
                          [hit["card_path"] for hit in hits])
 
+    def test_a_captured_quote_consumes_no_slot_however_well_it_matches(self):
+        """U-H: 原話事件檔連弱席都不佔，普通卡照樣補滿；決策卡不受影響。"""
+        quotes = self.vaults[0] / memspec.RULING_DIRECTORY
+        quotes.mkdir()
+        (quotes / "ruling-20260907-quote.md").write_text(
+            "---\nname: ruling-20260907-quote\n"
+            "description: selectneedle detailneedle owner 原話\n---\nselectneedle detailneedle\n",
+            encoding="utf-8",
+        )
+        for number in range(6):
+            self.card(self.vaults[0], f"plain-{number}", "selectneedle detailneedle")
+        for vault in self.vaults:
+            memsearch.build_index(vault)
+        lines = self.lines(self.invoke(prompt="selectneedle detailneedle"))
+        self.assertEqual(len(lines), memspec.FTS_TOP_K)
+        self.assertFalse(any("ruling-20260907-quote" in line for line in lines))
+
     def test_authority_precedes_stronger_ordinary_query_evidence(self):
         self.card(self.vaults[0], "policy", "selectneedle", decision=True)
         self.card(self.vaults[1], "answer", "selectneedle detailneedle")

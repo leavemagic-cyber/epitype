@@ -110,19 +110,26 @@ def _judge_recall(vault, root, question_input, expect):
     required = _as_text_list(expect.get("top_k_contains", []), "top_k_contains")
     excluded = _as_text_list(expect.get("top_k_excludes", []), "top_k_excludes")
     raw_pinned = expect.get("pinned_contains")
-    if not required and not excluded and raw_pinned is None:
-        raise ValueError("recall expect needs top_k_contains, top_k_excludes, or pinned_contains")
+    raw_unpinned = expect.get("pinned_excludes")
+    if not required and not excluded and raw_pinned is None and raw_unpinned is None:
+        raise ValueError(
+            "recall expect needs top_k_contains, top_k_excludes, pinned_contains, or pinned_excludes"
+        )
     missing = [item for item in required if item not in hits]
     forbidden = [item for item in excluded if item in hits]
     if missing or forbidden:
         return f"top_k={hits}; missing={missing}; forbidden={forbidden}"
-    if raw_pinned is None:
+    if raw_pinned is None and raw_unpinned is None:
         return None
-    pinned = _as_text_list(raw_pinned, "pinned_contains")
+    pinned = _as_text_list(raw_pinned or [], "pinned_contains")
+    # `pinned_excludes` is the half `top_k_excludes` cannot express: a card that must
+    # stay findable by search and must never be injected (U-H quote files).
+    unpinned = _as_text_list(raw_unpinned or [], "pinned_excludes")
     window = _recall_card_lines(vault, root, question_input)[:_PINNED_WINDOW]
     absent = [item for item in pinned if not any(item in line for line in window)]
-    if absent:
-        return f"pinned={window}; absent={absent}"
+    present = [item for item in unpinned if any(item in line for line in window)]
+    if absent or present:
+        return f"pinned={window}; absent={absent}; present={present}"
     return None
 
 

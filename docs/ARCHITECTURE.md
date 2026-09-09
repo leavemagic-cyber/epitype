@@ -14,18 +14,23 @@ The three blocks have different change rates and different failure modes. Keepin
 
 Decision cards are a cross-cutting record type. They may live beside the domain they govern, but their current/superseded state is checked independently from the three-block placement.
 
-## Three reading levels
+## Four reading levels
 
 Browsing memory and retrieving from it are different jobs. A hand-written index that
 also tries to list everything drifts, and "reachable from the index" then becomes a
 lint rule that forces people to maintain the list by hand — while recall never used
 reachability in the first place.
 
+Owner 2026-09-09, verbatim: 「其他全部按需讀：索引指到卡片，卡片只在喚回時出現；卡片
+下面才是解說，再下面才是原話和對話紀錄，要用到才翻」. Each level is opened by the one
+above it, never sent ahead of it.
+
 | Level | File | Written by | Read when |
 |---|---|---|---|
 | 1 | `MEMORY.md` | Hand-written only | Every session (hosts that load it natively; echoed to hosts that do not) |
 | 2 | `_views/current.md` | `epitype views` | Browsing what is in use; the fixed entry point for the complete list of active decisions |
 | 3 | `_views/history/closed.md` | `epitype views` | Looking up what was closed or replaced |
+| 4 | `grants/` `corrections/` `rulings/` | Auto-capture, verbatim | Somebody needs the owner's exact words — reached by `memsearch`, one file at a time, because a card pointed there (failure mode 41) |
 
 The generator never writes `MEMORY.md`. That file has several concurrent writers —
 sessions and the host's own auto-memory append to it — and a generator that rewrites
@@ -45,6 +50,14 @@ Levels change by editing a field, not by moving a file, so links stay stable:
   no longer recites one.
 - `feedback`, `reference`, `user`, `habit`, `scar` and event cards are never closed
   by project state; only `superseded` moves them.
+
+Level 4 is the one level recall never sends. The quote files stay in the search
+index — that is how an AI reaches them — but `recall_hook._event_card` drops every
+hit under those three directories before it can take a seat, so a sentence nobody
+curated cannot arrive beside the cards that were. The single exception is a file in
+one of those directories that is itself an active decision card (`decision_key` +
+`status: active`): that is level 2 material that happens to sit in a capture
+directory, and it keeps its pinned seat.
 
 `closed` changes the reading level and nothing else — the card stays in the search
 index and is still recalled. Only `superseded` changes recall, by redirecting to the
@@ -69,7 +82,7 @@ whole pass rather than overwriting another writer.
 Epitype uses four routes because no single retrieval mode is correct for every piece of memory.
 
 1. **Resident.** A small native index or stable rule block remains visible. Size limits keep residency selective instead of turning it into an unbounded prompt prefix.
-2. **Point-in-time injection.** A hook injects selected context at a lifecycle event. Prompt recall and the two content gates belong here; PreCompact writes a distinct, bounded recovery map per session or transcript so concurrent sessions do not overwrite one another. SessionStart is deliberately the thinnest of these: it emits only lines that name something to do — a card-type FAIL, the by-the-way alias task, a dream that errored, left review candidates, or is past due — and a session with none of those gets no injection at all. Nothing standing is re-sent at every session: not the work ledger, the vault's active rulings or the overdue-pending list (failure mode 35), and not the short index either, which the host loads for itself out of `CLAUDE.md` / `AGENTS.md` (failure mode 40). Those are read on demand, and a rule that must reach the model when a prompt touches it belongs to recall, not to the prologue.
+2. **Point-in-time injection.** Cards only: prompt recall pins active decision cards, fills the rest of the window with ordinary cards, and injects no level-4 quote file at all (failure mode 41). A hook injects selected context at a lifecycle event. Prompt recall and the two content gates belong here; PreCompact writes a distinct, bounded recovery map per session or transcript so concurrent sessions do not overwrite one another. SessionStart is deliberately the thinnest of these: it emits only lines that name something to do — a card-type FAIL, the by-the-way alias task, a dream that errored, left review candidates, or is past due — and a session with none of those gets no injection at all. Nothing standing is re-sent at every session: not the work ledger, the vault's active rulings or the overdue-pending list (failure mode 35), and not the short index either, which the host loads for itself out of `CLAUDE.md` / `AGENTS.md` (failure mode 40). Those are read on demand, and a rule that must reach the model when a prompt touches it belongs to recall, not to the prologue.
 3. **Agent-directed retrieval.** The resident index points to a fuller card, and the agent opens that card through the host's normal read path. This route is useful for detail that should not be permanently resident, but it is not sufficient for a rule that must intercept an action.
 4. **Search.** `memsearch.py` builds a local trigram FTS index at `<vault>/.epitype/memory_fts.sqlite3` and supports explicit query or prompt-oriented recall. Only `build` creates an index; `query` and `recall` atomically move an existing legacy `.cairn` index into place before reading, fall back to that legacy snapshot with `index_migration_pending` if the move is blocked, and otherwise report no-index distinctly from a valid zero-hit result. Existing stale indexes retain the bounded incremental refresh path, with the refresh disclosed in the response. Search is a retrieval aid, not an authority source and not permission to act.
 

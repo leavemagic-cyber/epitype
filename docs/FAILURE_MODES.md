@@ -1149,7 +1149,7 @@ types, so `epitype cards` does not WARN on them.
 | Write gate rule A | `pretooluse_gate._forbidden_write` iterates `stop_gate._decisions` | same cards, same bar |
 | Write gate rule B | `_vault_card_path` skips any `_`/`.` path part | a proposal carries no card contract |
 | SessionStart ruling list | `_active_decisions` requires `decision_key` + `status: active` | same bar |
-| Recall | a captured card keeps its pinned seat but is labelled 「歷史捕捉（非完整對話／現行裁定）」, never `DECISION_PREFIX` | authority order is 親裁 > 自動捕捉 |
+| Recall | since §41 a captured card is not injected at all — `_event_card` drops every hit under `grants/` `corrections/` `rulings/` | a quote nobody curated is the bottom reading layer, reached by `memsearch` |
 
 **Measured, 254 hand-labelled real sentences** (`tests/capture_precision.py --local`;
 `exam/exam_runner.py` cannot run this corpus — it wants a `questions` list). The
@@ -1730,3 +1730,51 @@ corpus 330/330 and seeds 15/15, 5/5 unchanged, **0 questions retired**.
 Boundary: the index is not lost, it moved to the layer that was already paying for it.
 Keeping it there is the sync tool's job, not the hook's — if a host file ever stops
 carrying its index section, SessionStart will not notice and will not compensate.
+
+## 41. Recall read the bottom layer out loud (2026-09-09)
+
+Owner 2026-09-09, verbatim: 「其他全部按需讀：索引指到卡片，卡片只在喚回時出現；卡片
+下面才是解說，再下面才是原話和對話紀錄，要用到才翻」.
+
+Auto-capture files the owner's sentence verbatim under `grants/` `corrections/`
+`rulings/`. Those files are the bottom of the four reading layers — the raw record a
+card points back to when somebody needs the exact wording. Recall injected them as if
+they were the card layer: `_captured_context` read the whole quote file, prefixed the
+line with 「歷史捕捉（非完整對話／現行裁定）」, and gave it a pinned seat that the byte
+budget could not drop. So the layer meant to be opened on demand arrived first, in
+full, at every prompt whose words happened to match — and 「歷史捕捉」 is a label, not
+a filter: a sentence that was never reviewed still reads like a standing instruction
+once it is sitting in the turn ahead of the cards.
+
+The root cause is a layering one, not a labelling one: **the raw record was not kept
+at the bottom.** A card is a thing somebody curated — a decision, a rule, a scar, a
+feedback note. A quote file is evidence for one. Injecting evidence beside curated
+cards makes the two indistinguishable at the point of reading, and the pinned seat
+made the uncurated one louder.
+
+**The rule.** `adapters/claude/recall_hook._event_card` decides from the
+vault-relative path: a hit whose first path segment is one of
+`memspec.EVENT_CARD_DIRECTORIES` is skipped before any cap, prefix or seat is
+computed. One exception, and it is not an exception to the layering — a file that is
+itself an active decision card (`decision_key` + `status: active`, read from the card
+by `_active_decision`, not from the index) is a curated card that happens to live in
+a capture directory, and keeps its pinned decision seat. The removed machinery goes
+with it: `_captured_context`, the 「歷史捕捉」 prefix, the correction/ruling pinned
+seats, and `memspec.CORRECTION_PREFIX` / `RULING_PREFIX` / `CAPTURE_LABEL_REGEX`.
+
+**What did not change.** Capture still writes exactly what it wrote before (the U-B
+whitelist, the U-P event identity, the proposal area). `memsearch` still indexes the
+quote files and still returns them from `query` and `recall` — that is the whole
+point: an AI that needs the owner's exact words searches for them, one file at a
+time, because a card sent it there. The Stop gate and the write gate read decision
+cards and were never in this path.
+
+Prerequisite, honoured in order: the quotes were carried into decision/rule/feedback
+cards first (U-N-1, U-N-2, titan; `carried_by`), so removing the injection removes a
+duplicate route, not the only route. The dream's §12 keeps listing quotes no card
+carries yet.
+
+Regressions: `tests/capture_recall_regression.py` (never injected, still searchable,
+a promoted decision card keeps its seat), `tests/capture_admission_regression.py`
+(the consumer sweep), `tests/recall_selection_regression.py` (a quote consumes no
+slot), and `adapters/claude/recall_hook.py --selftest`.

@@ -1,5 +1,5 @@
 import sys; sys.dont_write_bytecode = True
-"""Synthetic capture-to-recall fidelity, history and budget boundaries."""
+"""Captured quotes stay out of recall, stay reachable by memsearch (U-H)."""
 
 import json
 import os
@@ -15,7 +15,6 @@ from epitype import capture, memsearch, memspec
 import _hook_common as common
 import recall_hook as recall
 
-HISTORY = "歷史捕捉（非完整對話／現行裁定）"
 TAIL = "但是只能在隔離副本操作，禁止修改正式資料"
 QUOTE = "fixturehistory 這次先整理" + "相關資料與規則的對照，" * 9 + TAIL
 
@@ -55,6 +54,13 @@ class CaptureRecallRegression(unittest.TestCase):
         memsearch.build_index(self.vault)
         return path
 
+    def plain_card(self, name="plain", needle="fixturehistory"):
+        path = self.vault / f"{name}.md"
+        path.write_text(f"---\nname: {name}\ndescription: {needle} 的整理卡\n---\n{needle} body\n",
+                        encoding="utf-8")
+        memsearch.build_index(self.vault)
+        return path
+
     def invoke(self, session="", budget=10240):
         config = common.load_config(time.monotonic())
         config[memspec.CONFIG_BUDGET_BYTES_FIELD] = budget
@@ -68,53 +74,63 @@ class CaptureRecallRegression(unittest.TestCase):
         return value, markers
 
     def context(self):
-        return self.invoke()[0]["hookSpecificOutput"]["additionalContext"]
+        value = self.invoke()[0]
+        return value["hookSpecificOutput"]["additionalContext"] if value else ""
+
+    def searched(self, prompt="fixturehistory"):
+        return [item["card_path"] for item in
+                memsearch.recall_index(self.vault, prompt).get("results", ())]
 
     def test_new_description_retains_trailing_condition(self):
         path = self.card()
         fields, _ = memspec.frontmatter_fields(path)
         self.assertIn(TAIL, fields["description"])
 
-    def test_old_truncated_description_recovers_stored_body_and_source(self):
-        path = self.card(legacy=True)
-        context = self.context()
-        for expected in (TAIL, HISTORY, "2026-01-02T03:04:05Z", "synthetic-project",
-                         "synthetic-source-session", path.name):
-            self.assertIn(expected, context)
-        self.assertNotIn(memspec.RULING_PREFIX, context)
-        self.assertNotIn("unrelated-current-project", context)
-
-    def test_held_out_multiline_and_grant_keep_conditions(self):
-        quote = "fixturehistory 你可以整理測試素材\n" + "保留對照資料；" * 16 + "本次授權到測試結束為止"
-        self.card(quote, kind="grant", legacy=True)
-        context = self.context()
-        self.assertIn("本次授權到測試結束為止", context)
-        self.assertIn(HISTORY, context)
-
-    def test_missing_source_never_becomes_verified_index_quote(self):
+    def test_captured_ruling_is_never_injected(self):
         path = self.card()
-        with patch.object(Path, "open", side_effect=OSError("synthetic read failure")):
-            rendered = recall._captured_context(path)
-        self.assertIn("未讀得原卡", rendered)
-        self.assertNotIn(QUOTE, rendered)
-
-    def test_oversized_body_is_explicitly_partial(self):
-        self.card("fixturehistory " + "內容" * 1000 + TAIL)
+        self.plain_card()
         context = self.context()
-        self.assertIn("未完；先讀原卡", context)
-        self.assertIn("rulings/ruling-", context)
+        self.assertIn("plain", context)
+        for absent in (path.name, path.stem, TAIL, "rulings/"):
+            self.assertNotIn(absent, context)
 
-    def test_unknown_provenance_is_not_borrowed_from_current_session(self):
-        path = self.card("fixturehistory 短原話")
+    def test_captured_grant_is_never_injected(self):
+        quote = "fixturehistory 你可以整理測試素材\n" + "保留對照資料；" * 16 + "本次授權到測試結束為止"
+        path = self.card(quote, kind="grant", legacy=True)
+        self.plain_card()
+        context = self.context()
+        self.assertNotIn(path.stem, context)
+        self.assertNotIn("本次授權到測試結束為止", context)
+
+    def test_a_vault_of_quotes_alone_injects_nothing(self):
+        self.card()
+        self.card("fixturehistory 另一句原話", kind="correction")
+        self.assertEqual(self.invoke()[0], None)
+
+    def test_quotes_recall_skips_are_still_reachable_by_memsearch(self):
+        path = self.card()
+        self.assertIn(f"{memspec.RULING_DIRECTORY}/{path.name}", self.searched())
+
+    def test_a_promoted_decision_card_keeps_its_pinned_seat(self):
+        path = self.card()
         text = path.read_text(encoding="utf-8")
-        path.write_text("\n".join(line for line in text.splitlines()
-                        if not line.startswith(("cwd:", "session_id:", "captured_at:"))) + "\n", encoding="utf-8")
+        head, _, rest = text.partition("\n---\n")
+        path.write_text(
+            head
+            + f"\n{memspec.DECISION_KEY_FIELD}: fixturehistory-key"
+            + f"\n{memspec.DECISION_STATUS_FIELD}: {memspec.ACTIVE_DECISION_STATUS}"
+            + f"\n{memspec.CURRENT_DECISION_AT_FIELD}: 2026-01-02"
+            + f"\n{memspec.OWNER_QUOTE_FIELD}: fixturehistory 一律照這條走\n---\n"
+            + rest,
+            encoding="utf-8",
+        )
+        memsearch.build_index(self.vault)
         context = self.context()
-        self.assertIn("來源欄位不全", context)
-        self.assertNotIn("unrelated-current-project", context)
+        self.assertIn(memspec.DECISION_PREFIX + "fixturehistory-key（2026-01-02）", context)
+        self.assertIn("fixturehistory 一律照這條走", context)
 
     def test_budget_drops_whole_card_without_delivery_marker(self):
-        path = self.card()
+        path = self.plain_card()
         full, _ = self.invoke()
         size = len(full["hookSpecificOutput"]["additionalContext"].encode("utf-8"))
         for budget in (size - 1, 100):
@@ -122,7 +138,7 @@ class CaptureRecallRegression(unittest.TestCase):
             context = value["hookSpecificOutput"]["additionalContext"] if value else ""
             self.assertNotIn(path.name, context)
             self.assertFalse(any(digest.startswith("card-") for _session, digest in markers))
-        self.assertIn(TAIL, self.context())
+        self.assertIn(path.stem, self.context())
 
 
 if __name__ == "__main__":

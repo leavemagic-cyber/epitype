@@ -874,7 +874,7 @@ def _uncarried_quotes_of(vault, carriers):
             fields, _problem = memspec.frontmatter_text(text)
             verified = fields.get(memspec.VERIFIED_FIELD, "").strip().casefold()
             if verified == memspec.VERIFIED_FALSE:
-                continue  # 卡面已經自報「未經人核」，喚回也只掛歷史捕捉，不是這一節的事。
+                continue  # 卡面已經自報「未經人核」，不是這一節的事。
             key = fields.get(memspec.DECISION_KEY_FIELD, "").strip()
             # 比對用完整檔名（帶 .md）與 decision_key，不用去掉副檔名的字根：`carried`
             # 是 `uncarried` 的子字串，用字根比對會把「沒人承接」誤判成「有人承接」，
@@ -902,12 +902,12 @@ def _uncarried_quotes_of(vault, carriers):
 
 
 def _section_uncarried_quotes(vaults, today, since_date, config):
-    """升決策卡候選：會被當裁定端出的原話，卻沒有任何決策卡承接它。
+    """升決策卡候選：沒有任何決策卡承接的原話。
 
-    喚回把 `rulings/`／`corrections/` 的卡掛上「⚖ owner 裁決：」「⚠ owner 曾糾正：」
-    前綴端出去（adapters/claude/recall_hook.py），只有自報 `verified: false` 的那些
-    降級成歷史捕捉。所以一張沒人核、也沒有決策卡承接的原話，讀起來仍像現行裁定——
-    這正是 Claude↔Codex 收斂加的那一項要先找出來的東西。
+    U-H 之後喚回不再注入 `rulings/`／`corrections/`／`grants/` 的原話檔
+    （adapters/claude/recall_hook.py `_event_card`），所以一張沒人承接的原話不再
+    自己送到現場——但它也就沒有任何到達路徑了：卡片層若沒人把它寫成決策卡／規則卡，
+    那句話等於只留在檔案裡等人搜。這一節列的就是這種缺口，也是移除注入的前置條件。
 
     承接有三條路，任一成立就不列：決策卡提名（檔名或 decision_key）、決策卡在
     owner_quote 逐字引了它、事件卡自己寫了 `carried_by`。每一列另附「疑似雜訊」欄，
