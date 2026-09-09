@@ -53,6 +53,17 @@ not the same as being findable: `card_lint --deep` reports managed cards missing
 the views and managed cards missing from the search index, each with the exact
 command that rebuilds it.
 
+Level 1 drifts back up on its own — the host's own default after saving a card is to
+append a pointer line to `MEMORY.md`, and concurrent sessions edit it directly — so
+putting things back down a level is the dream's job, not a gate's (§33). At 03:30 it
+regenerates the views, then moves any card-link line that sits **outside** the
+hand-written sections (`memspec.INDEX_ALLOWED_SECTIONS`) and whose cards level 2 or 3
+already carries, verbatim, into `<vault>/_drafts/index_pruned/YYYYMMDD.md`. Links the
+views do not carry stay put and are reported: an uncarried link may be a card written
+minutes ago. The hand-written sections themselves are never touched, and any mismatch
+between the read and the write abandons the whole pass rather than overwriting
+another writer.
+
 ## Four retrieval routes
 
 Epitype uses four routes because no single retrieval mode is correct for every piece of memory.
@@ -128,7 +139,9 @@ Epitype splits memory governance into two regimes. Waking runs inside hooks: det
 
 Dreaming is scheduled, not asked for. `dream.mode` in `~/.epitype/config.json` selects one of three regimes. `piggyback` (the default) makes `SessionStart` check `<governance vault>/.epitype/dream_state.json`; once the gap since the last finished dream exceeds `dream.interval_hours` (24 by default), the hook starts one detached, low-priority background process and returns without waiting for it — a lock file holding the pid and the start time keeps a second dream from starting, and a lock older than 30 minutes is treated as a dead one and taken over. `nightly` leaves the run to the operating system: `graft install --dream nightly [--at HH:MM]` registers a daily task (`schtasks` on Windows, one marked `crontab` line elsewhere), `graft uninstall` removes it, and `graft doctor` reports the mode and the last completion. `off` does nothing at all. Every mode runs the same check — `epitype dream --scheduled` — which resolves the registered vaults, the governance vault, and its own output paths from the config, so a changed vault list never requires re-registering the schedule. (The `nightly` schedule entry itself still names the literal script path, `epitype/dream.py --scheduled`, since `schtasks`/`crontab` invoke an interpreter and a file, not the installed console command.)
 
-The background run reads vaults and writes only inside `<governance vault>/.epitype/`: `dream_pack_latest.md`, `dream_pack_latest.json`, `dream_state.json` (completion time, per-section counts, elapsed seconds) and `dream.log`. It gives itself a ten-minute budget and marks any section it did not reach rather than dropping it silently. The next session — but not one resuming after a compaction — opens with one line naming the four headline numbers and the pack path, once; a dream that found nothing still says it ran, because silence cannot be told apart from a dream that never happened. None of this calls a model: the model half of dreaming stays manual, so an installed Epitype never spends model budget on its own.
+The inventory itself is read-only, but the run carries two piggyback tasks that write into each vault: it regenerates `_views/` (nothing is rewritten when the input fingerprint is unchanged), and then it shapes `MEMORY.md` back into a short entry point, reporting both in the packet. Shaping runs second on purpose — "the catalogue already carries this card" is its only test, and a stale catalogue would answer it wrongly.
+
+Apart from those two tasks, the background run's own output stays inside `<governance vault>/.epitype/`: `dream_pack_latest.md`, `dream_pack_latest.json`, `dream_state.json` (completion time, per-section counts, elapsed seconds) and `dream.log`. It gives itself a ten-minute budget and marks any section it did not reach rather than dropping it silently. The next session — but not one resuming after a compaction — opens with one line naming the four headline numbers and the pack path, once; a dream that found nothing still says it ran, because silence cannot be told apart from a dream that never happened. None of this calls a model: the model half of dreaming stays manual, so an installed Epitype never spends model budget on its own.
 
 ```powershell
 python epitype/dream.py --selftest

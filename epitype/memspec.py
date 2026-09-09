@@ -595,6 +595,37 @@ VIEWS_CLOSED_NOTE = "closed {stamp} by {who}"
 VIEWS_SUPERSEDED_NOTE = "superseded_by: {target}"
 VIEWS_MISSING = "-"
 VIEWS_LOCK_PREFIX = "epitype-views-"
+# markdown 連結裡只有這幾個字元會把目標吃掉；其餘（含中文檔名）保持原樣才讀得懂。
+# 生成端（views）與還原端（views.listed_paths、dream 的主記憶整形）必須用同一張表，
+# 否則同一個連結寫出去與讀回來會是兩個路徑。
+MARKDOWN_LINK_ESCAPES = {" ": "%20", "(": "%28", ")": "%29", "<": "%3C", ">": "%3E"}
+
+# 第一層（MEMORY.md）是**手寫**短入口，但它會自己長回來：宿主預設「存卡後在
+# MEMORY.md 加一行」、別場 session 直接編輯、到期歸檔（只減不增）。事前用寫檔閘擋
+# 會連合法的手寫連結一起擋掉，所以改由夜間夢事後整形（FAILURE_MODES §33）。
+# 這裡只放「哪些段是手寫區」與落點名稱，不含任何行為守則文字；要多一個手寫段，
+# 加進這個 tuple 就好（雙語各一組，段標題比對忽略大小寫與空白）。
+INDEX_ALLOWED_SECTIONS = (
+    "習慣與偏好", "habits and preferences",
+    "找不到就搜", "search when it is not here",
+    "索引卡", "index cards",
+    "專案規則", "project rules",
+)
+INDEX_PRUNED_SUBPATH = ("_drafts", "index_pruned")
+INDEX_PRUNED_TITLE = "# index_pruned — 夢從 MEMORY.md 移出的卡片連結行（原文照搬、未刪除；正本＝各卡片）"
+INDEX_PRUNED_ENTRY_NOTE = "<!-- moved {stamp} | from: {source} 「{section}」 | reason: {reason} -->"
+INDEX_PRUNED_SECTION_NONE = "(no section)"
+INDEX_PRUNED_REASON = "listed-in-views"
+INDEX_CARD_LINK_REGEX = re.compile(r"\]\(([^)\s]+\.md)\)")
+INDEX_SHAPING_HEADING = "## 8. 主記憶整形 / index shaping"
+INDEX_SHAPING_LINE = "{vault} — {status}｜搬出 {moved} 行｜留下 {kept} 行（視圖未列）｜{detail}"
+INDEX_SHAPING_NO_INDEX = "沒有 MEMORY.md，這一庫不整形"
+INDEX_SHAPING_NO_VIEWS = '讀不到 {directory} 目錄，無法判斷哪些行已被承載 → python epitype/views.py "{vault}"'
+INDEX_SHAPING_RACE_REASON = "寫入前 MEMORY.md 已被別的寫者改動，本次放棄（下次夢重試）"
+INDEX_SHAPING_CONFLICT_REASON = "換名寫入被拒（檔案在鎖／比對之間又變了），本次放棄：{error}"
+INDEX_SHAPING_READBACK_REASON = "寫入後讀回與預期不符，已停手；移出的行留在 index_pruned"
+INDEX_SHAPING_KEPT_STEP = "MEMORY.md 有 {count} 行卡片連結不在目錄裡（可能是新卡還沒生成視圖）→ python epitype/views.py <vault>"
+INDEX_SHAPING_ABANDONED_STEP = "主記憶整形放棄 {count} 次（寫入前檔案被別的寫者改動）→ 下次夢自動重試"
 # 「被目錄列出 ≠ 能被搜尋找到」（收斂第 5 條）：兩個漏卡檢查各自帶自己的修法。
 VIEWS_MISSING_REASON = '沒有可讀的 {directory} 目錄 → python epitype/views.py "{vault}"'
 VIEWS_STALE_REASON = '{count} 張納管卡不在目錄裡（{cards}）→ python epitype/views.py "{vault}"'

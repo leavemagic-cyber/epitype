@@ -9,7 +9,9 @@ import sys; sys.dont_write_bytecode = True; [getattr(stream, "reconfigure", lamb
 排程有三種模式（設定在 config 的 dream 區塊）：piggyback（SessionStart 順路起一個
 脫鉤的低優先權背景程序）、nightly（graft 註冊系統排程）、off。三者跑的都是同一條
 命令 `dream.py --scheduled`——庫與輸出路徑由這裡自己從 config 解出，所以換庫不必
-重註冊排程。只讀 vault，只寫 <治理 vault>/.epitype/ 底下的 pack／state／lock／log。
+重註冊排程。盤點本身唯讀，寫的是 <治理 vault>/.epitype/ 的 pack／state／lock／log，
+外加兩個順路任務：重生 `_views/`，以及把 MEMORY.md 允許段以外、目錄已承載的卡片
+連結行搬進 `_drafts/index_pruned/`（原文照搬、不刪；`--dry-run` 只印不改）。
 """
 
 import argparse
@@ -18,6 +20,7 @@ from datetime import date, datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
+import posixpath
 import subprocess
 import sys
 import tempfile
@@ -26,9 +29,10 @@ import time
 import uuid
 
 try:
-    from . import alias_batch, card_lint, decision_lint, memsearch, memspec, pending_lint
+    from . import alias_batch, card_io, card_lint, decision_lint, memsearch, memspec, pending_lint
 except ImportError:  # Direct script execution keeps the CLI contract.
     import alias_batch
+    import card_io
     import card_lint
     import decision_lint
     import memsearch
@@ -155,8 +159,12 @@ def _section_drafts(vaults, today, since_date):
             entries.append({"vault": str(vault), "path": relative})
     commands = []
     pending_root = memspec.CAPTURE_PENDING_SUBPATH[-1]
+    pruned_root = memspec.INDEX_PRUNED_SUBPATH[-1]
+    # 整形移出的行不是捕捉草稿，`--reevaluate` 對它沒有意義（那條路問的是「今天的規則
+    # 還會不會捕捉這句話」）；它只是人要看的紀錄，所以不觸發任何建議指令。
+    replayable = {pending_root, pruned_root}
     for vault, paths in results:
-        if any(pending_root not in path.parts for path in paths):
+        if any(replayable.isdisjoint(path.parts) for path in paths):
             commands.append(
                 f'python epitype/harvest.py --reevaluate "{Path(vault) / DRAFT_DIRNAME / "decisions"}" [--apply]'
             )
@@ -358,6 +366,189 @@ def _section_recent(vaults, today, since_date):
     }
 
 
+# --------------------------------------------------------------------------- 主記憶整形（順路任務）
+
+
+def _views_module():
+    """lazy import：夢的盤點路徑不為生成器付錢，整形與順路重生共用這一處。"""
+    try:
+        from . import views
+    except ImportError:  # Direct script execution keeps the CLI contract.
+        import views
+    return views
+
+
+def _allowed_index_section(title):
+    key = " ".join(str(title or "").split()).casefold()
+    return any(key == allowed.casefold() for allowed in memspec.INDEX_ALLOWED_SECTIONS)
+
+
+def _index_card_targets(line):
+    """這一行指到的卡片（vault 相對 posix 路徑）；沒有 `](….md)` 就回空清單。"""
+    targets = []
+    for raw in memspec.INDEX_CARD_LINK_REGEX.findall(line):
+        target = raw.split("#", 1)[0].replace("\\", "/")
+        for character, encoded in memspec.MARKDOWN_LINK_ESCAPES.items():
+            target = target.replace(encoded, character)
+        if target.endswith(".md"):
+            targets.append(posixpath.normpath(target))
+    return targets
+
+
+def _index_stat(path):
+    """(mtime_ns, size)——讀後與寫前各取一次；中間變了就放棄本次整形。"""
+    info = path.stat()
+    return (info.st_mtime_ns, info.st_size)
+
+
+def _split_index(text, listed):
+    """(留下的行, 要搬的 [(段標題, 原文行)], 留下但視圖沒列的連結行)。
+
+    段標題＝最近一個 `##` 以上的標題（`#` 是檔名標題，之後算「不在任何段」）。允許段
+    內一律不動：那是手寫區，動它就等於生成器去跟其他寫者搶同一份檔案。
+    """
+    keep, moved, unlisted_lines = [], [], []
+    section = None
+    fenced = False
+    for raw in text.splitlines(keepends=True):
+        stripped = raw.strip()
+        if stripped.startswith("```"):
+            fenced = not fenced
+            keep.append(raw)
+            continue
+        if not fenced and stripped.startswith("#"):
+            level = len(stripped) - len(stripped.lstrip("#"))
+            section = stripped.lstrip("#").strip() if level >= 2 else None
+            keep.append(raw)
+            continue
+        if fenced or (section is not None and _allowed_index_section(section)):
+            keep.append(raw)
+            continue
+        targets = _index_card_targets(raw)
+        if not targets:
+            keep.append(raw)
+            continue
+        missing = [target for target in targets if target not in listed]
+        if missing:
+            # 視圖沒列的連結不搬：那可能是剛寫好、還沒生成目錄的新卡，搬走就真的不見了。
+            unlisted_lines.append({"section": section, "line": stripped, "missing": missing})
+            keep.append(raw)
+            continue
+        moved.append((section, raw))
+    return keep, moved, unlisted_lines
+
+
+def _append_pruned(vault, today, moved, stamp):
+    """把移出的行原文照搬進 `_drafts/index_pruned/YYYYMMDD.md`（附時間、來源段、原因）。
+
+    先寫這裡再改 MEMORY.md：換名寫入若在最後一步被拒，行仍然兩邊都在，下一次夢靠
+    「原文行已在檔內」去重，不會疊出第二份。
+    """
+    path = Path(vault).joinpath(*memspec.INDEX_PRUNED_SUBPATH) / f"{today.strftime('%Y%m%d')}.md"
+    try:
+        existing = path.read_text(encoding="utf-8")
+    except OSError:
+        existing = ""
+    recorded = set(existing.splitlines())
+    block = [] if existing else [memspec.INDEX_PRUNED_TITLE, ""]
+    written = 0
+    for section, raw in moved:
+        body = raw.rstrip("\r\n")
+        if body in recorded:
+            continue
+        block.append(memspec.INDEX_PRUNED_ENTRY_NOTE.format(
+            stamp=stamp,
+            source=memspec.MEMORY_INDEX_FILENAME,
+            section=section or memspec.INDEX_PRUNED_SECTION_NONE,
+            reason=memspec.INDEX_PRUNED_REASON,
+        ))
+        block.append(body)
+        block.append("")
+        recorded.add(body)
+        written += 1
+    if written:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8", newline="\n") as stream:
+            stream.write("\n".join(block) + "\n")
+    return path, written
+
+
+def shape_index(vault, today, apply=True, stamp=None):
+    """把 MEMORY.md 允許段以外、目錄已經承載的卡片連結行搬進 `_drafts/index_pruned/`。
+
+    主記憶會自己長回來（宿主「存卡後在 MEMORY.md 加一行」的預設、別場直接編輯），
+    事前用寫檔閘擋會連合法的手寫連結一起擋掉，所以改成夜裡低頻、受控、小範圍的事後
+    整形（Codex 2026-09-09 (c)）：讀→記 mtime＋大小→改→寫前再比→換名寫入（帶原內容
+    比對）→再讀核對，任一步對不上就整份放棄並記一行，絕不硬寫。搬走的行不刪，原文
+    留在 `_drafts/`。
+    """
+    vault = Path(vault)
+    index_path = vault / memspec.MEMORY_INDEX_FILENAME
+    result = {
+        "vault": str(vault), "status": "clean", "moved": 0, "kept": 0,
+        "moved_examples": [], "kept_examples": [], "pruned_path": None, "reason": None,
+    }
+    try:
+        original = index_path.read_bytes()
+        before = _index_stat(index_path)
+    except OSError:
+        result["status"] = "no-index"
+        result["reason"] = memspec.INDEX_SHAPING_NO_INDEX
+        return result
+    try:
+        text = original.decode("utf-8")
+    except UnicodeError as exc:
+        result["status"] = "error"
+        result["reason"] = f"{type(exc).__name__}: {exc}"
+        return result
+
+    listed = _views_module().listed_paths(vault)
+    if listed is None:
+        # 目錄讀不到就沒有「已被承載」的證據，整形沒有判準——不猜，報一行。
+        result["status"] = "no-views"
+        result["reason"] = memspec.INDEX_SHAPING_NO_VIEWS.format(
+            directory=memspec.VIEWS_DIRECTORY, vault=vault
+        )
+        return result
+
+    keep, moved, unlisted_lines = _split_index(text, listed)
+    result["moved"] = len(moved)
+    result["kept"] = len(unlisted_lines)
+    result["moved_examples"] = [line.strip() for _section, line in moved[:EXAMPLE_LIMIT]]
+    result["kept_examples"] = unlisted_lines[:EXAMPLE_LIMIT]
+    if not moved:
+        return result
+    if not apply:
+        result["status"] = "would-move"
+        return result
+
+    try:
+        if _index_stat(index_path) != before:
+            result["status"] = "abandoned"
+            result["reason"] = memspec.INDEX_SHAPING_RACE_REASON
+            return result
+        stamp = stamp or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%MZ")
+        pruned_path, _written = _append_pruned(vault, today, moved, stamp)
+        result["pruned_path"] = str(pruned_path)
+        payload = "".join(keep).encode("utf-8")
+        card_io.replace_if_unchanged(index_path, payload, original)
+    except card_io.CardConflict as exc:
+        result["status"] = "abandoned"
+        result["reason"] = memspec.INDEX_SHAPING_CONFLICT_REASON.format(error=exc)
+        return result
+    except OSError as exc:
+        result["status"] = "error"
+        result["reason"] = f"{type(exc).__name__}: {exc}"
+        return result
+
+    if index_path.read_bytes() != payload:
+        result["status"] = "readback-mismatch"
+        result["reason"] = memspec.INDEX_SHAPING_READBACK_REASON
+        return result
+    result["status"] = "moved"
+    return result
+
+
 # --------------------------------------------------------------------------- report assembly
 
 
@@ -372,7 +563,7 @@ _SECTIONS = (
 )
 
 
-def _next_steps(sections):
+def _next_steps(sections, shaping=()):
     by_id = {section["id"]: section for section in sections}
 
     def counts(section_id):
@@ -400,6 +591,12 @@ def _next_steps(sections):
     event = counts(6)
     if event.get("aging_total", 0) > 0:
         steps.append(f"事件卡老化候選 {event['aging_total']} 張 → 人工複核是否歸檔（不刪）")
+    kept = sum(item.get("kept", 0) for item in shaping)
+    if kept:
+        steps.append(memspec.INDEX_SHAPING_KEPT_STEP.format(count=kept))
+    abandoned = sum(1 for item in shaping if item.get("status") == "abandoned")
+    if abandoned:
+        steps.append(memspec.INDEX_SHAPING_ABANDONED_STEP.format(count=abandoned))
     if any(section.get("error") or section.get("errors") for section in sections):
         steps.append("盤點未完成：先查看失敗／略過的節與 vault，重跑後才能確認其餘待處理項。")
     if not steps:
@@ -407,7 +604,7 @@ def _next_steps(sections):
     return steps
 
 
-def build_report(vaults, today=None, since_date=None, deadline=None):
+def build_report(vaults, today=None, since_date=None, deadline=None, shaping=None):
     today = today or datetime.now(timezone.utc).date()
     since_date = since_date or (today - timedelta(days=DEFAULT_EVENT_AGING_DAYS))
     sections = []
@@ -422,12 +619,14 @@ def build_report(vaults, today=None, since_date=None, deadline=None):
             sections.append({"id": section_id, "title": title, "error": None, **data})
         except Exception as exc:
             sections.append({"id": section_id, "title": title, "error": f"{type(exc).__name__}: {exc}"})
+    shaping = list(shaping or ())
     return {
         "vaults": [str(vault) for vault in vaults],
         "today": today.isoformat(),
         "since": since_date.isoformat(),
         "sections": sections,
-        "next_steps": _next_steps(sections),
+        "index_shaping": shaping,
+        "next_steps": _next_steps(sections, shaping),
     }
 
 
@@ -458,7 +657,22 @@ def _render_markdown(report):
         if note:
             lines.append(f"備註：{note}")
         lines.append("")
-    lines.append("## 8. 夢的下一步")
+    lines.append(memspec.INDEX_SHAPING_HEADING)
+    shaping = report.get("index_shaping") or ()
+    for item in shaping:
+        lines.append("- " + memspec.INDEX_SHAPING_LINE.format(
+            vault=item["vault"], status=item["status"], moved=item["moved"], kept=item["kept"],
+            detail=item.get("reason") or item.get("pruned_path") or memspec.VIEWS_MISSING,
+        ))
+        for example in item.get("moved_examples") or ():
+            lines.append(f"  - 移出：{example}")
+        for example in item.get("kept_examples") or ():
+            lines.append(f"  - 留下（視圖未列 {example['missing']}）：{example['line']}")
+    if not shaping:
+        lines.append(memspec.VIEWS_EMPTY_SECTION)
+    lines.append("")
+
+    lines.append("## 9. 夢的下一步")
     for step in report["next_steps"]:
         lines.append(f"- {step}")
     lines.append("")
@@ -1106,11 +1320,116 @@ def _selftest():
                 and len(root_calls) == 3
                 and not (gov / memspec.DREAM_DIRECTORY / memspec.DREAM_LOCK_FILENAME).exists()
             )))
+
+            # --- 主記憶整形（順路任務）---
+            shaped = Path(temp_dir).resolve() / "shaped"
+            shaped.mkdir()
+            for stem in ("moved-one", "moved-two"):
+                _write_card(
+                    shaped / f"{stem}.md",
+                    f"---\nname: {stem}\ndescription: 2026-09-01 synthetic\naliases:\n- {stem}\n---\nbody\n",
+                )
+            _views_module().generate(shaped, stamp="2026-09-09T00:00Z")
+            index_path = shaped / memspec.MEMORY_INDEX_FILENAME
+            # 三段短入口（兩段各帶一行合法的手寫連結）＋一段允許段以外、被塞進三行卡片
+            # 連結：兩行的卡目錄承載得到，第三行指到還沒成為卡的檔案。
+            index_text = (
+                "# 短入口\n"
+                "\n"
+                "## 習慣與偏好\n"
+                "- [moved-one](moved-one.md)\n"
+                "\n"
+                "## 找不到就搜\n"
+                "- 先 memsearch，讀索引不算查過記憶。\n"
+                "\n"
+                "## 索引卡\n"
+                "- [moved-two](moved-two.md)\n"
+                "\n"
+                "## 環境陷阱\n"
+                "- [moved-one](moved-one.md)\n"
+                "- [moved-two](moved-two.md)\n"
+                "- [還沒生成目錄的新卡](pending-card.md)\n"
+            )
+            index_path.write_bytes(index_text.encode("utf-8"))
+            pruned_dir = shaped.joinpath(*memspec.INDEX_PRUNED_SUBPATH)
+            pruned_file = pruned_dir / "20260906.md"
+
+            dry_out = io.StringIO()
+            dry_code = main(["--dry-run", "--today", "2026-09-06", os.fspath(shaped)], output=dry_out)
+            checks.append(("--dry-run 只印「會搬幾行」：MEMORY.md 一個位元組沒動，index_pruned 不存在", (
+                dry_code == 0
+                and index_path.read_bytes() == index_text.encode("utf-8")
+                and not pruned_dir.exists()
+                and "would-move｜搬出 2 行｜留下 1 行" in dry_out.getvalue()
+            )))
+
+            shaped_out = io.StringIO()
+            shaped_code = main(["--today", "2026-09-06", os.fspath(shaped)], output=shaped_out)
+            after_first = index_path.read_text(encoding="utf-8")
+            pruned_text = pruned_file.read_text(encoding="utf-8")
+            checks.append(("整形只搬允許段以外、目錄已承載的行；三段短入口一字不動", (
+                shaped_code == 0
+                and after_first == index_text.replace(
+                    "- [moved-one](moved-one.md)\n- [moved-two](moved-two.md)\n"
+                    "- [還沒生成目錄的新卡](pending-card.md)\n",
+                    "- [還沒生成目錄的新卡](pending-card.md)\n",
+                )
+            )))
+            checks.append(("移出的行原文照搬進 _drafts/index_pruned/YYYYMMDD.md，附時間、來源段與原因", (
+                "- [moved-one](moved-one.md)" in pruned_text
+                and "- [moved-two](moved-two.md)" in pruned_text
+                and "「環境陷阱」" in pruned_text
+                and memspec.INDEX_PRUNED_REASON in pruned_text
+                and "pending-card" not in pruned_text
+            )))
+
+            second_pack = (shaped / ".epitype" / "dream_pack_20260906.md").read_text(encoding="utf-8")
+            checks.append(("視圖沒列的那行留在 MEMORY.md，並列進夢報告的整形節", (
+                "- [還沒生成目錄的新卡](pending-card.md)" in after_first
+                and memspec.INDEX_SHAPING_HEADING in second_pack
+                and "moved｜搬出 2 行｜留下 1 行" in second_pack
+                and "pending-card.md" in second_pack.split(memspec.INDEX_SHAPING_HEADING, 1)[1]
+                and memspec.INDEX_SHAPING_KEPT_STEP.format(count=1) in second_pack
+            )))
+
+            main(["--today", "2026-09-06", os.fspath(shaped)], output=io.StringIO())
+            checks.append(("再跑一次沒有東西可搬：MEMORY.md 與 index_pruned 都不再變動", (
+                index_path.read_text(encoding="utf-8") == after_first
+                and pruned_file.read_text(encoding="utf-8") == pruned_text
+            )))
+
+            # 競爭情境：讀完之後、寫入之前檔案被別的寫者改動 → 整份放棄，一行都不搬。
+            index_path.write_bytes(index_text.encode("utf-8"))
+            saved_index_stat = _index_stat
+            stat_calls = []
+
+            def _index_stat_races(path):
+                stat_calls.append(path)
+                if len(stat_calls) == 2:
+                    with open(path, "a", encoding="utf-8", newline="\n") as stream:
+                        stream.write("- 別場 session 這時候加了一行\n")
+                return saved_index_stat(path)
+
+            race_out = io.StringIO()
+            try:
+                globals()["_index_stat"] = _index_stat_races
+                main(["--today", "2026-09-06", os.fspath(shaped)], output=race_out)
+            finally:
+                globals()["_index_stat"] = saved_index_stat
+            race_pack = (shaped / ".epitype" / "dream_pack_20260906.md").read_text(encoding="utf-8")
+            checks.append(("寫入前 mtime 變了就整份放棄：行留在原地、index_pruned 沒長、報告記一行", (
+                len(stat_calls) == 2
+                and "- [moved-one](moved-one.md)\n- [moved-two](moved-two.md)\n"
+                in index_path.read_text(encoding="utf-8")
+                and pruned_file.read_text(encoding="utf-8") == pruned_text
+                and memspec.INDEX_SHAPING_RACE_REASON in race_pack
+                and memspec.INDEX_SHAPING_ABANDONED_STEP.format(count=1) in race_pack
+            )))
     except Exception as exc:
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 31
+    total = 37
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
@@ -1187,18 +1506,27 @@ def main(argv=None, output=sys.stdout):
         since_date = parsed.since or (today - timedelta(days=DEFAULT_EVENT_AGING_DAYS))
         # 順路重生閱讀目錄：夜間整理已經在走每一個庫，而生成本身是「輸入指紋沒變就
         # 不寫」。失敗不影響審核包——目錄過期還有 card_lint --deep 的漏卡檢查會報。
-        # lazy import 且不併進上面那條共用 import：夢的熱路徑不為它付錢。
+        # 必須排在整形之前：整形的判準是「目錄已經承載這張卡」，判準本身不能是舊的。
         if not parsed.dry_run:
-            try:
-                from . import views
-            except ImportError:  # Direct script execution keeps the CLI contract.
-                import views
+            views = _views_module()
             for vault in vaults:
                 try:
                     views.generate(vault)
                 except Exception:
                     continue
-        report = build_report(vaults, today=today, since_date=since_date, deadline=deadline)
+        shaping = []
+        for vault in vaults:
+            try:
+                shaping.append(shape_index(vault, today, apply=not parsed.dry_run))
+            except Exception as exc:
+                shaping.append({
+                    "vault": str(vault), "status": "error", "moved": 0, "kept": 0,
+                    "moved_examples": [], "kept_examples": [], "pruned_path": None,
+                    "reason": f"{type(exc).__name__}: {exc}",
+                })
+        report = build_report(
+            vaults, today=today, since_date=since_date, deadline=deadline, shaping=shaping
+        )
         rendered = json.dumps(report, ensure_ascii=False, indent=1)
         content = rendered if parsed.json else _render_markdown(report)
 

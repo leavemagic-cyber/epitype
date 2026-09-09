@@ -40,8 +40,8 @@ STATE_REVIEW = "review"
 # （收斂第 3 條）——它進待複查段，由收尾的人／AI 依證據補欄位。
 STATE_REQUIRED_TYPES = (memspec.CARD_TYPE_DECISION, memspec.CARD_TYPE_PROJECT)
 
-# markdown 連結只有這幾個字元會把目標吃掉；其餘（含中文檔名）保持原樣才讀得懂。
-_LINK_ESCAPES = {" ": "%20", "(": "%28", ")": "%29", "<": "%3C", ">": "%3E"}
+# 生成與還原共用同一張表（dream 的主記憶整形也要還原這些連結）。
+_LINK_ESCAPES = memspec.MARKDOWN_LINK_ESCAPES
 
 
 def _state_of(card_type, fields):

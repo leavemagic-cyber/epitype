@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- 夢多一個順路任務「主記憶整形」（owner 2026-09-09：「我們不是有類似夢的機制，不就是剛好處理這個?」；FAILURE_MODES §33）：`MEMORY.md` 被 §31 修短之後會自己長回來——宿主「存卡後在 MEMORY.md 加一行」的預設、別場 session 直接編輯——而事前用寫檔閘擋會連手寫短入口本來就長成那樣的 `- [name](card.md)` 一起擋掉。改由 03:30 那場夢事後整形：允許段（`memspec.INDEX_ALLOWED_SECTIONS`＝習慣與偏好／找不到就搜／索引卡／專案規則，各含英文寫法）內一律不動；允許段以外、且連到的卡 `_views/current.md` 或 `history/closed.md` 已經列出的整行，原文照搬進 `<vault>/_drafts/index_pruned/YYYYMMDD.md`（附時間、來源段、原因），不刪。
+- 視圖沒列到的連結不搬，只列進報告：那可能是幾分鐘前才寫好、目錄還沒生成的新卡。整形排在順路重生 `_views/` 之後，因為「目錄已經承載這張卡」就是它唯一的判準，判準不能是舊的。
+- 寫法是受控的小範圍改寫，不是重寫：讀→記 mtime＋大小→算→寫前再比 mtime＋大小→帶原內容比對的換名寫入（`card_io.replace_if_unchanged`，取鎖）→再讀核對。任一步對不上就整份放棄、報告記一行、下次夢重試。紀錄檔先寫、`MEMORY.md` 後改，所以被拒的換名不會弄丟行；下一次靠「原文行已在檔內」去重，不疊第二份。`--dry-run` 只印會搬幾行，一個位元組都不動。
+- 夢報告多一節「## 8. 主記憶整形」（原本的下一步改為第 9 節），列每庫的狀態、搬出行數、留下行數與放棄原因；下一步會提示「有連結不在目錄裡 → 跑 views」與「整形放棄 N 次」。第 4 節不再對 `_drafts/index_pruned/` 提 `harvest --reevaluate`（那條路問的是捕捉規則，跟整形無關）。
+- 本機 `memory_lint.py` 未改：`INDEX_WARN_KB = 3.0` 與 `index_over` 計入 issues 已經在位（`memory_lint.py:389`／`:422`），`MEMORY.md` >3 KB 本來就列 ISSUES 並在 SessionStart 浮一行，符合本單要求。
+- 回歸：`epitype/dream.py --selftest` 31 → **37**（新增六案：`--dry-run` 不動檔、只搬允許段外且目錄承載的行、紀錄檔原文照搬＋來源段、視圖未列的行留著並進報告、再跑一次無動作、寫入前 mtime 變了整份放棄）。`views.py` 的連結轉義表移到 `memspec.MARKDOWN_LINK_ESCAPES` 供生成端與還原端共用，行為不變。run_all 49/49、corpus 330/330、seeds 15/15 與 5/5。
+
 - 自動捕捉改折衷制（owner 2026-09-09 裁 Q5「C」；FAILURE_MODES §32）：只有形狀明確的三個模板自動入庫——`arrow-answer`（有 `<-`／`<=`／`《` 回覆標記，且 owner 那半以短答開頭：同意／可／不／好／甲乙丙／A–E／yes／no）、`leading-correction`（owner 那半**句首**是不是！／不對，／不要／別再／錯了／stop）、`explicit-grant`（明示第一人稱授權：我同意／同意過／我授權／准你／批准你／允許你／你可以＋動詞／I agree／you may）。判定只看 owner 自己那半（`capture.owner_side`：裁定卡正文帶著助理的提問，不能讓助理替 owner 蓋章），常數在 `memspec.CAPTURE_ADMIT_*`。
 - 其餘「現行規則仍會捕捉」的句子改寫提案：`<vault>/_drafts/captured_pending/YYYYMMDD/<原本的檔名>.md`。`_` 開頭的路徑段本來就不在 `memsearch._scan_vault` 的掃描範圍，所以提案不進索引、不被喚回、也不受寫檔閘的卡片契約管——沒有第二條排除規則要同步。線上 hook 與離線回放（harvest）共用 `capture.write_capture` 這一處判定，落點一致；`--dry-run` 多印一種 `WOULD PROPOSE`。
 - 轉正是人的動作，不是回放：`harvest --reevaluate --apply` 對 `verified: false` 的提案印 **HOLD** 不搬（提案本來就是「今天的規則也會捕捉」，那正是它被扣住的原因），dream 第 4 節改列待審份數與人工審閱指令，不再對捕捉提案提供 `--reevaluate` 那條命令。

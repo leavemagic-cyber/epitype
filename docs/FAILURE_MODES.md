@@ -1159,3 +1159,70 @@ Regressions: `tests/capture_admission_regression.py` (8 cases, including the
 consumer-gate sweep), the admission split in `epitype/harvest.py --selftest` and
 `adapters/claude/recall_hook.py --selftest`, and the landing assertion for every
 fixture in `tests/capture_integration_regression.py`.
+
+## 33. MEMORY.md grows back by itself
+
+§31 made `MEMORY.md` a hand-written short entry point and moved the catalogue into
+`_views/`. That fixed the file once. It does not keep it that way, because the file
+has writers other than the person who trimmed it, and every one of them writes the
+same shape — one more index line:
+
+1. **The host's own default.** After a card is saved, "append a pointer line to
+   `MEMORY.md`" is the assistant's default closing move. It happened on 2026-09-09
+   while the trim was in progress: another session appended a `## 使用者既有資源`
+   section.
+2. **Another session editing directly.** Sessions run concurrently against one
+   vault; the second one to read has no idea a trim happened.
+3. **Expiry archiving.** Only ever removes lines, so it cannot cause growth — listed
+   because it is the third writer and it must keep working while shaping runs.
+
+A write gate cannot be the answer here. The gate would have to reject exactly the
+line shape the short entry point is *made of* — `- [name](card.md)` is what the
+「索引卡」 and 「習慣與偏好」 sections legitimately contain — so blocking it before
+the fact blocks the hand-written entry point as much as the drift.
+
+So the correction happens afterwards, in the dream (owner 2026-09-09:
+「我們不是有類似夢的機制，不就是剛好處理這個?」). The dream already runs offline at
+03:30, calls no model, and walks every vault; Codex's (c) in the same day's
+convergence allows exactly this much contact with the file: `MEMORY.md` may be
+edited only in low-frequency, controlled, small-scope passes.
+
+**The rule** (`memspec.INDEX_ALLOWED_SECTIONS`, `epitype/dream.py:shape_index`):
+
+- Sections named in `INDEX_ALLOWED_SECTIONS` (習慣與偏好 / 找不到就搜 / 索引卡 /
+  專案規則, each with an English spelling) are the hand-written area. **Nothing
+  inside them is ever touched**, links included. Adding a hand-written section means
+  adding it to that tuple.
+- Outside those sections, a line carrying a card link (`](….md)`) is moved out **only
+  if every card it links to is already listed in `_views/current.md` or
+  `_views/history/closed.md`**. A link the views do not carry stays where it is and
+  is reported instead: it may be a card written minutes ago whose view has not been
+  generated, and moving it would be the one case where a line really disappears.
+- Moved lines are appended verbatim to `<vault>/_drafts/index_pruned/YYYYMMDD.md`
+  with the timestamp, the section they came from, and the reason. Nothing is deleted;
+  `_`-prefixed paths are outside the scan range, so the record is not itself indexed.
+- The dream regenerates `_views/` before shaping, because "the catalogue already
+  carries this card" is the entire test and it must not be answered from a stale
+  catalogue.
+
+**When it gives up.** The failure this guards against is the one block markers
+cannot stop: A reads, B appends, A writes back its stale snapshot and B's line is
+gone. So the pass is read → record mtime and size → compute → **re-check mtime and
+size** → rename-into-place with the original bytes compared under a lock
+(`card_io.replace_if_unchanged`) → read back and compare. Any mismatch abandons the
+whole pass, writes one line into the packet, and changes nothing; the next dream
+retries. The record file is appended before the swap, so a rejected swap can never
+lose a line — the next pass deduplicates against the verbatim lines already recorded.
+`--dry-run` reports what it would move and writes nothing at all.
+
+Boundary: this is cleanup after the fact, not prevention. Between two dreams the
+file can be any size, and shaping cannot rescue a line pasted *inside* an allowed
+section — that is the price of never fighting the hand-written area. The size signal
+is the local SessionEnd lint, where `MEMORY.md` over 3 KB counts as an ISSUE and
+surfaces at the next SessionStart.
+
+Regressions: six cases in `epitype/dream.py --selftest` — `--dry-run` moves nothing,
+a real pass moves only the carried lines and leaves the three short-entry sections
+byte-identical, the record file carries the verbatim line with its source section, a
+second pass is a no-op, and a file changed between read and write abandons with the
+line still in place and nothing appended.
