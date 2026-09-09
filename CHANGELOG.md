@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- exam（U-P3）：`_emit_results()` 把 U-P2 標的純機制題（`cards: []` ＋ `mechanism` 標籤，如 encoding／budget／fail-open／advisory）從 UNMAPPED 分出來，總結行改 `MAPPED a/total | MECHANISM b/total | UNMAPPED c/total`，`exam_results_latest.json` 每題多 `mechanism` 欄（無則空字串），不改判分；selftest 11→12 案；真庫實測 corpus_300 MAPPED 140／MECHANISM 190／UNMAPPED 0（330 題）、seeds 6／9／0（15 題）、seeds_cr 5／0／0（5 題）；閘門 run_all 49/49、privacy PASS、corpus 330/330、seeds 15/15 與 5/5。
 - 整潔（U-J2）：閘門紀錄與 `forbidden` 正則驗證器搬進 `adapters/claude/_hook_common.py` 並改公開名（`compile_bounded_regex`、`append_gate_log`、`with_session`、`GATE_LOG_MAX_BYTES`），Stop 閘不再跨 adapter 借 `pretooluse_gate` 的私有名。純搬家：函式本體逐位元組不變，紀錄格式與輪替門檻（2 MiB → `.1`）照舊。
 - gitignore: ignore the transient .hook-trust-*/ directory that hook_trust selftest creates in the repo root (it made the worktree-clean gate flap while another selftest was running).
 
