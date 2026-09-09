@@ -1198,9 +1198,19 @@ edited only in low-frequency, controlled, small-scope passes.
   `_views/history/closed.md`**. A link the views do not carry stays where it is and
   is reported instead: it may be a card written minutes ago whose view has not been
   generated, and moving it would be the one case where a line really disappears.
+- **The preamble — everything before the first `##` — is never touched either**,
+  because a short entry point's title line and its opening sentences can legitimately
+  carry links and there is no section to judge them against.
+- **A leading BOM is skipped while the sections are parsed**: with it, the first
+  heading's opening character is not `#`, so no section is ever recognised and the
+  whole file reads as "outside every section" — including the hand-written areas. It
+  is skipped for the judgement only; the bytes written back are the original lines,
+  BOM included.
 - Moved lines are appended verbatim to `<vault>/_drafts/index_pruned/YYYYMMDD.md`
-  with the timestamp, the section they came from, and the reason. Nothing is deleted;
-  `_`-prefixed paths are outside the scan range, so the record is not itself indexed.
+  with the timestamp, the section they came from, and the reason. Verbatim is
+  byte-for-byte, line ending included, and identical lines are each recorded — the
+  same line under two sections is two facts. Nothing is deleted; `_`-prefixed paths
+  are outside the scan range, so the record is not itself indexed.
 - The dream regenerates `_views/` before shaping, because "the catalogue already
   carries this card" is the entire test and it must not be answered from a stale
   catalogue.
@@ -1212,7 +1222,9 @@ size** → rename-into-place with the original bytes compared under a lock
 (`card_io.replace_if_unchanged`) → read back and compare. Any mismatch abandons the
 whole pass, writes one line into the packet, and changes nothing; the next dream
 retries. The record file is appended before the swap, so a rejected swap can never
-lose a line — the next pass deduplicates against the verbatim lines already recorded.
+lose a line; the next pass records it again, each entry carrying its own timestamp —
+a record file is the one place where a duplicate costs nothing and a gap costs
+everything.
 `--dry-run` reports what it would move and writes nothing at all.
 
 Boundary: this is cleanup after the fact, not prevention. Between two dreams the
@@ -1221,8 +1233,11 @@ section — that is the price of never fighting the hand-written area. The size 
 is the local SessionEnd lint, where `MEMORY.md` over 3 KB counts as an ISSUE and
 surfaces at the next SessionStart.
 
-Regressions: six cases in `epitype/dream.py --selftest` — `--dry-run` moves nothing,
+Regressions: nine cases in `epitype/dream.py --selftest` — `--dry-run` moves nothing,
 a real pass moves only the carried lines and leaves the three short-entry sections
 byte-identical, the record file carries the verbatim line with its source section, a
 second pass is a no-op, and a file changed between read and write abandons with the
-line still in place and nothing appended.
+line still in place and nothing appended; plus the three the first review caught — a
+BOM'd file's allowed section stays byte-identical, a preamble link line stays while
+the same file's out-of-section line still moves, and a CRLF line reaches the record
+with its `\r\n` intact and twice when it sat under two sections.

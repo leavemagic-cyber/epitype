@@ -7,7 +7,8 @@
 - 寫法是受控的小範圍改寫，不是重寫：讀→記 mtime＋大小→算→寫前再比 mtime＋大小→帶原內容比對的換名寫入（`card_io.replace_if_unchanged`，取鎖）→再讀核對。任一步對不上就整份放棄、報告記一行、下次夢重試。紀錄檔先寫、`MEMORY.md` 後改，所以被拒的換名不會弄丟行；下一次靠「原文行已在檔內」去重，不疊第二份。`--dry-run` 只印會搬幾行，一個位元組都不動。
 - 夢報告多一節「## 8. 主記憶整形」（原本的下一步改為第 9 節），列每庫的狀態、搬出行數、留下行數與放棄原因；下一步會提示「有連結不在目錄裡 → 跑 views」與「整形放棄 N 次」。第 4 節不再對 `_drafts/index_pruned/` 提 `harvest --reevaluate`（那條路問的是捕捉規則，跟整形無關）。
 - 本機 `memory_lint.py` 未改：`INDEX_WARN_KB = 3.0` 與 `index_over` 計入 issues 已經在位（`memory_lint.py:389`／`:422`），`MEMORY.md` >3 KB 本來就列 ISSUES 並在 SessionStart 浮一行，符合本單要求。
-- 回歸：`epitype/dream.py --selftest` 31 → **37**（新增六案：`--dry-run` 不動檔、只搬允許段外且目錄承載的行、紀錄檔原文照搬＋來源段、視圖未列的行留著並進報告、再跑一次無動作、寫入前 mtime 變了整份放棄）。`views.py` 的連結轉義表移到 `memspec.MARKDOWN_LINK_ESCAPES` 供生成端與還原端共用，行為不變。run_all 49/49、corpus 330/330、seeds 15/15 與 5/5。
+- 審核抓到三件，同批修掉：檔首 BOM 讓第一個標題認不出來（整份檔被當成「不在任何段」，連允許段的手寫行都可搬）→ 判段前跳過 BOM，寫回位元組不變；第一個 `##` 之前的前言區改為一律不搬（短入口的標題行與說明行本來就可能帶連結）；`index_pruned` 改逐位元組照搬（CRLF 行尾原樣保留）且不再去重（同一行分屬兩段是兩件事）。
+- 回歸：`epitype/dream.py --selftest` 31 → **40**（新增九案：`--dry-run` 不動檔、只搬允許段外且目錄承載的行、紀錄檔原文照搬＋來源段、視圖未列的行留著並進報告、再跑一次無動作、寫入前 mtime 變了整份放棄，加上審核補的 BOM 不動檔、前言區不搬、紀錄檔 CRLF＋重複行各留一筆）。`views.py` 的連結轉義表移到 `memspec.MARKDOWN_LINK_ESCAPES` 供生成端與還原端共用，行為不變。run_all 49/49、corpus 330/330、seeds 15/15 與 5/5。
 
 - 自動捕捉改折衷制（owner 2026-09-09 裁 Q5「C」；FAILURE_MODES §32）：只有形狀明確的三個模板自動入庫——`arrow-answer`（有 `<-`／`<=`／`《` 回覆標記，且 owner 那半以短答開頭：同意／可／不／好／甲乙丙／A–E／yes／no）、`leading-correction`（owner 那半**句首**是不是！／不對，／不要／別再／錯了／stop）、`explicit-grant`（明示第一人稱授權：我同意／同意過／我授權／准你／批准你／允許你／你可以＋動詞／I agree／you may）。判定只看 owner 自己那半（`capture.owner_side`：裁定卡正文帶著助理的提問，不能讓助理替 owner 蓋章），常數在 `memspec.CAPTURE_ADMIT_*`。
 - 其餘「現行規則仍會捕捉」的句子改寫提案：`<vault>/_drafts/captured_pending/YYYYMMDD/<原本的檔名>.md`。`_` 開頭的路徑段本來就不在 `memsearch._scan_vault` 的掃描範圍，所以提案不進索引、不被喚回、也不受寫檔閘的卡片契約管——沒有第二條排除規則要同步。線上 hook 與離線回放（harvest）共用 `capture.write_capture` 這一處判定，落點一致；`--dry-run` 多印一種 `WOULD PROPOSE`。

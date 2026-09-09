@@ -405,13 +405,19 @@ def _split_index(text, listed):
     """(留下的行, 要搬的 [(段標題, 原文行)], 留下但視圖沒列的連結行)。
 
     段標題＝最近一個 `##` 以上的標題（`#` 是檔名標題，之後算「不在任何段」）。允許段
-    內一律不動：那是手寫區，動它就等於生成器去跟其他寫者搶同一份檔案。
+    內一律不動：那是手寫區，動它就等於生成器去跟其他寫者搶同一份檔案。第一個 `##`
+    之前的前言區同樣不動：短入口的標題行與說明行本來就可能帶連結。
+
+    判斷段落前要先跳過檔首 BOM——帶 BOM 的第一行首字元不是 `#`，第一個標題會認不出
+    來，整份檔就被當成「不在任何段」而全部可搬。BOM 只影響判斷：`raw` 一律原文進
+    keep，寫回的位元組不因這個判斷而改變。
     """
     keep, moved, unlisted_lines = [], [], []
     section = None
+    seen_section = False
     fenced = False
-    for raw in text.splitlines(keepends=True):
-        stripped = raw.strip()
+    for position, raw in enumerate(text.splitlines(keepends=True)):
+        stripped = (raw.lstrip("\N{ZERO WIDTH NO-BREAK SPACE}") if position == 0 else raw).strip()
         if stripped.startswith("```"):
             fenced = not fenced
             keep.append(raw)
@@ -419,9 +425,10 @@ def _split_index(text, listed):
         if not fenced and stripped.startswith("#"):
             level = len(stripped) - len(stripped.lstrip("#"))
             section = stripped.lstrip("#").strip() if level >= 2 else None
+            seen_section = seen_section or level >= 2
             keep.append(raw)
             continue
-        if fenced or (section is not None and _allowed_index_section(section)):
+        if fenced or not seen_section or (section is not None and _allowed_index_section(section)):
             keep.append(raw)
             continue
         targets = _index_card_targets(raw)
@@ -441,35 +448,35 @@ def _split_index(text, listed):
 def _append_pruned(vault, today, moved, stamp):
     """把移出的行原文照搬進 `_drafts/index_pruned/YYYYMMDD.md`（附時間、來源段、原因）。
 
-    先寫這裡再改 MEMORY.md：換名寫入若在最後一步被拒，行仍然兩邊都在，下一次夢靠
-    「原文行已在檔內」去重，不會疊出第二份。
+    先寫這裡再改 MEMORY.md：換名寫入若在最後一步被拒，行仍然兩邊都在，下次夢會把它
+    再記一次——這是紀錄檔，多一筆各自帶自己的時間戳，比漏一筆安全。
+
+    照搬＝逐位元組，連原本的行尾（CRLF 就是 CRLF）一起；也不去重：同一行出現在不同
+    段是兩件事，兩筆都要留得下來。所以這裡用二進位附加，不讓文字模式改寫行尾。
     """
     path = Path(vault).joinpath(*memspec.INDEX_PRUNED_SUBPATH) / f"{today.strftime('%Y%m%d')}.md"
     try:
-        existing = path.read_text(encoding="utf-8")
+        existing = path.read_bytes()
     except OSError:
-        existing = ""
-    recorded = set(existing.splitlines())
-    block = [] if existing else [memspec.INDEX_PRUNED_TITLE, ""]
-    written = 0
+        existing = b""
+    block = [] if existing else [memspec.INDEX_PRUNED_TITLE + "\n", "\n"]
     for section, raw in moved:
-        body = raw.rstrip("\r\n")
-        if body in recorded:
-            continue
         block.append(memspec.INDEX_PRUNED_ENTRY_NOTE.format(
             stamp=stamp,
             source=memspec.MEMORY_INDEX_FILENAME,
             section=section or memspec.INDEX_PRUNED_SECTION_NONE,
             reason=memspec.INDEX_PRUNED_REASON,
-        ))
-        block.append(body)
-        block.append("")
-        recorded.add(body)
-        written += 1
+        ) + "\n")
+        block.append(raw)
+        if not raw.endswith(("\n", "\r")):
+            # 檔尾那一行原本就沒有換行；補一個純粹是不讓下一筆註解黏上去。
+            block.append("\n")
+        block.append("\n")
+    written = len(moved)
     if written:
         path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8", newline="\n") as stream:
-            stream.write("\n".join(block) + "\n")
+        with path.open("ab") as stream:
+            stream.write("".join(block).encode("utf-8"))
     return path, written
 
 
@@ -1425,11 +1432,67 @@ def _selftest():
                 and memspec.INDEX_SHAPING_RACE_REASON in race_pack
                 and memspec.INDEX_SHAPING_ABANDONED_STEP.format(count=1) in race_pack
             )))
+
+            def _shaping_vault(name, stems, payload):
+                """開一個只為整形用的小庫：幾張卡、一份目錄、一份指定位元組的 MEMORY.md。"""
+                built = Path(temp_dir).resolve() / name
+                built.mkdir()
+                for stem in stems:
+                    _write_card(
+                        built / f"{stem}.md",
+                        f"---\nname: {stem}\ndescription: 2026-09-01 synthetic\naliases:\n- {stem}\n---\nbody\n",
+                    )
+                _views_module().generate(built, stamp="2026-09-09T00:00Z")
+                (built / memspec.MEMORY_INDEX_FILENAME).write_bytes(payload)
+                return built, built / memspec.MEMORY_INDEX_FILENAME
+
+            # 檔首 BOM：`## 索引卡` 前面多一個 BOM，第一行首字元就不是 `#`，第一個標題
+            # 認不出來 → 整份檔被當成「不在任何段」，允許段裡的手寫行會被搬走。
+            bom_bytes = "\ufeff## 索引卡\n- [bom-one](bom-one.md)\n- [bom-two](bom-two.md)\n".encode("utf-8")
+            bom_vault, bom_index = _shaping_vault("bom", ("bom-one", "bom-two"), bom_bytes)
+            main(["--today", "2026-09-06", os.fspath(bom_vault)], output=io.StringIO())
+            checks.append(("檔首 BOM 不影響判段：允許段的兩行連結一個位元組沒動，index_pruned 也沒開", (
+                bom_index.read_bytes() == bom_bytes
+                and not bom_vault.joinpath(*memspec.INDEX_PRUNED_SUBPATH).exists()
+            )))
+
+            # 前言區（第一個 `##` 之前）：短入口的標題行與說明行本來就可能帶連結，一律
+            # 不搬；同一份檔裡允許段以外的行照搬，證明這道保護沒有把整形關掉。
+            pre_bytes = (
+                "# 短入口\n"
+                "- [pre-one](pre-one.md)\n"
+                "\n"
+                "## 環境陷阱\n"
+                "- [pre-two](pre-two.md)\n"
+            ).encode("utf-8")
+            pre_vault, pre_index = _shaping_vault("preamble", ("pre-one", "pre-two"), pre_bytes)
+            main(["--today", "2026-09-06", os.fspath(pre_vault)], output=io.StringIO())
+            pre_pruned = (pre_vault.joinpath(*memspec.INDEX_PRUNED_SUBPATH) / "20260906.md").read_text(encoding="utf-8")
+            checks.append(("第一個 `##` 之前的前言連結行不搬；同檔允許段以外的行照搬", (
+                pre_index.read_bytes() == pre_bytes.replace(b"- [pre-two](pre-two.md)\n", b"")
+                and "- [pre-two](pre-two.md)" in pre_pruned
+                and "pre-one" not in pre_pruned
+            )))
+
+            # 紀錄檔＝原文照搬：CRLF 檔搬出的行連 \r\n 一起進 index_pruned；同一行出現在
+            # 兩個段就是兩件事，去重會讓其中一段的證據消失。
+            crlf_bytes = (
+                "# t\r\n\r\n## 環境陷阱\r\n- [dup](dup-one.md)\r\n\r\n## 另一段\r\n- [dup](dup-one.md)\r\n"
+            ).encode("utf-8")
+            crlf_vault, crlf_index = _shaping_vault("verbatim", ("dup-one",), crlf_bytes)
+            main(["--today", "2026-09-06", os.fspath(crlf_vault)], output=io.StringIO())
+            crlf_pruned = (crlf_vault.joinpath(*memspec.INDEX_PRUNED_SUBPATH) / "20260906.md").read_bytes()
+            checks.append(("index_pruned 逐位元組照搬：CRLF 行尾原樣留著，同一行分屬兩段就記兩筆", (
+                crlf_pruned.count(b"- [dup](dup-one.md)\r\n") == 2
+                and "「環境陷阱」".encode("utf-8") in crlf_pruned
+                and "「另一段」".encode("utf-8") in crlf_pruned
+                and crlf_index.read_bytes() == "# t\r\n\r\n## 環境陷阱\r\n\r\n## 另一段\r\n".encode("utf-8")
+            )))
     except Exception as exc:
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 37
+    total = 40
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

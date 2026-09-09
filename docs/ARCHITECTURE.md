@@ -60,9 +60,9 @@ regenerates the views, then moves any card-link line that sits **outside** the
 hand-written sections (`memspec.INDEX_ALLOWED_SECTIONS`) and whose cards level 2 or 3
 already carries, verbatim, into `<vault>/_drafts/index_pruned/YYYYMMDD.md`. Links the
 views do not carry stay put and are reported: an uncarried link may be a card written
-minutes ago. The hand-written sections themselves are never touched, and any mismatch
-between the read and the write abandons the whole pass rather than overwriting
-another writer.
+minutes ago. The hand-written sections themselves — and the preamble above the first
+one — are never touched, and any mismatch between the read and the write abandons the
+whole pass rather than overwriting another writer.
 
 ## Four retrieval routes
 
