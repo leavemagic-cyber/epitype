@@ -984,3 +984,43 @@ ancestor-directory vaults and the governance vault are still echoed, and the
 ledger is unchanged. Events without a `.claude` transcript (Codex, synthetic)
 keep the old behaviour. Selftest: "Claude host skips the natively loaded cwd
 index, keeps governance index and ledger" (sessionstart 29/29).
+
+## 31. Hand-written indexes drifted; reachability lint forced them
+
+Two vaults kept their catalogue by hand in `MEMORY.md`. They drifted the way any
+hand-maintained list drifts: the two vaults grouped cards differently, the same
+fact appeared in the index and again in the SessionStart injection, and closing a
+project meant remembering to move a line. The local SessionEnd lint made it worse
+rather than better — its "orphan" rule flagged every card not reachable by
+breadth-first search from `MEMORY.md`, so the only way to a clean lint was to keep
+adding lines to the file the host loads whole into every session. Reachability was
+never how recall worked: recall is content-based (bm25 over the FTS index), and a
+card is found by what it says, not by who links to it.
+
+Owner 2026-09-09 (Q8, option 丙), after a Claude↔Codex round that converged:
+
+- `MEMORY.md` becomes a hand-written short entry point. The generator never writes
+  it — block markers cannot stop "A reads, B appends, A rewrites from its stale
+  snapshot", and the host's own auto-memory is one of the writers.
+- `epitype views` generates `_views/current.md` and `_views/history/closed.md` from
+  card fields, sharing `memsearch`'s scan range and `card_lint`'s type inference, so
+  a card cannot be one type to the catalogue and another to the lint. Unchanged input
+  fingerprint rewrites nothing; concurrent generators share a lock.
+- Levels change by editing a field, not by moving a file. `closed` moves a project
+  card to level 3 and changes nothing else — it stays searchable and recallable;
+  only `superseded` redirects recall to the successor.
+- A card that needs a status and has none is listed under "needs review". Not being
+  closed is not evidence of being current.
+- The local lint drops the orphan rule and delegates: `epitype views` plus
+  `epitype cards --deep`, which folds in `decision_lint`'s uniqueness and
+  supersession-chain rules rather than growing a second copy of them, and adds the
+  two checks that catch a card actually disappearing — missing from the views,
+  missing from the search index. Its index-size warning is now MEMORY.md > 3 KB
+  (target ≤ 2 KB), because the complete list lives in the views.
+
+Boundary: none of this improves recall coverage. Moving standing rules out of the
+resident index trades per-session tokens for dependence on keyword recall; a tidy
+catalogue does not close that gap, and the exam corpus is what measures it.
+Regressions: `tests/views_regression.py` (11 cases), `epitype/views.py --selftest`
+(12), plus "Closed status moves the view only; the card stays searchable" in
+memsearch and the `--deep` case in card_lint.

@@ -14,6 +14,45 @@ The three blocks have different change rates and different failure modes. Keepin
 
 Decision cards are a cross-cutting record type. They may live beside the domain they govern, but their current/superseded state is checked independently from the three-block placement.
 
+## Three reading levels
+
+Browsing memory and retrieving from it are different jobs. A hand-written index that
+also tries to list everything drifts, and "reachable from the index" then becomes a
+lint rule that forces people to maintain the list by hand — while recall never used
+reachability in the first place.
+
+| Level | File | Written by | Read when |
+|---|---|---|---|
+| 1 | `MEMORY.md` | Hand-written only | Every session (hosts that load it natively; echoed to hosts that do not) |
+| 2 | `_views/current.md` | `epitype views` | Browsing what is in use; the fixed entry point for the complete list of active decisions |
+| 3 | `_views/history/closed.md` | `epitype views` | Looking up what was closed or replaced |
+
+The generator never writes `MEMORY.md`. That file has several concurrent writers —
+sessions and the host's own auto-memory append to it — and a generator that rewrites
+a region from a snapshot it read earlier silently drops whatever was appended in
+between. It writes only the `_views/` tree it owns, under a lock shared by every
+generating process, and rewrites nothing when the input fingerprint (each card's
+path, mtime, and size) is unchanged.
+
+Levels change by editing a field, not by moving a file, so links stay stable:
+
+- `project` → `status: closed` (with optional `closed_at`, `closed_by`,
+  `closed_evidence`); a project card with no status is listed under "needs review"
+  rather than passed off as confirmed-current.
+- `decision` → `status: superseded` with `superseded_by`; `active` stays at level 2,
+  where the decision section lists every active decision, because the SessionStart
+  ruling block is bounded (`forbidden` or recent, capped per vault) and is not a
+  complete substitute.
+- `feedback`, `reference`, `user`, `habit`, `scar` and event cards are never closed
+  by project state; only `superseded` moves them.
+
+`closed` changes the reading level and nothing else — the card stays in the search
+index and is still recalled. Only `superseded` changes recall, by redirecting to the
+successor. Two lint checks hold the pair together, because being listed in a view is
+not the same as being findable: `card_lint --deep` reports managed cards missing from
+the views and managed cards missing from the search index, each with the exact
+command that rebuilds it.
+
 ## Four retrieval routes
 
 Epitype uses four routes because no single retrieval mode is correct for every piece of memory.
@@ -32,7 +71,7 @@ A decision card has five required fields (`aliases` is listed with the other typ
 | Field | Meaning |
 |---|---|
 | `decision_key` | Stable identity shared by every version of the same decision |
-| `status` | `active` or `superseded` |
+| `status` | `active` or `superseded` (`closed` is a project-card value and is rejected here) |
 | `current_decision_at` | ISO date or timestamp at which this card's decision became current |
 | `decided_by` | One of `owner-explicit`, `owner-implicit`, `ai-autonomous`, or `three-way` |
 

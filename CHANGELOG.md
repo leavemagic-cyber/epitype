@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- 記憶目錄改生成式（owner 2026-09-09 裁 Q8 丙；FAILURE_MODES §31）：新增 `epitype views`，依卡片欄位生成 `_views/current.md`（現用卡＋**全部**現行決策）與 `_views/history/closed.md`（已結案／已取代）。掃描範圍與 memsearch 同一份、型別判定與 card_lint 同一份，不再造第二套掃描器；生成器永遠不寫 `MEMORY.md`（它有多個併發寫者），輸入指紋沒變就不重寫，同庫並行共用鎖。`epitype dream` 順路重生。
+- 專案卡收得下 `status: closed`（另可寫 `closed_at`／`closed_by`／`closed_evidence`），決策卡仍只有 `active`／`superseded`；寫錯型別的 status 是 FAIL。**`closed` 只改目錄位置，喚回照舊搜得到**，只有 `superseded` 會轉向繼任卡——memsearch 加一項回歸釘住這句話。
+- `epitype cards --deep` 加庫層級檢查：決策唯一性與取代鏈折用既有的 `decision_lint`（不另寫一套），再加兩項新的——納管卡是否漏出生成目錄、是否漏出搜尋索引，各自帶重生指令。SessionStart 那一行走的仍是不含庫層級檢查的淺掃描，開場成本不變。
+- SessionStart 對非原生載入索引的宿主（Codex）改回音**完整**短入口：按真實 JSON 編碼位元組預算，裝得下就整段，裝不下才排序取樣並在最後一行明說「送出 N／全文 M bytes」與正本路徑；不再固定截前 3 KB 而不留痕跡。Claude 端維持不回音。
+- 回歸：`tests/views_regression.py`（11 案）、`epitype/views.py --selftest`（12 案）納入 run_all；card_lint 41/41、memsearch 50/50、sessionstart 30/30、dream 31/31。
+
 - SessionStart 在 Claude Code 上不再回音 cwd 的 MEMORY.md（宿主本來就會載入，回音重複 ≤3 KB 並擠掉帳本）；依 transcript_path 位於 `.claude` 判定宿主，只跳過該 cwd slug 的庫，Codex 與治理庫照舊（owner 2026-09-09；FAILURE_MODES §29）
 - 生成前程序（提問前查證＋任務續行，共 2,427 字元）改為每場一次：SessionStart 或第一個 prompt 送出後，同場後續 prompt 不再重送；壓縮清掉標記後補送；無 session id 維持每 prompt（owner 2026-09-09 選項 B；FAILURE_MODES §28）
 
