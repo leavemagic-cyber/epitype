@@ -1607,3 +1607,56 @@ amortising the cost of two readers going through a pack, adopted so the loop has
 number to run with; it is not measured, and `memspec.REVIEW_PACK_TRIGGER` is the one
 place to change it once per-pack tokens, effective dispositions, and waiting time say
 something.
+## 39. The contract was prose nobody could generate, check, or cost
+
+Owner 2026-09-09, on the rule contract the agents load every session:
+「契約應該是簡單扼要規則」and「契約等應該跟整個epitype做整合」. Both sentences point at
+the same defect. The contract had grown into an 18 KB document of paragraphs: a rule and
+its explanation, its incident history and its examples all lived in one block of prose,
+so nothing could be counted, superseded, or retired as one item. And it lived outside
+the memory system that governs every other durable statement — cards have required
+fields, a lint, a supersession chain, a catalogue and a size check; the contract had a
+file and a habit of editing it.
+
+The consequences were all the ones the card contract already exists to prevent:
+
+- **No unit.** A rule and its rationale were the same paragraph, so shortening the
+  resident cost meant rewriting prose by hand and hoping nothing normative was lost.
+- **No provenance per rule.** The document as a whole had a version; an individual
+  sentence had no record of who approved that exact wording or when.
+- **No mechanical check.** Whether the file on disk still matched what had been approved
+  was a question only a careful human reading could answer.
+- **No layer.** Every sentence was resident by construction. A rule that only matters
+  when a prompt touches it was paid for on every turn of every session.
+
+**The countermeasure** is the `rule` card plus `epitype/core_gen.py` (see
+`docs/ARCHITECTURE.md`, "Core generation"). One card is one rule; the card carries the
+approved sentence in `text`, who decided and who approved it, the incidents behind it,
+and `layer` — which decides whether the sentence is paid for every turn (`floor`,
+`resident`) or only when recall reaches it (`situational`, `recall`). The generator
+selects, orders and copies; it never rewrites a single character, because a rewritten
+sentence is a rule nobody approved. It refuses to write anything at all when a generated
+card lacks its approval fields or when the assembly is over its cap, and it records
+what it built from in an approval pack keyed by the SHA-256 of each `text`. `--check`
+re-assembles and compares byte for byte, so "does the file still match the cards" became
+one command — run by hand, and nightly as a report-only candidate in the dream's §11.
+
+What this unit deliberately does **not** do: it writes no contract file and no host file.
+The product gained the ability to generate a core block from approved cards; deciding
+which sentences become cards, and pointing the generator at a real file, stays outside
+the repository (owner ruling 2026-09-09: the wording of those files is approved before
+it is written, not after).
+
+Regressions: eighteen cases in `epitype/core_gen.py --selftest` — the two generated
+layers assemble in the right order while `situational` and `superseded` cards do not
+appear at all; every generated `text` survives byte for byte, including non-ASCII; the
+approval pack carries every field including per-card `text` hashes; `--check` matches a
+fresh file, detects a single hand-edited line, and stays silent when there is nothing to
+compare; `--dry-run`, over-cap and missing-approval runs all leave the target file
+untouched; and the CLI returns non-zero for a refusal without repairing the file. Two
+more in `epitype/dream.py --selftest` hold the §11 side: a hand-edited block is listed as
+a drift candidate and a vault with no rule cards never is. The core-gen selftest points
+`HOME`, `USERPROFILE` and `EPITYPE_CONFIG` at its own temporary directory and restores
+them in a `finally`, with one case pinning that: its CLI cases go through `main()`, which
+reads the real config when nothing redirects it, so the day an owner sets `core_cap_bytes`
+an unisolated selftest would start failing against a cap that has nothing to do with it.

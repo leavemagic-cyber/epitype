@@ -11,6 +11,7 @@ SELFTESTS = (
     Path("epitype") / "memsearch.py",
     Path("epitype") / "card_lint.py",
     Path("epitype") / "views.py",
+    Path("epitype") / "core_gen.py",
     Path("epitype") / "decision_lint.py",
     Path("epitype") / "ledger_gate.py",
     Path("epitype") / "compact_map.py",

@@ -3,6 +3,19 @@
 ## Unreleased
 - gitignore: ignore the transient .hook-trust-*/ directory that hook_trust selftest creates in the repo root (it made the worktree-clean gate flap while another selftest was running).
 
+### U-M-a：規則卡型別與核心生成器（owner 2026-09-09 最終方案；FAILURE_MODES §39）
+
+- owner 原話：「契約應該是簡單扼要規則」「契約等應該跟整個epitype做整合」。契約長成 18 KB 的散文，一條規則與它的解說、事故、例子混在同一段，所以數不出來、退不掉、也算不出每場的固定成本；而它又活在治理其他所有durable 陳述的那套機制之外（卡片有必填欄位、lint、取代鏈、目錄與上限檢查，契約只有一個檔和一個編輯習慣）。本單只做**產品端**：卡片型別＋生成器＋檢查。**不建真卡、不寫任何契約檔或宿主檔**——哪些句子成為卡、生成器指向哪個檔，是本機作業（U-M-b）。
+- **`rule` 卡型別**（`metadata.type: rule`）：必填 `layer`（`floor`｜`resident`｜`situational`｜`recall`）、`section`、`order`（整數）、`text`（核准原句、單行、任何語言）、`decided_by`（值域與 owner-explicit 要 `owner_quote` 都與決策卡同一份實作 `card_lint._decider_findings`）、`approved_by`、`approved_at`（ISO 日期）、`aliases`（≥1）；選填 `source_anchor`、`incidents`，`status`／`superseded_by` 沿用決策卡的取代鏈語意。card_lint 新增四項 FAIL：`layer` 值域外、`order` 非整數、`text` 超過 `memspec.RULE_TEXT_MAX_BYTES`（400）、`text` 不是單行。`approved_by`／`approved_at` 直接列為必填（涵蓋「floor／resident 缺核准＝FAIL」那條要求），生成器另有一道同樣的拒絕。
+- **`epitype core-gen <vaults...> --out FILE [--cap-bytes N] [--dry-run] [--check] [--json]`**（`epitype/core_gen.py`）：只讀 `type: rule` 且非 `superseded` 的卡；`floor` 依 `order` 排進「## A.」編號段，`resident` 依 `section` 分「## B.」小節（節序由節內最小 `order` 決定），`situational`／`recall` 不進輸出。**只組裝不改字**：每張卡的 `text` 逐位元組照抄，除標題、說明、小標與清單符號外，輸出裡沒有任何一個字是產品寫的（模板全在 memspec，語言中立、不含任何規則）。說明行刻意不帶時間戳——帶了的話 `--check` 每次都會不同。
+- 兩種拒絕都是**一個位元組都不寫**：生成層的卡缺 `approved_by`／`approved_at` → 列出那幾張；組出來超過上限（`--cap-bytes` 優先，其次設定的 `core_cap_bytes`，沒設就不擋）→ 列最長的 10 張卡。拒絕回 exit 1，工具自己壞掉回 2。
+- 成功生成同時寫核准包 `<vault>/.epitype/core_gen_latest.json`：每張卡的庫／路徑／層／節／序／核准者／`text` 的 sha256，加輸出檔的 sha256、位元組、當時的上限與時間。輸出檔與核准包都走 tmp＋`os.replace`。
+- **`--check`** 走同一條組裝路徑與現有檔逐位元組比對，不寫任何檔案；不同回非零。夢第 11 節對每個 `core_files` 順帶跑同一個判準（`core_gen.drifted`），把漂移列成 report-only 候選並多一條下一步。刻意的靜默：**庫裡一張規則卡都沒有就不比對**——空的組裝對上有內容的檔會是每晚一則固定的假候選。
+- 視圖：規則卡列進 `_views/current.md`，並在型別段內按 `layer` 分小節（`memspec.VIEWS_RULE_LAYER_HEADING`）、節內按 `order`；值域外或沒寫 `layer` 的卡歸到 `-` 小節而不是消失（lint 已經判它 FAIL，目錄再藏起來就找不到要修的卡）。
+- 同源整理：設定檔路徑與整份讀取移到 `memspec.config_path()`／`memspec.config_options()`，`dream` 的兩支改為委派——夢的上限檢查與核心生成器讀的必須是同一個檔，否則 `core_cap_bytes` 會在一支工具眼裡有設、另一支眼裡沒設。`card_lint` 的 `decided_by` 判定抽成 `_decider_findings`，決策卡與規則卡共用。
+- 審核抓到一件，同批修掉：`core_gen._selftest` 沒有隔離環境，走 `main()` 的 CLI 案例會讀這台機器的真設定檔——今天綠只是因為真設定還沒有 `core_cap_bytes` 鍵，owner 依 §11 設下去的那天自測就會被真上限擋成 over-cap。改成與 `dream._selftest` 同一套：`HOME`／`USERPROFILE`／`EPITYPE_CONFIG` 指進自己的暫存目錄並在 `finally` 還原，另加一案釘住這件事（18/18）。
+- 閘門：run_all 48/48 → **49/49**（新增 `epitype/core_gen.py`）、privacy PASS 122 檔、corpus 330/330、seeds 15/15 與 5/5（同一組閘門在 `EPITYPE_CONFIG` 指向一個帶 `core_cap_bytes: 5` 的設定時同樣全綠）。selftest 分母：core_gen **18/18**（新）、memspec 9 → **10**（型別表兩張都要有這個型別）、card_lint 43 → **45**、views 12 → **13**、dream 58 → **60**（本單 rebase 到 U-P 之後的分母）。
+
 ### U-P：回饋檢討機制的前四行（owner 2026-09-09；FAILURE_MODES §38）
 
 - owner 原話：「應該有回饋檢討機制，你跟CODEX設計一下」。設計由 Claude↔Codex 收斂（`_materials/DISCUSS_FEEDBACK_REVIEW_LOOP_20260909.md`）：**回饋保留出處、夢整理候選、候選滿額才集中檢討、owner 一包核決；每場不加任何必做動作。** 本單做落地十行的第 1–4 行，全部純程式、report-only、不改卡、不注入對話、不新增每場成本。

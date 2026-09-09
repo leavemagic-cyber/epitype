@@ -87,6 +87,14 @@ def _note_of(card_type, fields):
     return ""
 
 
+def _order_of(fields):
+    """規則卡的排序鍵；沒寫或寫壞（card_lint 會 FAIL）就排到最後而不是讓目錄生不出來。"""
+    try:
+        return int(fields.get(memspec.RULE_ORDER_FIELD, "").strip())
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
 def collect(vault):
     """(解析後的庫, 納管卡的分類結果, 輸入指紋)。
 
@@ -116,6 +124,8 @@ def collect(vault):
             ),
             "decision_key": _text(fields.get(memspec.DECISION_KEY_FIELD, "")),
             "decided_at": _text(fields.get(memspec.CURRENT_DECISION_AT_FIELD, "")),
+            "layer": _text(fields.get(memspec.RULE_LAYER_FIELD, "")),
+            "order": _order_of(fields),
             "note": _note_of(card_type, fields),
         })
     return vault, entries, digest.hexdigest()
@@ -132,6 +142,28 @@ def _card_line(entry, depth):
     return memspec.VIEWS_CARD_LINE.format(
         name=entry["name"], link=_link(entry["path"], depth), description=entry["description"]
     )
+
+
+def _rule_layer_lines(group):
+    """規則卡按 layer 分小節，節內按 order。
+
+    值域外或沒寫 layer 的卡不會消失——它們歸到一個 `-` 小節。lint 已經把那張卡判成
+    FAIL；目錄再把它藏起來的話，要修的人就找不到它了。
+    """
+    remaining = list(group)
+    lines = []
+    for layer in memspec.RULE_LAYERS + (memspec.VIEWS_MISSING,):
+        if layer == memspec.VIEWS_MISSING:
+            members = remaining
+        else:
+            members = [entry for entry in remaining if entry["layer"] == layer]
+            remaining = [entry for entry in remaining if entry["layer"] != layer]
+        if not members:
+            continue
+        members.sort(key=lambda entry: (entry["order"] is None, entry["order"] or 0, entry["path"]))
+        lines.append(memspec.VIEWS_RULE_LAYER_HEADING.format(layer=layer, count=len(members)))
+        lines.extend(_card_line(entry, 1) for entry in members)
+    return lines
 
 
 def _header(title, stamp, total):
@@ -169,7 +201,10 @@ def render_current(entries, stamp):
         if not group:
             continue  # 小庫不必生成空分類
         lines.append(memspec.VIEWS_TYPE_HEADING.format(type=card_type, count=len(group)))
-        lines.extend(_card_line(entry, 1) for entry in group)
+        if card_type == memspec.CARD_TYPE_RULE:
+            lines.extend(_rule_layer_lines(group))
+        else:
+            lines.extend(_card_line(entry, 1) for entry in group)
         lines.append("")
 
     lines.append(memspec.VIEWS_REVIEW_HEADING.format(count=len(review)))
@@ -324,6 +359,19 @@ _FIXTURES = {
     "decision-live.md": "---\nname: decision-live\ndescription: 2026-09-01 現行裁定\ndecision_key: k-one\nstatus: active\ncurrent_decision_at: 2026-09-01\ndecided_by: three-way\naliases:\n  - 裁定\n---\nbody\n",
     "decision-old.md": "---\nname: decision-old\ndescription: 2026-08-01 被取代的裁定\ndecision_key: k-one\nstatus: superseded\nsuperseded_by: decision-live.md\ncurrent_decision_at: 2026-08-01\ndecided_by: three-way\naliases:\n  - 舊裁定\n---\nbody\n",
     "feedback-plain.md": "---\nname: feedback-plain\ndescription: 2026-09-01 一般回饋，永遠現用\naliases:\n  - 回饋\nmetadata:\n  type: feedback\n---\nbody\n",
+    # 合成規則卡（英文與另一種語言各一句假規則），只用來驗分節與排序。
+    "rule-b.md": "---\nname: rule-b\ndescription: 2026-09-09 second resident sentence\n"
+    "layer: resident\nsection: beta\norder: 20\ntext: Second synthetic resident sentence.\n"
+    "decided_by: three-way\napproved_by: synthetic-pair\napproved_at: 2026-09-09\n"
+    "aliases:\n  - 第二條\nmetadata:\n  type: rule\n---\nbody\n",
+    "rule-a.md": "---\nname: rule-a\ndescription: 2026-09-09 第一條常駐句\n"
+    "layer: resident\nsection: alpha\norder: 10\ntext: 合成的常駐規則句。\n"
+    "decided_by: three-way\napproved_by: synthetic-pair\napproved_at: 2026-09-09\n"
+    "aliases:\n  - 第一條\nmetadata:\n  type: rule\n---\nbody\n",
+    "rule-recall.md": "---\nname: rule-recall\ndescription: 2026-09-09 只在喚回時讀的規則\n"
+    "layer: recall\nsection: alpha\norder: 5\ntext: Synthetic recall-only sentence.\n"
+    "decided_by: three-way\napproved_by: synthetic-pair\napproved_at: 2026-09-09\n"
+    "aliases:\n  - 喚回層\nmetadata:\n  type: rule\n---\nbody\n",
     "grants/grant-one.md": "---\nname: grant-one\ndescription: owner grant auto-captured 2026-09-02: 你可以繼續\ncaptured_at: 2026-09-02T07:37:47Z\nsession_id: synthetic\n---\nbody\n",
 }
 
@@ -378,6 +426,19 @@ def _selftest():
                 memspec.VIEWS_REVIEW_HEADING.format(count=1) in current
                 and "- [project-open](../project-open.md) — project｜" in current
                 and first["review"] == 1,
+            ))
+            rule_block = current.split(
+                memspec.VIEWS_TYPE_HEADING.format(type=memspec.CARD_TYPE_RULE, count=3), 1
+            )[-1]
+            checks.append((
+                "規則卡列進現用視圖，並依 layer 分小節、節內依 order",
+                memspec.VIEWS_TYPE_HEADING.format(type=memspec.CARD_TYPE_RULE, count=3) in current
+                and memspec.VIEWS_RULE_LAYER_HEADING.format(
+                    layer=memspec.RULE_LAYER_RESIDENT, count=2) in rule_block
+                and memspec.VIEWS_RULE_LAYER_HEADING.format(
+                    layer=memspec.RULE_LAYER_RECALL, count=1) in rule_block
+                and rule_block.index("- [rule-a]") < rule_block.index("- [rule-b]")
+                and rule_block.index("- [rule-b]") < rule_block.index("- [rule-recall]"),
             ))
             checks.append((
                 "連結相對路徑從視圖所在目錄解得開（含子目錄的事件卡）",
@@ -438,7 +499,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 12
+    total = 13
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

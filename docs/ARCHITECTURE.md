@@ -96,6 +96,72 @@ Run the implemented contract checks with:
 python epitype/decision_lint.py --selftest
 ```
 
+## Core generation (rule cards → the resident block)
+
+The resident core is the one memory that is read on every turn of every session, so
+every byte of it is a fixed cost. Owner 2026-09-09 settled its shape: a hand-written
+floor plus resident sentences that are **generated from cards**, one rule per card,
+with a cap set from the reviewed size plus twenty percent. `epitype/core_gen.py` is
+the generator; it is the only thing in the product that assembles a core block, and
+it assembles nothing else.
+
+A `rule` card carries the sentence and its provenance:
+
+| Field | Meaning |
+|---|---|
+| `layer` | `floor`, `resident`, `situational`, or `recall` — where the sentence is read |
+| `section` | Free-text grouping inside the resident layer (e.g. `evidence`) |
+| `order` | Integer sort key inside a layer |
+| `text` | The **approved sentence**, one line, any language, at most `RULE_TEXT_MAX_BYTES` |
+| `decided_by` | Same domain as a decision card; `owner-explicit` also requires `owner_quote` |
+| `approved_by` / `approved_at` | Who approved this exact wording, and when |
+| `aliases` | At least one, so the card is reachable by search |
+
+Optional: `source_anchor` (where the sentence came from), `incidents` (dated one-liners),
+and `status`/`superseded_by` with the decision card's supersession meaning. Explanation,
+examples, and the incident narrative belong in the card body and the explanation layer —
+not in `text`, because `text` is what everyone pays for on every turn.
+
+Only `floor` and `resident` are generated. `situational` and `recall` cards exist for
+the same reason recall exists: a rule that must arrive when a prompt touches it is not
+a rule that must arrive every time. The generator therefore does three things and
+nothing else — **select** (the two generated layers, skipping `superseded`), **order**
+(`floor` numbered by `order`; `resident` grouped into `section` subsections, section
+order taken from each section's lowest `order`), and **copy** (`text` byte for byte).
+Only the title, the note line, the headings and the list markers are the product's own
+words, and all of them come from language-neutral templates in `memspec`: the product
+carries no behavior-rule text of its own (failure mode 30).
+
+Two refusals, both of which write nothing at all:
+
+- **No approval, no generation.** A card in a generated layer without `approved_by`
+  and `approved_at` stops the whole run and is listed. A core block is the wrong place
+  to discover that one sentence was never approved.
+- **Over the cap, no generation.** `--cap-bytes`, else `core_cap_bytes` from the
+  config; unset means no cap, because a cap the product guessed is not the owner's
+  threshold (failure mode 36). Over it, the ten longest cards are listed instead.
+
+A successful run also writes an approval pack to `<vault>/.epitype/core_gen_latest.json`:
+per card the vault, path, layer, section, order, approver, and the SHA-256 of its
+`text`; for the output the SHA-256, the byte count, the cap in force, and the time.
+That is what lets a later reader prove which approved wordings a given core block was
+built from.
+
+`--check` runs the same assembly and compares it with `--out` byte for byte, exiting
+non-zero on a difference and writing nothing. The dream's §11 calls the same
+predicate for every configured `core_files` entry and lists a drifted block as a
+report-only candidate — with one deliberate silence: a vault holding no rule cards
+yields no comparison at all, so a machine that has not adopted rule cards yet is not
+told nightly that its core block "drifted" from an empty assembly.
+
+Writing the assembled block into a host file (`CLAUDE.md`, `AGENTS.md`) is not the
+product's job and is not in this repository: the generator writes the file it is
+pointed at, and nothing else.
+
+```powershell
+python epitype/core_gen.py --selftest
+```
+
 ## Card types and required fields
 
 One table, read off `CARD_REQUIRED_FIELDS` in `epitype/memspec.py`. `card_lint.py` and the write gate share it, so this is exactly what a blocked write is asking for.
@@ -103,6 +169,7 @@ One table, read off `CARD_REQUIRED_FIELDS` in `epitype/memspec.py`. `card_lint.p
 | `type` | Required frontmatter fields |
 |---|---|
 | `decision` | `decision_key`, `status`, `current_decision_at`, `decided_by`, `aliases` |
+| `rule` | `layer`, `section`, `order`, `text`, `decided_by`, `approved_by`, `approved_at`, `aliases` |
 | `scar` | `advice`, `incident` |
 | `grant`, `correction`, `ruling` | `name`, `description`, `captured_at`, `session_id` |
 | `pending` | `owner`, `verify`, `exit` |
@@ -152,7 +219,7 @@ Five later sections answer a different question from the first seven: not "what 
 - **§8 pocket vaults.** Registered vaults cannot answer "how many places are producing unfiled memory", so this counts from disk instead: every `<home>/.claude/projects/*/memory/` directory that is not registered and holds at least one `*.md` card is listed as a filing candidate with its path, card count, and newest mtime. The home directory is never hardcoded — it is recognised from a registered vault's own path (`.claude/projects` walking up) and only falls back to `HOME`. Only that shape counts: taking "the registered vault's grandparent is the root" would make a vault at `C:\a\b` scan every directory under `C:\`.
 - **§9 draft aging.** `_drafts/**` per registered vault: total, older than 7 days, older than 30, grouped by first-level subdirectory, and the five oldest with their age in days. §4 counts how many drafts are waiting; this counts how long they have waited (the backlog measured 370 files on 2026-09-09).
 - **§10 mixed cards.** One card is one memory or one rule. Three shape signals, any one of which lists a split candidate: two or more `## ` headings in the body (fenced code is skipped, since cards quote markdown), a body over `memspec.CARD_BODY_MIXED_BYTES`, or a `description` over 160 characters that strings several things together with `＋`/`；`. Fifty rows per vault; past that only the total.
-- **§11 caps.** Three optional config keys — `index_cap_bytes`, `core_files` (absolute paths), `core_cap_bytes`. A missing key writes one "unset" line and judges nothing: a cap the product guessed, reported as "over cap", would read as the owner's own threshold. What is over is listed with its size, cap, and overage; no file is touched.
+- **§11 caps.** Three optional config keys — `index_cap_bytes`, `core_files` (absolute paths), `core_cap_bytes`. A missing key writes one "unset" line and judges nothing: a cap the product guessed, reported as "over cap", would read as the owner's own threshold. What is over is listed with its size, cap, and overage; no file is touched. The same `core_files` list is also compared against a fresh assembly from the vault's rule cards, and a block that no longer matches is listed as a drift candidate — report-only, and skipped entirely when there are no rule cards to assemble from (see [Core generation](#core-generation-rule-cards--the-resident-block)).
 - **§12 quotes no decision card carries.** Recall serves `rulings`/`corrections`/`grants` cards under the `⚖ owner 裁決：`/`⚠ owner 曾糾正：` prefixes, and only a card that declares `verified: false` is demoted to a historical capture. So an event card that is still trusted, but that no `type: decision` card mentions — in its body or its `source`/`superseded_by`/`aliases` — reads like a standing ruling with nobody behind it. Those are listed newest first (path, `captured_at`, a suspected-noise column, first 80 characters), thirty per vault. The match is on the full filename and the `decision_key`, never a bare stem: `carried` is a substring of `uncarried`, and a stem match would report "carried" for a quote nobody carries. Naming is only one of **three carry routes**, because most cards carry a quote without ever writing its filename: a decision card that quotes the sentence verbatim in `owner_quote` carries it (both texts are normalised to letters and digits — NFKC first, then every separator, quote and punctuation dropped, so no language's punctuation is hardcoded — and the overlap must run at least twelve characters, since a four-character overlap happens in any two Chinese sentences), and so does an event card that names its carrier in its own `carried_by` field (whether that card exists is `epitype cards`' question, not this section's). The noise column marks a row whose body matches one of `memspec.EVENT_NOISE_MARKERS` — the fixed cross-CLI transport-probe templates that auto-capture files as rulings; marking only, nothing is changed or deleted.
 
 The inventory itself is read-only, but the run carries two piggyback tasks that write into each vault: it regenerates `_views/` (nothing is rewritten when the input fingerprint is unchanged), and then it shapes `MEMORY.md` back into a short entry point, reporting both in the packet. Shaping runs second on purpose — "the catalogue already carries this card" is its only test, and a stale catalogue would answer it wrongly.

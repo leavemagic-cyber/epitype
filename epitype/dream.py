@@ -69,6 +69,10 @@ MIXED_REASON_DESCRIPTION = "description {chars} 字元且用「＋」「；」�
 MIXED_COMMAND = "人工判斷要不要拆成多張卡（一張卡＝一個記憶或規則）；夢不自動拆"
 CAP_UNSET_NOTE = "{field} 未設定，這一項跳過"
 CAP_COMMAND = "人工判斷超上限的檔案要精簡還是提高上限；夢不改檔"
+# 同一批 core_files 順路多問一句：這個檔跟規則卡重組出來的生成塊還一不一致。
+# 只列候選——夢不重生成核心塊，那是本機作業（`epitype core-gen`）。
+CAP_DRIFT_KIND = "generated-block-drift"
+CAP_DRIFT_COMMAND = "人工判斷生成塊漂移：重跑 epitype core-gen，或查誰手改了生成塊；夢不改檔"
 DECISION_CARRIER_FIELDS = ("source", memspec.SUPERSEDED_BY_FIELD, memspec.ALIASES_FIELD)
 UNCARRIED_MAX_PER_VAULT = 30
 UNCARRIED_EXCERPT_CHARS = 80
@@ -711,15 +715,17 @@ def _section_caps(vaults, today, since_date, config):
                 })
     core_files = config.get(memspec.CONFIG_CORE_FILES_FIELD)
     core_cap = _positive_int(config.get(memspec.CONFIG_CORE_CAP_BYTES_FIELD))
-    if not isinstance(core_files, list) or not core_files:
+    named = [
+        Path(raw).expanduser()
+        for raw in (core_files if isinstance(core_files, list) else ())
+        if isinstance(raw, str) and raw.strip()
+    ]
+    if not named:
         notes.append(CAP_UNSET_NOTE.format(field=memspec.CONFIG_CORE_FILES_FIELD))
     elif core_cap is None:
         notes.append(CAP_UNSET_NOTE.format(field=memspec.CONFIG_CORE_CAP_BYTES_FIELD))
     else:
-        for raw in core_files:
-            if not isinstance(raw, str) or not raw.strip():
-                continue
-            path = Path(raw).expanduser()
+        for path in named:
             try:
                 size = path.stat().st_size
             except OSError as exc:
@@ -730,13 +736,38 @@ def _section_caps(vaults, today, since_date, config):
                     "path": str(path), "bytes": size, "cap": core_cap, "over": size - core_cap,
                 })
     entries.sort(key=lambda item: -item["over"])
+    drift = _core_drift(vaults, named)
     return {
-        "counts": {"over_cap": len(entries), "unset_keys": len(notes)},
-        "examples": entries,
-        "commands": [CAP_COMMAND] if entries else [],
+        "counts": {"over_cap": len(entries), "unset_keys": len(notes), "drift": len(drift)},
+        "examples": entries + drift,
+        "commands": ([CAP_COMMAND] if entries else []) + ([CAP_DRIFT_COMMAND] if drift else []),
         "errors": errors,
         "note": "；".join(notes) if notes else None,
     }
+
+
+def _core_drift(vaults, core_files):
+    """生成塊漂移候選：`core_files` 每個檔與規則卡重組出來的核心塊比一次。
+
+    `core_cap_bytes` 沒設也照比——上限與漂移是兩件事。判準與本機的 drift check 同一支
+    （`core_gen.drifted`），「無從判斷」（沒有規則卡、讀不到檔）不算漂移，否則沒有規則卡
+    的機器每晚都會收到一則固定的假候選。
+    """
+    if not core_files:
+        return []
+    try:  # lazy import：核心生成器只有這一節要，夢的其餘各節不為它付 import
+        from . import core_gen
+    except ImportError:  # Direct script execution keeps the CLI contract.
+        import core_gen
+
+    found = []
+    for path in core_files:
+        try:
+            if core_gen.drifted(vaults, path):
+                found.append({"path": str(path), "kind": CAP_DRIFT_KIND})
+        except Exception:
+            continue  # 一個讀不了的檔不得讓整節失敗；缺口由 errors 以外的節照常報
+    return found
 
 
 # --------------------------------------------------------------------------- section 12
@@ -1360,6 +1391,11 @@ def _next_steps(sections, shaping=()):
         steps.append(f"超上限候選 {caps['over_cap']} 個檔案 → 人工判斷精簡或提高上限；夢不改檔")
     if caps.get("unset_keys", 0) > 0:
         steps.append(f"上限檢查有 {caps['unset_keys']} 項未設定（config 缺鍵），這幾項這次沒查")
+    if caps.get("drift", 0) > 0:
+        steps.append(
+            f"生成塊漂移 {caps['drift']} 個檔案（與規則卡重組的結果不一致）"
+            " → 人工判斷重生成或查手改；夢不改檔"
+        )
     uncarried = counts(12)
     if uncarried.get("uncarried_quotes", 0) > 0:
         noise = uncarried.get("noise_candidates", 0)
@@ -1737,8 +1773,8 @@ def spawn(governance, python_executable=None, launcher=None, now=None):
 
 
 def _config_path():
-    configured = os.environ.get(memspec.EPITYPE_CONFIG_ENV)
-    return Path(configured).expanduser() if configured else Path.home() / ".epitype" / "config.json"
+    # 路徑推導同源 memspec：核心生成器讀的必須是同一個設定檔（U-M-a）。
+    return memspec.config_path()
 
 
 def configured_vaults(config_path=None):
@@ -1764,11 +1800,7 @@ def configured_options(config_path=None):
     `configured_vaults` 會為「沒有登記庫」丟例外，因為那時候夢無事可做；這裡相反：
     設定不存在只代表沒設上限，盤點照跑，缺的鍵由第 11 節寫一行「未設定」。
     """
-    try:
-        value = json.loads(Path(config_path or _config_path()).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    return value if isinstance(value, dict) else {}
+    return memspec.config_options(config_path)
 
 
 # 開場那一行的欄位名同源 memspec；這裡只說每個名字取哪一節的哪個數字。
@@ -2039,6 +2071,38 @@ def _selftest():
                 and capped[os.fspath(core_file)]["over"] == 35
                 and (cap_vault / memspec.MEMORY_INDEX_FILENAME).read_text(encoding="utf-8") == "x" * 50
                 and core_file.read_text(encoding="utf-8") == "y" * 40
+            )))
+
+            try:  # 規則卡的合成庫沿用 core_gen 自己那一份，夢不再寫第二套樣板
+                from . import core_gen
+            except ImportError:  # Direct script execution keeps the CLI contract.
+                import core_gen
+            drift_vault = core_gen._build_vault(Path(temp_dir).resolve() / "coredrift")
+            core_block = Path(temp_dir).resolve() / "core_block.md"
+            core_gen.generate([drift_vault], core_block, config={})
+            drift_config = {
+                memspec.CONFIG_CORE_FILES_FIELD: [os.fspath(core_block)],
+                memspec.CONFIG_CORE_CAP_BYTES_FIELD: 1000000,
+            }
+            clean_11 = {s["id"]: s for s in build_report(
+                [drift_vault], today=today, config=drift_config)["sections"]}[11]
+            core_block.write_text(
+                core_block.read_text(encoding="utf-8") + "hand edit\n", encoding="utf-8", newline="\n"
+            )
+            drifted_11 = {s["id"]: s for s in build_report(
+                [drift_vault], today=today, config=drift_config)["sections"]}[11]
+            checks.append(("section 11 reports a hand-edited generated block as a drift candidate and changes neither", (
+                clean_11["counts"]["drift"] == 0
+                and drifted_11["counts"]["drift"] == 1
+                and drifted_11["counts"]["over_cap"] == 0
+                and drifted_11["examples"][0]["path"] == os.fspath(core_block)
+                and CAP_DRIFT_COMMAND in drifted_11["commands"]
+                and core_block.read_text(encoding="utf-8").endswith("hand edit\n")
+            )))
+            no_rules_11 = {s["id"]: s for s in build_report(
+                [cap_vault], today=today, config=drift_config)["sections"]}[11]
+            checks.append(("a vault with no rule cards is never reported as drift (an empty assembly compares to nothing)", (
+                no_rules_11["counts"]["drift"] == 0
             )))
 
             quotes_vault = Path(temp_dir).resolve() / "quotes"
@@ -2636,7 +2700,7 @@ def _selftest():
                 os.environ[name] = value
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 58
+    total = 60
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

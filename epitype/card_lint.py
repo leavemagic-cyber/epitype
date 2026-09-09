@@ -151,6 +151,63 @@ def _is_bare_term(item):
     return not any(verb in item for verb in memspec.FORBIDDEN_VERB_HINTS)
 
 
+def _decider_findings(fields, nested, counts):
+    """`decided_by` 的值域與 owner-explicit 的原話要求。
+
+    決策卡與規則卡共用同一份：規則卡的「誰決定」問的是同一件事，兩處各寫一份的話，
+    同一個 `owner-explicit` 會在一種卡上要原話、在另一種卡上不要。
+    """
+    decider = fields.get(memspec.DECIDED_BY_FIELD, "").strip()
+    if decider and decider not in memspec.DECIDED_BY_VALUES:
+        yield (
+            FAIL,
+            "decided-by",
+            f"{memspec.DECIDED_BY_FIELD}={decider} 不在 {'|'.join(memspec.DECIDED_BY_VALUES)}",
+        )
+    if decider == memspec.OWNER_EXPLICIT_DECIDER and not _has_value(
+        memspec.OWNER_QUOTE_FIELD, fields, nested, counts
+    ):
+        yield (
+            FAIL,
+            "required",
+            f"{memspec.DECIDED_BY_FIELD}=owner-explicit 缺 {memspec.OWNER_QUOTE_FIELD}",
+        )
+
+
+def _rule_findings(fields):
+    """規則卡自己的四項：住哪一層、核准日期、規則原句的長度與行數。
+
+    `text` 會被生成器逐位元組抄進核心塊，所以形狀不合的卡在這裡就是 FAIL——生成器
+    在組裝時才發現，代價是整個核心塊生不出來。
+    """
+    layer = fields.get(memspec.RULE_LAYER_FIELD, "").strip()
+    if layer and layer not in memspec.RULE_LAYERS:
+        yield (FAIL, "layer", memspec.RULE_LAYER_REASON.format(
+            field=memspec.RULE_LAYER_FIELD, value=layer, allowed="|".join(memspec.RULE_LAYERS)))
+    approved_at = fields.get(memspec.RULE_APPROVED_AT_FIELD, "").strip()
+    if approved_at and not memspec.is_iso_date(approved_at):
+        yield (FAIL, "date", f"{memspec.RULE_APPROVED_AT_FIELD}={approved_at} 不是 ISO 日期")
+    order = fields.get(memspec.RULE_ORDER_FIELD, "").strip()
+    if order and _as_int(order) is None:
+        yield (FAIL, "field-shape", memspec.RULE_ORDER_NOT_INTEGER_REASON.format(
+            field=memspec.RULE_ORDER_FIELD, value=order))
+    text = fields.get(memspec.RULE_TEXT_FIELD, "")
+    size = len(text.encode("utf-8"))
+    if size > memspec.RULE_TEXT_MAX_BYTES:
+        yield (FAIL, "rule-text", memspec.RULE_TEXT_TOO_LONG_REASON.format(
+            field=memspec.RULE_TEXT_FIELD, size=size, limit=memspec.RULE_TEXT_MAX_BYTES))
+    if "\n" in text:
+        yield (FAIL, "field-shape", memspec.RULE_TEXT_MULTILINE_REASON.format(
+            field=memspec.RULE_TEXT_FIELD))
+
+
+def _as_int(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _card_type(relative, fields, nested):
     """順序判定；結構訊號優先於自報型別，自報的 metadata.type 才是最後手段。"""
     if memspec.DECISION_KEY_FIELD in fields:
@@ -393,21 +450,18 @@ def _check_card(path, relative, today):
         if field in memspec.CARD_LIST_FIELDS and field in counts and counts[field] == 0:
             findings.append((FAIL, "field-shape", f"{field} 是空序列；選填欄位寫了就要有內容"))
 
+    if card_type in (memspec.CARD_TYPE_DECISION, memspec.CARD_TYPE_RULE):
+        findings.extend(_decider_findings(fields, nested, counts))
     if card_type == memspec.CARD_TYPE_DECISION:
         stamp = fields.get(memspec.CURRENT_DECISION_AT_FIELD, "").strip()
         if stamp and not memspec.is_iso_date(stamp):
             findings.append((FAIL, "date", f"{memspec.CURRENT_DECISION_AT_FIELD}={stamp} 不是 ISO 日期"))
-        decider = fields.get(memspec.DECIDED_BY_FIELD, "").strip()
-        if decider and decider not in memspec.DECIDED_BY_VALUES:
-            findings.append((FAIL, "decided-by", f"decided_by={decider} 不在 {'|'.join(memspec.DECIDED_BY_VALUES)}"))
-        if decider == memspec.OWNER_EXPLICIT_DECIDER and not _has_value(
-            memspec.OWNER_QUOTE_FIELD, fields, nested, counts
-        ):
-            findings.append((FAIL, "required", f"decided_by=owner-explicit 缺 {memspec.OWNER_QUOTE_FIELD}"))
         for item in _forbidden_items(front_lines):
             if _is_bare_term(item):
                 findings.append((WARN, "forbidden-bare-term", memspec.FORBIDDEN_BARE_TERM_REASON.format(
                     term=item, example=memspec.FORBIDDEN_BARE_TERM_EXAMPLE.format(term=item))))
+    elif card_type == memspec.CARD_TYPE_RULE:
+        findings.extend(_rule_findings(fields))
     elif card_type == memspec.CARD_TYPE_GRANT:
         if not _has_value(memspec.GRANT_EXPIRES_FIELD, fields, nested, counts):
             findings.append((
@@ -767,6 +821,15 @@ _FIXTURES = {
     "aliases:\n  - 裸名詞\n  - bare term\nforbidden:\n  - 兩套參數\n"
     "  - (建議|要不要|是否|應該).{0,12}(納入|採用|改成)兩套參數\n  - 建議改成兩套參數\n"
     "  - 這串裸名詞剛好超過八個字\n---\nbody\n",
+    # 規則卡：合成規則，不是任何人的真規則（產品不內建行為守則文字）。
+    "rule-floor.md": "---\nname: rule-floor\ndescription: 2026-09-09 合成底線規則卡\n"
+    "layer: floor\nsection: alpha\norder: 1\ntext: Synthetic floor sentence for the fixtures.\n"
+    "decided_by: three-way\napproved_by: synthetic-pair\napproved_at: 2026-09-09\n"
+    "aliases:\n  - 合成規則\n  - synthetic rule\nmetadata:\n  type: rule\n---\nbody\n",
+    "rule-bad.md": "---\nname: rule-bad\ndescription: 2026-09-09 壞規則卡\n"
+    "layer: nowhere\nsection: alpha\norder: 甲\ntext: " + "x" * (400 + 1) + "\n"
+    "decided_by: owner-explicit\napproved_by: synthetic-pair\napproved_at: 昨天\n"
+    "aliases:\n  - 壞規則\nmetadata:\n  type: rule\n---\nbody\n",
     "scar-bad.md": "---\nname: scar-bad\ndescription: 2026-09-01 壞傷疤卡\ntrigger:\n  tool: \"^(Bash)$\"\nmetadata:\n  type: scar\n---\nbody\n",
     "scar-good.md": "---\nname: scar-good\ndescription: 2026-09-01 好傷疤卡\nadvice: 改用 Write 落檔\nincident: 2026-09-02 三個 session 各踩一次\nvalid_until: 2026-08-01\nmetadata:\n  type: scar\n---\nbody\n",
     # 2026-09-09 U-J：只剩 trigger 的舊卡不再被判成傷疤卡，欄位本身只點名一次。
@@ -857,6 +920,25 @@ def _selftest():
             checks.append((
                 "decision WARN only: 齊備但 valid_until 已過期",
                 card is not None and rules == {(WARN, "expired")},
+            ))
+
+            checks.append((
+                "rule 卡欄位齊備即無 finding，且不因缺日期欄位被點名（approved_at 就是它的日期）",
+                _findings_of(report, "rule-floor.md")[1] is None
+                and report["by_type"].get(memspec.CARD_TYPE_RULE) == 2,
+            ))
+            rules, card = _findings_of(report, "rule-bad.md")
+            checks.append((
+                "rule FAIL：layer 值域外、order 非整數、text 超上限、approved_at 非 ISO、"
+                "owner-explicit 缺 owner_quote",
+                card is not None
+                and card["type"] == memspec.CARD_TYPE_RULE
+                and rules == {
+                    (FAIL, "layer"), (FAIL, "field-shape"), (FAIL, "rule-text"),
+                    (FAIL, "date"), (FAIL, "required"),
+                }
+                and str(memspec.RULE_TEXT_MAX_BYTES) in _reason_of(report, "rule-bad.md", "rule-text")
+                and memspec.OWNER_QUOTE_FIELD in _reason_of(report, "rule-bad.md", "required"),
             ))
 
             rules, card = _findings_of(report, "scar-bad.md")
@@ -1197,7 +1279,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 43
+    total = 45
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
