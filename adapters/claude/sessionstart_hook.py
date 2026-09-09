@@ -307,7 +307,8 @@ def _selftest():
             checks.append(
                 (
                     "the work ledger is never injected, however present the file is",
-                    (vault / memspec.WORK_LEDGER_FILENAME).is_file()
+                    "🧾" in context  # 空 context 會讓下面兩條「不在裡面」恆真
+                    and (vault / memspec.WORK_LEDGER_FILENAME).is_file()
                     and "ledger detail" not in context
                     and memspec.WORK_LEDGER_FILENAME not in context,
                 )
