@@ -959,9 +959,17 @@ def _selftest():
             )))
 
             # default --out path and --json both work and agree on the numbers.
+            views_current = vault / memspec.VIEWS_DIRECTORY / memspec.VIEWS_CURRENT_FILENAME
+            views_dry_run_absent = not views_current.exists()
             code = main(["--today", "2026-09-06", os.fspath(vault)], output=io.StringIO())
             default_out = vault / ".epitype" / "dream_pack_20260906.md"
             checks.append(("default run writes the dated pack under <vault>/.epitype", code == 0 and default_out.is_file()))
+            checks.append(("the run rebuilds the reading views on the way; --dry-run writes none", (
+                views_dry_run_absent
+                and views_current.is_file()
+                and (vault / memspec.VIEWS_DIRECTORY / memspec.VIEWS_HISTORY_DIRECTORY
+                     / memspec.VIEWS_CLOSED_FILENAME).is_file()
+            )))
 
             custom_out = Path(temp_dir).resolve() / "custom_pack.json"
             out2 = io.StringIO()
@@ -1131,7 +1139,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 30
+    total = 31
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
@@ -1206,6 +1214,19 @@ def main(argv=None, output=sys.stdout):
 
         today = parsed.today or datetime.now(timezone.utc).date()
         since_date = parsed.since or (today - timedelta(days=DEFAULT_EVENT_AGING_DAYS))
+        # 順路重生閱讀目錄：夜間整理已經在走每一個庫，而生成本身是「輸入指紋沒變就
+        # 不寫」。失敗不影響審核包——目錄過期還有 card_lint --deep 的漏卡檢查會報。
+        # lazy import 且不併進上面那條共用 import：夢的熱路徑不為它付錢。
+        if not parsed.dry_run:
+            try:
+                from . import views
+            except ImportError:  # Direct script execution keeps the CLI contract.
+                import views
+            for vault in vaults:
+                try:
+                    views.generate(vault)
+                except Exception:
+                    continue
         report = build_report(vaults, today=today, since_date=since_date, deadline=deadline)
         rendered = json.dumps(report, ensure_ascii=False, indent=1)
         content = rendered if parsed.json else _render_markdown(report)
