@@ -1,7 +1,7 @@
 import sys; sys.dont_write_bytecode = True; [getattr(stream, "reconfigure", lambda **_: None)(encoding="utf-8", errors="replace") for stream in (sys.stdout, sys.stderr)]  # cp950 主控台先轉 UTF-8；唯讀/寫入 CLI 不落 pyc。
 """Epitype 型別卡片 lint：卡片是表單，每種型別有必填欄位，缺了就不收。
 
-型別由 frontmatter 與路徑依序推斷（decision_key → trigger → 事件卡目錄 → 待辦 →
+型別由 frontmatter 與路徑依序推斷（decision_key → 事件卡目錄 → 待辦 →
 metadata.type → feedback），必填欄位表在 memspec.CARD_REQUIRED_FIELDS 同源。FAIL 是
 「這張卡不能算收下」；WARN 是「收下但有已知缺口」——第一版把既有 371 張缺別名的卡
 留在 WARN，否則第一次跑就全紅、沒人看得完。INFO 是「這不是給 owner 的決定題」
@@ -44,7 +44,7 @@ def _nested_and_lists(front_lines, path):
     """一層巢狀子欄位（"parent.child"）與序列欄位的項數。
 
     memspec.frontmatter_fields 只吐 top-level scalar，memsearch 只吐 aliases；
-    型別判定需要 trigger.tool 與 metadata.type，必填判定需要「序列是否至少一項」。
+    型別判定需要 metadata.type，必填判定需要「序列是否至少一項」。
     這裡不另解析界線或 scalar——界線用 memspec.split_frontmatter 的輸出、值用
     memspec.parse_scalar、flow mapping 用 scar_census 既有的那一份。
     flow 序列只判空／非空（規則只問 ≥1），不假裝數得出項數。

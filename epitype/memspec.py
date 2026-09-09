@@ -393,8 +393,8 @@ DECISION_PREFIX = "⚖ 裁定："
 SESSIONSTART_DECISIONS_HEADER = "⚖ 現行裁定（{vault}）"
 SESSIONSTART_DECISIONS_MAX_LINES = 12
 
-# PreToolUse 的「同一場只說一次」去重標記（卡片 trigger 壞掉的告示、寫檔閘的拒絕）。
-# 2026-09-09（§30）：旁白計量依 owner 裁定移除，標記機制留給上述兩個告示用。
+# PreToolUse 的「同一場只說一次」去重標記（寫檔閘的拒絕、無法使用的 forbidden 告示）。
+# 2026-09-09（§30／§34）：旁白計量與卡片 trigger 攔截都已移除，標記機制留給寫檔閘用。
 NOTICE_MARKER_DIRECTORY = "epitype_notices"
 # 2026-09-03 對抗審查 #4：marker 只建不收會在 temp 無限累積；超過這個年齡就清掉。
 NOTICE_MARKER_TTL_SECONDS = 24 * 3600
