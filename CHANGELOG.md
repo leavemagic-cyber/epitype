@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- gitignore: ignore the transient .hook-trust-*/ directory that hook_trust selftest creates in the repo root (it made the worktree-clean gate flap while another selftest was running).
 
 ### U-J：拆掉傷疤卡 trigger 的機械攔截（owner 2026-09-09；FAILURE_MODES §34）
 
