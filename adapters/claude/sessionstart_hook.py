@@ -23,6 +23,7 @@ from _hook_common import (
     load_config,
     native_cwd_vaults,
     payload,
+    payload_fits,
     pre_generation_guide,
     read_event,
     recall_marker_directory,
@@ -266,6 +267,50 @@ def _claude_native_index_vaults(event, native):
     return {vault for vault in native if vault in exact}
 
 
+def _joined(pieces, piece=""):
+    """bounded_context 之後會怎麼接，這裡就先怎麼接——量錯拼法就量錯預算。"""
+    parts = [item for item in pieces if isinstance(item, str) and item]
+    if piece:
+        parts.append(piece)
+    return "\n".join(parts)
+
+
+def _index_echo(index_path, pieces, budget):
+    """沒有原生載入的宿主（Codex）拿到的短入口：裝得下就整段，裝不下才排序取樣，
+    並在最後一行明說送出多少／全文多少。
+
+    預算按 `payload_fits` 那一份真實 JSON 編碼位元組算，不是字元數、也不是固定
+    「截前 3 KB」——舊碼截了不留痕跡，收件端無從得知偏好有沒有送到（2026-09-09
+    Claude↔Codex 收斂第 8 條）。裝不下就一路縮，縮到連 slim 的路徑頁尾都放不下時
+    整段不送：半段索引配一行沒對上的位元組數，比沒有索引更難判讀。
+    """
+    heading = f"## {memspec.MEMORY_INDEX_FILENAME}"
+    body = index_path.read_text(encoding="utf-8").rstrip()
+    total = len(body.encode("utf-8"))
+    if payload_fits("SessionStart", _joined(pieces, f"{heading}\n{body}"), budget):
+        return f"{heading}\n{body}"
+
+    full_path = index_path.resolve()
+
+    def notice(sent):
+        return memspec.SESSIONSTART_INDEX_TRUNCATED_LINE.format(
+            filename=memspec.MEMORY_INDEX_FILENAME, sent=sent, total=total, path=full_path
+        )
+
+    used = len(_joined(pieces).encode("utf-8"))
+    room = budget - used - len(f"{heading}\n\n{notice(total)}".encode("utf-8"))
+    while room > 0:
+        try:
+            slim = memspec.slim_index(body, room, full_path)
+        except ValueError:
+            return None
+        piece = "\n".join((heading, slim, notice(len(slim.encode("utf-8")))))
+        if payload_fits("SessionStart", _joined(pieces, piece), budget):
+            return piece
+        room -= max(64, room // 8)
+    return None
+
+
 def _handle(event, started_at):
     config = load_config(started_at)
     if config is None:
@@ -363,13 +408,9 @@ def _handle(event, started_at):
             return None
         index_path = vault / memspec.MEMORY_INDEX_FILENAME
         if index_path.is_file() and vault not in skip_index:
-            body = index_path.read_text(encoding="utf-8")
-            slim = memspec.slim_index(
-                body,
-                min(memspec.SESSIONSTART_INDEX_BUDGET_BYTES, budget),
-                index_path.resolve(),
-            )
-            pieces.append(f"## {memspec.MEMORY_INDEX_FILENAME}\n{slim}")
+            echo = _index_echo(index_path, pieces, budget)
+            if echo:
+                pieces.append(echo)
 
         ledger_path = vault / memspec.WORK_LEDGER_FILENAME
         if ledger_path.is_file():
@@ -428,11 +469,49 @@ def _selftest():
             context = value.get("hookSpecificOutput", {}).get("additionalContext", "")
             checks.append(
                 (
-                    "index and ledger injection",
+                    "index and ledger injection: a short index goes whole, with no sampling footer",
                     result.returncode == 0
+                    and "# Synthetic Index" in context
                     and "index detail" in context
                     and "ledger detail" in context
-                    and str((vault / memspec.MEMORY_INDEX_FILENAME).resolve()) in context,
+                    and "Full index:" not in context
+                    and "未完整回音" not in context,
+                )
+            )
+
+            # 裝不下時的行為才是這段程式的重點：舊碼固定截前 3 KB 又不留痕跡。
+            big_vault = root / "bigvault"
+            big_vault.mkdir()
+            big_body = "# Big Index\n" + "\n".join(
+                f"- line {number} 索引內容 padding padding" for number in range(1200)
+            )
+            (big_vault / memspec.MEMORY_INDEX_FILENAME).write_text(
+                big_body + "\n", encoding="utf-8"
+            )
+            big_config = root / "big-config.json"
+            write_config(big_config, [big_vault])
+            big_result = run_synthetic(Path(__file__), {"source": "startup"}, big_config)
+            big_value = json.loads(big_result.stdout) if big_result.stdout.strip() else {}
+            big_context = big_value.get("hookSpecificOutput", {}).get("additionalContext", "")
+            notice_line = next(
+                (line for line in big_context.splitlines() if "未完整回音" in line), ""
+            )
+            numbers = re.search(r"送出 (\d+)／全文 (\d+)", notice_line)
+            heading = f"## {memspec.MEMORY_INDEX_FILENAME}\n"
+            sampled = ""
+            if numbers and heading in big_context:
+                start = big_context.index(heading) + len(heading)
+                sampled = big_context[start:big_context.index(notice_line)].rstrip("\n")
+            checks.append(
+                (
+                    "oversized index is sampled, and the notice states the real bytes sent",
+                    big_result.returncode == 0
+                    and numbers is not None
+                    and int(numbers.group(1)) == len(sampled.encode("utf-8"))
+                    and int(numbers.group(2)) == len(big_body.encode("utf-8"))
+                    and int(numbers.group(1)) < int(numbers.group(2))
+                    and str((big_vault / memspec.MEMORY_INDEX_FILENAME).resolve()) in big_context
+                    and len(big_context.encode("utf-8")) <= memspec.HOOK_DEFAULT_BUDGET_BYTES,
                 )
             )
 
@@ -1042,7 +1121,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 29
+    total = 30
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

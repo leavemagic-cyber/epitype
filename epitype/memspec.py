@@ -103,7 +103,6 @@ TRIGGER_REGEX_MAX_CHARS = 1024
 # a scar that silently stopped applying is the failure the gate exists to prevent.
 GATE_DEFECT_NOTICE = "⚠ Epitype 動作閘：卡片 {name} 的 trigger 無法使用（{reason}），這條傷疤暫不生效；修正卡片後自動恢復。"
 GATE_DEFECT_MAX_LINES = 3
-SESSIONSTART_INDEX_BUDGET_BYTES = 3072
 # 手寫短入口對非原生載入的宿主（Codex）整段回音：裝得下就整段，裝不下才排序取樣
 # 並在最後一行明說少了多少位元組。舊碼一律截前 3 KB 不留痕跡，收件端無從得知
 # 偏好有沒有送到（2026-09-09 Claude↔Codex 收斂第 8 條）。
