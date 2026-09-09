@@ -67,6 +67,10 @@ MIXED_REASON_HEADINGS = "正文有 {count} 個 `## ` 小標"
 MIXED_REASON_BYTES = "正文 {bytes} 位元組 > {cap}"
 MIXED_REASON_DESCRIPTION = "description {chars} 字元且用「＋」「；」串了多件事"
 MIXED_COMMAND = "人工判斷要不要拆成多張卡（一張卡＝一個記憶或規則）；夢不自動拆"
+MIXED_SKIP_REVIEWED = "reviewed"
+MIXED_SKIP_SUPERSEDED = "superseded"
+MIXED_SKIP_FRESH_SPLIT = "fresh_split"
+MIXED_SKIPPED_NOTE = "已審過略過 {count} 張"
 CAP_UNSET_NOTE = "{field} 未設定，這一項跳過"
 CAP_COMMAND = "人工判斷超上限的檔案要精簡還是提高上限；夢不改檔"
 # 同一批 core_files 順路多問一句：這個檔跟規則卡重組出來的生成塊還一不一致。
@@ -630,8 +634,34 @@ def _body_heading_count(body):
     return count
 
 
+def _mixed_skip_reason(fields, headings, body_bytes):
+    """這張卡為什麼不必再列為候選；沒有理由就回 None。
+
+    2026-09-09 U-K3：三個訊號是形狀，人審是判斷，形狀不該壓過判斷。已標
+    `mixed_reviewed`（值不看，只看鍵在不在，才不綁任何語言）、已被取代的卡、以及
+    剛拆出來就只有一個小標又不超上限的新卡，都已經有人看過，再列一次只是把清單
+    變成永遠清不掉的雜訊。新卡若自己長成兩個小標或超上限，那是新卡自己的問題，
+    照樣列——這個豁免只赦免 description 那一條。
+    """
+    if memspec.MIXED_REVIEWED_FIELD in fields:
+        return MIXED_SKIP_REVIEWED
+    status = fields.get(memspec.DECISION_STATUS_FIELD, "")
+    if isinstance(status, str) and status.strip() == memspec.SUPERSEDED_DECISION_STATUS:
+        return MIXED_SKIP_SUPERSEDED
+    origin = fields.get(memspec.SPLIT_FROM_FIELD, "")
+    if (
+        isinstance(origin, str)
+        and origin.strip()
+        and headings < memspec.CARD_MIXED_HEADING_MIN
+        and body_bytes <= memspec.CARD_BODY_MIXED_BYTES
+    ):
+        return MIXED_SKIP_FRESH_SPLIT
+    return None
+
+
 def _mixed_cards_of(vault):
     flagged = []
+    skipped = {}
     for path in memsearch.card_files(vault):
         try:
             text = path.read_text(encoding="utf-8-sig")
@@ -641,9 +671,9 @@ def _mixed_cards_of(vault):
         body = _body_of(text)
         reasons = []
         headings = _body_heading_count(body)
+        body_bytes = len(body.encode("utf-8"))
         if headings >= memspec.CARD_MIXED_HEADING_MIN:
             reasons.append(MIXED_REASON_HEADINGS.format(count=headings))
-        body_bytes = len(body.encode("utf-8"))
         if body_bytes > memspec.CARD_BODY_MIXED_BYTES:
             reasons.append(MIXED_REASON_BYTES.format(bytes=body_bytes, cap=memspec.CARD_BODY_MIXED_BYTES))
         description = fields.get(memspec.DESCRIPTION_FIELD, "")
@@ -652,14 +682,21 @@ def _mixed_cards_of(vault):
             and any(joiner in description for joiner in memspec.CARD_MIXED_DESCRIPTION_JOINERS)
         ):
             reasons.append(MIXED_REASON_DESCRIPTION.format(chars=len(description)))
-        if reasons:
-            flagged.append({
-                "vault": str(vault),
-                "path": path.relative_to(vault).as_posix(),
-                "reasons": reasons,
-            })
+        if not reasons:
+            continue
+        # 略過只在「這張本來會被列」時才計數：報告那一行說的是人審從清單上拿掉幾張，
+        # 把從來就沒上榜的卡也算進去，那個數字就對不上清單的前後差。
+        skip = _mixed_skip_reason(fields, headings, body_bytes)
+        if skip is not None:
+            skipped[skip] = skipped.get(skip, 0) + 1
+            continue
+        flagged.append({
+            "vault": str(vault),
+            "path": path.relative_to(vault).as_posix(),
+            "reasons": reasons,
+        })
     flagged.sort(key=lambda item: item["path"])
-    return flagged
+    return flagged, skipped
 
 
 def _section_mixed_cards(vaults, today, since_date, config):
@@ -668,14 +705,26 @@ def _section_mixed_cards(vaults, today, since_date, config):
     examples = []
     by_vault = {}
     total = 0
-    for vault, flagged in results:
+    skipped_total = 0
+    skipped_by_reason = {}
+    for vault, (flagged, skipped) in results:
         by_vault[str(vault)] = len(flagged)
         total += len(flagged)
         examples.extend(flagged[:MIXED_MAX_PER_VAULT])
+        for reason, count in skipped.items():
+            skipped_total += count
+            skipped_by_reason[reason] = skipped_by_reason.get(reason, 0) + count
     return {
-        "counts": {"mixed_cards": total, "by_vault": by_vault, "listed_cap_per_vault": MIXED_MAX_PER_VAULT},
+        "counts": {
+            "mixed_cards": total,
+            "reviewed_skipped": skipped_total,
+            "skipped_by_reason": skipped_by_reason,
+            "by_vault": by_vault,
+            "listed_cap_per_vault": MIXED_MAX_PER_VAULT,
+        },
         "examples": examples,
         "commands": [MIXED_COMMAND] if total else [],
+        "note": MIXED_SKIPPED_NOTE.format(count=skipped_total),
         "errors": errors,
     }
 
@@ -2036,14 +2085,64 @@ def _selftest():
                 "---\nname: packed_description\ndescription: 2026-06-01 "
                 + "甲乙丙丁" * 45 + "；戊己庚辛\naliases:\n- d\n---\nbody\n",
             )
+            # U-K3：人審過的憑證要壓過三個形狀訊號，否則逐張審完的庫下一次照樣被列。
+            packed = "2026-06-01 " + "甲乙丙丁" * 45 + "；戊己庚辛"
+            _write_card(
+                mixed_vault / "reviewed_two_headings.md",
+                "---\nname: reviewed_two_headings\ndescription: 2026-06-01 synthetic\n"
+                "mixed_reviewed: 2026-09-09-keep\naliases:\n- e\n---\n"
+                "## 第一件事\nbody\n\n## 第二件事\nbody\n",
+            )
+            _write_card(
+                mixed_vault / "superseded_big.md",
+                "---\nname: superseded_big\ndescription: 2026-06-01 synthetic\nstatus: superseded\n"
+                "aliases:\n- f\n---\n" + "x" * (memspec.CARD_BODY_MIXED_BYTES + 1) + "\n",
+            )
+            _write_card(
+                mixed_vault / "fresh_split.md",
+                "---\nname: fresh_split\ndescription: " + packed
+                + "\nsplit_from: origin.md\naliases:\n- g\n---\n## 一件事\nbody\n",
+            )
+            _write_card(
+                mixed_vault / "split_two_headings.md",
+                "---\nname: split_two_headings\ndescription: 2026-06-01 synthetic\n"
+                "split_from: origin.md\naliases:\n- h\n---\n"
+                "## 第一件事\nbody\n\n## 第二件事\nbody\n",
+            )
+            _write_card(
+                mixed_vault / "unmarked_twin.md",
+                "---\nname: unmarked_twin\ndescription: " + packed
+                + "\naliases:\n- i\n---\n## 一件事\nbody\n",
+            )
             mixed_by_id = {s["id"]: s for s in build_report([mixed_vault], today=today)["sections"]}
             mixed_paths = {item["path"] for item in mixed_by_id[10]["examples"]}
             checks.append(("section 10 flags the three mixed shapes and leaves a fenced markdown example alone", (
-                mixed_by_id[10]["counts"]["mixed_cards"] == 3
-                and mixed_paths == {"two_headings.md", "too_big.md", "packed_description.md"}
+                mixed_by_id[10]["counts"]["mixed_cards"] == 5
+                and mixed_paths == {"two_headings.md", "too_big.md", "packed_description.md",
+                                    "split_two_headings.md", "unmarked_twin.md"}
                 and "fenced_example.md" not in mixed_paths
                 and any("## " in reason for item in mixed_by_id[10]["examples"]
                         for reason in item["reasons"] if item["path"] == "two_headings.md")
+            )))
+            checks.append(("section 10 skips the card a human already marked mixed_reviewed", (
+                "reviewed_two_headings.md" not in mixed_paths
+                and mixed_by_id[10]["counts"]["skipped_by_reason"][MIXED_SKIP_REVIEWED] == 1
+            )))
+            checks.append(("section 10 skips a superseded card even when its body is over the cap", (
+                "superseded_big.md" not in mixed_paths
+                and mixed_by_id[10]["counts"]["skipped_by_reason"][MIXED_SKIP_SUPERSEDED] == 1
+            )))
+            checks.append(("a card just split out is not listed again, but an unmarked twin still is", (
+                "fresh_split.md" not in mixed_paths
+                and mixed_by_id[10]["counts"]["skipped_by_reason"][MIXED_SKIP_FRESH_SPLIT] == 1
+                and "unmarked_twin.md" in mixed_paths
+            )))
+            checks.append(("a split card that grew two headings of its own is listed again", (
+                "split_two_headings.md" in mixed_paths
+            )))
+            checks.append(("section 10 reports how many cards the human review took off the list", (
+                mixed_by_id[10]["counts"]["reviewed_skipped"] == 3
+                and mixed_by_id[10]["note"] == MIXED_SKIPPED_NOTE.format(count=3)
             )))
 
             cap_vault = Path(temp_dir).resolve() / "caps"
@@ -2700,7 +2799,7 @@ def _selftest():
                 os.environ[name] = value
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 60
+    total = 65
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

@@ -611,6 +611,12 @@ CARD_BODY_MIXED_BYTES = 4000
 CARD_MIXED_HEADING_MIN = 2
 CARD_MIXED_DESCRIPTION_MAX_CHARS = 160
 CARD_MIXED_DESCRIPTION_JOINERS = ("＋", "；")
+# 2026-09-09 實測事故（U-K3）：三個機械訊號不認人的判斷，逐張審完標記過的卡下一次
+# 照樣列，候選清單永遠清不掉。這兩個欄位是人審留下的憑證：`mixed_reviewed` 記「這張
+# 看過了」（值是自由文字，機器只看有沒有這個鍵，語言中立），`split_from` 記「這張是
+# 從哪張拆出來的」。值本身不是機器判準，只有鍵的存在是。
+MIXED_REVIEWED_FIELD = "mixed_reviewed"
+SPLIT_FROM_FIELD = "split_from"
 # 這些欄位必須是至少一項的序列，空清單等於沒有欄位。
 CARD_LIST_FIELDS = (ALIASES_FIELD, FORBIDDEN_FIELD, RULE_INCIDENTS_FIELD)
 CARD_EVENT_REQUIRED_FIELDS = (NAME_FIELD, DESCRIPTION_FIELD, CAPTURED_AT_FIELD, SESSION_FIELD)

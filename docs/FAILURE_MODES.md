@@ -1778,3 +1778,52 @@ Regressions: `tests/capture_recall_regression.py` (never injected, still searcha
 a promoted decision card keeps its seat), `tests/capture_admission_regression.py`
 (the consumer sweep), `tests/recall_selection_regression.py` (a quote consumes no
 slot), and `adapters/claude/recall_hook.py --selftest`.
+
+## 42. The split-candidate list could not be finished (2026-09-10)
+
+§10 of the dream lists mixed cards from three shape signals: two or more `## `
+headings, a body over `memspec.CARD_BODY_MIXED_BYTES`, or a long `description` that
+strings several things together with `＋`/`；`. The signals were the whole judgement.
+Nothing read the record of a human having already looked.
+
+So the owner reviewed the project vault card by card on 2026-09-09 — 89 cards marked
+`mixed_reviewed: 2026-09-09-keep` / `-index`, the ones actually split marked
+`status: superseded` — and the next run listed **122**: the same 89, plus the new
+cards the split had just produced, several of which inherited the parent's packed
+`description`. Two ways to fail from there, and both are worse than the original
+mess: work through a list that cannot go down, or stop reading a section that is now
+mostly noise. A backlog that regenerates itself after the work is done teaches people
+to ignore it.
+
+The root cause is that **a mechanical signal was allowed to outrank a human
+decision.** The shapes are cheap and language-free, which is why they are the right
+way to *find* candidates; they are not a judgement about whether a card holds one
+thing. A review is that judgement, and it leaves a mark — the product simply never
+read the mark.
+
+**The rule** (`dream._mixed_skip_reason`). A card is skipped and counted, not listed,
+when any of these holds: `memspec.MIXED_REVIEWED_FIELD` (`mixed_reviewed`) is present
+in the frontmatter — **the value is never read**, so a mark written in any language
+works and no date or vocabulary is hardcoded; the card is `status: superseded` (a card
+that has been replaced is not a split candidate); or the card carries
+`memspec.SPLIT_FROM_FIELD` (`split_from`) *and* is now under the byte cap with fewer
+than `CARD_MIXED_HEADING_MIN` headings. That last exemption forgives exactly one
+thing, the inherited `description`: a card that came out of a split and then grew two
+headings of its own, or ran over the cap, is listed again on its own account.
+
+The skip is counted **only for a card the shapes would otherwise have listed**, and
+the section reports it as 「已審過略過 N 張」 with a per-reason breakdown. Counting
+every marked card instead would inflate N with cards that were never candidates, and
+the number would no longer reconcile with the drop in the list. Measured on the two
+real vaults (read-only `--dry-run`, 2026-09-10): project vault **122 → 22**, skipped
+100 (89 reviewed, 11 fresh splits); governance vault **75 → 11**, skipped 64 (all
+reviewed). Both reconcile exactly.
+
+What this does not do: nothing is written, moved, or unmarked. Removing a
+`mixed_reviewed` mark from a card puts it straight back on the list — the mark is the
+only thing holding it off, and it lives in the card, where a human put it.
+
+Regression: `epitype/dream.py --selftest` (a reviewed card with two headings is
+skipped, a superseded card over the cap is skipped, a fresh split is not relisted
+while an unmarked twin with the same description still is, a split card that grew two
+headings is listed again, and the count reported is the count taken off the list).

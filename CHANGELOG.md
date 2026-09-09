@@ -4,6 +4,15 @@
 - 整潔（U-J2）：閘門紀錄與 `forbidden` 正則驗證器搬進 `adapters/claude/_hook_common.py` 並改公開名（`compile_bounded_regex`、`append_gate_log`、`with_session`、`GATE_LOG_MAX_BYTES`），Stop 閘不再跨 adapter 借 `pretooluse_gate` 的私有名。純搬家：函式本體逐位元組不變，紀錄格式與輪替門檻（2 MiB → `.1`）照舊。
 - gitignore: ignore the transient .hook-trust-*/ directory that hook_trust selftest creates in the repo root (it made the worktree-clean gate flap while another selftest was running).
 
+### U-K3：夢第 10 節認人審過的標記（FAILURE_MODES §42）
+
+- 病灶：拆卡候選只看三個機械訊號（正文 ≥2 個 `## `、正文 > `CARD_BODY_MIXED_BYTES`、description 又長又用「＋」「；」串），不認人的判斷。owner 2026-09-09 在 titan 庫逐張審完 89 張並標 `mixed_reviewed: 2026-09-09-keep`／`-index`、拆掉的原卡標 `status: superseded` 之後，下一次仍列 **122** 張（原 89 全數回榜，加上剛拆出來、繼承了母卡 description 的新卡）。清單清不掉就只剩兩條路：做一份永遠不會變短的工，或整節不看。
+- **判定**（`dream._mixed_skip_reason`）：三種情形略過並計數而不列出——frontmatter 有 `memspec.MIXED_REVIEWED_FIELD`（`mixed_reviewed`，**值一律不讀**，只看鍵在不在，所以任何語言的標記都算數，也沒有任何日期或詞彙被寫死）、卡是 `status: superseded`、或卡有 `memspec.SPLIT_FROM_FIELD`（`split_from`）且現在只有不到 `CARD_MIXED_HEADING_MIN` 個小標又不超上限。最後一條只赦免 description 那一條：**剛拆出來的新卡若自己長了兩個小標或超上限，照樣列**，那是新卡自己的問題。
+- 略過**只在「這張本來會被列」時計數**，報告多一行「已審過略過 N 張」，counts 另有 `reviewed_skipped` 與 `skipped_by_reason` 明細。把沒上榜的卡也算進去，N 就對不上清單的前後差，那一行會變成不能查的數字。
+- **真庫實測**（唯讀 `--dry-run --json`，`HOME`／`USERPROFILE`／`EPITYPE_CONFIG` 全指暫存，2026-09-10）：titan 庫 **122 → 22**，略過 100（reviewed 89、fresh_split 11）；治理庫 **75 → 11**，略過 64（全部 reviewed）。兩邊都恰好對得起來（122−100＝22、75−64＝11）。治理庫改前是 75 而不是派工單寫的 71——那是 U-K 當天的數字，這幾天新卡讓它長了 4 張。
+- **沒動的**：三個訊號的門檻與判定、五十列上限、夢不自動拆卡、任何寫檔行為。標記住在卡片裡，是人放的；把 `mixed_reviewed` 拿掉，那張卡下一次就回到清單上。
+- 測試：dream selftest 60 → **65**（已審過略過、superseded 略過、剛拆的新卡不回榜但同樣 description 的無標記雙胞胎照樣列、長出兩個小標的拆出卡再次被列、報告的數字＝從清單上被拿掉的張數）。閘門：run_all 49/49、privacy PASS、corpus 330/330、seeds 15/15 與 5/5。
+
 ### U-H：喚回只端卡片，原話留在最底層（owner 2026-09-09；FAILURE_MODES §41）
 
 - owner 原話：「其他全部按需讀：索引指到卡片，卡片只在喚回時出現；卡片下面才是解說，再下面才是原話和對話紀錄，要用到才翻」。UserPromptSubmit 不再注入 `rulings/`／`corrections/`／`grants/` 的原話事件檔——那是第四層（最底層）的原始紀錄，只在 AI 主動 `memsearch` 時才出現。根因是層級錯位不是標籤錯：原話被當卡片層逐句注入，還佔了預算裁不掉的置頂席，所以沒人核過的一句話每次詞面命中就先於卡片抵達現場，「歷史捕捉」四個字改不了它讀起來像現行裁定。
