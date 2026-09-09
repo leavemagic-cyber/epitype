@@ -74,18 +74,6 @@ def _handle(event, started_at):
         destination,
         memspec.COMPACT_MAP_DEFAULT_BUDGET_BYTES,
     )
-    # U53：壓縮丟掉的正是「我等一下會…」那句話。地圖是壓縮前唯一落地的快照，所以
-    # 還沒兌現的承諾跟著它落地——讀地圖的人不必再去翻帳本。地圖已經寫好的事實不受
-    # 這一段影響：帳本讀不到就什麼都不加。
-    try:
-        from epitype import commitments
-
-        block = commitments.snapshot_block(vault, memspec.COMMITMENT_PRECOMPACT_MAX)
-        if block:
-            with destination.open("a", encoding="utf-8", newline="\n") as stream:
-                stream.write("\n" + block)
-    except Exception:
-        pass
     _sweep_maps(destination.parent, destination)
     context = f"地圖已落於{destination},壓縮後先讀它按行號回撈原文。"
     budget = config[memspec.CONFIG_BUDGET_BYTES_FIELD]
@@ -215,11 +203,17 @@ def _selftest():
                 and not (project_vault / memspec.COMPACT_MAP_DIRECTORY).exists(),
             ))
 
-            # U53: the map is the only pre-compaction snapshot that lands on disk,
-            # so the promises that compaction would erase land with it.
-            from epitype import commitments
-
-            commitments.record(vault, "precompact-promise", ["我等一下會補上 settle 的測試。"])
+            # Owner 2026-09-09 (§30): the commitment ledger is gone, so the map is
+            # the transcript's recovery map and nothing else — a leftover ledger in
+            # the vault must not be appended to it.
+            legacy_ledger = vault / memspec.FTS_INDEX_DIRECTORY / "commitments.jsonl"
+            legacy_ledger.parent.mkdir(parents=True, exist_ok=True)
+            legacy_ledger.write_text(
+                json.dumps({"digest": "d1", "ts": "2026-09-08T00:00:00Z",
+                            "text": "我等一下會補上 settle 的測試。", "status": "open",
+                            "session_id": "s1"}, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
             promise_result = run_synthetic(
                 Path(__file__),
                 {"transcript_path": str(transcript)},
@@ -227,10 +221,9 @@ def _selftest():
             )
             promise_map = destination.read_text(encoding="utf-8")
             checks.append((
-                "open promises are appended to the pre-compaction map",
+                "a leftover commitment ledger is not appended to the map",
                 promise_result.returncode == 0
-                and memspec.COMMITMENT_PRECOMPACT_HEADING in promise_map
-                and "我等一下會補上 settle 的測試。" in promise_map
+                and "我等一下會補上 settle 的測試。" not in promise_map
                 and "Synthetic recovery request" in promise_map,
             ))
 

@@ -431,24 +431,6 @@ def _vaults(config, event):
     return vaults
 
 
-def _commitments(event, message, config, started_at):
-    """U53 承諾帳：先收尾已兌現的，再把這回合新開的承諾記下來。
-
-    「我等一下會…」說出口就沒人記得，compaction 之後連 owner 都得自己追。這一段不
-    影響本回合擋或不擋——決定已經算完，帳本只是把承諾落成檔案；任何例外由呼叫端吞掉，
-    預算沿用同一個 deadline。"""
-    if expired(started_at):
-        return
-    from epitype import commitments
-
-    vault = governance_vault(config, for_write=True)
-    session_id = event.get("session_id", event.get("sessionId"))
-    commitments.settle(vault, session_id, message)
-    if expired(started_at):
-        return
-    commitments.record(vault, session_id, commitments.extract(message))
-
-
 def _handle(event, started_at, defects):
     # The host re-runs Stop after a block; blocking that run again would loop forever.
     if event.get("stop_hook_active"):
@@ -460,12 +442,7 @@ def _handle(event, started_at, defects):
     config = load_config(started_at)
     if config is None:
         return None
-    verdict = _verdict(event, message, config, started_at, defects)
-    try:
-        _commitments(event, message, config, started_at)
-    except Exception:
-        pass
-    return verdict
+    return _verdict(event, message, config, started_at, defects)
 
 
 def _verdict(event, message, config, started_at, defects):
@@ -879,37 +856,21 @@ def _selftest():
                 and memspec.STOP_GATE_PATTERN_DEFECT.split("{", 1)[0] in evil_result.stderr,
             ))
 
-            # U53: the promise is the point of the turn's tail, block or no block.
-            from epitype import commitments
-
+            # Owner 2026-09-09 (§30): Stop keeps the decision gate and writes no
+            # commitment ledger. A turn whose tail is a promise still blocks on the
+            # forbidden phrase, and leaves nothing behind in the vault.
+            ledger = vault / memspec.FTS_INDEX_DIRECTORY / "commitments.jsonl"
+            before = ledger.stat().st_mtime_ns if ledger.exists() else None
             promise = "我等一下會把參數表補上。"
             blocked_result, blocked_value, _ = run(
                 "我建議虛擬盤先用不同參數跑一週再說。" + promise
             )
-            recorded = [row.get("digest") for row in commitments.open_items(vault)]
+            after = ledger.stat().st_mtime_ns if ledger.exists() else None
             checks.append((
-                "a blocked turn still records the promise it made",
+                "a promise in the turn's tail still blocks and writes no ledger",
                 blocked_result.returncode == 0
                 and blocked_value.get("decision") == "block"
-                and commitments.digest(promise) in recorded,
-            ))
-
-            rerun_promise = "我稍後會把 stop_gate 的預算量一遍。"
-            rerun_result = run_synthetic(
-                Path(__file__),
-                {
-                    "session_id": "stopgate-rerun",
-                    "stop_hook_active": True,
-                    "last_assistant_message": rerun_promise,
-                },
-                config,
-            )
-            checks.append((
-                "the host's post-block re-run records nothing: it is not a new turn",
-                rerun_result.returncode == 0
-                and not rerun_result.stdout.strip()
-                and commitments.digest(rerun_promise)
-                not in [row.get("digest") for row in commitments.open_items(vault)],
+                and before == after,
             ))
 
             blown = time.monotonic() - memspec.HOOK_TIMEOUT_SECONDS - 1
@@ -926,7 +887,7 @@ def _selftest():
             clear_recall_markers(session_id)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 23
+    total = 22
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

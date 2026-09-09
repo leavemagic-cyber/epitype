@@ -12,7 +12,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from epitype import capture_route, card_lint, commitments, memsearch, memspec, pending_lint
+from epitype import capture_route, card_lint, memsearch, memspec, pending_lint
 from _hook_common import (
     bounded_context,
     emit,
@@ -358,13 +358,6 @@ def _handle(event, started_at):
         overdue = pending_lint.summary_line(vaults, time_budget=seconds)
         if overdue:
             pieces.append(overdue)
-
-    # U53：AI 自己開的承諾（「我等一下會…」）沒有任何人在追，而 compaction 正是它蒸發
-    # 的時刻——所以 source: compact 也印。這不是 owner 的待辦，帳本另放，一行帶最近一條。
-    if _soft_remaining(started_at) >= memspec.SESSIONSTART_SEGMENT_FLOOR_SECONDS:
-        promised = commitments.summary_line(vaults, memspec.COMMITMENT_SESSIONSTART_MAX)
-        if promised:
-            pieces.append(promised)
 
     # A card missing its type's required fields is a card the recall side will
     # hand over half-true. One line, and only when the scan finished inside its
@@ -855,8 +848,9 @@ def _selftest():
                     and "index detail" in plain_context,
                 )
             )
-            # U53: an AI promise nobody is tracking gets one line, under the pending
-            # line, and the compaction-resumed session needs it most of all.
+            # Owner 2026-09-09 (§30): the AI commitment ledger is gone. A vault
+            # holding a ledger file gets no line from it, at startup or after
+            # compaction; the owner's own pending line is unaffected.
             promise_vault = root / "promise-vault"
             promise_vault.mkdir()
             (promise_vault / memspec.MEMORY_INDEX_FILENAME).write_text(
@@ -866,36 +860,29 @@ def _selftest():
                 "---\nname: plan\ndescription: synthetic plan\n---\n- 2026-07-22 未辦（owner 自行）：SWSetup\n",
                 encoding="utf-8",
             )
+            legacy_ledger = promise_vault / memspec.FTS_INDEX_DIRECTORY / "commitments.jsonl"
+            legacy_ledger.parent.mkdir(parents=True, exist_ok=True)
+            legacy_ledger.write_text(
+                json.dumps({"digest": "d1", "ts": "2026-09-08T00:00:00Z",
+                            "text": "我等一下會補上 settle 的測試。", "status": "open",
+                            "session_id": "s1"}, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
             promise_config = root / "promise-config.json"
             write_config(promise_config, [promise_vault])
-            commitments.record(promise_vault, "sessionstart-promise", ["我等一下會補上 settle 的測試。"])
-            promise_result = run_synthetic(Path(__file__), {"source": "startup"}, promise_config)
-            promise_value = json.loads(promise_result.stdout) if promise_result.stdout.strip() else {}
-            promise_context = promise_value.get("hookSpecificOutput", {}).get("additionalContext", "")
-            promise_line = "⏳ AI 未兌現承諾 1 條（最近：我等一下會補上 settle 的測試。…）"
-            checks.append(
-                (
-                    "an open AI promise adds one line, after the owner's pending line",
-                    promise_result.returncode == 0
-                    and promise_line in promise_context
-                    and promise_context.index("⏳ 殭屍待辦") < promise_context.index(promise_line)
-                    and "promise index detail" in promise_context,
+            for promise_source in ("startup", "compact"):
+                promise_result = run_synthetic(Path(__file__), {"source": promise_source}, promise_config)
+                promise_value = json.loads(promise_result.stdout) if promise_result.stdout.strip() else {}
+                promise_context = promise_value.get("hookSpecificOutput", {}).get("additionalContext", "")
+                checks.append(
+                    (
+                        f"a leftover commitment ledger adds no line at source={promise_source}",
+                        promise_result.returncode == 0
+                        and "未兌現承諾" not in promise_context
+                        and "我等一下會補上" not in promise_context
+                        and "⏳ 殭屍待辦" in promise_context,
+                    )
                 )
-            )
-            promise_compact = run_synthetic(Path(__file__), {"source": "compact"}, promise_config)
-            promise_compact_value = json.loads(promise_compact.stdout) if promise_compact.stdout.strip() else {}
-            promise_compact_context = promise_compact_value.get("hookSpecificOutput", {}).get(
-                "additionalContext", ""
-            )
-            checks.append(
-                (
-                    "the compaction-resumed session gets the promise line, and a vault with"
-                    " no open promise gets none",
-                    promise_compact.returncode == 0
-                    and promise_line in promise_compact_context
-                    and "AI 未兌現承諾" not in plain_context,
-                )
-            )
 
             # --- 夢：順路做的觸發條件與開場通知 ---
             import time as _time
@@ -961,7 +948,7 @@ def _selftest():
                 }
                 dream_state_file.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
 
-            full_headline = {"card_fail": 2, "missing_aliases": 7, "drafts": 1, "open_commitments": 3}
+            full_headline = {"card_fail": 2, "missing_aliases": 7, "drafts": 1}
             _write_dream_state(_time.time(), full_headline)
             inside = _dream_spawn(piggyback, dream_vault, launcher=_fake_launcher)
             _write_dream_state(_time.time() - 25 * 3600, full_headline)

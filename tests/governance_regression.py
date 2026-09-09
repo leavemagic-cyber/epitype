@@ -118,7 +118,7 @@ class GovernanceRegression(unittest.TestCase):
              patch.object(recall, "expired", lambda _started: late):
             self.assertEqual(self.recall_once(), "")
         self.assertIn("fixturedecision", self.recall_once())
-        # Cards and the procedure were delivered once; nothing repeats until compaction (owner 2026-09-09).
+        # Every card was delivered once; nothing repeats until compaction clears the markers.
         self.assertEqual(self.recall_once(), "")
 
     def test_output_failure_leaves_recall_retryable(self):
@@ -127,7 +127,7 @@ class GovernanceRegression(unittest.TestCase):
         with patch.object(recall, "emit", side_effect=OSError("synthetic output failure")):
             self.assertEqual(self.recall_once(), "")
         self.assertIn("fixturedecision", self.recall_once())
-        # Cards and the procedure were delivered once; nothing repeats until compaction (owner 2026-09-09).
+        # Every card was delivered once; nothing repeats until compaction clears the markers.
         self.assertEqual(self.recall_once(), "")
 
     def test_missing_vault_keeps_reads_but_never_redirects_capture(self):
@@ -169,7 +169,7 @@ class GovernanceRegression(unittest.TestCase):
         second_output = json.loads(self.recall_once())["hookSpecificOutput"]["additionalContext"]
         self.assertEqual(sum(line.startswith("- ") for line in second_output.splitlines()), 1)
         self.assertNotIn(first, second_output)
-        # Cards and the procedure were delivered once; nothing repeats until compaction (owner 2026-09-09).
+        # Every card was delivered once; nothing repeats until compaction clears the markers.
         self.assertEqual(self.recall_once(), "")
 
     def test_degraded_governance_writers_are_paused(self):
@@ -177,8 +177,6 @@ class GovernanceRegression(unittest.TestCase):
         common.write_config(self.config, [self.root / "missing", self.vault])
         with contextlib.redirect_stderr(io.StringIO()):
             config = common.load_config(time.monotonic())
-            with self.assertRaises(OSError):
-                stop._commitments({}, "I will finish fixturedecision", config, time.monotonic())
             stop._audit(config, "fixturedecision", "question", time.monotonic())
             transcript = self.root / "transcript.jsonl"
             transcript.write_text('{"type":"user","message":{"content":"fixture"}}\n', encoding="utf-8")
@@ -193,7 +191,8 @@ class GovernanceRegression(unittest.TestCase):
                 spawn.assert_not_called()
                 notice.assert_not_called()
         self.assertFalse((self.vault / memspec.GATE_LOG_FILENAME).exists())
-        self.assertFalse((self.vault / memspec.FTS_INDEX_DIRECTORY / memspec.COMMITMENT_LEDGER_FILENAME).exists())
+        # Owner 2026-09-09 (§30): no commitment ledger is written anywhere any more.
+        self.assertFalse((self.vault / memspec.FTS_INDEX_DIRECTORY / "commitments.jsonl").exists())
 
 
 if __name__ == "__main__":

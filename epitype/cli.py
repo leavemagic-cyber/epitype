@@ -16,7 +16,6 @@ _COMMANDS = {
     "source": ("epitype.source_lookup", "main", ()),
     "scar-census": ("epitype.scar_census", "main", ()),
     "pending": ("epitype.pending_lint", "main", ()),
-    "commitments": ("epitype.commitments", "main", ()),
     "token-meter": ("epitype.token_meter", "main", ()),
     "gates": ("epitype.gates_report", "main", ()),
     "exam": ("exam.exam_runner", "main", ()),

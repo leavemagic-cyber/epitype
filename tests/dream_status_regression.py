@@ -47,7 +47,7 @@ class DreamStatusRegression(unittest.TestCase):
         with patch.object(dream.time, "monotonic", side_effect=lambda: next(ticks, 1.0)):
             state, notice = self.run_pack("--time-budget-seconds", "0.001")
         self.assert_incomplete(state, notice)
-        self.assertEqual(len(state["section_errors"]), 8)
+        self.assertEqual(len(state["section_errors"]), 7)
         self.assertTrue(all(row["error"] == dream.TIME_BUDGET_ERROR
                             for row in state["section_errors"].values()))
         pack = json.loads(self.pack.read_text(encoding="utf-8"))
@@ -66,7 +66,7 @@ class DreamStatusRegression(unittest.TestCase):
             state, notice = self.run_pack()
         self.assert_incomplete(state, notice)
         self.assertEqual(set(state["section_errors"]), {"2"})
-        self.assertEqual(state["sections"]["5"]["total_drafts"], 1)
+        self.assertEqual(state["sections"]["4"]["total_drafts"], 1)
 
     def test_one_vault_failure_keeps_the_error_and_completed_vault(self):
         other = self.root / "other"

@@ -1178,64 +1178,8 @@ if __name__ == "__main__":
     raise SystemExit(_selftest() if "--selftest" in sys.argv[1:] else 0)
 
 
-# ── U53 承諾落待辦（append-only 常數區塊；實作在 epitype/commitments.py）──────
-# 2026-09-06 owner 痛點：AI 在回合裡說「我等一下會…」「等 X 回報後我會…」，compaction
-# 或換 session 之後沒人記得，owner 得自己追。承諾句偵測比照 capture.py 的原話捕捉：
-# 句型表、引用排除、digest 去重都只在這裡寫一次，線上 hook 與 CLI 讀同一份規格。
-COMMITMENT_LEDGER_FILENAME = "commitments.jsonl"
-COMMITMENT_LOCK_SECONDS = 0.2
-COMMITMENT_MAX_SENTENCE_CHARS = 200   # 超長句截斷後才入帳，digest 才穩定
-COMMITMENT_MAX_PER_TURN = 2           # 一回合最多記幾條（U59 由 5 降為 2：真庫實測長篇回報一輪灌四五條）
-COMMITMENT_LEDGER_MAX_ROWS = 500      # 重寫時保留的最新列數（closed 先被丟）
-COMMITMENT_SETTLE_PREFIX_CHARS = 20   # 收尾比對用的關鍵片段長度
-COMMITMENT_SUMMARY_CHARS = 60         # SessionStart 一行裡的摘錄長度
-COMMITMENT_SESSIONSTART_MAX = 20      # 一行最多統計幾條 open，超過標 N+
-COMMITMENT_PRECOMPACT_MAX = 5         # 壓縮前快照塞幾條 open 承諾
-COMMITMENT_OPEN_STATUS = "open"
-COMMITMENT_CLOSED_STATUS = "closed"
-COMMITMENT_SENTENCE_TERMINATORS = "。！？!?；;.\r\n"
-# 承諾句型表：中英文各一組。裸「會」「稍後」不入表（「稍後會很忙」不是承諾）；
-# 「我不會」不含子串「我會」，故否定式天然落選。
-COMMITMENT_TRIGGER_PATTERN = (
-    r"(?:我(?:待會|等一下|等等|稍後|之後|接下來|接著|隨後|再|馬上|立刻)?會"
-    r"|我(?:等一下|待會|稍後|之後|接著|接下來)"
-    r"|稍後(?:我|再|會)"
-    r"|之後(?:我)?(?:會|再)"
-    r"|接著我|接下來我"
-    r"|下一步"
-    r"|等[^。！？!?；;\r\n]{0,20}回報後"
-    r"|回報後(?:我|再)"
-    r"|它回報後"
-    r"|\bI\s+will\b|\bI['’]ll\b|\bnext\s+I\b"
-    r"|\bafter\b[^.!?;\r\n]{0,40}\bI\s*(?:['’]ll|will)\b"
-    r"|\bthen\s+I\s*(?:['’]ll|will)\b)"
-)
-COMMITMENT_TRIGGER_REGEX = re.compile(COMMITMENT_TRIGGER_PATTERN, re.IGNORECASE)
-# 覆述 owner 指令不是承諾：句中把主詞指給別人的，一律不記。
-COMMITMENT_ATTRIBUTION_PATTERN = (
-    # 動詞窄到「轉述」為止：裸「要」與「裁」會把真承諾「等 owner 裁決後我會…」連坐，
-    # 而那正是 owner 點名最容易蒸發的句型，所以兩者不入表。
-    r"(?:owner\s*(?:說|要求|指示|交代|交待|叫)"
-    r"|你(?:說|要求|指示|叫我|交代|交待)"
-    r"|使用者說|上面說|規格說"
-    # 「下一步由 owner 決定」是交棒，不是承諾。只認「由 owner」「owner 自行」這兩個
-    # 窄形——「等 owner 裁決後我會…」仍是真承諾，不能被 owner 兩字連坐。
-    r"|由\s*owner|owner\s*自行"
-    r"|\bthe\s+owner\s+(?:said|wants|asked)\b|\byou\s+(?:said|asked|want)\b)"
-)
-COMMITMENT_ATTRIBUTION_REGEX = re.compile(COMMITMENT_ATTRIBUTION_PATTERN, re.IGNORECASE)
-# 已完成式不是待辦。裸「已」太寬（「用已有的資料」），只認已＋動詞與明確完成詞。
-COMMITMENT_DONE_PATTERN = (
-    r"(?:已(?:經)?(?:完成|做完|跑完|改|寫|加|修|建|驗|落|記|同步|處理|更新|補|刪|移)"
-    r"|完成了|做完了|搞定"
-    r"|\bdone\b|\balready\b|\bcompleted\b|\bfinished\b|\bhas\s+been\s+(?:done|added|fixed)\b)"
-)
-COMMITMENT_DONE_REGEX = re.compile(COMMITMENT_DONE_PATTERN, re.IGNORECASE)
-COMMITMENT_SESSIONSTART_LINE = (
-    "⏳ AI 未兌現承諾 {count} 條（最近：{excerpt}）"
-    "→ python epitype/commitments.py \"{vault}\" --list"
-)
-COMMITMENT_PRECOMPACT_HEADING = "## 未兌現承諾（壓縮前 open 快照）"
+# ── 2026-09-09 owner 裁定（FAILURE_MODES §30）：承諾帳本（U53）已移除。
+# 舊庫裡的 .epitype/commitments.jsonl 不刪，但已經沒有任何路徑讀它。
 
 
 # ── U56 夢的排程（append-only 常數區塊；實作在 epitype/dream.py 與 SessionStart）──
@@ -1284,11 +1228,11 @@ DREAM_STATE_ELAPSED_FIELD = "elapsed_seconds"
 DREAM_STATE_SECTIONS_FIELD = "sections"
 DREAM_STATE_COMPLETE_FIELD = "complete"
 DREAM_STATE_ERRORS_FIELD = "section_errors"
-# 開場那一行只報這四個數字；其餘各節數字在 state 的 sections 裡，pack 裡有全文。
-DREAM_HEADLINE_FIELDS = ("card_fail", "missing_aliases", "drafts", "open_commitments")
+# 開場那一行只報這三個數字；其餘各節數字在 state 的 sections 裡，pack 裡有全文。
+DREAM_HEADLINE_FIELDS = ("card_fail", "missing_aliases", "drafts")
 DREAM_NOTICE_LINE = (
     "🌙 夢已整理（{date}）：型別 FAIL {card_fail}／缺別名 {missing_aliases}／"
-    "草稿 {drafts}／未兌現承諾 {open_commitments} → {pack}"
+    "草稿 {drafts} → {pack}"
 )
 # 沒有待處理項也要印一行：不然「夢跑完但乾淨」與「夢從沒跑」在開場長得一樣。
 DREAM_NOTICE_CLEAN_LINE = "🌙 夢已整理（{date}）：沒有待處理項。"
@@ -1367,21 +1311,6 @@ RECALL_GENERIC_TERMS = frozenset(
 # 其餘用一行收尾說還有幾條。
 SESSIONSTART_DECISION_RECENT_DAYS = 30
 SESSIONSTART_DECISION_REST_LINE = '…另 {count} 條現行裁定：python epitype/decision_lint.py "{vault}"'
-
-# 2026-09-06 真機實測：帳本 23 條 open，多數是過程旁白被當成承諾（「Private list: (1) the
-# Core3 verifier's background pytest…」「這兩個跑完我會確認…」）。規則：只看訊息結尾那段
-# （兌現的宣告在結尾，過程旁白在中間）、執行旁白詞一律不算承諾、一回合最多兩條、
-# open 超過 COMMITMENT_STALE_DAYS 天自動標 expired。
-COMMITMENT_TAIL_CHARS = 600           # 結尾段落最多回看幾個字
-COMMITMENT_STALE_DAYS = 7             # open 超過幾天自動標 expired
-COMMITMENT_EXPIRED_STATUS = "expired"
-COMMITMENT_SESSIONSTART_EXCERPTS = 3  # 開場一行最多摘幾條
-# 執行旁白：講的是「我正在跑什麼工具」，不是對 owner 開的帳。
-COMMITMENT_NOISE_PATTERN = (
-    r"(?:private\s+list|verifier|background|\bshell\b|pytest|subagent|sub-agent"
-    r"|背景|子代理|正在跑|跑完|驗收官|派工)"
-)
-COMMITMENT_NOISE_REGEX = re.compile(COMMITMENT_NOISE_PATTERN, re.IGNORECASE)
 
 # ── U64 引用不是再提議（append-only 常數區塊；實作在 stop_gate._forbidden_fragment，
 # pretooluse_gate 的規則 A 經 stop_gate._forbidden_fragment 共用同一份，改一處兩邊都好）

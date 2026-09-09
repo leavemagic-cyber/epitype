@@ -2,7 +2,7 @@ import sys; sys.dont_write_bytecode = True; [getattr(stream, "reconfigure", lamb
 """Epitype 夢——離線整理審核包的確定性盤點入口。
 
 不呼叫任何模型。「醒時」（hook）已經有的確定性檢查（別名匯出、卡片型別 lint、殭屍
-待辦、承諾帳本、草稿、決策鏈、事件卡老化）在這裡各跑一次唯讀盤點，彙整成一份審核
+待辦、草稿、決策鏈、事件卡老化）在這裡各跑一次唯讀盤點，彙整成一份審核
 包（Markdown 或 JSON），讓 owner 或子代理一眼看到今晚該整理什麼、該跑哪個既有指令
 ——這裡本身不套用任何建議，套用一律由列出的指令另外執行。
 
@@ -26,11 +26,10 @@ import time
 import uuid
 
 try:
-    from . import alias_batch, card_lint, commitments, decision_lint, memsearch, memspec, pending_lint
+    from . import alias_batch, card_lint, decision_lint, memsearch, memspec, pending_lint
 except ImportError:  # Direct script execution keeps the CLI contract.
     import alias_batch
     import card_lint
-    import commitments
     import decision_lint
     import memsearch
     import memspec
@@ -136,30 +135,6 @@ def _section_pending(vaults, today, since_date):
 # --------------------------------------------------------------------------- section 4
 
 
-def _section_commitments(vaults, today, since_date):
-    results, errors = _bounded(vaults, lambda v: commitments.open_items(v, limit=None))
-    entries = []
-    for vault, rows in results:
-        for row in rows:
-            entries.append({
-                "vault": str(vault),
-                "digest": row.get("digest"),
-                "ts": row.get("ts"),
-                "text": row.get("text"),
-            })
-    entries.sort(key=lambda item: str(item.get("ts")), reverse=True)
-    commands = [f'epitype commitments "{vault}"' for vault in vaults] if entries else []
-    return {
-        "counts": {"open_commitments": len(entries)},
-        "examples": entries[:EXAMPLE_LIMIT],
-        "commands": commands,
-        "errors": errors,
-    }
-
-
-# --------------------------------------------------------------------------- section 5
-
-
 def _drafts_of(vault):
     root = Path(vault) / DRAFT_DIRNAME
     if not root.is_dir():
@@ -192,7 +167,7 @@ def _section_drafts(vaults, today, since_date):
     }
 
 
-# --------------------------------------------------------------------------- section 6
+# --------------------------------------------------------------------------- section 5
 
 
 def _stop_gate_forbidden_reader():
@@ -258,7 +233,7 @@ def _section_decisions(vaults, today, since_date):
     }
 
 
-# --------------------------------------------------------------------------- section 7
+# --------------------------------------------------------------------------- section 6
 
 
 def _event_cards_of(vault):
@@ -302,7 +277,7 @@ def _section_event_aging(vaults, today, since_date):
     }
 
 
-# --------------------------------------------------------------------------- section 8
+# --------------------------------------------------------------------------- section 7
 
 
 def _git_added_dates(vault):
@@ -379,11 +354,10 @@ _SECTIONS = (
     (1, "缺別名卡", _section_missing_aliases),
     (2, "卡片型別檢查 FAIL／WARN", _section_card_lint),
     (3, "殭屍待辦", _section_pending),
-    (4, "AI 未兌現承諾", _section_commitments),
-    (5, "草稿待審", _section_drafts),
-    (6, "裁定鏈", _section_decisions),
-    (7, "事件卡老化", _section_event_aging),
-    (8, "最近 7 天新增卡數", _section_recent),
+    (4, "草稿待審", _section_drafts),
+    (5, "裁定鏈", _section_decisions),
+    (6, "事件卡老化", _section_event_aging),
+    (7, "最近 7 天新增卡數", _section_recent),
 )
 
 
@@ -401,19 +375,16 @@ def _next_steps(sections):
     alias = counts(1)
     if alias.get("missing_aliases", 0) > 20:
         steps.append(f"缺別名卡 {alias['missing_aliases']} 張超過門檻，跑別名批次 → epitype aliases export <vault>")
-    draft = counts(5)
+    draft = counts(4)
     if draft.get("total_drafts", 0) > 0:
         steps.append(f"草稿待審 {draft['total_drafts']} 份 → 人工審閱 _drafts/**")
     pending = counts(3)
     if pending.get("zombie_cards", 0) > 0:
         steps.append(f"殭屍待辦 {pending['zombie_lines']} 行／{pending['zombie_cards']} 卡 → epitype pending <vault>")
-    commitment = counts(4)
-    if commitment.get("open_commitments", 0) > 0:
-        steps.append(f"未兌現承諾 {commitment['open_commitments']} 筆 → epitype commitments <vault>")
-    decision = counts(6)
+    decision = counts(5)
     if decision.get("missing_owner_or_forbidden", 0) > 0:
         steps.append(f"active 決策卡缺 owner_quote／forbidden 共 {decision['missing_owner_or_forbidden']} 張 → epitype decisions <vault>")
-    event = counts(7)
+    event = counts(6)
     if event.get("aging_total", 0) > 0:
         steps.append(f"事件卡老化候選 {event['aging_total']} 張 → 人工複核是否歸檔（不刪）")
     if any(section.get("error") or section.get("errors") for section in sections):
@@ -474,7 +445,7 @@ def _render_markdown(report):
         if note:
             lines.append(f"備註：{note}")
         lines.append("")
-    lines.append("## 9. 夢的下一步")
+    lines.append("## 8. 夢的下一步")
     for step in report["next_steps"]:
         lines.append(f"- {step}")
     lines.append("")
@@ -757,8 +728,7 @@ def configured_vaults(config_path=None):
 _HEADLINE_SOURCES = {
     "card_fail": (2, "fail"),
     "missing_aliases": (1, "missing_aliases"),
-    "drafts": (5, "total_drafts"),
-    "open_commitments": (4, "open_commitments"),
+    "drafts": (4, "total_drafts"),
 }
 
 
@@ -827,26 +797,11 @@ def _selftest():
                 "- 2026-07-01 待辦：跑掉這行\n",
             )
 
-            # section 4: one open commitment in the ledger.
-            (vault / memspec.FTS_INDEX_DIRECTORY).mkdir(parents=True, exist_ok=True)
-            ledger = vault / memspec.FTS_INDEX_DIRECTORY / memspec.COMMITMENT_LEDGER_FILENAME
-            ledger.write_text(
-                json.dumps({
-                    "digest": "abc123456789",
-                    # U59 起 open 超過 COMMITMENT_STALE_DAYS 天自動過期，時間戳不能寫死。
-                    "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                    "text": "我會做 X。",
-                    "status": memspec.COMMITMENT_OPEN_STATUS,
-                    "session_id": "s1",
-                }, ensure_ascii=False) + "\n",
-                encoding="utf-8",
-            )
-
-            # section 5: two drafts in one subdirectory.
+            # section 4: two drafts in one subdirectory.
             _write_card(vault / "_drafts" / "decisions" / "d1.md", "draft one\n")
             _write_card(vault / "_drafts" / "decisions" / "d2.md", "draft two\n")
 
-            # section 6: one active decision missing owner_quote, one clean superseded.
+            # section 5: one active decision missing owner_quote, one clean superseded.
             _write_card(
                 vault / "missing_quote.md",
                 "---\ndecision_key: k1\nstatus: active\ncurrent_decision_at: 2026-06-01\n"
@@ -857,7 +812,7 @@ def _selftest():
                 "---\ndecision_key: k1\nstatus: superseded\nsuperseded_by: missing_quote.md\n"
                 "current_decision_at: 2026-05-01\ndecided_by: ai-autonomous\naliases:\n- k1\n---\nbody\n",
             )
-            # section 6 (fix): forbidden written as a YAML block list must not be
+            # section 5 (fix): forbidden written as a YAML block list must not be
             # misread as missing — memspec.frontmatter_fields only returns flat
             # scalars, so this active card would false-positive without the
             # stop_gate sequence reader.
@@ -868,7 +823,7 @@ def _selftest():
                 "aliases:\n- k2\n---\nbody\n",
             )
 
-            # section 7 + 8: one old grant (aging candidate), one fresh grant (recent).
+            # section 6 + 7: one old grant (aging candidate), one fresh grant (recent).
             _write_card(
                 vault / "grants" / "old_grant.md",
                 "---\nname: old_grant\ndescription: synthetic\ncaptured_at: 2025-01-01\nsession_id: s1\n---\nbody\n",
@@ -878,7 +833,7 @@ def _selftest():
                 "---\nname: new_grant\ndescription: synthetic\ncaptured_at: 2026-09-05\nsession_id: s1\n---\nbody\n",
             )
 
-            # backdate everything so the mtime fallback in section 8 doesn't
+            # backdate everything so the mtime fallback in section 7 doesn't
             # pick up "just written by this test" as "recent" — only
             # new_grant.md's explicit captured_at should land in the window.
             old_ts = datetime(2026, 1, 1, tzinfo=timezone.utc).timestamp()
@@ -888,42 +843,45 @@ def _selftest():
             report = build_report([vault], today=today)
             by_id = {section["id"]: section for section in report["sections"]}
 
-            checks.append(("all 8 deterministic sections present with no error", all(
-                by_id[i]["error"] is None for i in range(1, 9)
+            checks.append(("all 7 deterministic sections present with no error", all(
+                by_id[i]["error"] is None for i in range(1, 8)
             )))
             checks.append(("section 1 counts the alias-less card only", by_id[1]["counts"]["missing_aliases"] == 1
                 and by_id[1]["examples"][0]["card_path"] == "feedback/no_alias.md"))
             checks.append(("section 2 sees the frontmatter-less FAIL card", by_id[2]["counts"]["fail"] >= 1
                 and any(item["path"] == "feedback/broken.md" for item in by_id[2]["examples"])))
             checks.append(("section 3 counts the overdue pending line", by_id[3]["counts"]["zombie_lines"] == 1))
-            checks.append(("section 4 counts the one open commitment", by_id[4]["counts"]["open_commitments"] == 1
-                and by_id[4]["examples"][0]["digest"] == "abc123456789"))
-            checks.append(("section 5 counts both drafts under their subdirectory", by_id[5]["counts"]["total_drafts"] == 2
-                and by_id[5]["counts"]["by_subdir"].get("decisions") == 2))
-            checks.append(("section 6 flags the active card missing owner_quote and counts superseded", (
-                by_id[6]["counts"]["active"] == 2
-                and by_id[6]["counts"]["superseded"] == 1
-                and by_id[6]["counts"]["missing_owner_or_forbidden"] == 1
-                and by_id[6]["examples"][0]["path"] == "missing_quote.md"
+            checks.append(("section 4 counts both drafts under their subdirectory", by_id[4]["counts"]["total_drafts"] == 2
+                and by_id[4]["counts"]["by_subdir"].get("decisions") == 2))
+            checks.append(("section 5 flags the active card missing owner_quote and counts superseded", (
+                by_id[5]["counts"]["active"] == 2
+                and by_id[5]["counts"]["superseded"] == 1
+                and by_id[5]["counts"]["missing_owner_or_forbidden"] == 1
+                and by_id[5]["examples"][0]["path"] == "missing_quote.md"
             )))
-            checks.append(("section 6 does not flag a block-list forbidden as missing", not any(
-                item["path"] == "block_forbidden.md" for item in by_id[6]["examples"]
+            checks.append(("section 5 does not flag a block-list forbidden as missing", not any(
+                item["path"] == "block_forbidden.md" for item in by_id[5]["examples"]
             )))
-            checks.append(("section 7 flags the old grant as an aging candidate, not the new one", (
-                by_id[7]["counts"]["by_type"]["grant"] == 2
-                and by_id[7]["counts"]["aging_total"] == 1
-                and by_id[7]["examples"][0]["path"] == "grants/old_grant.md"
+            checks.append(("section 6 flags the old grant as an aging candidate, not the new one", (
+                by_id[6]["counts"]["by_type"]["grant"] == 2
+                and by_id[6]["counts"]["aging_total"] == 1
+                and by_id[6]["examples"][0]["path"] == "grants/old_grant.md"
             )))
-            checks.append(("section 8 counts the fresh grant as recent, not the old one", (
-                by_id[8]["counts"]["recent_7d"] == 1
-                and by_id[8]["examples"][0]["path"] == "grants/new_grant.md"
+            checks.append(("section 7 counts the fresh grant as recent, not the old one", (
+                by_id[7]["counts"]["recent_7d"] == 1
+                and by_id[7]["examples"][0]["path"] == "grants/new_grant.md"
+            )))
+            checks.append(("no section counts AI commitments any more (owner 2026-09-09)", not any(
+                "commitment" in key
+                for section in report["sections"]
+                for key in (section.get("counts") or {})
             )))
 
             # --since moved before old_grant's captured_at (2025-01-01) clears it as
             # a candidate: only cards captured *before* the cutoff count as aging.
             loose_report = build_report([vault], today=today, since_date=date(2024, 1, 1))
             loose_by_id = {section["id"]: section for section in loose_report["sections"]}
-            checks.append(("--since moved earlier than old_grant's date clears the aging candidate", loose_by_id[7]["counts"]["aging_total"] == 0))
+            checks.append(("--since moved earlier than old_grant's date clears the aging candidate", loose_by_id[6]["counts"]["aging_total"] == 0))
 
             # a broken section function must not take the rest of the report down.
             global _SECTIONS
@@ -943,10 +901,10 @@ def _selftest():
                 and broken_by_id[1]["counts"]["missing_aliases"] == 1
             )))
 
-            # next steps surface the pending/commitment/decision findings deterministically.
-            checks.append(("next steps name the overdue pending line and the open commitment", any(
+            # next steps surface the pending/draft/decision findings deterministically.
+            checks.append(("next steps name the overdue pending line and the drafts", any(
                 "殭屍待辦" in step for step in report["next_steps"]
-            ) and any("未兌現承諾" in step for step in report["next_steps"])))
+            ) and any("草稿待審" in step for step in report["next_steps"])))
 
             # --dry-run prints to the given stream and writes nothing to disk.
             import io
