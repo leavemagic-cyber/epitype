@@ -1047,8 +1047,10 @@ per-session dedupe markers the PreToolUse gate needs for trigger-card defects an
 write-gate denials keep working under `NOTICE_MARKER_*`.
 
 Existing `.epitype/commitments.jsonl` files are **not deleted** — the data stays
-on disk, and nothing reads it any more. Gates after the change: run_all 46/46,
-privacy PASS, corpus 330/330, seeds 15/15 and 5/5, doctor HEALTH PASS 5/5.
+on disk, and nothing reads it any more. Gates after the change: run_all 48/48
+(52 before), privacy PASS, corpus 330/330, seeds 15/15 and 5/5, doctor HEALTH
+PASS 5/5. Selftest denominators: pretooluse 73, stop 22, sessionstart 31,
+precompact 8, recall 45, dream 31.
 ## 31. Hand-written indexes drifted; reachability lint forced them
 
 Two vaults kept their catalogue by hand in `MEMORY.md`. They drifted the way any
