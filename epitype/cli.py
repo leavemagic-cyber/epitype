@@ -9,6 +9,7 @@ from . import __version__
 _COMMANDS = {
     "search": ("epitype.memsearch", "main", ()),
     "cards": ("epitype.card_lint", "main", ()),
+    "views": ("epitype.views", "main", ()),
     "decisions": ("epitype.decision_lint", "main", ()),
     "ledger": ("epitype.ledger_gate", "main", ()),
     "compact-map": ("epitype.compact_map", "main", ()),

@@ -176,6 +176,19 @@ def _card_type(relative, fields, nested):
     return memspec.DEFAULT_CARD_TYPE
 
 
+def card_type_of(relative, text, path=None):
+    """(型別, 平面欄位)——已讀進來的一份卡片內容判型別的公開入口。
+
+    視圖生成器必須跟 lint 判成同一個型別，否則同一張卡在目錄裡分到 A 區、在
+    lint 裡按 B 型的必填欄位檢查。`_card_type` 仍是唯一實作，這裡只是不必再讀一次檔
+    的入口（`_check_card` 走的是同一個函式）。
+    """
+    fields, _problem = memspec.frontmatter_text(text)
+    front_lines, _closing = memspec.split_frontmatter(text)
+    nested = {} if front_lines is None else _nested_and_lists(front_lines, path)[0]
+    return _card_type(relative, fields, nested), fields
+
+
 def _has_value(field, fields, nested, counts):
     if field in memspec.CARD_LIST_FIELDS:
         return counts.get(field, 0) >= 1
@@ -347,12 +360,13 @@ def _check_card(path, relative, today):
         level = FAIL if "重複欄位" in problem else WARN
         findings.append((level, "frontmatter", problem))
 
+    allowed = memspec.card_status_values(card_type)
     status = fields.get(memspec.DECISION_STATUS_FIELD, "").strip()
-    if status and status not in memspec.DECISION_STATUS_VALUES:
+    if status and status not in allowed:
         findings.append((
             FAIL,
             "status",
-            f"status={status} 不在 {'|'.join(memspec.DECISION_STATUS_VALUES)}",
+            f"status={status} 不在 {'|'.join(allowed)}（{card_type} 型）",
         ))
 
     for field in memspec.CARD_REQUIRED_FIELDS[card_type]:
@@ -432,14 +446,82 @@ def check_card(path, relative, today=None):
     return card_type, findings
 
 
-def scan_vault(vault, today=None, deadline=None):
-    """唯讀掃描一個 vault；deadline 是 time.monotonic() 上限，逾時就標記並停手。"""
+def _shorten(text, vault):
+    prefix = os.fspath(vault)
+    return text.replace(prefix + os.sep, "").replace(prefix, "")
+
+
+def _vault_findings(vault, relatives):
+    """庫層級的四件事——一張一張看不出來的那些。
+
+    決策唯一性（同一 decision_key 只准一張 active）與取代鏈（目標存在、指向相同
+    decision_key、鏈不循環、走得到現行卡）**不在這裡重寫**：那一份實作在
+    decision_lint 規則 1／2，同一條規則兩份實作就會有兩個答案。這裡把它的結論折進
+    同一份報告，另外做兩個真正新的檢查：目錄漏卡、搜尋器漏卡。
+
+    兩個漏卡是 WARN 不是 FAIL：修法是機械重生，不是「這張卡不能收」。
+    """
+    try:  # lazy import：hook 熱路徑（scan_vaults）不走這條，不為它付 import
+        from . import decision_lint, views
+    except ImportError:  # Direct script execution keeps the CLI contract.
+        import decision_lint
+        import views
+
+    findings = []
+    try:
+        decisions = decision_lint.lint_vault(vault)
+    except Exception as exc:
+        findings.append((WARN, "decisions", f"決策 lint 無法完成：{type(exc).__name__}: {exc}"))
+    else:
+        for level, items in ((FAIL, decisions.failures), (WARN, decisions.warnings)):
+            for item in items:
+                findings.append((
+                    level,
+                    "decisions",
+                    f"規則{item.rule} {item.reason}｜{_shorten(item.path_text, vault)}",
+                ))
+
+    managed = set(relatives)
+    try:
+        listed = views.listed_paths(vault)
+    except Exception:
+        listed = None
+    if listed is None:
+        findings.append((WARN, "views", memspec.VIEWS_MISSING_REASON.format(
+            directory=memspec.VIEWS_DIRECTORY, vault=vault)))
+    else:
+        missing = sorted(managed - listed)
+        if missing:
+            findings.append((WARN, "views", memspec.VIEWS_STALE_REASON.format(
+                count=len(missing), cards="／".join(missing[:3]), vault=vault)))
+
+    try:
+        indexed = memsearch.indexed_card_paths(vault)
+    except Exception:
+        indexed = None
+    if indexed is None:
+        findings.append((WARN, "search-index", memspec.SEARCH_INDEX_MISSING_REASON.format(vault=vault)))
+    else:
+        missing = sorted(managed - indexed)
+        if missing:
+            findings.append((WARN, "search-index", memspec.SEARCH_INDEX_STALE_REASON.format(
+                count=len(missing), cards="／".join(missing[:3]), vault=vault)))
+    return findings
+
+
+def scan_vault(vault, today=None, deadline=None, deep=False):
+    """唯讀掃描一個 vault；deadline 是 time.monotonic() 上限，逾時就標記並停手。
+
+    `deep` 另跑庫層級檢查（決策唯一性／取代鏈／目錄漏卡／索引漏卡）：那是第二趟
+    全庫走訪，開場那一行付不起，所以 hook 走的 `scan_vaults` 維持不開。
+    """
     vault = Path(vault).resolve()
     today = today or datetime.now(timezone.utc).date()
     raw_cards = []
     by_type = {}
     oversized = 0
     timed_out = False
+    relatives = []
     for path in memsearch.card_files(vault):
         if deadline is not None and time.monotonic() >= deadline:
             timed_out = True
@@ -451,6 +533,7 @@ def scan_vault(vault, today=None, deadline=None):
         except OSError:
             continue
         relative = path.relative_to(vault).as_posix()
+        relatives.append(relative)
         try:
             card_type, findings, derived = _check_card(path, relative, today)
         except Exception as exc:  # 一張壞卡不得讓整庫掃描停擺
@@ -482,17 +565,25 @@ def scan_vault(vault, today=None, deadline=None):
         for card in raw_cards
     ]
     cards.sort(key=lambda item: (-item["fail"], -item["warn"], item["path"]))
+    # 逾時的庫不跑庫層級檢查：半個庫的納管清單會把沒掃到的卡全報成「目錄漏卡」。
+    vault_findings = _vault_findings(vault, relatives) if deep and not timed_out else []
     return {
         "vault": str(vault),
         "total": sum(by_type.values()),
-        "fail": sum(item["fail"] for item in cards),
-        "warn": sum(item["warn"] for item in cards),
+        "fail": sum(item["fail"] for item in cards)
+        + sum(1 for level, _rule, _reason in vault_findings if level == FAIL),
+        "warn": sum(item["warn"] for item in cards)
+        + sum(1 for level, _rule, _reason in vault_findings if level == WARN),
         "info": sum(item["info"] for item in cards),
         "fail_cards": sum(1 for item in cards if item["fail"]),
         "by_type": {name: by_type[name] for name in memspec.CARD_TYPES if by_type.get(name)},
         "oversized_skipped": oversized,
         "timed_out": timed_out,
         "cards": cards,
+        "vault_findings": [
+            {"level": level, "rule": rule, "reason": reason}
+            for level, rule, reason in vault_findings
+        ],
     }
 
 
@@ -588,6 +679,8 @@ def no_chinese_line(reports, governance, limit=memspec.CARD_NO_CHINESE_PER_SESSI
 
 
 def _print_report(report, output, verbose=False):
+    for item in report.get("vault_findings") or ():
+        print(f"  {item['level']} {item['rule']}: {item['reason']}", file=output)
     for card in report["cards"]:
         items = [item for item in card["findings"] if verbose or item["level"] != INFO]
         if not items:
@@ -671,6 +764,8 @@ _FIXTURES = {
     "name-20260814.md": "---\nname: name-20260814\ndescription: 只有檔名帶日期\naliases:\n  - 檔名日期\nmetadata:\n  type: project\n---\nbody\n",
     "bom-crlf-nodate.md": "﻿---\r\nname: bom-crlf-nodate\r\ndescription: BOM 加 CRLF 且欄位無日期\r\naliases:\r\n  - 無日期\r\nmetadata:\r\n  type: user\r\n---\r\n2026-08-16 正文日期\r\n",
     "stale-date-field.md": "---\nname: stale-date-field\ndescription: 欄位在但值不是日期\nlast_verified_at: 未知\naliases:\n  - 壞日期\nmetadata:\n  type: habit\n---\n2026-08-17 正文日期\n",
+    "project-closed.md": "---\nname: project-closed\ndescription: 2026-09-09 已結案的專案\nstatus: closed\nclosed_at: 2026-09-09\nclosed_by: claude\naliases:\n  - 結案專案\nmetadata:\n  type: project\n---\nbody\n",
+    "feedback-closed.md": "---\nname: feedback-closed\ndescription: 2026-09-09 把專案狀態寫到回饋卡上\nstatus: closed\naliases:\n  - 錯層級\nmetadata:\n  type: feedback\n---\nbody\n",
 }
 
 
@@ -841,6 +936,19 @@ def _selftest():
                 and card["warn"] == 0,
             ))
 
+            checks.append((
+                "status 的值域按型別：專案卡收得下 closed（結案＝目錄位置）",
+                _findings_of(report, "project-closed.md")[1] is None,
+            ))
+            rules, card = _findings_of(report, "feedback-closed.md")
+            checks.append((
+                "同一個 closed 寫在回饋卡上＝FAIL，理由指名型別（不然視圖會分錯層級）",
+                card is not None
+                and rules == {(FAIL, "status")}
+                and f"（{memspec.CARD_TYPE_FEEDBACK} 型）"
+                in _reason_of(report, "feedback-closed.md", "status"),
+            ))
+
             rules, card = _findings_of(report, "decision-bare.md")
             checks.append((
                 "forbidden 寫成裸名詞＝WARN forbidden-bare-term，理由給再提議的句形範例",
@@ -904,6 +1012,23 @@ def _selftest():
                 and report["by_type"].get(memspec.CARD_TYPE_DECISION) == 3
                 and report["by_type"].get(memspec.CARD_TYPE_SCAR) == 2
                 and not report["timed_out"],
+            ))
+
+            deep = scan_vault(vault, today=today, deep=True)
+            deep_rules = {(item["level"], item["rule"]) for item in deep["vault_findings"]}
+            vault_fail = sum(1 for item in deep["vault_findings"] if item["level"] == FAIL)
+            vault_warn = sum(1 for item in deep["vault_findings"] if item["level"] == WARN)
+            out = io.StringIO()
+            main(["--deep", "--today", "2026-09-06", os.fspath(vault)], output=out)
+            checks.append((
+                "--deep 加庫層級檢查：目錄漏卡／索引漏卡各一則，決策規則折進同一份報告而非另寫一套",
+                {(WARN, "views"), (WARN, "search-index")} <= deep_rules
+                and (FAIL, "decisions") in deep_rules
+                and vault_fail > 0
+                and deep["fail"] == report["fail"] + vault_fail
+                and deep["warn"] == report["warn"] + vault_warn
+                and report["vault_findings"] == []
+                and "WARN search-index:" in out.getvalue(),
             ))
 
             line = summary_line([vault], today=today)
@@ -1028,7 +1153,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 38
+    total = 41
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
@@ -1048,11 +1173,13 @@ def main(argv=None, output=sys.stdout):
     parser.add_argument("--strict", action="store_true", help="exit 1 when any card FAILs")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--verbose", action="store_true", help="also list INFO findings")
+    parser.add_argument("--deep", action="store_true",
+                        help="also run the vault-level checks: decision uniqueness, supersession chains, view and search-index coverage")
     parser.add_argument("--fix-dates", action="store_true", help="write derived dates back as last_verified_at")
     parser.add_argument("--dry-run", action="store_true", help="with --fix-dates: name the writes, change nothing")
     parsed = parser.parse_args(arguments)
     try:
-        report = scan_vault(parsed.vault.expanduser(), parsed.today)
+        report = scan_vault(parsed.vault.expanduser(), parsed.today, deep=parsed.deep)
     except Exception as exc:
         print(f"ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2

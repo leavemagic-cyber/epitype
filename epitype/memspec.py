@@ -34,6 +34,13 @@ OWNER_QUOTE_FIELD = "owner_quote"
 ACTIVE_DECISION_STATUS = "active"
 SUPERSEDED_DECISION_STATUS = "superseded"
 DECISION_STATUS_VALUES = (ACTIVE_DECISION_STATUS, SUPERSEDED_DECISION_STATUS)
+# 專案結案只改目錄位置，不改喚回：memsearch 只排除 superseded（`_is_superseded`），
+# closed 的卡照樣搜得到（2026-09-09 收斂第 4 條）。決策卡不吃這個值——它的結案
+# 語意是 superseded＋繼任指標。
+CLOSED_CARD_STATUS = "closed"
+CLOSED_AT_FIELD = "closed_at"
+CLOSED_BY_FIELD = "closed_by"
+CLOSED_EVIDENCE_FIELD = "closed_evidence"
 # 2026-09-01 實測事故：裁定來源埋在自由文字會無法機器稽核；規則：決策者類型
 # 必須使用同源結構化值。
 OWNER_EXPLICIT_DECIDER = "owner-explicit"
@@ -97,6 +104,12 @@ TRIGGER_REGEX_MAX_CHARS = 1024
 GATE_DEFECT_NOTICE = "⚠ Epitype 動作閘：卡片 {name} 的 trigger 無法使用（{reason}），這條傷疤暫不生效；修正卡片後自動恢復。"
 GATE_DEFECT_MAX_LINES = 3
 SESSIONSTART_INDEX_BUDGET_BYTES = 3072
+# 手寫短入口對非原生載入的宿主（Codex）整段回音：裝得下就整段，裝不下才排序取樣
+# 並在最後一行明說少了多少位元組。舊碼一律截前 3 KB 不留痕跡，收件端無從得知
+# 偏好有沒有送到（2026-09-09 Claude↔Codex 收斂第 8 條）。
+SESSIONSTART_INDEX_TRUNCATED_LINE = (
+    "⚠ {filename} 未完整回音：送出 {sent}／全文 {total} bytes；其餘見 {path}"
+)
 EPITYPE_CONFIG_ENV = "EPITYPE_CONFIG"
 CONFIG_VAULTS_FIELD = "vaults"
 CONFIG_BUDGET_BYTES_FIELD = "budget_bytes"
@@ -530,9 +543,56 @@ CARD_OPTIONAL_FIELDS = {
     CARD_TYPE_USER: (ALIASES_FIELD,),
     CARD_TYPE_HABIT: (ALIASES_FIELD,),
 }
+# status 的值域按型別分：只有專案卡收得下 closed（結案＝目錄位置），決策卡的結案
+# 一律走 superseded＋繼任指標。寫錯型別的 status 會讓視圖把卡分到錯的層級，所以
+# 它是 FAIL 而不是照單全收。
+CARD_STATUS_VALUES = {
+    CARD_TYPE_PROJECT: DECISION_STATUS_VALUES + (CLOSED_CARD_STATUS,),
+}
+
+
+def card_status_values(card_type):
+    return CARD_STATUS_VALUES.get(card_type, DECISION_STATUS_VALUES)
+
+
 # SessionStart 只給一行；lint 是磁碟掃描，超過這個時間就不印，開場不能被它拖住。
 CARD_LINT_HOOK_BUDGET_SECONDS = 1.0
 CARD_LINT_NOTICE = '🧾 卡片型別檢查：FAIL {fail}／WARN {warn} → python epitype/card_lint.py "{vault}"'
+
+# 三個閱讀層級的第二、三層（2026-09-09 收斂第 2 條）：MEMORY.md 是手寫短入口，
+# 這兩份由卡片欄位機械生成，生成器永遠不寫 MEMORY.md。段落標題用型別名（卡片
+# frontmatter 寫什麼就印什麼），不放任何行為守則文字。
+VIEWS_DIRECTORY = "_views"
+VIEWS_HISTORY_DIRECTORY = "history"
+VIEWS_CURRENT_FILENAME = "current.md"
+VIEWS_CLOSED_FILENAME = "closed.md"
+VIEWS_FINGERPRINT_FILENAME = "views_fingerprint.json"
+VIEWS_FINGERPRINT_FIELD = "fingerprint"
+VIEWS_DESCRIPTION_CHARS = 80
+VIEWS_ELLIPSIS = "…"
+VIEWS_CURRENT_TITLE = "# current — 現用卡（機器生成，勿手改；正本＝各卡片）"
+VIEWS_CLOSED_TITLE = "# history/closed — 已結案／已取代（機器生成，勿手改）"
+VIEWS_GENERATED_LINE = "generated: {stamp} by `epitype views` — cards: {total}"
+VIEWS_TYPE_HEADING = "## {type}（{count}）"
+VIEWS_DECISION_HEADING = "## 現行決策 / active decisions（{count}）"
+VIEWS_REVIEW_HEADING = "## 待複查 / needs review（{count}）"
+VIEWS_EMPTY_SECTION = "（無）"
+VIEWS_CARD_LINE = "- [{name}]({link}) — {description}"
+VIEWS_DECISION_LINE = "- [{name}]({link}) — {key}｜{date}｜{description}"
+VIEWS_NOTE_LINE = "- [{name}]({link}) — {note}｜{description}"
+VIEWS_CLOSED_NOTE = "closed {stamp} by {who}"
+VIEWS_SUPERSEDED_NOTE = "superseded_by: {target}"
+VIEWS_MISSING = "-"
+VIEWS_LOCK_PREFIX = "epitype-views-"
+# 「被目錄列出 ≠ 能被搜尋找到」（收斂第 5 條）：兩個漏卡檢查各自帶自己的修法。
+VIEWS_MISSING_REASON = '沒有可讀的 {directory} 目錄 → python epitype/views.py "{vault}"'
+VIEWS_STALE_REASON = '{count} 張納管卡不在目錄裡（{cards}）→ python epitype/views.py "{vault}"'
+SEARCH_INDEX_MISSING_REASON = (
+    '沒有搜尋索引，列在目錄裡也喚不回 → python epitype/memsearch.py build "{vault}"'
+)
+SEARCH_INDEX_STALE_REASON = (
+    '{count} 張納管卡不在搜尋索引裡（{cards}）→ python epitype/memsearch.py build "{vault}"'
+)
 
 # 2026-09-01 實測事故：別名查無時缺少全文兜底，會讓既存卡片完全不可達；
 # 規則：DB 使用 vault-root 相對路徑，且不得綁定特定 CLI。

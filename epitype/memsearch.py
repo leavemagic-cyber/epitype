@@ -336,6 +336,28 @@ def scan_cards(vault):
     return _scan_vault(Path(vault).resolve())
 
 
+def indexed_card_paths(vault):
+    """索引目前收錄的卡（vault 相對 posix 路徑）；沒有可讀的索引回 None。
+
+    「被目錄列出」不等於「搜尋找得到」——lint 要能把「這個庫根本沒建索引」與
+    「索引漏了某幾張卡」報成兩件事，所以查不到索引時回 None 而不是空集合。
+    """
+    vault = _resolve_vault(vault)
+    db_path, _legacy = _read_db_path(vault)
+    if not db_path.is_file():
+        return None
+    try:
+        connection = _read_connection(db_path)
+    except sqlite3.Error:
+        return None
+    try:
+        return {row[0] for row in connection.execute("SELECT card_path FROM cards")}
+    except sqlite3.Error:
+        return None
+    finally:
+        connection.close()
+
+
 def _ensure_schema(connection):
     connection.execute(
         "CREATE TABLE IF NOT EXISTS search_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
@@ -1127,6 +1149,7 @@ def _selftest():
             private_nested = private_directory / "machine-note.md"
             nonfrontmatter = vault / "plain-note.md"
             blank_metadata = vault / "blank-metadata.md"
+            closed_project = vault / "closed-project.md"
             _write_card(
                 bilingual,
                 "name: 雙語路由卡\ndescription: bilingual CLI routing fixture\naliases: [routealias, relayalias]\nscope: infra",
@@ -1204,6 +1227,20 @@ def _selftest():
                 blank_metadata,
                 "scope: archaeology",
                 "blankmetadataneedle",
+            )
+            _write_card(
+                closed_project,
+                "\n".join(
+                    (
+                        "name: Closed Project Fixture",
+                        "description: closedprojectneedle finished project",
+                        f"{memspec.DECISION_STATUS_FIELD}: {memspec.CLOSED_CARD_STATUS}",
+                        f"{memspec.CLOSED_AT_FIELD}: 2026-09-09",
+                        "metadata:",
+                        f"  type: {memspec.CARD_TYPE_PROJECT}",
+                    )
+                ),
+                "closedprojectneedle stays reachable after the project closed.",
             )
 
             initial = build_index(vault)
@@ -1413,6 +1450,23 @@ def _selftest():
                     and guidance_query["guidance"] == expected_guidance
                     and guidance_recall["count"] == 0
                     and guidance_recall["guidance"] == expected_guidance,
+                )
+            )
+            # 2026-09-09 收斂第 4 條：`closed` 只改目錄位置，喚回語意不變。這道檢查
+            # 就是那句話的機器證明——把它接成排除條件，結案專案的知識會整批消失。
+            closed_query = query_index(vault, "closedprojectneedle")
+            closed_recall = recall_index(vault, "find closedprojectneedle")
+            checks.append(
+                (
+                    "Closed status moves the view only; the card stays searchable",
+                    {item["path"] for item in closed_query["results"]}
+                    == {str(closed_project.resolve())}
+                    and {item["path"] for item in closed_recall["results"]}
+                    == {str(closed_project.resolve())}
+                    and closed_query["results"][0][memspec.DECISION_STATUS_FIELD]
+                    == memspec.CLOSED_CARD_STATUS
+                    and closed_query["guidance"] == []
+                    and closed_recall["guidance"] == [],
                 )
             )
             ordinary_query = query_index(vault, "ordinarynostatusneedle")
@@ -1899,8 +1953,8 @@ def _selftest():
                 and all(isinstance(outcome, dict) for outcome in outcomes)
                 and any(outcome["status"] == "built" for outcome in outcomes)
                 and integrity == "ok"
-                and card_count == 10
-                and fts_count == 10
+                and card_count == 11
+                and fts_count == 11
                 and query_index(vault, "concurrentwriteproof")["results"][0]["path"]
                 == str(other.resolve())
             )
@@ -2041,7 +2095,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 49
+    total = 50
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
