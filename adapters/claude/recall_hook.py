@@ -28,13 +28,10 @@ from epitype.capture import (
 from _hook_common import (
     capture_vault as _capture_vault,
     emit,
-    event_session_id,
     expired,
-    guide_marker_digest,
     load_config,
     payload,
     payload_fits,
-    pre_generation_guide,
     read_event,
     recall_marker_directory,
     resolve_vaults,
@@ -172,11 +169,10 @@ def _merge_ordinary(groups):
             heapq.heappush(queue, (-coverage, rank, vault_index, line))
 
 
-def _bounded_recall(pieces, budget, required_count, header_count, prefix=""):
-    """Keep the authority prefix intact; only ordinary cards may be skipped."""
+def _bounded_recall(pieces, budget, required_count, header_count):
+    """Keep the header and pinned authority lines intact; only ordinary cards may be skipped."""
     def fits(parts):
-        context = "\n".join(([prefix] if prefix else []) + parts)
-        return payload_fits("UserPromptSubmit", context, budget)
+        return payload_fits("UserPromptSubmit", "\n".join(parts), budget)
 
     selected = []
     truncated = False
@@ -206,30 +202,13 @@ def _handle(event, started_at, delivery_markers=None):
     config = load_config(started_at)
     if config is None:
         return None
-
-    # User wording cannot predict a question the model will invent later.
-    # Reserve the procedure before retrieval; card delivery markers must refer
-    # only to the remaining budget's output, never to subsequently trimmed cards.
-    budget = config[memspec.CONFIG_BUDGET_BYTES_FIELD]
-    guide = pre_generation_guide("UserPromptSubmit", budget)
-    # Owner 2026-09-09: the procedure is sent once per session (SessionStart or the
-    # first prompt) and again after compaction, which clears the markers; later
-    # prompts omit it. Without a session id there is no marker and it stays per prompt.
-    session_id = event_session_id(event)
-    guide_digest = guide_marker_digest(guide) if guide else ""
-    if guide and session_id and (recall_marker_directory(session_id) / guide_digest).is_file():
-        guide = ""
-    value = _recall(event, started_at, config, delivery_markers, guide)
+    value = _recall(event, started_at, config, delivery_markers)
     if expired(started_at):
         return None
-    recalled = value["hookSpecificOutput"]["additionalContext"] if value else ""
-    context = "\n".join(part for part in (guide, recalled) if part)
-    if guide and context and session_id and delivery_markers is not None:
-        delivery_markers.append((session_id, guide_digest))
-    return payload("UserPromptSubmit", context) if context else None
+    return value
 
 
-def _recall(event, started_at, config, delivery_markers=None, guide=""):
+def _recall(event, started_at, config, delivery_markers=None):
     prompt = event["prompt"]
 
     # 落點依「這場對話屬於哪個專案」決定（_hook_common.capture_vault）：專案的卡
@@ -377,7 +356,6 @@ def _recall(event, started_at, config, delivery_markers=None, guide=""):
         config[memspec.CONFIG_BUDGET_BYTES_FIELD],
         required_count=header_count + sum(line in pinned_set for line in lines),
         header_count=header_count,
-        prefix=guide,
     )
     if not context or expired(started_at):
         return None

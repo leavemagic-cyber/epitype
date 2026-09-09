@@ -16,17 +16,13 @@ from epitype import capture_route, card_lint, commitments, memsearch, memspec, p
 from _hook_common import (
     bounded_context,
     emit,
-    event_session_id,
     expired,
     governance_vault,
-    guide_marker_digest,
     load_config,
     native_cwd_vaults,
     payload,
     payload_fits,
-    pre_generation_guide,
     read_event,
-    recall_marker_directory,
     resolve_vaults,
     run_synthetic,
     write_config,
@@ -330,9 +326,7 @@ def _handle(event, started_at):
     if config is None:
         return None
     budget = config[memspec.CONFIG_BUDGET_BYTES_FIELD]
-    # Session entry can resume generation without a fresh UserPromptSubmit.
-    guide = pre_generation_guide("SessionStart", budget)
-    pieces = [guide] if guide else []
+    pieces = []
     # Session start carries the cwd's own vault(s) plus the governance vault;
     # another project's index and ledger are noise here and were crowding the
     # budget. Recall still reaches that project's cards by content.
@@ -435,9 +429,6 @@ def _handle(event, started_at):
     if expired(started_at):
         return None
     context = bounded_context("SessionStart", pieces, budget)
-    # A truncation suffix must not evict the whole procedure.
-    if not context:
-        context = guide
     return payload("SessionStart", context) if context else None
 
 
@@ -605,9 +596,9 @@ def _selftest():
             overdue_context = overdue_value.get("hookSpecificOutput", {}).get("additionalContext", "")
             checks.append(
                 (
-                    "overdue pending line follows the procedure, before the index",
+                    "overdue pending line comes first, before the index",
                     overdue_result.returncode == 0
-                    and overdue_context.startswith(pre_generation_guide("SessionStart", memspec.HOOK_DEFAULT_BUDGET_BYTES) + "\n⏳ 殭屍待辦 1 行／1 卡")
+                    and overdue_context.startswith("⏳ 殭屍待辦 1 行／1 卡")
                     and "index detail" in overdue_context,
                 )
             )
@@ -1159,26 +1150,6 @@ def _selftest():
     return 0 if status == "PASS" else 1
 
 
-def _claim_guide(event, value):
-    """The procedure emitted at session entry counts for the whole session:
-    UserPromptSubmit omits it until compaction clears the markers (owner 2026-09-09).
-    Claimed only after a successful emission, so a failed output never suppresses it."""
-    session_id = event_session_id(event)
-    if not session_id:
-        return
-    context = value.get("hookSpecificOutput", {}).get("additionalContext", "")
-    for guide in (memspec.QUESTION_PREFLIGHT + "\n" + memspec.TURN_CONTINUITY, memspec.QUESTION_PREFLIGHT):
-        if context.startswith(guide):
-            directory = recall_marker_directory(session_id)
-            try:
-                directory.mkdir(parents=True, exist_ok=True)
-                with (directory / guide_marker_digest(guide)).open("x", encoding="ascii") as stream:
-                    stream.write(guide_marker_digest(guide) + "\n")
-            except OSError:
-                pass
-            return
-
-
 def main():
     if "--selftest" in sys.argv[1:]:
         return _selftest()
@@ -1188,7 +1159,6 @@ def main():
         if value is not None and not expired(_STARTED_AT):
             emit(value)
             sys.stdout.flush()
-            _claim_guide(event, value)
     except Exception:
         pass
     return 0

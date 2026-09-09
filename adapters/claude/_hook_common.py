@@ -1,7 +1,6 @@
 import sys; sys.dont_write_bytecode = True; [getattr(stream, "reconfigure", lambda **_: None)(encoding="utf-8", errors="replace") for stream in (sys.stdout, sys.stderr)]  # cp950 consoles must not break hook entrypoints.
 """Shared fail-open mechanics for Claude hook adapters."""
 
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -44,30 +43,10 @@ def event_session_id(event):
     return value if isinstance(value, str) else ""
 
 
-def guide_marker_digest(guide):
-    """Per-session marker name for the pre-generation procedure. Owner 2026-09-09:
-    the procedure (2,427 chars) is paid for once per session — SessionStart or the
-    first prompt — and again after compaction clears the markers, not on every prompt."""
-    return "guide-" + hashlib.sha256(guide.encode("utf-8")).hexdigest()[:24]
-
-
 def expired(started_at):
     import time
 
     return time.monotonic() - started_at >= memspec.HOOK_TIMEOUT_SECONDS
-
-
-def pre_generation_guide(event_name, budget):
-    """Atomic procedures within both budgets; never evict the older question check."""
-    guide = memspec.QUESTION_PREFLIGHT
-    if not payload_fits(event_name, guide, budget):
-        print("Epitype: question preflight omitted: configured budget too small", file=sys.stderr)
-        return ""
-    combined = guide + "\n" + memspec.TURN_CONTINUITY
-    if payload_fits(event_name, combined, budget):
-        return combined
-    print("Epitype: continuity procedure omitted: configured budget too small", file=sys.stderr)
-    return guide
 
 
 def read_event(stream):
