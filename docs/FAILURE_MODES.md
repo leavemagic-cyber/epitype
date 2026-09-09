@@ -653,6 +653,8 @@ These offline checks do not establish improvements in unrestricted dialogue.
 
 ## 20. Questions can assert unsupported premises
 
+> Superseded by §30 (owner ruling 2026-09-09): the pre-generation question procedure was removed from the product.
+
 An assistant can ask the user to choose details of a combined workflow before
 checking that its components actually connect. Earlier searches, individual
 API documentation, citations, and an assistant's own `verified` flag do not
@@ -735,6 +737,8 @@ exact metric/comparison before treating a recalled conclusion as established.
 These distinctions remain model judgments, not new lexical denial rules.
 
 ## 21. A follow-up can silently replace the active task
+
+> Superseded by §30 (owner ruling 2026-09-09): the task-continuity procedure was removed from the product.
 
 An assistant may save one design decision and stop, or answer a diagnostic
 aside and discard an already-authorized repair. It can also explicitly admit
@@ -892,6 +896,8 @@ rewrite was added.
 
 ## 26. Control cleanup rules recalled in discussion but absent at tool use
 
+> Superseded by §30 (owner ruling 2026-09-09): the control-lifecycle guidance was removed from the product.
+
 A short memory-card description can omit the operational distinction between
 closing a target window, closing browser tabs/groups and ending the controller.
 Prompt-based recall also need not fire when the agent independently chooses a
@@ -947,6 +953,8 @@ runs are retained; no repeated full run was added for the count-only correction.
 
 ## 28. The pre-generation procedure was re-sent on every prompt
 
+> Superseded by §30 (owner ruling 2026-09-09): the procedure and its once-per-session marker was removed from the product.
+
 `QUESTION_PREFLIGHT` + `TURN_CONTINUITY` total 2,427 characters. Until
 2026-09-09 every valid UserPromptSubmit re-sent both, in addition to
 SessionStart, so a 50-prompt session paid roughly 35,000 tokens for text that
@@ -985,6 +993,62 @@ ledger is unchanged. Events without a `.claude` transcript (Codex, synthetic)
 keep the old behaviour. Selftest: "Claude host skips the natively loaded cwd
 index, keeps governance index and ledger" (sessionstart 29/29).
 
+## 30. Behavior-layer features removed by owner ruling (2026-09-09)
+
+Four features told the model how to behave. None of them was memory, and the
+owner removed all four on 2026-09-09, answering each question in turn:
+
+| Q | Feature | Owner's word |
+|---|---|---|
+| Q1 | The pre-generation procedures (`QUESTION_PREFLIGHT` + `TURN_CONTINUITY`) leave the product; the local rules stay in the contract and the behaviour layer runs on cards plus exam questions | 「A」 |
+| Q2 | The control-lifecycle cleanup rules leave the product; locally the card `feedback_close_programs_when_done` carries them | 「A」 |
+| Q3 | The commitment ledger (Stop extraction plus the SessionStart / PreCompact reminders) leaves the product; unfinished work goes on pending cards and in the handover file | 「A」 |
+| Q6 | The narration meter leaves the product | 「A」, with the follow-up question 「這不是超級浪費 token 行為，為什麼要這樣做」 |
+
+**Root cause**, conceded by the AI when the owner pressed on Q6: every owner
+correction was reflexively turned into a product mechanism; the token cost of
+the mechanism itself was never counted, and the 2026-09-02 ruling that the
+behaviour layer runs on cards plus exam questions was never checked against.
+The standing rule that follows: **Epitype does memory only** — cards, fields,
+views, recall, and gates that rule on what a card says — and ships no built-in
+behavioural guidance text of its own.
+
+### Removed
+
+| Kind | Item |
+|---|---|
+| module | `epitype/control_lifecycle.py` |
+| module | `epitype/commitments.py` |
+| module | `epitype/narration_meter.py` |
+| constants | `memspec.QUESTION_PREFLIGHT`, `memspec.TURN_CONTINUITY`, the whole `COMMITMENT_*` block, `NARRATION_*` (the marker constants survive as `NOTICE_MARKER_*`) |
+| helper | `_hook_common.pre_generation_guide`, `_hook_common.guide_marker_digest`, `sessionstart_hook._claim_guide`, the recall hook's guide gate and `_bounded_recall(prefix=)` |
+| hook wiring | `pretooluse_gate._narration_context` and its `control_lifecycle.guidance` call; `stop_gate._commitments`; the SessionStart commitment line; the PreCompact commitment snapshot; dream section 4 (sections 5-8 renumber to 4-7) |
+| CLI | `epitype commitments`, `epitype narration` |
+| test | `tests/control_lifecycle_regression.py` (retired: the feature it validated is gone) |
+| test | `tests/commitment_persistence_regression.py` (retired: same) |
+| test | `tests/question_premise_regression.py` (retired; its two negative guards — no denial at a question tool, no Stop block on completion wording — continue as `tests/no_semantic_gate_regression.py`) |
+| doc | `docs/QUESTION_PREMISE_VALIDATION.md`, `docs/TASK_CONTINUITY_VALIDATION.md` |
+
+**Exam questions retired: none.** Every graded corpus was scanned for questions
+depending on the removed features (`corpus_300.json`, both 2026-09-02 seed sets,
+`recall_regression_local_20260906.json`, `recall_irrelevant_local_20260906.json`,
+`capture_precision_local.json`), and no question exercised narration, commitments,
+control lifecycle, preflight or continuity. The six `capture_precision_local.json`
+rows whose owner text happens to contain those words test capture labelling, not
+the removed features, so they stay. Denominators are therefore unchanged: corpus
+330/330, seeds 15/15 and 5/5.
+
+### Kept
+
+The Stop decision gate (`decisions` / `forbidden`), the write-content gate, scar
+triggers, recall, the SessionStart index / ledger / rulings / pending lines,
+compaction recovery, dream, harvest, aliases, card lint and the exam runner. The
+per-session dedupe markers the PreToolUse gate needs for trigger-card defects and
+write-gate denials keep working under `NOTICE_MARKER_*`.
+
+Existing `.epitype/commitments.jsonl` files are **not deleted** — the data stays
+on disk, and nothing reads it any more. Gates after the change: run_all 46/46,
+privacy PASS, corpus 330/330, seeds 15/15 and 5/5, doctor HEALTH PASS 5/5.
 ## 31. Hand-written indexes drifted; reachability lint forced them
 
 Two vaults kept their catalogue by hand in `MEMORY.md`. They drifted the way any
