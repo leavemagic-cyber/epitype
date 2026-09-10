@@ -2,9 +2,11 @@ import sys; [getattr(stream, 'reconfigure', lambda **_: None)(encoding='utf-8', 
 
 import argparse
 from datetime import datetime
+import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import tempfile
 
 try:
@@ -12,6 +14,7 @@ try:
     from .memspec import (
         COMPACT_MAP_ASSISTANT_MAX_CHARS,
         COMPACT_MAP_DEFAULT_BUDGET_BYTES,
+        COMPACT_MAP_DIRECTORY,
         COMPACT_MAP_MAX_LINE_BYTES,
         COMPACT_MAP_TAIL_BYTES,
         COMPACT_MAP_USER_MAX_CHARS,
@@ -21,6 +24,7 @@ except ImportError:  # Direct script execution keeps the U1 CLI contract.
     from memspec import (
         COMPACT_MAP_ASSISTANT_MAX_CHARS,
         COMPACT_MAP_DEFAULT_BUDGET_BYTES,
+        COMPACT_MAP_DIRECTORY,
         COMPACT_MAP_MAX_LINE_BYTES,
         COMPACT_MAP_TAIL_BYTES,
         COMPACT_MAP_USER_MAX_CHARS,
@@ -29,6 +33,48 @@ except ImportError:  # Direct script execution keeps the U1 CLI contract.
 
 # 2026-09-01 實測事故：對話壓縮時未落檔的結論會遺失，導致後續無法可靠續接；
 # 規則：以純程式抄出 2KB 地圖，壓縮後按圖回 transcript 撈原文，不全量重讀。
+
+
+# 壓縮後把地圖交回模型的那一行（U-R1，2026-09-10）。PreCompact 印的 context 在兩邊
+# 宿主都到不了模型（Claude Code 的 PreCompact 不能注入；Codex 0.153 的 PreCompactOutcome
+# 只有 Continue／Stopped），所以改由 SessionStart 在 source=compact 時端回來。
+MAP_NOTICE_TEMPLATE = '壓縮前原文地圖：{path}；需要原文時讀它按行號回撈。'
+# 整行上限按 UTF-8 位元組計。超限＝整行不注，路徑絕不截斷：半條路徑讀不回任何東西，
+# 而讀不回來的指標比沒有指標更貴（Codex round 1 COUNTER，2026-09-10）。
+MAP_NOTICE_MAX_BYTES = 240
+_SESSION_COMPONENT_UNSAFE = re.compile(r'[^A-Za-z0-9._-]')
+
+
+def session_component(session_id, limit=128):
+    """Filesystem-safe session identifier.
+
+    Byte-for-byte the same rule as `adapters/claude/_hook_common.session_component`;
+    the map destination has to be computable from `epitype/` alone (PreCompact writes
+    it, SessionStart reads it), and `tests/compact_map_destination_regression.py`
+    pins the two implementations to each other so neither can drift.
+    """
+    text = session_id if isinstance(session_id, str) else ''
+    return _SESSION_COMPONENT_UNSAFE.sub('_', text).strip('._-')[:limit] or 'nosession'
+
+
+def map_destination(vault, session_id, transcript_path):
+    """Where this session's recovery map lives: one file per (session, transcript).
+
+    Pure function on purpose — PreCompact writes here and SessionStart reads here,
+    and the two must land on the same path without sharing any state but the event.
+    """
+    component = session_component(session_id, limit=80)
+    transcript = Path(transcript_path).expanduser().resolve()
+    digest = hashlib.sha256(os.fspath(transcript).encode('utf-8')).hexdigest()[:12]
+    return (Path(vault) / COMPACT_MAP_DIRECTORY / f'{component}-{digest}.md').resolve()
+
+
+def map_notice(destination):
+    """The one line, or None when the absolute path makes it exceed the byte cap."""
+    line = MAP_NOTICE_TEMPLATE.format(path=os.fspath(destination))
+    if len(line.encode('utf-8')) > MAP_NOTICE_MAX_BYTES:
+        return None
+    return line
 
 
 def _positive_int(value):
@@ -288,11 +334,44 @@ def _selftest():
                 and 'LATE-MARKER' in tail_map
                 and '行號基準=尾窗' in tail_map,
             ))
+
+            # U-R1：PreCompact 寫、SessionStart 讀，同一個 (session, transcript)
+            # 必須落在同一個檔上；不同 session 或不同 transcript 必須分開。
+            vault = root / 'vault'
+            same_a = map_destination(vault, 'sess-1', transcript)
+            same_b = map_destination(vault, 'sess-1', os.fspath(transcript))
+            other_session = map_destination(vault, 'sess-2', transcript)
+            other_transcript = map_destination(vault, 'sess-1', tail_source)
+            checks.append((
+                'map_destination is stable per session and transcript, and separates both',
+                same_a == same_b
+                and same_a.parent == (vault / COMPACT_MAP_DIRECTORY).resolve()
+                and same_a != other_session
+                and same_a != other_transcript
+                and same_a.name.startswith('sess-1-')
+                and len(same_a.stem.rsplit('-', 1)[1]) == 12,
+            ))
+            checks.append((
+                'a hostile or missing session id still yields one safe filename',
+                map_destination(vault, ' weird/id. ', transcript).name.startswith('weird_id-')
+                and map_destination(vault, None, transcript).name.startswith('nosession-'),
+            ))
+
+            # 240 B（UTF-8）是整行的上限，超限整行不注、路徑絕不截斷。
+            short_notice = map_notice(same_a)
+            long_path = Path(os.fspath(root / ('d' * 260) / 'map.md'))
+            checks.append((
+                'the notice carries the whole path under the byte cap, and is dropped whole over it',
+                short_notice is not None
+                and os.fspath(same_a) in short_notice
+                and len(short_notice.encode('utf-8')) <= MAP_NOTICE_MAX_BYTES
+                and map_notice(long_path) is None,
+            ))
     except Exception as exc:
         print(f'SELFTEST ERROR {type(exc).__name__}: {exc}', file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 9
+    total = 12
     status = 'PASS' if passed == total and len(checks) == total else 'FAIL'
     print(f'SELFTEST {status} {passed}/{total}')
     if status != 'PASS':

@@ -16,7 +16,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from epitype import card_lint, memspec
+from epitype import card_lint, compact_map, memspec
 from _hook_common import (
     bounded_context,
     emit,
@@ -194,6 +194,26 @@ def _dream_mark_notified(governance, state, completed):
         return False
 
 
+def _compact_map_line(event, governance):
+    """壓縮續場唯一新增的一行：這一場壓縮前的原文地圖在哪裡。
+
+    PreCompact 已經把地圖寫到 `map_destination(庫, session_id, transcript)`，但它印的
+    那句話在兩邊宿主都到不了模型，所以由這裡端回來——同一個純函式算路徑，不猜、不用
+    mtime 找最新的、不列目錄：算出來的檔不在，就什麼都不加。
+    """
+    transcript = event.get("transcript_path") if isinstance(event, dict) else None
+    if not isinstance(transcript, str) or not transcript.strip():
+        return None
+    session_id = event.get("session_id", event.get("sessionId", ""))
+    try:
+        destination = compact_map.map_destination(governance, session_id, transcript)
+        if not destination.is_file():
+            return None
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return compact_map.map_notice(destination)
+
+
 def _handle(event, started_at):
     config = load_config(started_at)
     if config is None:
@@ -215,6 +235,16 @@ def _handle(event, started_at):
 
     source = event.get("source") if isinstance(event, dict) else None
     dream = config.get(memspec.DREAM_CONFIG_FIELD) or {}
+
+    # 壓縮續場先放地圖那一行：續場丟掉的是原文，而其餘幾行在別的場次還會再出現一次；
+    # 預算裁不下時，先保住唯一一份回得去原文的指標。其他 source 一個字都不加。
+    if source == "compact":
+        try:
+            map_line = _compact_map_line(event, governance)
+        except Exception:
+            map_line = None
+        if map_line:
+            pieces.append(map_line)
     if _soft_remaining(started_at) > 0:
         try:
             _dream_spawn(dream, governance_vault(config, for_write=True), started_at, source=source)
@@ -839,6 +869,113 @@ def _selftest():
                 )
             )
 
+            # --- U-R1：壓縮續場把壓縮前的原文地圖交回模型 ---
+            # 這一段從 PreCompact 真的寫出來的檔跑起，不是自己造一個假路徑：整條鏈的
+            # 意義就在兩支 hook 算出同一個目的地，各自造一份就驗不到那件事。
+            map_vault = root / "map-vault"
+            map_vault.mkdir()
+            (map_vault / memspec.WORK_LEDGER_FILENAME).write_text("map ledger\n", encoding="utf-8")
+            map_transcript = root / "map-transcript.jsonl"
+            map_transcript.write_text(
+                json.dumps({"type": "user", "message": {"content": "壓縮前說過的那句話"}},
+                           ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            map_config = root / "map-config.json"
+            write_config(map_config, [map_vault])
+            map_session = "compact-session"
+            precompact = Path(__file__).with_name("precompact_hook.py")
+            precompact_event = {
+                "session_id": map_session,
+                "transcript_path": os.fspath(map_transcript),
+            }
+            written = run_synthetic(precompact, precompact_event, map_config)
+            map_file = compact_map.map_destination(map_vault, map_session, map_transcript)
+            expected_line = compact_map.map_notice(map_file)
+
+            def map_run(event, config_path=map_config):
+                done = run_synthetic(Path(__file__), event, config_path)
+                value = json.loads(done.stdout) if done.stdout.strip() else {}
+                return done, value.get("hookSpecificOutput", {}).get("additionalContext", "")
+
+            claude_shape = {
+                "hook_event_name": "SessionStart",
+                "session_id": map_session,
+                "transcript_path": os.fspath(map_transcript),
+                "cwd": os.fspath(root),
+                "source": "compact",
+            }
+            codex_shape = {
+                "session_id": map_session,
+                "transcript_path": os.fspath(map_transcript),
+                "source": "compact",
+            }
+            camel_shape = {
+                "sessionId": map_session,
+                "transcript_path": os.fspath(map_transcript),
+                "source": "compact",
+            }
+            shape_runs = [map_run(shape) for shape in (claude_shape, codex_shape, camel_shape)]
+            checks.append((
+                "壓縮續場端回 PreCompact 寫的那份地圖：兩種宿主形狀（含 sessionId 拼法）拿到同一行，且只有一行",
+                written.returncode == 0
+                and map_file.is_file()
+                and bool(expected_line)
+                and all(done.returncode == 0 for done, _text in shape_runs)
+                and all(
+                    text.count(expected_line) == 1 and text.count("壓縮前原文地圖") == 1
+                    for _done, text in shape_runs
+                )
+                and os.fspath(map_file) in shape_runs[0][1],
+            ))
+
+            # 算出來的檔不在＝什麼都不加：不用 mtime 猜最新的一份，也不列目錄。
+            map_file.unlink()
+            missing_run, missing_context = map_run(claude_shape)
+            checks.append((
+                "算不到檔案就一個字都不加（不猜最新的一份、不列目錄）",
+                missing_run.returncode == 0
+                and missing_context == ""
+                and not missing_run.stdout.strip(),
+            ))
+
+            # 地圖就在那裡，但這一行只屬於壓縮續場。
+            run_synthetic(precompact, precompact_event, map_config)
+            startup_run, startup_context = map_run({**claude_shape, "source": "startup"})
+            resume_run, resume_context = map_run({**claude_shape, "source": "resume"})
+            checks.append((
+                "地圖存在但 source 不是 compact：startup 與 resume 都不加這一行",
+                map_file.is_file()
+                and startup_run.returncode == 0
+                and resume_run.returncode == 0
+                and "壓縮前原文地圖" not in startup_context
+                and "壓縮前原文地圖" not in resume_context,
+            ))
+
+            # 240 B（UTF-8）是整行的上限：超限整行不注，路徑一個字元都不截。
+            probe = compact_map.map_destination(root / "long", map_session, map_transcript)
+            probe_line = compact_map.MAP_NOTICE_TEMPLATE.format(path=os.fspath(probe))
+            padding = max(
+                1, compact_map.MAP_NOTICE_MAX_BYTES + 1 - len(probe_line.encode("utf-8"))
+            )
+            long_vault = root / ("long" + "g" * padding)
+            long_vault.mkdir()
+            (long_vault / memspec.WORK_LEDGER_FILENAME).write_text("long ledger\n", encoding="utf-8")
+            long_config = root / "long-config.json"
+            write_config(long_config, [long_vault])
+            long_written = run_synthetic(precompact, precompact_event, long_config)
+            long_map = compact_map.map_destination(long_vault, map_session, map_transcript)
+            long_run, long_context = map_run(claude_shape, long_config)
+            checks.append((
+                "路徑讓整行超過 240 B（UTF-8）：整行不注，路徑絕不截斷",
+                long_written.returncode == 0
+                and long_map.is_file()
+                and compact_map.map_notice(long_map) is None
+                and long_run.returncode == 0
+                and "壓縮前原文地圖" not in long_context
+                and os.fspath(long_map) not in long_context,
+            ))
+
             # 2026-09-06 事故：Codex 把 SessionStart 記成 Failed。宿主砍 hook 的兩個
             # 理由只有「逾時」與「stdout 不是它認得的 JSON」，所以這兩件事各釘一次，
             # 而且釘在一個大到會讓無界掃描現形的庫上（300 卡）。
@@ -934,7 +1071,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 25
+    total = 29
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

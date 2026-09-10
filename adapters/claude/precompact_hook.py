@@ -2,7 +2,6 @@ import sys, time; sys.dont_write_bytecode = True; _STARTED_AT = time.monotonic()
 """Claude PreCompact adapter that persists a bounded transcript recovery map."""
 
 import json
-import hashlib
 import os
 from pathlib import Path
 import tempfile
@@ -15,24 +14,21 @@ if str(_REPO_ROOT) not in sys.path:
 from epitype import compact_map, memspec
 from _hook_common import (
     clear_recall_markers,
-    emit,
     expired,
     governance_vault,
     load_config,
-    payload,
-    payload_fits,
     read_event,
     recall_marker_directory,
     run_synthetic,
-    session_component,
     write_config,
 )
 
 
 def _map_destination(vault, event, transcript):
-    component = session_component(event.get("session_id", event.get("sessionId", "")), limit=80)
-    digest = hashlib.sha256(os.fspath(transcript).encode("utf-8")).hexdigest()[:12]
-    return (vault / memspec.COMPACT_MAP_DIRECTORY / f"{component}-{digest}.md").resolve()
+    """本地薄殼：算法住在 epitype.compact_map，SessionStart 壓縮續場讀同一份。"""
+    return compact_map.map_destination(
+        vault, event.get("session_id", event.get("sessionId", "")), transcript
+    )
 
 
 def _sweep_maps(directory, keep):
@@ -75,11 +71,11 @@ def _handle(event, started_at):
         memspec.COMPACT_MAP_DEFAULT_BUDGET_BYTES,
     )
     _sweep_maps(destination.parent, destination)
-    context = f"地圖已落於{destination},壓縮後先讀它按行號回撈原文。"
-    budget = config[memspec.CONFIG_BUDGET_BYTES_FIELD]
-    if expired(started_at) or not payload_fits("PreCompact", context, budget):
-        return None
-    return payload("PreCompact", context)
+    # 這裡曾經回一句「地圖已落於…」。它在兩邊宿主都到不了模型：Claude Code 的
+    # PreCompact 不能注入（2026-08-19 實證），Codex 0.153 的 PreCompactOutcome 只有
+    # Continue／Stopped。印一句沒有人收得到的話，只會讓下一個讀碼的人以為鏈是通的。
+    # 壓縮後把地圖交回模型的是 SessionStart（source=compact），走同一個 map_destination。
+    return None
 
 
 def _selftest():
@@ -156,14 +152,18 @@ def _selftest():
                 and "Synthetic recovery request" in destination.read_text(encoding="utf-8")
                 and "Independent session B" in second_destination.read_text(encoding="utf-8"),
             ))
-            value = json.loads(result.stdout) if result.stdout.strip() else {}
-            context = value.get("hookSpecificOutput", {}).get("additionalContext", "")
+            # U-R1：PreCompact 不再印任何 context——那句話到不了模型（兩邊宿主皆然）。
+            # 地圖照寫，交回模型的工作歸 SessionStart 的壓縮續場。
             checks.append(
                 (
-                    "output contains map path",
-                    str(destination) in context
-                    and value.get("hookSpecificOutput", {}).get("hookEventName")
-                    == "PreCompact",
+                    "PreCompact writes the map and says nothing: the context never reached the model",
+                    not result.stdout
+                    and not result.stderr
+                    and destination.is_file()
+                    and os.fspath(destination)
+                    == os.fspath(
+                        compact_map.map_destination(vault, "", transcript.resolve())
+                    ),
                 )
             )
             destination.unlink()
@@ -261,10 +261,9 @@ def main():
     if "--selftest" in arguments:
         return _selftest()
     try:
-        event = read_event(sys.stdin)
-        value = _handle(event, _STARTED_AT)
-        if value is not None and not expired(_STARTED_AT) and "--codex" not in arguments:
-            emit(value)
+        # 只寫檔，永遠不輸出：`--codex` 仍被接受（Codex 的 hooks.json 這樣掛），
+        # 但兩邊宿主的輸出路徑都已經退役，所以兩條路徑跑的是同一段程式。
+        _handle(read_event(sys.stdin), _STARTED_AT)
     except Exception:
         pass
     return 0
