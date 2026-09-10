@@ -1,6 +1,10 @@
 # Changelog
 
 ## Unreleased
+
+## v1.3.0 (2026-09-10)
+
+**這一版做完的三件事**：壓縮後不再失憶（壓縮前的原文地圖會在下一回合交回模型）；夜裡的整理會順手收割新素材，只產草稿不動正式卡；規則卡可以只給某一個宿主，核心塊因此不必兩邊一模一樣。另有喚回改端卡片、開場注入歸零、行為層退出產品、核心塊改由規則卡生成等 09-07～09-09 的累積。
 - compact 鏈（U-R1）：壓縮後把「壓縮前原文地圖」的路徑交回模型。目的地算法搬進 `epitype/compact_map.py`（`map_destination(vault, session_id, transcript_path)` 純函式，`session_component` 與 `_hook_common` 同規則、由 `tests/compact_map_destination_regression.py` 釘住不許漂），PreCompact 與 SessionStart 共用同一份。SessionStart 只在 `source=compact` 且事件帶 `transcript_path`、且算出來的地圖檔**存在**時，加一行 `壓縮前原文地圖：<絕對路徑>；需要原文時讀它按行號回撈。`——不猜、不用 mtime 找最新的一份、不列目錄；整行超過 240 B（UTF-8）就整行不注，路徑一個字元都不截。其他 source 不加此行，既有的 compact 抑制（不起夢、不印夢通知、不派翻譯）與非 compact 場的既有通知（card_lint FAIL、翻譯任務、夢通知）全部照舊。PreCompact 不再回傳「地圖已落於…」那句 context——它在兩邊宿主都到不了模型（Claude Code 的 PreCompact 不能注入，2026-08-19 實證；Codex 0.153 的 `PreCompactOutcome` 只有 Continue／Stopped），地圖照寫、清 recall 標記與 `_sweep_maps` 照做。selftest：compact_map 9→12、precompact 8 案改釘「寫檔但不出聲」、sessionstart 25→29（兩種宿主形狀＋`sessionId` 拼法各一行且只有一行、地圖不存在→無、startup／resume→無、超長路徑→無），新增 tests 10 案，run_all 49→50。**UNVERIFIED**：三條實機路徑（Claude Code `/compact`、Codex 互動 `/compact`、`codex exec` 自動壓縮）壓縮後第一個送模型的輸入是否真的含這一行，合併後才驗。
 - dream／harvest（U-R2）：夢在第 4 節盤點草稿**之前**順手跑一趟 harvest，只產草稿。`harvest()` 新增 `drafts_only`（CLI `--drafts-only`）：transcript 的每一筆捕捉一律落 `_drafts/captured_pending/`，不寫 `grants`／`corrections`／`rulings`、不重建也不標舊索引（`capture.Replay(force_pending=...)` 把入庫閘關掉，判定本身不變）；文件句子照舊只進 `_drafts/decisions`。新增 `deadline`（`time.monotonic()` 截止點）：到點停在檔與檔之間，已整檔處理完的才記進 manifest，未處理的留給下一趟——游標＝harvest 既有的逐檔指紋，不是日期（日期會被「harvest 失敗而夢完成」「舊場追加」漏掉）。夢端給 `memspec.DREAM_HARVEST_BUDGET_SECONDS`（30 秒）與整體時限取小者，`--dry-run` 透傳，例外只在第 4 節多一行 errors（fail-open），counts 加 `harvest_new_drafts`／`harvest_files`，報告印「本次 harvest 新增 N 張草稿」。harvest 自己的 stdout 在夢裡被吞掉，報告流不混進 WOULD PROPOSE 日誌。
   - 設計依據：Claude↔Codex 兩輪收斂（`DISCUSS_COMPACT_CHAIN_20260910`，收斂共識 3）；Codex 指出現行 harvest 會直接寫正式庫並重建索引，`--apply` 只管 `--reevaluate`，所以必須先有明確的只產草稿模式。
