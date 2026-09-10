@@ -390,12 +390,18 @@ def _write_draft(vault, source, sentence, counts, dry_run):
     counts["drafts"] += 1
 
 
-def harvest(home, vaults, docs=(), since=None, limit=None, dry_run=False):
+def harvest(home, vaults, docs=(), since=None, limit=None, dry_run=False,
+            drafts_only=False, deadline=None):
     """Replay the online capture rules over every transcript and document.
 
     落點與線上捕捉同一份規則（capture_route）：一句話屬於哪個專案，卡就進那個專案
     的記憶庫；治理庫只收 cwd 不屬於任何已登記專案庫的話，並繼續持有 manifest、
     草稿與盤點數字。
+
+    `drafts_only`＝夢順手跑的那一趟（U-R2）：transcript 的每一筆捕捉一律落 captured_pending，
+    不寫正式卡、不重建索引、不標舊索引；文件句子本來就只寫草稿，行為不變。
+    `deadline`＝`time.monotonic()` 的截止點：到點就停止掃描，已處理完的檔照樣記進
+    manifest、未處理的不記，下一趟從它們接手（游標＝逐檔指紋，不是日期）。
     """
     vault = governance_vault(vaults)
     counts = {key: 0 for key in ("files", "utterances", "grants", "corrections", "rulings", "duplicates", "rejected", "drafts")}
@@ -406,6 +412,10 @@ def harvest(home, vaults, docs=(), since=None, limit=None, dry_run=False):
     now = _utc_stamp()
 
     for path in [*claude_transcripts(home), *codex_transcripts(home)]:
+        # 時限到就停在檔與檔之間：manifest 只認整檔處理完的指紋，所以停在這裡等於
+        # 把未讀的檔完整留給下一趟，不會留下讀到一半就記成已處理的檔。
+        if deadline is not None and time.monotonic() >= deadline:
+            break
         if limit is not None and counts["files"] >= limit:
             break
         if since is not None and transcript_date(path) < since:
@@ -452,6 +462,8 @@ def harvest(home, vaults, docs=(), since=None, limit=None, dry_run=False):
                     event_id, _origin, _session = capture.event_identity(event, digest)
                     landing = "" if target == vault else f" -> {os.fspath(target)}"
                     admitted, _template = capture.auto_admitted(capture.owner_side(body, summary))
+                    if drafts_only:
+                        admitted = False
                     where = directory if admitted else "/".join(
                         (*memspec.CAPTURE_PENDING_SUBPATH, stamp[:10].replace("-", ""))
                     )
@@ -469,6 +481,7 @@ def harvest(home, vaults, docs=(), since=None, limit=None, dry_run=False):
                 replay = capture.Replay(
                     stamp=_record_stamp(item, fallback),
                     fields=(("source", source), ("harvested_at", now)),
+                    force_pending=drafts_only,
                 )
                 # 白名單判定在 write_capture 裡（判 owner 自己那半），線上與回放共用
                 # 同一處，回放出來的卡才會和今天線上寫的卡分在同一邊。
@@ -1034,6 +1047,106 @@ def _selftest():
                 limited_code == 0 and limited["files"] == 1 and limited["utterances"] == 3,
             ))
 
+            # --- U-R2：只產草稿模式與時限游標。自帶 fixture，才不會動到上面每一條對
+            # 治理庫張數的斷言。---
+            class _StepClock:
+                """monotonic 每問一次前進一步，其餘屬性照用真的 time（只給時限案例）。"""
+
+                def __init__(self, start=0.0, step=1.0):
+                    self.value = start
+                    self.step = step
+
+                def monotonic(self):
+                    self.value += self.step
+                    return self.value
+
+                def __getattr__(self, name):
+                    return getattr(_real_time, name)
+
+            _real_time = time
+
+            def _transcript(directory, name, session, sentence, stamp):
+                path = directory / name
+                path.write_text(
+                    line({"type": "user", "timestamp": stamp, "sessionId": session,
+                          "cwd": os.fspath(root),
+                          "message": {"role": "user", "content": sentence}}) + "\n",
+                    encoding="utf-8",
+                )
+                return path
+
+            drafts_home = root / "drafts-home"
+            drafts_vault = (root / "drafts-vault").resolve()
+            drafts_vault.mkdir()
+            (drafts_vault / memspec.WORK_LEDGER_FILENAME).write_text("# ledger\n", encoding="utf-8")
+            drafts_directory = drafts_home / ".claude" / "projects" / "C--DraftsOnly"
+            drafts_directory.mkdir(parents=True)
+            # 兩句都是白名單形狀：沒有 --drafts-only 的話它們會直接進正式目錄。
+            _transcript(drafts_directory, "drafts-one.jsonl", "sess-drafts-1", grant,
+                        "2026-08-01T10:00:00.000Z")
+            _transcript(drafts_directory, "drafts-two.jsonl", "sess-drafts-2", codex_grant,
+                        "2026-08-02T10:00:00.000Z")
+            drafts_counts, _drafts_governance, drafts_routed = harvest(
+                drafts_home, [drafts_vault], drafts_only=True
+            )
+            drafts_pending = sorted(drafts_vault.joinpath(*memspec.CAPTURE_PENDING_SUBPATH).rglob("*.md"))
+            drafts_pending_text = "\n".join(path.read_text(encoding="utf-8") for path in drafts_pending)
+            checks.append((
+                "--drafts-only proposes every capture: no vault card, no index rebuild",
+                drafts_counts["files"] == 2
+                and drafts_counts["drafts"] == 2
+                and drafts_counts["grants"] == 0
+                and len(drafts_pending) == 2
+                and grant in drafts_pending_text and codex_grant in drafts_pending_text
+                and not (drafts_vault / memspec.GRANT_DIRECTORY).exists()
+                and not (drafts_vault / memspec.CORRECTION_DIRECTORY).exists()
+                and not (drafts_vault / memspec.RULING_DIRECTORY).exists()
+                and drafts_routed == {}
+                and not (drafts_vault / memspec.FTS_DB_PATH).exists(),
+            ))
+            # 同一份 fixture 不帶 --drafts-only：證明剛才那兩句本來就會入庫，不是題目
+            # 選得太軟。提案已經存在，所以這一趟判它們重複，正式目錄仍然是空的。
+            _manifest_path(drafts_vault).unlink()
+            normal_counts, _normal_governance, _normal_routed = harvest(drafts_home, [drafts_vault])
+            checks.append((
+                "the same sentences would have been filed without --drafts-only",
+                normal_counts["files"] == 2 and normal_counts["duplicates"] == 2,
+            ))
+
+            deadline_home = root / "deadline-home"
+            deadline_vault = (root / "deadline-vault").resolve()
+            deadline_vault.mkdir()
+            deadline_directory = deadline_home / ".claude" / "projects" / "C--Deadline"
+            deadline_directory.mkdir(parents=True)
+            first_transcript = _transcript(deadline_directory, "deadline-one.jsonl",
+                                           "sess-deadline-1", grant, "2026-08-01T10:00:00.000Z")
+            second_transcript = _transcript(deadline_directory, "deadline-two.jsonl",
+                                            "sess-deadline-2", codex_grant, "2026-08-02T10:00:00.000Z")
+            saved_clock = globals()["time"]
+            try:
+                # 第 1 次問 monotonic 得 1.0（< 1.5，處理第一個檔），第 2 次得 2.0（停）。
+                globals()["time"] = _StepClock(step=1.0)
+                deadline_counts, _deadline_governance, _deadline_routed = harvest(
+                    deadline_home, [deadline_vault], drafts_only=True, deadline=1.5
+                )
+            finally:
+                globals()["time"] = saved_clock
+            cursor = load_manifest(deadline_vault)
+            resumed_counts, _resumed_governance, _resumed_routed = harvest(
+                deadline_home, [deadline_vault], drafts_only=True
+            )
+            checks.append((
+                "a reached deadline stops between files; the manifest carries only the finished one",
+                deadline_counts["files"] == 1
+                and set(cursor) == {os.fspath(first_transcript)}
+                # 未處理的檔沒有進游標，所以下一趟從它接手，不是從頭再走一遍。
+                and resumed_counts["files"] == 1
+                and set(load_manifest(deadline_vault)) == {
+                    os.fspath(first_transcript), os.fspath(second_transcript)
+                }
+                and len(sorted(deadline_vault.joinpath(*memspec.CAPTURE_PENDING_SUBPATH).rglob("*.md"))) == 2,
+            ))
+
             inventory_code, inventory_lines = run(["--inventory", "--docs", os.fspath(docs)])
             stats = vault_stats(vault)
             checks.append((
@@ -1310,7 +1423,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 23
+    total = 26
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
@@ -1328,6 +1441,8 @@ def _parser():
     parser.add_argument("--since", type=_date_argument, default=None, help="skip sessions dated before YYYY-MM-DD")
     parser.add_argument("--limit", type=int, default=None, help="at most N transcripts this run")
     parser.add_argument("--dry-run", action="store_true", help="print what would be written")
+    parser.add_argument("--drafts-only", action="store_true",
+                        help="every captured sentence lands in the proposal area; write no vault card and rebuild no index")
     parser.add_argument("--reevaluate", type=Path, default=None, help="re-judge the cards under this directory with today's rules")
     parser.add_argument("--apply", action="store_true", help="with --reevaluate: move passing cards back under the vault")
     parser.add_argument(
@@ -1371,7 +1486,8 @@ def main(argv=None):
         return 1 if counts.get("failed") else 0
 
     counts, vault, routed = harvest(
-        home, vaults, docs=options.docs, since=options.since, limit=options.limit, dry_run=options.dry_run
+        home, vaults, docs=options.docs, since=options.since, limit=options.limit,
+        dry_run=options.dry_run, drafts_only=options.drafts_only,
     )
     print("HARVEST " + " ".join(f"{key}={value}" for key, value in counts.items()))
     # 治理庫之外還有別的庫收到卡，說出來；只印 HARVEST 那行會看不見它們。

@@ -15,8 +15,9 @@ import sys; sys.dont_write_bytecode = True; [getattr(stream, "reconfigure", lamb
 """
 
 import argparse
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stdout
 from datetime import date, datetime, timedelta, timezone
+import io
 import json
 import os
 from pathlib import Path
@@ -58,6 +59,12 @@ POCKET_VAULT_CANDIDATE = "歸戶候選"
 POCKET_VAULT_NOTE = "只列候選：夢不搬、不改、不刪任何口袋庫的檔案"
 POCKET_VAULT_COMMAND = "人工判斷每個口袋庫該歸哪一戶（登記進 config 的 vaults，或確認它就該留在原地）；沒有自動 CLI 指令"
 DRAFT_AGING_WARN_DAYS = 7
+# 第 4 節順手跑的 harvest（U-R2）：只產草稿，所以報告要說的是「這一趟實際多出幾張
+# 提案」，不是「掃到幾句話」——沒有新增就是 0，不是「沒跑」。
+HARVEST_DRAFTS_NOTE = "本次 harvest 新增 {drafts} 張草稿（掃過 {files} 個 transcript）"
+HARVEST_DRY_RUN_NOTE = "本次 harvest 新增 {drafts} 張草稿（--dry-run：只算不寫，掃過 {files} 個 transcript）"
+HARVEST_SKIPPED_NOTE = "本次未跑 harvest（呼叫端未給家目錄）：草稿數只反映既有檔案"
+HARVEST_ERROR = "harvest（順手收割）失敗，草稿盤點照跑：{detail}"
 DRAFT_AGING_STALE_DAYS = 30
 DRAFT_OLDEST_ROWS = 5
 DRAFT_ROOT_GROUP = "(root)"
@@ -208,8 +215,38 @@ def _drafts_of(vault):
     return sorted(root.rglob("*.md"))
 
 
-def _section_drafts(vaults, today, since_date, config):
+def _harvest_drafts(vaults, context):
+    """夢順手跑一趟 harvest，只產草稿。
+
+    排在盤點之前，這一趟新產的提案才會被下面的盤點數進去。回傳（新增草稿數、掃過的
+    transcript 數、錯誤行）——失敗只回一行錯誤，第 4 節與其餘各節照跑（fail-open）。
+    """
+    context = context or {}
+    home = context.get("home")
+    if home is None:
+        return None, 0, []          # 沒有家目錄就沒有 transcript 可讀：不跑，並在備註說出來
+    deadline = time.monotonic() + memspec.DREAM_HARVEST_BUDGET_SECONDS
+    overall = context.get("deadline")
+    if overall is not None:
+        deadline = min(deadline, overall)
+    try:
+        # harvest 的 --dry-run 會逐行印 WOULD PROPOSE：那是它自己 CLI 的輸出，夢的報告
+        # 只要數字。吞掉 stdout，夢的 --dry-run 才不會把報告和收割日誌混在同一條流裡。
+        with redirect_stdout(io.StringIO()):
+            counts, _governance, _routed = _harvest_module().harvest(
+                home, vaults, drafts_only=True, deadline=deadline,
+                dry_run=bool(context.get("dry_run")),
+            )
+    except Exception as exc:
+        return None, 0, [HARVEST_ERROR.format(detail=f"{type(exc).__name__}: {exc}")]
+    return counts.get("drafts", 0), counts.get("files", 0), []
+
+
+def _section_drafts(vaults, today, since_date, config, context=None):
+    # 收割先跑、盤點後跑：順序反了的話今晚新產的提案要等明晚才被數到。
+    new_drafts, harvested_files, harvest_errors = _harvest_drafts(vaults, context)
     results, errors = _bounded(vaults, _drafts_of)
+    errors = [*harvest_errors, *errors]
     by_subdir = {}
     entries = []
     for vault, paths in results:
@@ -236,15 +273,24 @@ def _section_drafts(vaults, today, since_date, config):
             commands.append(memspec.CAPTURE_PENDING_REVIEW_COMMAND.format(
                 path=Path(vault).joinpath(*memspec.CAPTURE_PENDING_SUBPATH)
             ))
+    if new_drafts is None:
+        note = HARVEST_SKIPPED_NOTE
+    elif (context or {}).get("dry_run"):
+        note = HARVEST_DRY_RUN_NOTE.format(drafts=new_drafts, files=harvested_files)
+    else:
+        note = HARVEST_DRAFTS_NOTE.format(drafts=new_drafts, files=harvested_files)
     return {
         "counts": {
             "total_drafts": len(entries),
             "by_subdir": by_subdir,
             "captured_pending": by_subdir.get(pending_root, 0),
+            "harvest_new_drafts": new_drafts,
+            "harvest_files": harvested_files,
         },
         "examples": entries[:EXAMPLE_LIMIT],
         "commands": commands,
         "errors": errors,
+        "note": note,
     }
 
 
@@ -1183,6 +1229,15 @@ def _section_review_pack(vaults, today, since_date, config, sections):
 # --------------------------------------------------------------------------- 主記憶整形（順路任務）
 
 
+def _harvest_module():
+    """lazy import：只有第 4 節那趟順手收割用得到，別的路徑不為它付 import 的錢。"""
+    try:
+        from . import harvest
+    except ImportError:  # Direct script execution keeps the CLI contract.
+        import harvest
+    return harvest
+
+
 def _views_module():
     """lazy import：夢的盤點路徑不為生成器付錢，整形與順路重生共用這一處。"""
     try:
@@ -1474,7 +1529,8 @@ def _next_steps(sections, shaping=()):
     return steps
 
 
-def build_report(vaults, today=None, since_date=None, deadline=None, shaping=None, config=None):
+def build_report(vaults, today=None, since_date=None, deadline=None, shaping=None, config=None,
+                 harvest_home=None, dry_run=False):
     today = today or datetime.now(timezone.utc).date()
     since_date = since_date or (today - timedelta(days=DEFAULT_EVENT_AGING_DAYS))
     # 設定讀一次就好：第 8 節要「登記了哪些庫」、第 11 節要三個上限鍵。讀不到就是空
@@ -1491,8 +1547,14 @@ def build_report(vaults, today=None, since_date=None, deadline=None, shaping=Non
         except Exception as exc:
             return {"id": section_id, "title": title, "error": f"{type(exc).__name__}: {exc}"}
 
+    # 第 4 節在盤點草稿之前順手跑一趟 harvest，所以它多收一個執行脈絡：家目錄（沒有
+    # 就不跑）、夢的 --dry-run 透傳、整體時限。其餘各節的簽章不變。
+    context = {"home": harvest_home, "dry_run": bool(dry_run), "deadline": deadline}
     sections = [
-        run(section_id, title, lambda fn=fn: fn(vaults, today, since_date, config))
+        run(section_id, title, lambda fn=fn: (
+            fn(vaults, today, since_date, config, context) if fn is _section_drafts
+            else fn(vaults, today, since_date, config)
+        ))
         for section_id, title, fn in _SECTIONS
     ]
     # 檢討包最後跑：它要把第 8–12 節算完的候選數一起列出來當背景。
@@ -2498,6 +2560,83 @@ def _selftest():
                 and written_state[memspec.DREAM_STATE_PACK_FIELD] == os.fspath(md_out)
             )))
 
+            # --- U-R2：第 4 節在盤點草稿之前順手跑一趟 harvest（只產草稿）。自帶
+            # 家目錄與庫，才不會動到上面每一條對主 fixture 草稿數的斷言。---
+            harvest_home = Path(temp_dir).resolve() / "harvest-home"
+            harvest_vault = Path(temp_dir).resolve() / "harvest-vault"
+            harvest_vault.mkdir()
+            harvest_projects = (
+                harvest_home / memspec.HOST_STATE_DIRECTORY
+                / memspec.HOST_PROJECTS_DIRECTORY / "C--Harvest"
+            )
+            harvest_projects.mkdir(parents=True)
+            # 白名單形狀的授權句：線上捕捉會直接入庫，所以它證明得了 drafts-only 有生效。
+            harvest_sentence = "你可以直接改那個測試檔"
+            (harvest_projects / "harvest-session.jsonl").write_text(
+                json.dumps({
+                    "type": "user", "timestamp": "2026-09-05T10:00:00.000Z",
+                    "sessionId": "sess-dream-harvest", "cwd": os.fspath(harvest_home),
+                    "message": {"role": "user", "content": harvest_sentence},
+                }, ensure_ascii=False) + chr(10),
+                encoding="utf-8",
+            )
+            saved_home = (os.environ["HOME"], os.environ["USERPROFILE"])
+            try:
+                os.environ["HOME"] = os.fspath(harvest_home)
+                os.environ["USERPROFILE"] = os.fspath(harvest_home)
+                dry_output = io.StringIO()
+                dry_harvest_code = main(
+                    ["--dry-run", "--today", "2026-09-06", os.fspath(harvest_vault)], output=dry_output
+                )
+                dry_harvest_text = dry_output.getvalue()
+                dry_harvest_files = sorted(
+                    path for path in harvest_vault.rglob("*") if path.is_file()
+                )
+                real_harvest_code = main(
+                    ["--today", "2026-09-06", os.fspath(harvest_vault)], output=io.StringIO()
+                )
+            finally:
+                os.environ["HOME"], os.environ["USERPROFILE"] = saved_home
+            checks.append(("section 4 harvests on the way; --dry-run counts the draft and writes nothing", (
+                dry_harvest_code == 0
+                and "本次 harvest 新增 1 張草稿" in dry_harvest_text
+                and dry_harvest_files == []
+            )))
+            harvest_pending = sorted(
+                harvest_vault.joinpath(*memspec.CAPTURE_PENDING_SUBPATH).rglob("*.md")
+            )
+            harvest_pack = (harvest_vault / ".epitype" / "dream_pack_20260906.md").read_text(encoding="utf-8")
+            checks.append(("the harvested sentence lands as a proposal only, and the pack says how many", (
+                real_harvest_code == 0
+                and len(harvest_pending) == 1
+                and harvest_sentence in harvest_pending[0].read_text(encoding="utf-8")
+                and not (harvest_vault / memspec.GRANT_DIRECTORY).exists()
+                and "本次 harvest 新增 1 張草稿" in harvest_pack
+                and '"harvest_new_drafts": 1' in harvest_pack
+            )))
+
+            # harvest 掛掉只花第 4 節一行 errors：其餘各節照跑，草稿盤點本身也照出數字。
+            saved_harvest_module = _harvest_module
+            def _broken_harvest_module():
+                raise RuntimeError("synthetic harvest failure")
+            try:
+                globals()["_harvest_module"] = _broken_harvest_module
+                broken_harvest_report = build_report([vault], today=today, harvest_home=home)
+            finally:
+                globals()["_harvest_module"] = saved_harvest_module
+            broken_harvest_by_id = {
+                section["id"]: section for section in broken_harvest_report["sections"]
+            }
+            checks.append(("a failing harvest costs section 4 one error line, nothing else", (
+                broken_harvest_by_id[4]["error"] is None
+                and len(broken_harvest_by_id[4]["errors"]) == 1
+                and "harvest" in broken_harvest_by_id[4]["errors"][0]
+                and broken_harvest_by_id[4]["counts"]["harvest_new_drafts"] is None
+                and broken_harvest_by_id[4]["counts"]["total_drafts"] >= 2
+                and broken_harvest_by_id[1]["error"] is None
+                and broken_harvest_by_id[2]["counts"]["fail"] >= 1
+            )))
+
             # 時限是自己計時的：預算耗盡後剩下的節標成略過，而不是靜靜少一節。
             budget_report = build_report([vault], today=today, deadline=time.monotonic() - 1)
             checks.append(("an exhausted time budget marks every remaining section, and the default budget is 10 minutes", (
@@ -2799,7 +2938,7 @@ def _selftest():
                 os.environ[name] = value
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 65
+    total = 68
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
@@ -2895,7 +3034,9 @@ def main(argv=None, output=sys.stdout):
                     "reason": f"{type(exc).__name__}: {exc}",
                 })
         report = build_report(
-            vaults, today=today, since_date=since_date, deadline=deadline, shaping=shaping
+            vaults, today=today, since_date=since_date, deadline=deadline, shaping=shaping,
+            # 家目錄同源 harvest CLI（沒有 --home 時就是 Path.home()），不另立第二套推導。
+            harvest_home=Path.home(), dry_run=parsed.dry_run,
         )
         rendered = json.dumps(report, ensure_ascii=False, indent=1)
         content = rendered if parsed.json else _render_markdown(report)

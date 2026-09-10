@@ -1455,6 +1455,9 @@ DREAM_AT_REGEX = re.compile(DREAM_AT_PATTERN)
 # 時不會永久堵住後續的夢）。
 DREAM_LOCK_STALE_SECONDS = 30 * 60
 DREAM_BUDGET_SECONDS = 600              # 背景程序自己計時，逾時剩下的節略過
+# 夢在草稿節之前順手跑的那趟 harvest（U-R2）：只產草稿，做多少算多少。時限刻意遠小於
+# 整體預算，因為它是順手做的——收割慢不該把後面十一節的盤點吃掉。
+DREAM_HARVEST_BUDGET_SECONDS = 30
 DREAM_NICE = 10                         # POSIX 背景優先權；Windows 用 BELOW_NORMAL
 # 起夢（lazy import + Popen）在忙機器上量到 ~2.5 s。開場預算只有 HOOK_TIMEOUT_SECONDS，
 # 剩不到這個數就不起：夢晚一場沒關係，記憶注入掉一場才是真的損失。

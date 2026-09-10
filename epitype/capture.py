@@ -30,14 +30,18 @@ STATUS_ERROR = "error"
 class Replay:
     """離線回放的來源與去向：stamp 是原話當時的時間、fields 是額外的 frontmatter
     來源欄、status 回報寫入結果。reindex 預設關閉，因為回放結束才建一次索引，
-    每張卡建一次會把一次大整理變成數千次索引重建。"""
+    每張卡建一次會把一次大整理變成數千次索引重建。
 
-    __slots__ = ("stamp", "fields", "reindex", "status")
+    force_pending＝這一趟只准產草稿：即使句子過得了白名單也一律停在提案區。夢順手
+    跑的那趟 harvest 沒有人在旁邊看著正式庫被寫，所以它不准自動入庫（U-R2）。"""
 
-    def __init__(self, stamp=None, fields=(), reindex=False):
+    __slots__ = ("stamp", "fields", "reindex", "force_pending", "status")
+
+    def __init__(self, stamp=None, fields=(), reindex=False, force_pending=False):
         self.stamp = stamp
         self.fields = tuple(fields)
         self.reindex = reindex
+        self.force_pending = force_pending
         self.status = None
 
 
@@ -404,6 +408,10 @@ def write_capture(vault, directory_name, kind, digest, label, body, event, start
     admitted, _template = auto_admitted(
         owner_side(body, summary) if source_text is None else source_text
     )
+    # 只產草稿的回放（harvest --drafts-only）把入庫閘整個關掉：判定照跑（卡面仍記得
+    # 它本來合格），落點一律是提案區，所以正式目錄不會被寫、索引也就沒有東西要重建。
+    if replay is not None and replay.force_pending:
+        admitted = False
     event_id, origin, session = event_identity(event, digest)
     try:
         if existing_capture(
