@@ -2,113 +2,105 @@
 
 [繁體中文](README.zh-TW.md)
 
-Epitype is a memory governance layer for CLI agents.
+You wrote the rule in `CLAUDE.md`. The agent still did something else.
 
-It keeps the host's native memory as the storage authority, then adds the structure, timing, action gates, and evidence needed for remembered rules to affect later behavior.
+You settled a decision three days ago. Today the agent answers from the version you replaced. One compaction later, a rule you put in the instruction file might as well not be there.
 
-An agent can retrieve the right fact and still break the rule attached to it. Epitype focuses on that gap:
+Epitype is the small layer I built for that. It runs on the hooks Claude Code and Codex already have, leaves your existing memory files where they are, and adds the part those files cannot do on their own: getting the right note in front of the agent at the moment it matters, and keeping the wrong one out.
 
-- a replaced decision should not return as current;
-- an incident lesson should reach the tool action where it matters;
-- a permission should remain attributable to the person who gave it;
-- a memory failure should be visible and testable.
-
-Epitype currently supports Claude Code and Codex. It uses only the Python standard library and does not require a hosted memory service.
+It is Python standard library only. No service to sign up for, no model calls of its own, nothing to pay for.
 
 ## How it works
 
-Epitype connects the same native vaults to five host events:
+Epitype hangs off five host events and reads the same vaults your host already uses.
 
 | Event | What Epitype does |
 |---|---|
-| `SessionStart` | Only the lines that name something to do (a card-type FAIL, the by-the-way alias task, a dream that errored, left candidates, or is past due). Nothing standing is re-sent, the memory index included: the host loads that itself from `CLAUDE.md` / `AGENTS.md`. A session with nothing to do gets no injection. |
-| `UserPromptSubmit` | Recalls up to five relevant cards from each resolved vault within the shared output budget — cards only; verbatim capture files are searchable, never injected. Short owner statements are stored verbatim, deduplicated, and indexed; their meaning is not inferred during capture. |
-| `PreToolUse` | Write gate: checks the content a file write is about to commit against the settled rulings and the card contract. A block returns the ruling and an audit row. |
-| `PreCompact` | Builds a small recovery map from the transcript tail before context compaction. |
-| `Stop` | Round-end decision gate: blocks a reply that re-proposes a rejected option or re-asks a ruled question. |
+| `SessionStart` | Injects only what names something to do: a card that fails its type check, the by-the-way alias task, a dream that errored or is overdue. After a compaction it also hands back the path to the map written below, so the agent can go read the original words. A session with nothing to do gets nothing. Standing material is not re-sent, the memory index included, because the host loads that itself from `CLAUDE.md` / `AGENTS.md`. |
+| `UserPromptSubmit` | Pulls up to five relevant cards from each resolved vault, inside a shared output budget. Cards only. Verbatim capture files stay searchable but are never injected. Short owner statements are stored word for word, deduplicated and indexed; nothing infers what they meant. |
+| `PreToolUse` | Write gate. Checks the content a file write is about to commit against settled rulings and the card contract. A block hands back the ruling and writes an audit row. |
+| `PreCompact` | Writes a small recovery map from the tail of the transcript before the context is compacted. |
+| `Stop` | Round-end decision gate. Blocks a reply that re-proposes a rejected option or re-asks a question you already ruled on. |
 
-Injected memory remains advisory. It cannot override system or developer instructions, bypass host permissions, or grant a tool authority by itself. Hook output is capped at 10 KiB and each hook has a ten-second fail-open deadline.
+Injected memory is advisory. It cannot override system or developer instructions, bypass host permissions, or hand a tool any authority by itself. Hook output is capped at 10 KiB, and every hook has a ten-second deadline that fails open.
 
-### Capture: filed, or proposed
+### Capture: filed, or waiting for you
 
-A trigger match proves a sentence *looks like* a ruling, not that anyone checked it,
-so capture files only what one of three shape templates admits — an arrow reply
-whose owner half opens with a short answer, a correction that opens the sentence, or
-a named first-person authorization. Everything else the rules still capture is
-written to `<vault>/_drafts/captured_pending/YYYYMMDD/` instead: not indexed, not
-recalled, waiting for a person. Both kinds carry `provenance: auto-captured` and
-`verified: false`, and promotion means editing those fields (`verified: true` plus
-`verified_by`/`verified_at`) and moving the file — a replay refuses to do it.
+A trigger match proves a sentence *looks like* a ruling, not that anyone checked it. So capture files a sentence only when it fits one of three shapes: an arrow reply whose owner half opens with a short answer, a correction that opens the sentence, or a named first-person authorization. Everything else the rules still catch goes to `<vault>/_drafts/captured_pending/YYYYMMDD/` instead. Not indexed, not recalled, waiting for a person.
 
-No `verified: false` card is authority for anything: the Stop decision gate and the
-write gate both read cards that declare `decision_key`, which a captured card never
-does.
-Recall does not surface it at all: a captured quote is the bottom reading level, so
-`memsearch` returns it when an AI goes looking for the exact words, and the prompt
-hook injects cards only. Details and the measured trade in `docs/FAILURE_MODES.md`
-§32 and §41.
+Both kinds carry `provenance: auto-captured` and `verified: false`. Promotion means editing those fields (`verified: true` plus `verified_by` / `verified_at`) and moving the file, and a replay refuses to do it for you.
 
-## Governance beyond recall
+A `verified: false` card is authority for nothing. The Stop gate and the write gate both read cards that declare a `decision_key`, which a captured card never has. Recall leaves it alone too: a captured quote sits at the bottom reading level, so `memsearch` finds it when someone goes looking for the exact words, while the prompt hook injects cards only. The measured trade-off is in `docs/FAILURE_MODES.md` §32 and §41.
 
-### Current decisions
+## Beyond recall
 
-Decision cards have a stable `decision_key`, an `active` or `superseded` status, an effective time, and a named decision source. Exactly one card should be active for each key. `query`, `recall`, and the prompt hook exclude superseded cards by default while retaining them for provenance. Use `--include-superseded` only when you want the history.
+### Decisions that stay replaced
 
-### Scars, and what actually stops an action
+Decision cards carry a stable `decision_key`, a status of `active` or `superseded`, an effective time, and a named source. One card is active per key. `query`, `recall` and the prompt hook drop superseded cards by default and keep them for provenance. Ask for `--include-superseded` when you actually want the history.
 
-A scar is an incident-born rule: the `incident` it came from and actionable `advice` that names the safer route. A card is context read back into a turn, not a refusal — it cannot stop a tool call, and a lexical pattern pretending otherwise produces both false denials and false confidence. Irreversible actions belong to the host's own native rules (Claude `permissions.deny`, Codex `execpolicy`), which refuse the call before it runs. Epitype refuses only content: the write gate below, and the Stop gate at the end of a turn.
+### Scars, and what really stops an action
 
-### Native-first installation
+A scar is a rule born from an incident: the `incident` it came from, plus `advice` that names the safer route. A card is context read back into a turn. It is not a refusal and it cannot stop a tool call. Treating a lexical match as a blocker produces false denials and false confidence at the same time. Irreversible actions belong to the host's own rules, which refuse the call before it runs: `permissions.deny` in Claude Code, `execpolicy` in Codex. Epitype refuses content only, at the write gate and at the end of a turn.
 
-The installer merges only entries marked as Epitype, keeps detected native vaults, and writes backups before changing an existing host file. Stable shims let the repository move without rewriting every host registration. Uninstall removes Epitype-owned registrations and configuration while preserving native memory and vault cards.
+### An installer that leaves your setup alone
 
-### Tidy-up that runs itself
+The installer merges only the entries it marks as its own, keeps the native vaults it detects, and backs up any host file before changing it. Stable shims mean you can move the repository without rewriting every registration. Uninstall takes back Epitype's own registrations and config and leaves native memory and vault cards untouched.
 
-The offline inventory pass ("the dream") does not wait to be remembered. By default (`dream.mode: piggyback`) a session start whose last dream is older than `dream.interval_hours` starts one detached, low-priority background process and returns without waiting; a pid-bearing lock, stale after 30 minutes, keeps a second one from starting. `graft install --dream nightly [--at HH:MM]` registers a daily system task instead (`graft doctor` shows the mode and the last completion; `graft uninstall` removes the task), and `--dream off` disables both. The run reads vaults and writes only `<governance vault>/.epitype/` — review pack, state, log — inside a ten-minute budget, and the next session announces it in one line. Its last section is the feedback review pack: one row per card that owner events, gate blocks or exam failures point at, flagged once enough rows accumulate (`memspec.REVIEW_PACK_TRIGGER`, 5) that a review sitting is worth holding. It judges nothing and changes no card. No model is called: the model half of tidying stays manual, so an installed Epitype never spends model budget on its own.
+### Tidying that happens on its own
 
-### Failure evidence
+The offline inventory pass, the dream, runs on its own. You never have to remember to start it.
 
-Missing indexes, stale indexes, shim failures, malformed cards, and lock contention have distinct outcomes. The hooks fail open when they cannot safely finish, and the installer doctor reports recorded shim outages instead of treating silence as health.
+By default (`dream.mode: piggyback`) a session start whose last dream is older than `dream.interval_hours` kicks off one detached, low-priority background run and returns without waiting for it. A lock carrying its pid, stale after 30 minutes, keeps a second one from starting. `graft install --dream nightly [--at HH:MM]` registers a daily system task instead, `graft doctor` shows the mode and the last completion, `graft uninstall` removes the task, and `--dream off` turns both off.
 
-`epitype gates <vault> [--since Nd|YYYY-MM-DD] [--json] [--by kind|decision|session|day]` turns a vault's `_GATE_LOG.jsonl` into a read-only report of what the gates actually blocked, by kind, decision or scar card, day, and session, plus a same-session-same-card ≥3 hint for suspected false positives.
+A run reads vaults and writes only inside `<governance vault>/.epitype/` (review pack, state, log) within a ten-minute budget. On the way it harvests new material into drafts, and it never touches a card you already filed. The next session mentions it in one line.
+
+The last section is the feedback review pack: one row per card that owner events, gate blocks or exam failures keep pointing at, raised once enough rows pile up (`memspec.REVIEW_PACK_TRIGGER`, 5) that a review sitting is worth holding. It judges nothing and edits nothing. No model is called, so an installed Epitype never spends your model budget while you are not looking.
+
+### When something breaks, you can see it
+
+Missing indexes, stale indexes, shim failures, malformed cards and lock contention all end differently. Hooks fail open when they cannot finish safely, and the installer doctor reports recorded shim outages instead of reading silence as health.
+
+`epitype gates <vault> [--since Nd|YYYY-MM-DD] [--json] [--by kind|decision|session|day]` turns a vault's `_GATE_LOG.jsonl` into a read-only report of what the gates actually blocked, by kind, card, day and session, and flags the same card blocking three times in one session as a likely false positive.
 
 ## Quickstart
 
-Requirements: Python 3.11 or newer and a Claude Code or Codex installation with hook support.
+You need Python 3.11 or newer and a Claude Code or Codex install with hook support.
 
-Install: `pip install epitype`. The `epitype` command exposes installation, search, lint, exam, and diagnostic tools; `epitype-graft` remains as a compatibility alias for the installer.
+```powershell
+pip install epitype
+```
 
-The `@hungyu/epitype` package on npm is only a signpost back to this Python project (npm rejects the bare name as too similar to an existing package).
+The `epitype` command covers installation, search, lint, exam and diagnostics. `epitype-graft` still works as an alias for the installer. The `@hungyu/epitype` package on npm is only a signpost back here; npm rejects the bare name as too close to an existing package.
 
-Preview the planned changes:
+Preview what the installer would change:
 
 ```powershell
 epitype install --dry-run
 ```
 
-If the preview contains only the hosts and paths you expect, install and run the synthetic health check:
+If the preview lists only the hosts and paths you expected, install and run the synthetic health check:
 
 ```powershell
 epitype install
 epitype doctor
 ```
 
-The installer detects existing native vaults. If it finds none, it creates an empty fallback vault. Reinstall preserves a curated vault list; use `epitype vaults --resync --dry-run` and then rerun without `--dry-run` when you intentionally want to adopt the latest detection result.
+The installer looks for native vaults you already have. If there are none it creates an empty one. Reinstalling keeps a vault list you curated; run `epitype vaults --resync --dry-run` and then without `--dry-run` when you do want the latest detection result.
 
 ### Approve Codex hooks
 
-Codex registration and Codex trust are separate. Check the real trust state after installation:
+Registering a hook in Codex and trusting it are two different things. Check the real state after installing:
 
 ```powershell
 epitype trust
 ```
 
-If any Epitype entry is `UNTRUSTED`, `DISABLED`, or `MODIFIED`:
+If an Epitype entry comes back `UNTRUSTED`, `DISABLED` or `MODIFIED`:
 
-- In the terminal UI, enter `/hooks`, press `t` to trust all entries in the panel, then press `esc`.
-- In the Desktop app, open **hooks need review** or the **Hooks** panel and approve the Epitype entries for `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PreCompact`, and `Stop`.
+- In the terminal UI, type `/hooks`, press `t` to trust everything in the panel, then `esc`.
+- In the Desktop app, open **hooks need review** or the **Hooks** panel and approve the Epitype entries for `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PreCompact` and `Stop`.
 
-Run the check again. Codex is ready only when it prints `CODEX TRUST: PASS 5/5`. `doctor` verifies registration and synthetic execution; it does not replace this trust check.
+Run the check again. Codex is ready when it prints `CODEX TRUST: PASS 5/5`. `doctor` checks registration and synthetic execution, and does not replace this.
 
 ### Choose a vault layout
 
@@ -116,13 +108,13 @@ Start from one of the tracked templates:
 
 | Template | Intended use |
 |---|---|
-| [`minimal`](templates/minimal/) | One person on one machine. |
-| [`team`](templates/team/) | A shared vault using the common write-lock contract. |
-| [`power`](templates/power/) | The full layout, including census and exam-ready directories. |
+| [`minimal`](templates/minimal/) | One person, one machine. |
+| [`team`](templates/team/) | A shared vault under the common write-lock contract. |
+| [`power`](templates/power/) | The full layout, census and exam directories included. |
 
 ## Search the local vault
 
-Build a vault's local FTS index, then query it directly or recall against a prompt:
+Build the index once, then query it or recall against a prompt:
 
 ```powershell
 epitype search build C:\path\to\vault
@@ -130,45 +122,45 @@ epitype search query term --vault C:\path\to\vault
 epitype search recall "natural-language prompt" --vault C:\path\to\vault
 ```
 
-The generated database lives at `<vault>/.epitype/memory_fts.sqlite3` and is ignored by Git. Only `build` creates a missing index. Existing indexes refresh incrementally when stale; a missing index is reported separately from a valid zero-result query.
+The database lives at `<vault>/.epitype/memory_fts.sqlite3` and Git ignores it. Only `build` creates a missing index; an existing one refreshes incrementally when it goes stale. A missing index is reported as missing, not as a query that found nothing.
 
 ## Command reference
 
-`epitype <command> --help` prints the full option list for any command below.
+`epitype <command> --help` prints the full option list for anything below.
 
 ### Everyday
 
 | Command | What it does |
 |---|---|
-| `epitype doctor [--home HOME] [--dry-run] [--clear-shim-status]` | Synthetic health check for hook registration and shim execution; run after install or whenever something looks broken. |
-| `epitype dream [vaults...] [--since SINCE] [--dry-run] [--scheduled] [--json]` | Read-only offline tidy inventory (missing aliases, card-lint findings, zombie pending lines, unreviewed drafts, aging event cards, unregistered pocket vaults, draft aging, mixed cards to split, files over their configured cap, owner quotes no decision card carries, generated core blocks that have drifted from their rule cards, and a review pack lining owner events, gate blocks and exam failures up against the cards they point at) rendered as a numbered review packet; applies nothing itself. Scheduling is `dream.mode` in config — `piggyback` (default: a detached background run at session start), `nightly` (an OS-scheduled task), or `off` — switched with `epitype install --dream {piggyback,nightly,off} [--at HH:MM]` (nightly default `03:30`). |
-| `epitype gates <vault> [--since Nd\|YYYY-MM-DD] [--json] [--by kind\|decision\|session\|day]` | Turns `_GATE_LOG.jsonl` into a report of what the action gates actually blocked, e.g. `epitype gates C:\path\to\vault --since 2d`. |
-| `epitype cards <vault> [--strict] [--verbose] [--deep] [--json] [--fix-dates [--dry-run]]` | Type-checks memory cards against their required fields. `--deep` adds the vault-level checks: one active card per `decision_key`, valid supersession chains, and every managed card present in both the generated views and the search index. `--fix-dates` is the only flag that writes: it backfills a derived `last_verified_at:` line; preview the exact writes first with `--fix-dates --dry-run`. |
-| `epitype views <vaults...> [--force] [--json]` | Regenerates the browsable catalogue from card fields: `_views/current.md` (cards in use, with the complete list of active decisions) and `_views/history/closed.md` (closed projects and superseded decisions). Never writes `MEMORY.md`, rewrites nothing when the input fingerprint is unchanged, and takes a lock so two generators cannot overlap. See [Four reading levels](docs/ARCHITECTURE.md#four-reading-levels). |
-| `epitype core-gen <vaults...> --out FILE [--cap-bytes N] [--dry-run] [--check] [--json]` | Assembles the resident core block from `type: rule` cards — `floor` numbered by `order`, `resident` grouped into `section` subsections — copying each card's approved `text` byte for byte and writing an approval pack next to it. Refuses to write (non-zero exit) when the assembly is over its cap or a card in a generated layer has no `approved_by`/`approved_at`. `--check` compares the assembly with `--out` instead of writing, for drift audits. See [Core generation](docs/ARCHITECTURE.md#core-generation-rule-cards--the-resident-block). |
+| `epitype doctor [--home HOME] [--dry-run] [--clear-shim-status]` | Synthetic health check for hook registration and shim execution. Run it after installing, or whenever something feels off. |
+| `epitype dream [vaults...] [--since SINCE] [--dry-run] [--scheduled] [--json]` | Read-only tidy inventory rendered as a numbered review packet, applying nothing itself: missing aliases, card-lint findings, zombie pending lines, unreviewed drafts, aging event cards, unregistered pocket vaults, draft aging, mixed cards to split, files over their cap, owner quotes no decision card carries, generated core blocks that have drifted from their rule cards, and the review pack. Scheduling is `dream.mode` in config — `piggyback` (default), `nightly` (an OS task) or `off` — switched with `epitype install --dream {piggyback,nightly,off} [--at HH:MM]` (nightly defaults to `03:30`). |
+| `epitype gates <vault> [--since Nd\|YYYY-MM-DD] [--json] [--by kind\|decision\|session\|day]` | Turns `_GATE_LOG.jsonl` into a report of what the gates actually blocked, e.g. `epitype gates C:\path\to\vault --since 2d`. |
+| `epitype cards <vault> [--strict] [--verbose] [--deep] [--json] [--fix-dates [--dry-run]]` | Type-checks cards against their required fields. `--deep` adds vault-level checks: one active card per `decision_key`, valid supersession chains, every managed card present in both the generated views and the search index. `--fix-dates` is the only flag that writes, backfilling a derived `last_verified_at:`; preview it with `--fix-dates --dry-run`. |
+| `epitype views <vaults...> [--force] [--json]` | Regenerates the browsable catalogue from card fields: `_views/current.md` (cards in use, with every active decision) and `_views/history/closed.md` (closed projects and superseded decisions). Never writes `MEMORY.md`, rewrites nothing when the input fingerprint is unchanged, and takes a lock so two generators cannot overlap. See [Four reading levels](docs/ARCHITECTURE.md#four-reading-levels). |
+| `epitype core-gen <vaults...> --out FILE [--cap-bytes N] [--dry-run] [--check] [--json]` | Assembles the resident core block from `type: rule` cards — `floor` numbered by `order`, `resident` grouped by `section`, host-only cards in their own zone — copying each approved `text` byte for byte and writing an approval pack beside it. Refuses to write when the assembly is over its cap or a card in a generated layer has no `approved_by` / `approved_at`. `--check` compares instead of writing, for drift audits. See [Core generation](docs/ARCHITECTURE.md#core-generation-rule-cards--the-resident-block). |
 | `epitype aliases {export,apply}` | `export` lists cards missing aliases as a JSON worklist; `apply` writes reviewed `suggested` aliases back, additive only. |
-| `epitype search {build,query,recall}` | Builds the local FTS index and queries it by keyword or natural-language prompt; see [Search the local vault](#search-the-local-vault) above. |
+| `epitype search {build,query,recall}` | Builds the local index and queries it by keyword or prompt; see [Search the local vault](#search-the-local-vault). |
 
 ### Maintenance and batch
 
 | Command | What it does |
 |---|---|
-| `epitype decisions [vault] [--audit] [--selftest]` | Read-only lint of decision cards: uniqueness per key, supersession chain, decider field; `--audit` lists current decisions that are not `owner-explicit`. |
-| `epitype ledger append --ledger PATH --entry TEXT --evidence PATH::SUBSTRING [--check-only]` | Verifies each evidence claim actually appears in the named file's bytes before appending the ledger entry; `--check-only` validates without writing. |
-| `epitype capture-route <vault> [--audit] [--apply] [--home HOME] [--json]` | Audits a vault's auto-captured event cards against the routing rule: the card belongs to the project vault its `cwd` names, so anything in the governance vault that belongs elsewhere is listed as `MISROUTED <card> -> <vault>`. `--audit` is read-only; `--apply` moves the cards (`os.replace`, `-2` suffix on a name collision, never a delete) and appends a one-line rehome note. |
-| `epitype harvest [--inventory] [--docs DOCS] [--since SINCE] [--reevaluate DIR [--apply]] [--quarantine-drops [DIR]]` | Zero-model replay of the capture rules over historical transcripts and documents for first-time backfill; also re-judges drafts or a vault's own event cards against today's rules. |
+| `epitype decisions [vault] [--audit] [--selftest]` | Read-only lint of decision cards: uniqueness per key, supersession chain, decider field. `--audit` lists current decisions that are not `owner-explicit`. |
+| `epitype ledger append --ledger PATH --entry TEXT --evidence PATH::SUBSTRING [--check-only]` | Checks that each evidence claim really appears in the named file's bytes before appending the entry. `--check-only` validates without writing. |
+| `epitype capture-route <vault> [--audit] [--apply] [--home HOME] [--json]` | Audits auto-captured event cards against the routing rule: a card belongs to the project vault its `cwd` names, so anything sitting in the governance vault that belongs elsewhere is listed as `MISROUTED <card> -> <vault>`. `--audit` is read-only; `--apply` moves the cards (`os.replace`, `-2` suffix on a name collision, never a delete) and appends a one-line note. |
+| `epitype harvest [--inventory] [--docs DOCS] [--since SINCE] [--drafts-only] [--reevaluate DIR [--apply]] [--quarantine-drops [DIR]]` | Zero-model replay of the capture rules over old transcripts and documents, for a first backfill. Also re-judges drafts, or a vault's own event cards, against today's rules. `--drafts-only` keeps everything it finds in the pending drafts area. |
 | `epitype token-meter [rollout] [--selftest]` | Reads a Codex rollout JSONL and prints its last current and cumulative token usage against the context window. |
 | `epitype scar-census build` | Builds the machine-generated view of the four-layer scar census. |
 | `epitype compact-map build` | Builds a bounded compact-recovery map, the same kind `PreCompact` writes per session. |
-| `epitype source SOURCE.jsonl [--find TEXT] [--role user\|assistant\|all] [--line N] [--offset BYTES] [--limit 1..8]` | Reads original messages with source roles, physical lines, hashes and explicit truncation/coverage. Line numbers are relative when an offset is supplied. Literal retrieval is not proof of a current decision or of evidence supporting a claim. |
+| `epitype source SOURCE.jsonl [--find TEXT] [--role user\|assistant\|all] [--line N] [--offset BYTES] [--limit 1..8]` | Reads original messages back with roles, physical lines, hashes and explicit truncation and coverage. Line numbers are relative when you supply an offset. Finding a sentence is not proof that it is the current decision. |
 | `epitype pending <vault> [--max-age-days N] [--strict] [--json]` | Lints for zombie pending lines: a todo marker with no closing text, no runnable `verify:`, and past the age threshold. |
 | `epitype exam [corpus] [--strict] [--selftest]` | Runs the exam engine against a behavior-question corpus. |
-| `epitype trust [--home HOME]` | Checks Codex's real hook trust state; see [Approve Codex hooks](#approve-codex-hooks) above. |
-| `epitype install \| uninstall \| vaults \| relocate` | Installer, removal, vault resync, and repository relocation; see [Quickstart](#quickstart) and [Moving or removing Epitype](#moving-or-removing-epitype) below. |
+| `epitype trust [--home HOME]` | Checks Codex's real hook trust state; see [Approve Codex hooks](#approve-codex-hooks). |
+| `epitype install \| uninstall \| vaults \| relocate` | Installer, removal, vault resync, repository relocation. See [Quickstart](#quickstart) and [Moving or removing Epitype](#moving-or-removing-epitype). |
 
 ## Verify this checkout
 
-Run the public checks from the repository root:
+From the repository root:
 
 ```powershell
 python tests/run_all.py
@@ -176,37 +168,38 @@ python tests/privacy_lint.py
 python exam/exam_runner.py --strict
 ```
 
-`tests/run_all.py` currently runs 34 component selftests covering the core tools, hook adapters, package surface, installer, exam engine, and privacy gate. The included exam corpus is a small synthetic sample. For this release, the publication gate also passed a strict 300-case behavior corpus and a 15-seed review; those release materials are not part of this repository.
+`tests/run_all.py` runs 50 component selftests across the core tools, hook adapters, package surface, installer, exam engine and privacy gate. The exam corpus in this repository is a small synthetic sample. The release gate for this version also passed a strict 330-case behavior corpus and two seed reviews, which are not part of this repository.
 
-These checks are regression evidence, not proof that every future host version or every memory failure is covered.
+These checks are regression evidence. They are not proof that every future host version, or every way memory can fail you, is covered.
 
 ## Moving or removing Epitype
 
-After moving the repository, update the stable shim target and rerun the doctor:
+After moving the repository, point the shims at the new path and check:
 
 ```powershell
 epitype relocate --to C:\path\to\new\repo
+epitype doctor
 ```
 
-Preview uninstall before removing Epitype-owned files:
+Preview an uninstall before it removes anything:
 
 ```powershell
 epitype uninstall --dry-run
 epitype uninstall
 ```
 
-Read [Uninstall Epitype](docs/UNINSTALL.md) before restoring a backup manually.
+Read [Uninstall Epitype](docs/UNINSTALL.md) before restoring a backup by hand.
 
 ## Limits
 
-- Hooks can govern only events and tools the host exposes. Direct file reads remain outside Epitype's current-decision filter.
-- The time and output ceilings require selection; Epitype never injects the entire vault into every prompt.
-- Epitype gates content, not actions: it never refuses a shell command or a read. Irreversible actions are the host's own native rules to refuse. Malformed cards fail open rather than taking control of the host.
-- Claude Code and Codex are the tested host boundary. A host upgrade still needs integration testing.
-- The bundled tests are synthetic. They exercise behavior and failure handling, not long-term field performance.
+- Hooks reach only the events and tools the host exposes. A direct file read stays outside the current-decision filter.
+- Time and output ceilings force selection. Epitype never pushes a whole vault into a prompt.
+- Epitype gates content, not actions. It never refuses a shell command or a read; irreversible actions are the host's to refuse. A malformed card fails open instead of taking the host with it.
+- Claude Code and Codex are the tested boundary. A host upgrade still needs its own integration test.
+- The bundled tests are synthetic. They exercise behaviour and failure handling, not months in the field.
 
 ## Documentation
 
-- [Architecture](docs/ARCHITECTURE.md): memory blocks, retrieval routes, decision cards, scar lifecycle, and authority rules.
-- [Failure modes](docs/FAILURE_MODES.md): symptoms, countermeasures, and verification boundaries.
+- [Architecture](docs/ARCHITECTURE.md): memory blocks, retrieval routes, decision cards, scar lifecycle, authority rules.
+- [Failure modes](docs/FAILURE_MODES.md): symptoms, countermeasures, verification boundaries.
 - [Uninstall](docs/UNINSTALL.md): ownership-aware removal and backup guidance.
