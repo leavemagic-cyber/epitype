@@ -129,9 +129,10 @@ A `rule` card carries the sentence and its provenance:
 | `decided_by` | Same domain as a decision card; `owner-explicit` also requires `owner_quote` |
 | `approved_by` / `approved_at` | Who approved this exact wording, and when |
 | `aliases` | At least one, so the card is reachable by search |
+| `hosts` | Optional: the hosts this rule is only for (`claude`, `codex`); absent means shared |
 
-Optional: `source_anchor` (where the sentence came from), `incidents` (dated one-liners),
-and `status`/`superseded_by` with the decision card's supersession meaning. Explanation,
+Also optional: `source_anchor` (where the sentence came from), `incidents` (dated
+one-liners), and `status`/`superseded_by` with the decision card's supersession meaning. Explanation,
 examples, and the incident narrative belong in the card body and the explanation layer —
 not in `text`, because `text` is what everyone pays for on every turn.
 
@@ -159,6 +160,39 @@ per card the vault, path, layer, section, order, approver, and the SHA-256 of it
 `text`; for the output the SHA-256, the byte count, the cap in force, and the time.
 That is what lets a later reader prove which approved wordings a given core block was
 built from.
+
+### Host zones (a rule only one host is missing)
+
+Some rules exist only to supply what one host does not provide natively. Owner
+2026-09-10 settled where those live: what both hosts need goes in the shared core, and
+a gap on one side only goes into that side's zone, so the other host does not pay for
+it on every turn. A card says so with `hosts` — a sequence over `claude` and `codex`,
+absent meaning shared. A `floor` card may not carry it (a floor sentence one host never
+reads is a floor with a hole in it), and `card_lint` fails one that does.
+
+Host-only `resident` cards assemble into a third section, `## C. host zones`, one
+comment-delimited zone per host; a card naming both hosts appears once in each zone:
+
+```markdown
+## C. host zones
+<!-- HOST claude BEGIN -->
+### section
+- the approved sentence
+<!-- HOST claude END -->
+```
+
+`core_gen.host_view(text, host)` is a pure function returning what that host actually
+loads — the shared sections plus its own zone, with the other zones and every marker
+removed. Writing that into a host file is still not the product's job; the point is
+that the generator and a downstream sync script share one definition of "what this host
+loads" instead of keeping two. That same number is what `--cap-bytes` measures — the
+largest single host load, not the size of the file, because no session ever pays for
+both zones — and the run prints every host's load. The approval pack records each
+card's `hosts`, the bytes of each zone, and each host's load.
+
+A vault where no card carries `hosts` assembles exactly the bytes it did before this
+existed: no `host-only` count on the note line, no `## C.` section, and `host_view`
+handing back the text unchanged.
 
 `--check` runs the same assembly and compares it with `--out` byte for byte, exiting
 non-zero on a difference and writing nothing. The dream's §11 calls the same

@@ -10,6 +10,11 @@ import sys; sys.dont_write_bytecode = True; [getattr(stream, "reconfigure", lamb
 契約檔或宿主檔（那是本機作業，不是產品）。超過上限、或有卡沒有核准憑證時，一個
 位元組都不寫出去——寧可沒有核心塊，也不要一份沒人核過的核心塊。
 
+帶 `hosts` 的常駐卡走第四件事：**分區**。只有一邊宿主原生就有的規則不該讓另一邊也
+每場付錢，所以它們不進共用區，而是排進「C. host zones」裡各自宿主的註解區；`host_view`
+是給下游同步腳本的純函式，切出「這個宿主實際載入的文字」。上限量的也是那個數字，不是
+整份檔案的大小。一張卡都沒帶 `hosts` 的庫，輸出與沒有這個功能之前逐位元組相同。
+
 `--check` 是同一條組裝路徑的比對版：重組一次，與現有檔逐位元組比。給本機的漂移
 稽核與夢的第 11 節用，兩邊看到的「漂移」才會是同一個定義。
 """
@@ -85,6 +90,7 @@ def collect_rules(vaults):
             status = fields.get(memspec.DECISION_STATUS_FIELD, "").strip()
             if status == memspec.SUPERSEDED_DECISION_STATUS:
                 continue
+            front_lines, _closing = memspec.split_frontmatter(text)
             rules.append({
                 "vault": str(vault),
                 "path": relative,
@@ -94,6 +100,9 @@ def collect_rules(vaults):
                 "text": fields.get(memspec.RULE_TEXT_FIELD, ""),
                 "approved_by": fields.get(memspec.RULE_APPROVED_BY_FIELD, "").strip(),
                 "approved_at": fields.get(memspec.RULE_APPROVED_AT_FIELD, "").strip(),
+                "hosts": tuple(
+                    memspec.sequence_items(front_lines or (), memspec.RULE_HOSTS_FIELD)
+                ),
             })
     rules.sort(key=_sort_key)
     return rules, errors
@@ -101,6 +110,19 @@ def collect_rules(vaults):
 
 def _of_layer(rules, layer):
     return [rule for rule in rules if rule["layer"] == layer]
+
+
+def _host_order(host):
+    """先產品認得的宿主，再其他。值域外的名字由 card_lint 判 FAIL；生成器照樣把它排
+    出一個區——把一張卡默默吞掉，比留下一個沒人讀、但看得見也 lint 得到的區更糟。"""
+    try:
+        return (0, memspec.RULE_HOSTS.index(host), host)
+    except ValueError:
+        return (1, 0, host)
+
+
+def _hosts_present(rules):
+    return sorted({host for rule in rules for host in rule["hosts"]}, key=_host_order)
 
 
 def _resident_sections(resident):
@@ -120,15 +142,36 @@ def unapproved(rules):
     ]
 
 
+def _section_lines(members):
+    lines = []
+    for section, section_members in _resident_sections(members):
+        lines.append(memspec.CORE_GEN_SECTION_HEADING.format(section=section))
+        lines.extend(
+            memspec.CORE_GEN_RESIDENT_LINE.format(text=rule["text"]) for rule in section_members
+        )
+        lines.append("")
+    return lines
+
+
 def assemble(rules):
-    """核心塊的完整文字。`text` 逐位元組照抄，其餘每一行都來自 memspec 的模板。"""
+    """核心塊的完整文字。`text` 逐位元組照抄，其餘每一行都來自 memspec 的模板。
+
+    共用區（A. floor、B. resident）是兩個宿主都載入的部分；帶 `hosts` 的常駐卡另外
+    排進「C. host zones」，一個宿主一個註解包起來的子區，一張卡列兩個宿主就在兩個區
+    各出現一次。沒有任何一張卡帶 hosts 時，這裡多寫的是零個位元組——說明行不接後綴、
+    也沒有 C 區——所以既有的生成檔不會因為多了這個功能而漂移。
+
+    底線層一律留在共用區：一條底線只給一邊，另一邊就少一條底線而沒有人會發現，所以
+    `floor` 帶 hosts 由 card_lint 判 FAIL，生成器不拿它當分區依據。
+    """
     floor = _of_layer(rules, memspec.RULE_LAYER_FLOOR)
     resident = _of_layer(rules, memspec.RULE_LAYER_RESIDENT)
-    lines = [
-        memspec.CORE_GEN_OUTPUT_TITLE,
-        memspec.CORE_GEN_OUTPUT_NOTE.format(floor=len(floor), resident=len(resident)),
-        "",
-    ]
+    shared = [rule for rule in resident if not rule["hosts"]]
+    host_only = [rule for rule in resident if rule["hosts"]]
+    note = memspec.CORE_GEN_OUTPUT_NOTE.format(floor=len(floor), resident=len(shared))
+    if host_only:
+        note += memspec.CORE_GEN_OUTPUT_NOTE_HOSTS_SUFFIX.format(host_only=len(host_only))
+    lines = [memspec.CORE_GEN_OUTPUT_TITLE, note, ""]
     if floor:
         lines.append(memspec.CORE_GEN_FLOOR_HEADING)
         lines.extend(
@@ -136,15 +179,132 @@ def assemble(rules):
             for number, rule in enumerate(floor, start=1)
         )
         lines.append("")
-    if resident:
+    if shared:
         lines.append(memspec.CORE_GEN_RESIDENT_HEADING)
-        for section, members in _resident_sections(resident):
-            lines.append(memspec.CORE_GEN_SECTION_HEADING.format(section=section))
-            lines.extend(
-                memspec.CORE_GEN_RESIDENT_LINE.format(text=rule["text"]) for rule in members
-            )
+        lines.extend(_section_lines(shared))
+    if host_only:
+        lines.append(memspec.CORE_GEN_HOST_HEADING)
+        for host in _hosts_present(host_only):
+            lines.append(memspec.CORE_GEN_HOST_BEGIN.format(host=host))
+            lines.extend(_section_lines([rule for rule in host_only if host in rule["hosts"]]))
+            lines.append(memspec.CORE_GEN_HOST_END.format(host=host))
             lines.append("")
     return "\n".join(lines).rstrip("\n") + "\n"
+
+
+_HOST_BEGIN_PREFIX, _HOST_BEGIN_SUFFIX = memspec.CORE_GEN_HOST_BEGIN.split("{host}")
+_HOST_END_PREFIX, _HOST_END_SUFFIX = memspec.CORE_GEN_HOST_END.split("{host}")
+
+
+def _marker_host(line, prefix, suffix):
+    """標記行裡的宿主名，不是標記就回 None。"""
+    stripped = line.strip()
+    if (
+        stripped.startswith(prefix)
+        and stripped.endswith(suffix)
+        and len(stripped) > len(prefix) + len(suffix)
+    ):
+        return stripped[len(prefix): len(stripped) - len(suffix)].strip() or None
+    return None
+
+
+def _unbalanced(number, reason):
+    return ValueError(memspec.CORE_GEN_HOST_UNBALANCED_REASON.format(line=number, reason=reason))
+
+
+def _zones(lines, offset):
+    """{宿主: 該區的內容行}。標記不成對、同一個宿主兩個區、或區外有內容都是例外——
+    下游同步腳本拿這份文字往宿主檔裡貼，猜錯一次貼進去的是別的宿主的規則。"""
+    zones = {}
+    open_host = None
+    body = []
+    for index, line in enumerate(lines):
+        number = offset + index + 1
+        begin = _marker_host(line, _HOST_BEGIN_PREFIX, _HOST_BEGIN_SUFFIX)
+        end = _marker_host(line, _HOST_END_PREFIX, _HOST_END_SUFFIX)
+        if begin is not None:
+            if open_host is not None:
+                raise _unbalanced(number, f"{open_host} 尚未結束")
+            if begin in zones:
+                raise _unbalanced(number, f"{begin} 有兩個區")
+            open_host = begin
+            body = []
+            continue
+        if end is not None:
+            if open_host is None:
+                raise _unbalanced(number, f"{end} 沒有起始標記")
+            if end != open_host:
+                raise _unbalanced(number, f"{open_host} 的區以 {end} 收尾")
+            while body and not body[-1].strip():
+                body.pop()
+            zones[open_host] = body
+            open_host = None
+            body = []
+            continue
+        if open_host is not None:
+            body.append(line)
+        elif line.strip():
+            raise _unbalanced(number, "宿主區之外有內容")
+    if open_host is not None:
+        raise _unbalanced(offset + len(lines), f"{open_host} 沒有結束標記")
+    return zones
+
+
+def host_view(text, host):
+    """這個宿主實際載入的文字：共用區＋自己的宿主區，其他宿主的區與標記都拿掉。
+
+    純函式，不讀任何檔——下游的同步腳本 import 它（或照抄這條規則），兩邊對「這個宿主
+    該載入什麼」才會是同一個答案。沒有宿主區的生成檔逐位元組原樣回傳。
+    """
+    if host not in memspec.RULE_HOSTS:
+        raise ValueError(memspec.CORE_GEN_HOST_UNKNOWN_REASON.format(
+            host=host, allowed="|".join(memspec.RULE_HOSTS)))
+    lines = text.split("\n")
+    heading_at = None
+    for index, line in enumerate(lines):
+        if line.strip() == memspec.CORE_GEN_HOST_HEADING:
+            heading_at = index
+            break
+    if heading_at is None:
+        stray = next(
+            (
+                number
+                for number, line in enumerate(lines, start=1)
+                if _marker_host(line, _HOST_BEGIN_PREFIX, _HOST_BEGIN_SUFFIX)
+                or _marker_host(line, _HOST_END_PREFIX, _HOST_END_SUFFIX)
+            ),
+            None,
+        )
+        if stray is not None:
+            raise _unbalanced(stray, "沒有宿主區標題")
+        return text
+    shared = list(lines[:heading_at])
+    while shared and not shared[-1].strip():
+        shared.pop()
+    kept = _zones(lines[heading_at + 1:], heading_at + 1).get(host)
+    if kept is None:
+        return "\n".join(shared).rstrip("\n") + "\n"
+    body = shared + ["", lines[heading_at]] + kept
+    return "\n".join(body).rstrip("\n") + "\n"
+
+
+def host_loads(text):
+    """{宿主: 這個宿主實際載入的位元組}。沒有宿主區時每一個都等於整份的大小。"""
+    return {
+        host: len(host_view(text, host).encode("utf-8")) for host in memspec.RULE_HOSTS
+    }
+
+
+def host_zone_bytes(text):
+    """{宿主: 該宿主區的內容位元組}（不含標記行）。沒有宿主區就是空的。"""
+    lines = text.split("\n")
+    for index, line in enumerate(lines):
+        if line.strip() == memspec.CORE_GEN_HOST_HEADING:
+            return {
+                host: len(("\n".join(body) + "\n").encode("utf-8"))
+                for host, body in _zones(lines[index + 1:], index + 1).items()
+            }
+    return {}
 
 
 def _sha256(payload):
@@ -180,13 +340,17 @@ def _longest(rules, limit=memspec.CORE_GEN_LONGEST_LISTED):
     ]
 
 
-def _pack(rules, out_path, payload, cap):
+def _pack(rules, out_path, payload, cap, text):
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "out": os.fspath(out_path),
         "out_sha256": _sha256(payload),
         "out_bytes": len(payload),
         "cap_bytes": cap,
+        # 宿主區的大小與「這個宿主實際載入多少」是兩個數字：載入量還含整個共用區，
+        # 而上限量的就是載入量。兩個都留在核准包裡，事後才查得出當時擋的是什麼。
+        "host_bytes": host_zone_bytes(text),
+        "host_loads": host_loads(text),
         "cards": [
             {
                 "vault": rule["vault"],
@@ -196,6 +360,7 @@ def _pack(rules, out_path, payload, cap):
                 "order": rule["order"],
                 "approved_by": rule["approved_by"],
                 "approved_at": rule["approved_at"],
+                "hosts": list(rule["hosts"]),
                 "text_sha256": _sha256(rule["text"].encode("utf-8")),
             }
             for rule in rules
@@ -229,14 +394,21 @@ def generate(vaults, out, cap_bytes=None, dry_run=False, config=None):
     cap = _cap_of(cap_bytes, config if config is not None else memspec.config_options())
     text = assemble(rules)
     payload = text.encode("utf-8")
+    resident = _of_layer(rules, memspec.RULE_LAYER_RESIDENT)
+    loaded = host_loads(text)
     result = {
         "status": STATUS_WRITTEN,
         "out": os.fspath(out_path),
         "bytes": len(payload),
+        # 上限量＝任何一個宿主實際載入的最大值（共用區＋自己那一區），不是整份的大小：
+        # 兩個宿主區的位元組沒有任何一場會同時付。沒有宿主區時兩者相同。
+        "measured": max(loaded.values()),
         "cap": cap,
         "rules": len(rules),
         "floor": len(_of_layer(rules, memspec.RULE_LAYER_FLOOR)),
-        "resident": len(_of_layer(rules, memspec.RULE_LAYER_RESIDENT)),
+        "resident": len([rule for rule in resident if not rule["hosts"]]),
+        "host_only": len([rule for rule in resident if rule["hosts"]]),
+        "loaded": loaded,
         "skipped": sum(
             1 for rule in rules if rule["layer"] not in memspec.RULE_GENERATED_LAYERS
         ),
@@ -255,7 +427,7 @@ def generate(vaults, out, cap_bytes=None, dry_run=False, config=None):
             for rule in missing
         ]
         return result
-    if cap is not None and len(payload) > cap:
+    if cap is not None and result["measured"] > cap:
         result["status"] = STATUS_OVER_CAP
         result["offenders"] = _longest(rules)
         return result
@@ -271,7 +443,7 @@ def generate(vaults, out, cap_bytes=None, dry_run=False, config=None):
         _write(out_path, payload)
     result["status"] = STATUS_UNCHANGED if unchanged else STATUS_WRITTEN
 
-    pack = _pack(rules, out_path, payload, cap)
+    pack = _pack(rules, out_path, payload, cap, text)
     target = pack_path(Path(vaults[0]).expanduser().resolve())
     try:
         _write(target, (json.dumps(pack, ensure_ascii=False, indent=1) + "\n").encode("utf-8"))
@@ -343,7 +515,8 @@ def _print(result, output):
     elif status == STATUS_OVER_CAP:
         print(
             memspec.CORE_GEN_OVER_CAP_REASON.format(
-                bytes=result["bytes"], cap=result["cap"], over=result["bytes"] - result["cap"]
+                bytes=result["measured"], cap=result["cap"],
+                over=result["measured"] - result["cap"]
             ),
             file=output,
         )
@@ -355,8 +528,8 @@ def _print(result, output):
     elif status == STATUS_DRY_RUN:
         print(result["text"], end="" if result["text"].endswith("\n") else "\n", file=output)
     summary = (
-        "CORE-GEN {status} bytes={bytes} cap={cap} rules={rules} floor={floor} "
-        "resident={resident} skipped={skipped} out={out}"
+        "CORE-GEN {status} bytes={bytes} loaded={loaded} cap={cap} rules={rules} "
+        "floor={floor} resident={resident} host-only={host_only} skipped={skipped} out={out}"
     )
     if status in (STATUS_MATCH, STATUS_DRIFT, STATUS_UNREADABLE):
         print(
@@ -364,7 +537,11 @@ def _print(result, output):
             file=output,
         )
     else:
-        print(summary.format(**result), file=output)
+        values = dict(result)
+        values["loaded"] = ",".join(
+            f"{host}:{size}" for host, size in (result.get("loaded") or {}).items()
+        )
+        print(summary.format(**values), file=output)
 
 
 _FIXTURES = {
@@ -385,7 +562,7 @@ _FIXTURES = {
 
 
 def _card_text(stem, layer, section, order, text, status, superseded_by,
-               approved_by="synthetic-pair", approved_at="2026-09-09"):
+               approved_by="synthetic-pair", approved_at="2026-09-09", hosts=()):
     lines = [
         "---",
         f"name: {stem}",
@@ -404,6 +581,9 @@ def _card_text(stem, layer, section, order, text, status, superseded_by,
         lines.append(f"{memspec.DECISION_STATUS_FIELD}: {status}")
     if superseded_by:
         lines.append(f"{memspec.SUPERSEDED_BY_FIELD}: {superseded_by}")
+    if hosts:
+        lines.append(f"{memspec.RULE_HOSTS_FIELD}:")
+        lines.extend(f"  - {host}" for host in hosts)
     lines += [
         f"{memspec.ALIASES_FIELD}:",
         f"  - {stem}",
@@ -637,6 +817,119 @@ def _selftest():
                 and not (root / "capped.md").exists()
                 and "CORE-GEN over-cap" in output.getvalue(),
             ))
+
+            # ── 宿主區（U-R3）─────────────────────────────────────────────
+            checks.append((
+                "沒有一張卡帶 hosts 時：說明行不接 host-only、沒有 C 區、"
+                "兩個宿主的 view 都逐位元組等於原文（既有生成檔不因這個功能漂移）",
+                body[1] == memspec.CORE_GEN_OUTPUT_NOTE.format(floor=3, resident=6)
+                and memspec.CORE_GEN_HOST_HEADING not in text
+                and all(host_view(text, host) == text for host in memspec.RULE_HOSTS)
+                and host_zone_bytes(text) == {},
+            ))
+
+            hosted = _build_vault(root / "hosted")
+            for stem, section, order, sentence, hosts in (
+                ("resident-h1", "delta", 410, "Claude-only synthetic sentence.",
+                 (memspec.RULE_HOST_CLAUDE,)),
+                ("resident-h2", "delta", 420, "Codex-only synthetic sentence.",
+                 (memspec.RULE_HOST_CODEX,)),
+                ("resident-h3", "epsilon", 430, "兩個宿主都缺的合成常駐規則。",
+                 memspec.RULE_HOSTS),
+            ):
+                (hosted / f"{stem}.md").write_text(
+                    _card_text(stem, memspec.RULE_LAYER_RESIDENT, section, order, sentence,
+                               None, None, hosts=hosts),
+                    encoding="utf-8",
+                    newline="\n",
+                )
+            hosted_out = root / "hosted_block.md"
+            hosted_result = generate([hosted], hosted_out, config={})
+            hosted_text = hosted_out.read_text(encoding="utf-8")
+            hosted_lines = hosted_text.splitlines()
+            shared_part = hosted_text.split(memspec.CORE_GEN_HOST_HEADING)[0]
+            checks.append((
+                "帶 hosts 的常駐卡改進 C 區、一個宿主一個註解區；雙宿主卡兩區各一次；"
+                "共用區不含宿主句；說明行接上 host-only",
+                hosted_result["status"] == STATUS_WRITTEN
+                and hosted_result["resident"] == 6
+                and hosted_result["host_only"] == 3
+                and hosted_lines[1] == memspec.CORE_GEN_OUTPUT_NOTE.format(floor=3, resident=6)
+                + memspec.CORE_GEN_OUTPUT_NOTE_HOSTS_SUFFIX.format(host_only=3)
+                and hosted_lines.count(
+                    memspec.CORE_GEN_HOST_BEGIN.format(host=memspec.RULE_HOST_CLAUDE)) == 1
+                and hosted_lines.count(
+                    memspec.CORE_GEN_HOST_END.format(host=memspec.RULE_HOST_CODEX)) == 1
+                and hosted_text.count("兩個宿主都缺的合成常駐規則。") == 2
+                and hosted_text.count("Claude-only synthetic sentence.") == 1
+                and "Claude-only synthetic sentence." not in shared_part
+                and "兩個宿主都缺的合成常駐規則。" not in shared_part
+                and memspec.CORE_GEN_RESIDENT_HEADING in shared_part,
+            ))
+
+            claude_view = host_view(hosted_text, memspec.RULE_HOST_CLAUDE)
+            codex_view = host_view(hosted_text, memspec.RULE_HOST_CODEX)
+            checks.append((
+                "host_view 只留該宿主的區：另一邊的句子與所有標記都不在，共用區兩邊都在",
+                "Claude-only synthetic sentence." in claude_view
+                and "Codex-only synthetic sentence." not in claude_view
+                and "Codex-only synthetic sentence." in codex_view
+                and "Claude-only synthetic sentence." not in codex_view
+                and claude_view.count("兩個宿主都缺的合成常駐規則。") == 1
+                and codex_view.count("兩個宿主都缺的合成常駐規則。") == 1
+                and _HOST_BEGIN_PREFIX not in claude_view
+                and _HOST_BEGIN_PREFIX not in codex_view
+                and memspec.CORE_GEN_HOST_HEADING in claude_view
+                and claude_view.startswith(memspec.CORE_GEN_OUTPUT_TITLE)
+                and "1. 第一句合成底線規則。" in claude_view
+                and claude_view.endswith("\n")
+                and not claude_view.endswith("\n\n"),
+            ))
+
+            loaded = host_loads(hosted_text)
+            biggest = max(loaded.values())
+            checks.append((
+                "上限量的是任一宿主實際載入的最大值（共用區＋自己那一區），不是整份的大小",
+                biggest < len(hosted_text.encode("utf-8"))
+                and hosted_result["measured"] == biggest
+                and hosted_result["loaded"] == loaded
+                and generate([hosted], hosted_out, cap_bytes=biggest, dry_run=True,
+                             config={})["status"] == STATUS_DRY_RUN
+                and generate([hosted], hosted_out, cap_bytes=biggest - 1, dry_run=True,
+                             config={})["status"] == STATUS_OVER_CAP,
+            ))
+
+            hosted_pack = json.loads(pack_path(hosted).read_text(encoding="utf-8"))
+            hosted_cards = {item["path"]: item for item in hosted_pack["cards"]}
+            checks.append((
+                "核准包記下每張卡的 hosts、每個宿主區的位元組與各宿主的實際載入量",
+                hosted_cards["resident-h1.md"]["hosts"] == [memspec.RULE_HOST_CLAUDE]
+                and hosted_cards["resident-h3.md"]["hosts"] == list(memspec.RULE_HOSTS)
+                and hosted_cards["resident-a1.md"]["hosts"] == []
+                and set(hosted_pack["host_bytes"]) == set(memspec.RULE_HOSTS)
+                and all(size > 0 for size in hosted_pack["host_bytes"].values())
+                and hosted_pack["host_loads"] == loaded,
+            ))
+
+            def _refuses(call):
+                try:
+                    call()
+                except ValueError:
+                    return True
+                return False
+
+            checks.append((
+                "host_view 對值域外的宿主、少一個結束標記、沒有標題的孤兒標記都丟例外，"
+                "不猜著回一份文字",
+                _refuses(lambda: host_view(hosted_text, "nowhere"))
+                and _refuses(lambda: host_view(
+                    hosted_text.replace(
+                        memspec.CORE_GEN_HOST_END.format(host=memspec.RULE_HOST_CLAUDE), ""),
+                    memspec.RULE_HOST_CLAUDE))
+                and _refuses(lambda: host_view(
+                    memspec.CORE_GEN_HOST_BEGIN.format(host=memspec.RULE_HOST_CLAUDE) + "\n",
+                    memspec.RULE_HOST_CLAUDE)),
+            ))
     except Exception as exc:
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
     finally:
@@ -649,7 +942,7 @@ def _selftest():
                 os.environ[name] = value
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 18
+    total = 24
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

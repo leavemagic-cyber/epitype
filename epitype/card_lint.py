@@ -100,43 +100,8 @@ def _nested_and_lists(front_lines, path):
 
 
 def _forbidden_items(front_lines):
-    """決策卡 forbidden 序列的字串項，block 與 flow 兩種寫法都讀得到。
-
-    flow 裡未加引號的逗號本來就分項（閘門的切法也是這樣），所以帶 `{0,12}` 的句形
-    要寫成 block 或加引號——切錯只會少報一條 WARN，不會多擋任何一次寫入。
-    """
-    items = []
-    parent = None
-    for raw_line in front_lines:
-        stripped = raw_line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        if raw_line[:1].isspace():
-            if parent and stripped.startswith("- "):
-                item, _problem = memspec.parse_scalar(stripped[1:])
-                if item:
-                    items.append(item)
-            continue
-        parent = None
-        match = TOP_LEVEL_FIELD.match(raw_line)
-        if match is None:
-            continue
-        key, raw_value = match.groups()
-        if key != memspec.FORBIDDEN_FIELD:
-            continue
-        value = memspec.strip_inline_comment(raw_value).strip()
-        if value.startswith("[") and value.endswith("]"):
-            for piece in value[1:-1].split(","):
-                item, _problem = memspec.parse_scalar(piece)
-                if item:
-                    items.append(item)
-        elif value and value not in memspec.BLOCK_SCALAR_STYLES:
-            item, _problem = memspec.parse_scalar(raw_value)
-            if item:
-                items.append(item)
-        else:
-            parent = key
-    return items
+    """決策卡 forbidden 序列的字串項；序列的讀法與別的欄位同源（memspec）。"""
+    return memspec.sequence_items(front_lines, memspec.FORBIDDEN_FIELD)
 
 
 def _is_bare_term(item):
@@ -174,8 +139,8 @@ def _decider_findings(fields, nested, counts):
         )
 
 
-def _rule_findings(fields):
-    """規則卡自己的四項：住哪一層、核准日期、規則原句的長度與行數。
+def _rule_findings(fields, front_lines):
+    """規則卡自己的幾項：住哪一層、給哪些宿主、核准日期、規則原句的長度與行數。
 
     `text` 會被生成器逐位元組抄進核心塊，所以形狀不合的卡在這裡就是 FAIL——生成器
     在組裝時才發現，代價是整個核心塊生不出來。
@@ -199,6 +164,18 @@ def _rule_findings(fields):
     if "\n" in text:
         yield (FAIL, "field-shape", memspec.RULE_TEXT_MULTILINE_REASON.format(
             field=memspec.RULE_TEXT_FIELD))
+    # 宿主區：缺 hosts＝共用（不是「還沒填」），所以只檢查寫了的那些卡。值域外的名字
+    # 生成得出一個沒有任何下游會讀的區；底線帶 hosts 則是把兩邊都要的一條只給一邊。
+    hosts = memspec.sequence_items(front_lines or (), memspec.RULE_HOSTS_FIELD)
+    unknown = [host for host in hosts if host not in memspec.RULE_HOSTS]
+    if unknown:
+        yield (FAIL, "hosts", memspec.RULE_HOSTS_REASON.format(
+            field=memspec.RULE_HOSTS_FIELD, value="／".join(unknown),
+            allowed="|".join(memspec.RULE_HOSTS)))
+    if hosts and layer == memspec.RULE_LAYER_FLOOR:
+        yield (FAIL, "hosts-layer", memspec.RULE_HOSTS_ON_FLOOR_REASON.format(
+            layer=memspec.RULE_LAYER_FLOOR, field=memspec.RULE_HOSTS_FIELD,
+            value="／".join(hosts)))
 
 
 def _as_int(value):
@@ -461,7 +438,7 @@ def _check_card(path, relative, today):
                 findings.append((WARN, "forbidden-bare-term", memspec.FORBIDDEN_BARE_TERM_REASON.format(
                     term=item, example=memspec.FORBIDDEN_BARE_TERM_EXAMPLE.format(term=item))))
     elif card_type == memspec.CARD_TYPE_RULE:
-        findings.extend(_rule_findings(fields))
+        findings.extend(_rule_findings(fields, front_lines))
     elif card_type == memspec.CARD_TYPE_GRANT:
         if not _has_value(memspec.GRANT_EXPIRES_FIELD, fields, nested, counts):
             findings.append((
@@ -830,6 +807,17 @@ _FIXTURES = {
     "layer: nowhere\nsection: alpha\norder: 甲\ntext: " + "x" * (400 + 1) + "\n"
     "decided_by: owner-explicit\napproved_by: synthetic-pair\napproved_at: 昨天\n"
     "aliases:\n  - 壞規則\nmetadata:\n  type: rule\n---\nbody\n",
+    # 宿主區（U-R3）：hosts 值域內＋常駐層是乾淨的；值域外的名字與底線層帶 hosts 都是 FAIL。
+    "rule-hosts.md": "---\nname: rule-hosts\ndescription: 2026-09-10 合成宿主區規則卡\n"
+    "layer: resident\nsection: alpha\norder: 2\ntext: Synthetic host-only sentence for the fixtures.\n"
+    "decided_by: three-way\napproved_by: synthetic-pair\napproved_at: 2026-09-10\n"
+    "hosts:\n  - claude\n  - codex\n"
+    "aliases:\n  - 宿主區規則\n  - host zone rule\nmetadata:\n  type: rule\n---\nbody\n",
+    "rule-hosts-bad.md": "---\nname: rule-hosts-bad\ndescription: 2026-09-10 宿主區寫壞的規則卡\n"
+    "layer: floor\nsection: alpha\norder: 3\ntext: Synthetic floor sentence that must stay shared.\n"
+    "decided_by: three-way\napproved_by: synthetic-pair\napproved_at: 2026-09-10\n"
+    "hosts: [claude, gemini]\n"
+    "aliases:\n  - 壞宿主區\nmetadata:\n  type: rule\n---\nbody\n",
     "scar-bad.md": "---\nname: scar-bad\ndescription: 2026-09-01 壞傷疤卡\ntrigger:\n  tool: \"^(Bash)$\"\nmetadata:\n  type: scar\n---\nbody\n",
     "scar-good.md": "---\nname: scar-good\ndescription: 2026-09-01 好傷疤卡\nadvice: 改用 Write 落檔\nincident: 2026-09-02 三個 session 各踩一次\nvalid_until: 2026-08-01\nmetadata:\n  type: scar\n---\nbody\n",
     # 2026-09-09 U-J：只剩 trigger 的舊卡不再被判成傷疤卡，欄位本身只點名一次。
@@ -925,7 +913,7 @@ def _selftest():
             checks.append((
                 "rule 卡欄位齊備即無 finding，且不因缺日期欄位被點名（approved_at 就是它的日期）",
                 _findings_of(report, "rule-floor.md")[1] is None
-                and report["by_type"].get(memspec.CARD_TYPE_RULE) == 2,
+                and report["by_type"].get(memspec.CARD_TYPE_RULE) == 4,
             ))
             rules, card = _findings_of(report, "rule-bad.md")
             checks.append((
@@ -939,6 +927,21 @@ def _selftest():
                 }
                 and str(memspec.RULE_TEXT_MAX_BYTES) in _reason_of(report, "rule-bad.md", "rule-text")
                 and memspec.OWNER_QUOTE_FIELD in _reason_of(report, "rule-bad.md", "required"),
+            ))
+
+            checks.append((
+                "rule hosts 值域內＋常駐層＝無 finding：宿主區卡不因為多了一個欄位被點名",
+                _findings_of(report, "rule-hosts.md")[1] is None,
+            ))
+            rules, card = _findings_of(report, "rule-hosts-bad.md")
+            checks.append((
+                "rule FAIL：hosts 值域外的宿主名、以及底線層不得帶 hosts",
+                card is not None
+                and card["type"] == memspec.CARD_TYPE_RULE
+                and rules == {(FAIL, "hosts"), (FAIL, "hosts-layer")}
+                and "gemini" in _reason_of(report, "rule-hosts-bad.md", "hosts")
+                and memspec.RULE_LAYER_FLOOR
+                in _reason_of(report, "rule-hosts-bad.md", "hosts-layer"),
             ))
 
             rules, card = _findings_of(report, "scar-bad.md")
@@ -1279,7 +1282,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 45
+    total = 47
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
