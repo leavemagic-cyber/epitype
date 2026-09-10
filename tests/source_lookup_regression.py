@@ -71,7 +71,20 @@ class LookupTests(unittest.TestCase):
     def test_snapshot_change_invalidates_complete_scan(self):
         before = self.path.stat()
         after = type("Changed", (), {"st_size": before.st_size + 1, "st_mtime_ns": before.st_mtime_ns})()
-        with patch.object(Path, "stat", side_effect=[before, after]):
+        # 用「讀檔前後」翻面, 不用固定呼叫次數: 3.11 的 Path.resolve() 自己也會呼叫
+        # Path.stat, 序列式 side_effect 會被多吃一格而 StopIteration(3.13 不會)。
+        read = {"done": False}
+        real_open = Path.open
+
+        def fake_stat(*_args, **_kwargs):
+            return after if read["done"] else before
+
+        def tracking_open(self, *args, **kwargs):
+            stream = real_open(self, *args, **kwargs)
+            read["done"] = True
+            return stream
+
+        with patch.object(Path, "stat", fake_stat), patch.object(Path, "open", tracking_open):
             self.assertFalse(source.lookup(self.path)["scan_complete"])
 
     def test_preview_and_output_caps_are_disclosed(self):

@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- tests：`source_lookup_regression` 的「掃描期間檔案變了」案例改用**讀檔前後翻面**，不再假設 `Path.stat` 只被呼叫兩次。Python 3.11 的 `Path.resolve()` 自己也會呼叫 `Path.stat`（3.13 不會），序列式 `side_effect` 因此多吃一格 StopIteration，v1.3.0 的 CI 在 3.11 兩個 runner 上 49/50。產品行為未變（3.11 實跑 lookup 正常），這是題目對 pathlib 內部細節的錯誤假設。**通案教訓**：本機閘門只跑 3.13，看不到宣告支援的最低版本 3.11；發版前要用 3.11 跑一次 `tests/run_all.py`。
 
 ## v1.3.0 (2026-09-10)
 
