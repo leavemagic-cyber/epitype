@@ -29,6 +29,7 @@ from _hook_common import (
     append_gate_log,
     clear_recall_markers,
     compile_bounded_regex,
+    compile_pattern_or_literal,
     declared_frontmatter,
     emit,
     expired,
@@ -180,7 +181,7 @@ def _write_cache(cache_path, manifest, rulings, cursor=""):
         pass
 
 
-def _decisions(vault, started_at):
+def _decisions(vault, started_at, defects=None):
     """Cache discovery only; every returned authority comes from this turn's bytes.
 
     Refresh at most one cap of discovery cards and one cap of known decisions.
@@ -189,6 +190,7 @@ def _decisions(vault, started_at):
     """
     from epitype import memsearch
 
+    defects = [] if defects is None else defects
     vault = Path(vault).resolve()
     try:
         scan = memsearch.scan_cards(vault)
@@ -229,12 +231,18 @@ def _decisions(vault, started_at):
 
     found = []
     candidates = [key for key in sorted(rulings) if isinstance(rulings[key], dict) and rulings[key].get(_KEY)]
-    # 每回合只讀得動一個上限的卡，所以先讀哪幾張就決定了哪些規則真的生效。夜間回饋把
-    # 「近期真的攔到東西」的卡排前面，閒著的卡用剩下的額度輪——閘漏擋裡唯一機械歸因
-    # 得出來的那個原因（排在上限之外），由那份資料每晚自己修掉。
+    # 上限只管「找」，不管「擋」。貴的是掃整個庫去分辨哪些卡帶著裁定——那件事有快取，
+    # 找過就不必再找；已經找出來的卡再讀一次 frontmatter 很便宜。以前連執行都砍到上限，
+    # 於是卡片一多，排在後面的就默默不生效，而且要靠「先被放行過一次」才拿得到優先權，
+    # 是個死結（2026-09-17 對抗審查實測：5000 張卡裡 500 張武裝，每回合只有 12 張生效）。
+    # 排序仍然有用：命中多的先讀，超時的時候先保住最會攔到東西的那些。
     candidates.sort(key=_priority_key(vault, rulings))
-    for card_path in candidates[:cap]:
+    for index, card_path in enumerate(candidates):
         if expired(started_at):
+            # 少檢查幾張卡一定要出聲。以前逾時就靜靜回傳已經找到的部分，於是「這回合
+            # 沒擋」跟「這回合沒檢查完」長得一模一樣。
+            defects.append(memspec.STOP_GATE_INCOMPLETE_DEFECT.format(
+                checked=index, total=len(candidates), vault=vault.name))
             break
         if card_path not in refreshed:
             try:
@@ -348,16 +356,21 @@ def _forbidden_fragment(decision, message, defects, excepted=frozenset()):
     turn still ends rather than being blocked by a card nobody can fix."""
     quoted = _quoted_spans(message)
     for pattern in decision.forbidden:
-        try:
-            regex = compile_bounded_regex(pattern)
-        except Exception as exc:
+        # A pattern that will not compile used to be dropped, which left the card
+        # looking armed and enforcing nothing. It now falls back to matching the text
+        # literally — narrower than any working pattern, so it cannot over-block —
+        # and says so, because a rule quietly behaving differently is the failure
+        # this gate exists to remove.
+        regex, repaired = compile_pattern_or_literal(pattern)
+        if regex is None or repaired:
             defects.append(
                 memspec.STOP_GATE_PATTERN_DEFECT.format(
                     decision=decision.key,
                     pattern=_one_line(pattern)[: memspec.STOP_GATE_FRAGMENT_MAX_CHARS],
-                    reason=f"{type(exc).__name__}: {exc}",
+                    reason="改用逐字比對" if repaired else "無法使用，這一條沒有生效",
                 )
             )
+        if regex is None:
             continue
         for found in regex.finditer(message):
             if any(start <= found.start() and found.end() <= end for start, end in quoted):
@@ -537,7 +550,7 @@ def _verdict(event, message, config, started_at, defects):
     for vault in _vaults(config, event):
         if expired(started_at):
             return None
-        decisions.extend(_decisions(vault, started_at))
+        decisions.extend(_decisions(vault, started_at, defects))
     if not decisions:
         return None
 

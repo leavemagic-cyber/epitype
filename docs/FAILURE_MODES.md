@@ -1314,10 +1314,19 @@ The prerequisite that made removal safe was in place first: Claude's
 `permissions.deny` already covers credential material, destructive git, `git add -A`
 and killing the host process, and Codex's native `execpolicy` rule file
 (`~/.codex/rules/epitype_guard.rules`) was installed and verified on the real
-machine. The standing rule that follows: **Epitype gates content, never actions.**
-Irreversible actions belong to the host's own native rules; what stays here is the
+machine. The standing rule that followed: **Epitype gates content, never actions.**
+Irreversible actions belong to the host's own native rules; what stayed here was the
 pair of gates over what the model is about to write or say, which no host rule can
 express.
+
+**Superseded in part, 2026-09-16.** The prerequisite above turned out to cover four
+of nine hazard classes, not nine: Claude's Bash patterns match the command text
+positionally with no AND operator, so the remaining five could not be written at all,
+and one of them — a heredoc eating a level of backslashes — was then hit four times
+in a single session with the lesson already carded three times over. The owner lifted
+the half of the ruling that forbade a card from carrying an action condition, and
+what returned is only the literal form (§3). The rest of the ruling stands: no
+semantic judgement, no intent, and no opinion about a command no card has named.
 
 ### Removed
 

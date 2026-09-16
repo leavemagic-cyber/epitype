@@ -267,6 +267,28 @@ def _validate_regex_tree(items, inside_repeat=False):
             raise ValueError("pattern backreferences are not supported")
 
 
+def compile_pattern_or_literal(pattern):
+    """(compiled, repaired) — a pattern that will not compile falls back to literal.
+
+    A card whose pattern will not compile enforces nothing, and the author is usually
+    not writing a regex at all: they wrote a phrase that happens to contain a bracket.
+    Matching it literally is what they meant, and it can only ever match less than a
+    working pattern would, so the repair cannot over-block.
+
+    What this deliberately does not do is guess at a truncated pattern. `(a|b` is a
+    half-written intention, and completing it would be choosing the rule's content on
+    the author's behalf; the literal fallback there simply matches nothing, and the
+    lint and the gate both say so out loud."""
+    try:
+        return compile_bounded_regex(pattern), False
+    except Exception:
+        pass
+    try:
+        return re.compile(re.escape(pattern[: memspec.FORBIDDEN_REGEX_MAX_CHARS])), True
+    except Exception:
+        return None, False
+
+
 def compile_bounded_regex(pattern):
     """The shared validator for a decision card's `forbidden` patterns — the Stop
     gate and this gate's rule A compile through this one reading, so a pattern that

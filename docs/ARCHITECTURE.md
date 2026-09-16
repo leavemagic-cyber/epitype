@@ -235,7 +235,7 @@ Everything else lands under `<vault>/_drafts/captured_pending/YYYYMMDD/` with th
 ## Scar lifecycle
 
 1. **Incident.** Record an observable failure, its boundary, and enough evidence to reproduce or audit it. A transcript scanner may propose a candidate, but it does not write a scar automatically.
-2. **Reflex.** Turn the narrow lesson into a scar card: the `incident` it came from and actionable `advice` that provides a safer route. A card is context read back into a turn, never a refusal — a card cannot stop a tool call.
+2. **Reflex.** Turn the narrow lesson into a scar card: the `incident` it came from and actionable `advice` that provides a safer route. Most cards are context read back into a turn and refuse nothing; a card that declares `guard_tool` with `guard_all_of` also denies a tool call whose text carries every literal fragment it names (2026-09-16, FAILURE_MODES §3), with no regex and no reading of intent.
 3. **Mechanization.** Move stable prevention into code, a deterministic check, or the host's own native rules (Claude `permissions.deny`, Codex `execpolicy`), which refuse the call before it runs. A scar does not count as mechanized merely because its prose is prominent.
 4. **Retirement.** Remove the reflex from the resident scar block after the mechanism covers the original hazard. Preserve the incident and test evidence outside the resident path so the reason for the guard remains auditable.
 

@@ -55,7 +55,7 @@ The installer looks for native vaults you already have. If there are none it cre
 
 Worth a try if you already run Claude Code or Codex against a `CLAUDE.md` or `AGENTS.md` you maintain, you have watched an agent forget or reopen something you settled, and you want a record of what got stopped.
 
-Probably not yet if you are new to CLI agents and have no accumulated rules to govern, or if what you actually want is something that refuses dangerous commands. That last one is the host's job, not this one's: `permissions.deny` in Claude Code, `execpolicy` in Codex. Epitype gates content, never actions.
+Probably not yet if you are new to CLI agents and have no accumulated rules to govern, or if what you actually want is a security boundary around dangerous commands. That one is the host's job: `permissions.deny` in Claude Code, `execpolicy` in Codex. Epitype can deny a tool call whose text carries the literal fragments a scar card names, but an equivalent rewrite gets through — it is a guardrail against repeating a carded mistake, not a control that holds against someone trying to get past it.
 
 ## How it works
 
@@ -87,7 +87,13 @@ Decision cards carry a stable `decision_key`, a status of `active` or `supersede
 
 ### Scars, and what really stops an action
 
-A scar is a rule born from an incident: the `incident` it came from, plus `advice` that names the safer route. A card is context read back into a turn. It is not a refusal and it cannot stop a tool call. Treating a lexical match as a blocker produces false denials and false confidence at the same time. Irreversible actions belong to the host's own rules, which refuse the call before it runs: `permissions.deny` in Claude Code, `execpolicy` in Codex. Epitype refuses content only, at the write gate and at the end of a turn.
+A scar is a rule born from an incident: the `incident` it came from, plus `advice` that names the safer route. Most cards are context read back into a turn and refuse nothing.
+
+A card can also refuse, in three narrow forms. `forbidden` patterns stop a turn from ending when the model has said something the owner ruled out. `require_when` with `require_text` stops a turn whose claim arrives without the evidence the rule asks for. `guard_tool` with `guard_all_of` denies a tool call whose own text contains every literal fragment the card names — no regex, no shell parsing, no guess about what a command means.
+
+That last one was removed in 2026-09-09 and restored on 2026-09-16, after the premise behind removing it was tested and failed: Claude's Bash permission patterns match positionally and have no AND operator, so four of nine hazard classes moved to the host and five could not be expressed at all. A literal conjunction over-approximates toward denial, which is the safe direction, and it is a guardrail against a mistake someone has already carded — not a security boundary. An equivalent rewrite of the same command gets through, by design.
+
+Semantic judgement and genuinely irreversible actions stay with the host, which refuses the call before it runs: `permissions.deny` in Claude Code, `execpolicy` in Codex.
 
 ### An installer that leaves your setup alone
 
@@ -219,7 +225,7 @@ Read [Uninstall Epitype](docs/UNINSTALL.md) before restoring a backup by hand.
 
 - Hooks reach only the events and tools the host exposes. A direct file read stays outside the current-decision filter.
 - Time and output ceilings force selection. Epitype never pushes a whole vault into a prompt.
-- Epitype gates content, not actions. It never refuses a shell command or a read; irreversible actions are the host's to refuse. A malformed card fails open instead of taking the host with it.
+- Epitype refuses content at the write gate and at the end of a turn, and refuses a tool call only when a scar card names every literal fragment in it. It reads no intent, and an equivalent rewrite of the same command gets through; irreversible actions are the host's to refuse. A malformed card fails open instead of taking the host with it.
 - Claude Code and Codex are the tested boundary. A host upgrade still needs its own integration test.
 - The bundled tests are synthetic. They exercise behaviour and failure handling, not months in the field.
 

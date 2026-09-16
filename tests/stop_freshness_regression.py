@@ -114,7 +114,14 @@ class StopFreshnessRegression(unittest.TestCase):
             self.assertEqual(self.decisions(), [])
             self.assertEqual([item.path for item in self.decisions()], [card])
 
-    def test_known_decisions_are_fresh_and_content_reads_remain_capped(self):
+    def test_every_known_decision_is_enforced_while_discovery_stays_capped(self):
+        """The cap bounds discovery, never enforcement.
+
+        Capping enforcement meant a card past the limit silently stopped applying,
+        and the ordering could not rescue it: a card earns priority by having been
+        caught, and it can only be caught if it is read. 2026-09-17 review measured
+        500 armed cards in a 5000-card vault coming out as 12 live per turn.
+        """
         cap = memspec.STOP_GATE_MAX_CARDS_PER_VAULT
         for index in range(cap + 5):
             self.card(f"d{index:03d}.md")
@@ -123,8 +130,8 @@ class StopFreshnessRegression(unittest.TestCase):
         for _ in range(13):
             self.decisions()
         with patch.object(stop, "_read_decision", wraps=stop._read_decision) as reader:
-            self.assertEqual(len(self.decisions()), cap)
-            self.assertLessEqual(reader.call_count, 2 * cap)
+            self.assertEqual(len(self.decisions()), cap + 5)
+            self.assertLessEqual(reader.call_count, 3 * cap)
         for index in range(cap):
             self.replace_preserving_metadata(self.vault / f"d{index:03d}.md", "active", "paused")
         found = self.decisions()

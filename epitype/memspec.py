@@ -820,6 +820,10 @@ TOP_LEVEL_FIELD = re.compile(r"^([A-Za-z_][A-Za-z0-9_-]*)\s*:\s*(.*)$")
 STOP_GATE_MAX_CARDS_PER_VAULT = 120
 # 退役或結案的卡不再說話；沒有 decision_key 的行為卡用這份名單判，而不是要求 active。
 STOP_GATE_SILENT_STATUSES = ("superseded", "closed", "retired")
+# 少檢查幾張卡一定要出聲：靜靜少做的話，「這回合沒擋」跟「這回合沒檢查完」長得一樣。
+STOP_GATE_INCOMPLETE_DEFECT = (
+    "⚠ 這回合逾時，{vault} 只檢查了 {checked}/{total} 張武裝卡；沒檢查到的那些這次沒有生效"
+)
 STOP_GATE_FRONTMATTER_MAX_BYTES = 16 * 1024
 STOP_GATE_MESSAGE_MAX_CHARS = 20000
 STOP_GATE_QUOTE_MAX_CHARS = 160
@@ -983,6 +987,42 @@ CARD_DISARMED_REASON = (
     "請把它移到 frontmatter 的頂層"
 )
 ACTION_GUARD_DEFECT = "⚠ 守衛卡 {card} 的 {field} 無法使用（{reason}），這一道沒有生效"
+# 認得的工具名。不在名單裡不等於一定錯（宿主可能有別的工具），所以只提醒不判死——但
+# 打錯字的守衛卡永遠不會攔到東西，而且不出聲，這一行就是唯一的訊號。
+ACTION_GUARD_KNOWN_TOOLS = frozenset((
+    "bash", "powershell", "shell", "run_terminal_cmd",
+    "write", "write_file", "create_file",
+    "edit", "edit_file", "str_replace_editor", "multiedit", "multi_edit", "apply_edits",
+    "read", "glob", "grep", "notebookedit", "webfetch", "websearch", "agent", "task",
+))
+CARD_PATTERN_BROKEN_REASON = (
+    "樣式「{pattern}」編不起來（{reason}）。閘會退回逐字比對，所以這張卡不會完全失效，"
+    "但那多半不是你要的意思——把它改成看得懂的寫法，或確認你本來就是要逐字比對"
+)
+CARD_GUARD_TOOL_UNKNOWN_REASON = (
+    "guard_tool「{tool}」不在認得的工具名單裡；打錯字的話這道守衛永遠不會攔到東西。"
+    "認得的有：{known}"
+)
+
+
+def pattern_problem(pattern):
+    """樣式不能用的理由，可用就回 None。lint 與閘走同一個驗證器。"""
+    import importlib
+    import sys as _sys
+    from pathlib import Path as _Path
+
+    adapters = str(_Path(__file__).resolve().parents[1] / "adapters" / "claude")
+    if adapters not in _sys.path:
+        _sys.path.insert(0, adapters)
+    try:
+        common = importlib.import_module("_hook_common")
+    except Exception as exc:  # 驗證器載不進來時不要把好卡判死
+        return None if isinstance(exc, ImportError) else f"{type(exc).__name__}: {exc}"
+    try:
+        common.compile_bounded_regex(pattern)
+    except Exception as exc:
+        return f"{type(exc).__name__}: {exc}"
+    return None
 # 缺欄位要能照抄一行就補好，否則模型只知道缺、不知道長什麼樣。
 WRITE_GATE_FIELD_EXAMPLES = {
     NAME_FIELD: "name: 虛擬盤鏡像裁定",

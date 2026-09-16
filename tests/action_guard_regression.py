@@ -247,6 +247,29 @@ class RequireWhenThen(unittest.TestCase):
         self.assertIsNotNone(value)
         self.assertIn("行為卡沒有裁定鍵", value.get("reason", ""))
 
+    def test_a_pattern_that_cannot_compile_still_matches_itself_literally(self):
+        # Self-repair: the author wrote a phrase that happens to contain a bracket.
+        # Matching it literally is what they meant, and can only match less.
+        (self.vault / "feedback-literal.md").write_text(
+            "---\nname: 逐字比對\ndescription: 說明\n"
+            "forbidden:\n  - 階段一)\n---\nbody\n",
+            encoding="utf-8",
+        )
+        value = self.block("這批是階段一)，先這樣。")
+        self.assertIsNotNone(value)
+        self.assertIn("逐字比對", value.get("reason", ""))
+
+    def test_a_truncated_pattern_is_not_guessed_at(self):
+        # Half a pattern is half an intention. Completing it would be choosing the
+        # rule's content for the author, so the literal fallback simply matches the
+        # text as written -- which here is nothing.
+        (self.vault / "feedback-truncated.md").write_text(
+            "---\nname: 截斷樣式\ndescription: 說明\n"
+            "forbidden:\n  - (甲案|乙案\n---\nbody\n",
+            encoding="utf-8",
+        )
+        self.assertIsNone(self.block("這次走甲案，不走乙案。"))
+
     def test_a_retired_behaviour_card_stops_speaking(self):
         (self.vault / "feedback-retired.md").write_text(
             "---\nname: 已退役\ndescription: 說明\nstatus: superseded\n"
@@ -370,6 +393,48 @@ class GuardCardLint(unittest.TestCase):
             "---\nname: 沒片段\ndescription: 2026-09-16 缺 guard_all_of\nguard_tool: Bash\n---\nbody\n",
         )
         self.assertIn(("FAIL", "guard"), rules)
+
+    def test_a_pattern_that_cannot_compile_fails_the_lint(self):
+        # A card whose pattern will not compile looks perfect and enforces nothing:
+        # the gate drops it silently. Until 2026-09-17 the lint passed it too, so
+        # nothing anywhere said the rule was dead.
+        rules, findings = self.findings(
+            "decision-bad-regex.md",
+            "---\nname: 壞樣式\ndescription: 2026-09-17 括號沒關\ndecision_key: bad\n"
+            "status: active\ncurrent_decision_at: 2026-09-17\ndecided_by: owner-explicit\n"
+            "owner_quote: x\naliases: [甲名, 乙名]\nforbidden:\n  - a(b\n---\nbody\n",
+        )
+        self.assertIn(("FAIL", "pattern"), rules)
+        reason = next(r for lvl, rule, r in findings if rule == "pattern")
+        self.assertIn("逐字比對", reason)
+
+    def test_an_over_long_pattern_fails_the_lint(self):
+        rules, _ = self.findings(
+            "decision-long.md",
+            "---\nname: 過長\ndescription: 2026-09-17 樣式超長\ndecision_key: long\n"
+            "status: active\ncurrent_decision_at: 2026-09-17\ndecided_by: owner-explicit\n"
+            "owner_quote: x\naliases: [丙名, 丁名]\nforbidden:\n  - " + ("x" * 1100)
+            + "\n---\nbody\n",
+        )
+        self.assertIn(("FAIL", "pattern"), rules)
+
+    def test_an_unknown_guard_tool_is_reported(self):
+        rules, _ = self.findings(
+            "scar-bad-tool.md",
+            "---\nname: 壞工具名\ndescription: 2026-09-17 工具不存在\n"
+            'guard_tool: Shellzz\nguard_all_of:\n  - "aa"\n  - "bb"\n'
+            "aliases: [壞工具]\n---\nbody\n",
+        )
+        self.assertIn(("WARN", "guard-tool"), rules)
+
+    def test_a_usable_pattern_raises_no_pattern_finding(self):
+        _rules, findings = self.findings(
+            "decision-fine.md",
+            "---\nname: 好卡\ndescription: 2026-09-17 正常\ndecision_key: fine\n"
+            "status: active\ncurrent_decision_at: 2026-09-17\ndecided_by: owner-explicit\n"
+            "owner_quote: x\naliases: [戊名, 己名]\nforbidden:\n  - (先不動|等看看)\n---\nbody\n",
+        )
+        self.assertEqual([f for f in findings if f[1] in ("pattern", "guard-tool")], [])
 
     def test_a_well_formed_guard_card_raises_no_guard_finding(self):
         _rules, findings = self.findings(

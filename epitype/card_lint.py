@@ -188,6 +188,37 @@ def _require_findings(fields):
     )]
 
 
+def _pattern_findings(fields, front_lines):
+    """樣式編不編得起來、工具名認不認得——不驗的話，卡片壞了也看不出來。
+
+    2026-09-17 對抗審查實測：`forbidden: "a(b"`（括號沒關）、`guard_tool: Shell`（不存在
+    的工具）、以及超過長度上限的樣式，三張卡片體檢全部 `fail=0 warn=0`，而三張都是零
+    攔截。卡片看起來正常、實際什麼都不擋，正是這套東西最該杜絕的那一種失敗。
+    """
+    findings = []
+    patterns = list(memspec.sequence_items(front_lines, memspec.FORBIDDEN_FIELD))
+    for field in (memspec.REQUIRE_WHEN_FIELD, memspec.REQUIRE_TEXT_FIELD):
+        value = fields.get(field, "").strip()
+        if value:
+            patterns.append(value)
+    for pattern in patterns:
+        problem = memspec.pattern_problem(pattern)
+        if problem:
+            findings.append((
+                FAIL, "pattern",
+                memspec.CARD_PATTERN_BROKEN_REASON.format(
+                    pattern=pattern[:60], reason=problem),
+            ))
+    tool = fields.get(memspec.ACTION_GUARD_TOOL_FIELD, "").strip()
+    if tool and tool.casefold() not in memspec.ACTION_GUARD_KNOWN_TOOLS:
+        findings.append((
+            WARN, "guard-tool",
+            memspec.CARD_GUARD_TOOL_UNKNOWN_REASON.format(
+                tool=tool, known="、".join(sorted(memspec.ACTION_GUARD_KNOWN_TOOLS))),
+        ))
+    return findings
+
+
 def _guard_findings(fields, front_lines):
     """動作守衛欄位的可用性（owner 2026-09-16 解除 §34 的動作條件禁令）。
 
@@ -520,6 +551,7 @@ def _check_card(path, relative, today):
 
     findings.extend(_disarmed_findings(fields, nested))
     findings.extend(_guard_findings(fields, front_lines))
+    findings.extend(_pattern_findings(fields, front_lines))
     findings.extend(_require_findings(fields))
     findings.extend(_arming_findings(fields, counts, card_type, today))
 
