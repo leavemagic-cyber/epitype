@@ -380,6 +380,65 @@ def noop_blocks(blocked, finals):
     return found
 
 
+def opportunities(transcripts, since=None):
+    """歷史裡有幾次「它本來就有機會命中」：回合數，以及各工具的呼叫次數。
+
+    命中次數本身說不出一條樣式寬不寬——heredoc 那條 36 小時攔了 8 次，因為我真的犯了
+    8 次。要看的是比例：在幾次機會裡命中了幾次。
+    """
+    turns = 0
+    tools = {}
+    for path in transcripts:
+        for _session, stamp, final_text, _all_texts, calls in _turns(path):
+            happened = _epoch_of(stamp)
+            if since is not None and happened is not None and happened < since:
+                continue
+            if final_text:
+                turns += 1
+            for tool, payload in calls:
+                if payload:
+                    key = tool.casefold()
+                    tools[key] = tools.get(key, 0) + 1
+    return {"turns": turns, "tools": tools}
+
+
+def rehearse(rules, hits, chances):
+    """每條樣式在歷史裡的命中率：(命中次數, 機會次數, 比率)。
+
+    這是 Dream-RSI 那套「歷史就是模擬器」用在規則上：一條新樣式不必等它明天在 owner
+    面前出錯，拿累積的紀錄重走一次就知道它會攔到什麼。一條在十次機會裡命中超過一次的
+    樣式，描述的已經不是某個具體錯誤，而是我平常說話的方式——那種東西不該擋。
+    """
+    counted = {}
+    for hit in hits:
+        counted[hit.card] = counted.get(hit.card, 0) + 1
+    result = {}
+    for rule in rules:
+        if rule.kind == "guard":
+            chance = chances["tools"].get(rule.tool.casefold(), 0)
+        else:
+            chance = chances["turns"]
+        matches = counted.get(rule.card, 0)
+        rate = (matches / chance) if chance else 0.0
+        result[rule.card] = (matches, chance, round(rate, 4))
+    return result
+
+
+# 十次機會命中超過一次就不是在描述某個具體錯誤了。超過就自動降級成只計數不攔，
+# 比率掉回來會自動恢復——降級是可逆的觀察，不是把規則刪掉。
+REHEARSAL_MAX_RATE = 0.10
+# 機會太少時比率沒有意義（跑兩回合命中一次＝50%）。
+REHEARSAL_MIN_CHANCES = 40
+
+
+def demoted_cards(vault):
+    """目前只計數、不攔的卡名。"""
+    return {
+        name for name, entry in load_health(vault).items()
+        if isinstance(entry, dict) and entry.get("demoted_since")
+    }
+
+
 HEALTH_FILENAME = "gate_health.json"
 HEALTH_WINDOW_DAYS = 30
 
@@ -456,7 +515,33 @@ def _fold_exceptions(entry, card, noops, today):
     return added
 
 
-def update_health(vault, rules, hits, today, noops=()):
+def _fold_rehearsal(entry, rule, measured, today):
+    """把歷史命中率併進來，太寬的自動降級，掉回來自動恢復。
+
+    樣式改過就重算：健康度裡存著上一次的樣式指紋，指紋變了代表這是一條新樣式，它在
+    歷史上的表現要重新看，不能沿用舊的數字背書。
+    """
+    matches, chances, rate = measured
+    digest = _digest("|".join(
+        list(rule.forbidden) + [rule.require_when, rule.require_text, rule.tool]
+        + list(rule.fragments)
+    ))
+    changed = entry.get("pattern_digest") not in (None, digest)
+    entry["pattern_digest"] = digest
+    entry["rehearsed"] = {"matches": matches, "chances": chances, "rate": rate,
+                          "on": today.isoformat()}
+    if chances < REHEARSAL_MIN_CHANCES:
+        return  # 機會太少，比率說明不了什麼，維持現狀
+    if rate > REHEARSAL_MAX_RATE:
+        entry.setdefault("demoted_since", today.isoformat())
+        if changed:
+            # 改過之後才變這麼寬：記下來，讓「這一版比它取代的那一版差」看得見。
+            entry["broadened_at"] = today.isoformat()
+    else:
+        entry.pop("demoted_since", None)
+
+
+def update_health(vault, rules, hits, today, noops=(), rehearsed=None):
     """把今天的命中併進健康度，回傳新的一份（並落檔）。
 
     夢每晚自己做完這件事，不必有人去讀報告——這份檔案下一次工具呼叫就會被閘讀到。
@@ -480,6 +565,8 @@ def update_health(vault, rules, hits, today, noops=()):
         entry["recent"] = recent
         entry["hits_30d"] = sum(recent.values())
         _fold_exceptions(entry, rule.card, noops, today)
+        if rehearsed and rule.card in rehearsed:
+            _fold_rehearsal(entry, rule, rehearsed[rule.card], today)
         cards[rule.card] = entry
     try:
         target = health_path(vault)
@@ -707,10 +794,42 @@ def _selftest():
                 and entry["until"] > entry["since"],
             ))
 
+            # 彩排：在歷史上命中太頻繁的樣式自動降級，掉回來自動恢復。
+            chances = opportunities([transcript])
+            checks.append((
+                "機會數分回合與各工具",
+                chances["turns"] == 6 and chances["tools"].get("bash") == 1,
+            ))
+            wide = Rule("寬樣式", "forbidden", vault / "decision-x.md", 0,
+                        ["。"], "", "", "", ())
+            wide_hits = replay([wide], [transcript], epoch=time.time() + 60)
+            measured = rehearse([wide], wide_hits, {"turns": 100, "tools": {}})
+            checks.append((
+                "命中率算得出來：命中數除以機會數",
+                measured["寬樣式"][0] == len(wide_hits) and measured["寬樣式"][2] > 0,
+            ))
+            update_health(vault, [wide], wide_hits, day,
+                          rehearsed={"寬樣式": (20, 100, 0.20)})
+            checks.append((
+                "超過門檻就自動降級成只計數不攔",
+                demoted_cards(vault) == {"寬樣式"},
+            ))
+            update_health(vault, [wide], [], day, rehearsed={"寬樣式": (2, 100, 0.02)})
+            checks.append((
+                "比率掉回來就自動恢復，降級是可逆的",
+                demoted_cards(vault) == set(),
+            ))
+            update_health(vault, [wide], [], day,
+                          rehearsed={"寬樣式": (20, 10, 2.0)})
+            checks.append((
+                "機會太少時不下判斷（跑兩回合命中一次不算 50% 太寬）",
+                demoted_cards(vault) == set(),
+            ))
+
             ranks = priority_rank(vault)
             checks.append((
                 "健康度轉得出排序鍵；沒有檔案時退回一致的預設",
-                set(ranks) == {"probe", "needs", "測試守衛"}
+                set(ranks) == {"probe", "needs", "測試守衛", "寬樣式"}
                 and priority_rank(root / "no-such-vault") == {},
             ))
 
@@ -734,7 +853,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 18
+    total = 23
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

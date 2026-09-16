@@ -323,6 +323,20 @@ def _exceptions(vault):
         return {}
 
 
+def _demoted(vault):
+    """Cards the nightly rehearsal found fire too often across history to block.
+
+    A rule that matches more than one turn in ten is not describing a mistake any
+    more, it is describing how the model writes. Counting continues; blocking stops
+    until the rate comes back down, so the demotion undoes itself."""
+    try:
+        from epitype import compliance
+
+        return compliance.demoted_cards(vault)
+    except Exception:
+        return set()
+
+
 def _forbidden_fragment(decision, message, defects, excepted=frozenset()):
     """The matched fragment of the first usable `forbidden` pattern that fires
     outside a quoted citation (U64: see _quoted_spans) — a hit fully inside a
@@ -531,9 +545,12 @@ def _verdict(event, message, config, started_at, defects):
     # the owner ruled out, which is the harder violation of the two.
     verdicts = []
     excepted = {}
+    demoted = set()
     for vault in _vaults(config, event):
         for card, fragments in _exceptions(vault).items():
             excepted.setdefault(card, set()).update(fragments)
+        demoted |= _demoted(vault)
+    decisions = [decision for decision in decisions if decision.key not in demoted]
     for decision in decisions:
         fragment = _forbidden_fragment(
             decision, message, defects, excepted.get(decision.key, frozenset())

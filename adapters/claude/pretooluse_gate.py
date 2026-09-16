@@ -532,8 +532,16 @@ def _guard_review(event, tool_name, tool_input, config, started_at, defects):
     for vault in resolve_vaults(config, event):
         if expired(started_at):
             return None
+        # 夜間彩排認定「在歷史上命中太頻繁」的卡只計數不攔：一條十次機會命中超過一次
+        # 的條件，描述的已經不是某個具體錯誤。比率掉回來會自動恢復。
+        try:
+            from epitype import compliance
+
+            demoted = compliance.demoted_cards(vault)
+        except Exception:
+            demoted = set()
         for guard in _guards(vault, started_at, defects):
-            if guard.tool.casefold() != folded_tool:
+            if guard.tool.casefold() != folded_tool or guard.card in demoted:
                 continue
             if not all(fragment in haystack for fragment in guard.substrings):
                 continue

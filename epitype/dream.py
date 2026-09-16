@@ -1490,7 +1490,11 @@ def _section_compliance(vaults, today, since_date, config):
             # 自動放行清單，隔天起不再為它停下來——不必有人判斷，也不必有人看。
             finals = compliance.final_messages(transcripts)
             noops = compliance.noop_blocks(vault_blocked, finals)
-            compliance.update_health(vault, rules, vault_hits, today, noops)
+            # 彩排：每條樣式在累積的歷史上命中率多少。新卡不必等它明天在 owner 面前
+            # 出錯，改過的樣式也不能靠舊數字背書——太寬的當晚就自動降級成只計數。
+            chances = compliance.opportunities(transcripts, since=since_stamp)
+            rehearsed = compliance.rehearse(rules, vault_hits, chances)
+            compliance.update_health(vault, rules, vault_hits, today, noops, rehearsed)
         except Exception as exc:
             errors.append(f"{vault}: 健康度未更新 {type(exc).__name__}: {exc}")
         hits.extend(vault_hits)
