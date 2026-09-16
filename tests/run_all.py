@@ -23,6 +23,7 @@ SELFTESTS = (
     Path("epitype") / "capture_route.py",
     Path("epitype") / "alias_batch.py",
     Path("epitype") / "dream.py",
+    Path("epitype") / "compliance.py",
     Path("adapters") / "claude" / "recall_hook.py",
     Path("adapters") / "claude" / "sessionstart_hook.py",
     Path("adapters") / "claude" / "precompact_hook.py",

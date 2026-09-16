@@ -1428,6 +1428,89 @@ def shape_index(vault, today, apply=True, stamp=None):
 # --------------------------------------------------------------------------- report assembly
 
 
+# --------------------------------------------------------------------------- section 13
+
+
+def _section_compliance(vaults, today, since_date, config):
+    """白天的閘到底有沒有在擋：重放對話，跟閘自己的稽核帳對帳。
+
+    閘在 owner 等回話的當下跑，有期限、有讀卡上限、出錯放行——它注定會漏，而且漏的時候
+    不出聲。擋到幾次查得到、漏掉幾次查不到的話，「Epitype 有沒有發揮作用」就只答得出
+    報喜的那一半。這一節就是另一半。
+    """
+    from epitype import compliance
+
+    # 只認從登記庫自己往上找到的專案目錄，不吃 `_projects_roots` 的家目錄退路：那條退路
+    # 會讓一個放在暫存目錄的庫去重放真機上別人的對話，既是測試污染，也等於拿甲專案的
+    # 紀錄去對乙專案的卡。
+    #
+    # 庫不在宿主的專案目錄底下時就沒有對話可重放。那不是錯誤，是這台機器上沒有那份
+    # 資料；報成錯誤會讓整晚的夢被標成沒跑完。
+    roots = []
+    for vault in vaults:
+        for parent in Path(vault).resolve().parents:
+            if (
+                parent.name == memspec.HOST_PROJECTS_DIRECTORY
+                and parent.parent.name == memspec.HOST_STATE_DIRECTORY
+                and parent.is_dir()
+            ):
+                if parent not in roots:
+                    roots.append(parent)
+                break
+    if not roots:
+        return {
+            "counts": {"hits": 0, "blocked": 0, "missed": 0, "outside_gate_view": 0,
+                       "silent_rules": 0, "transcripts": 0},
+            "examples": [], "commands": [], "errors": [],
+        }
+
+    since_stamp = datetime(
+        since_date.year, since_date.month, since_date.day, tzinfo=timezone.utc
+    ).timestamp()
+    transcripts = compliance.transcripts_for(roots, since_stamp=since_stamp)
+
+    errors, examples = [], []
+    hits, blocked, missed, unseen = [], [], [], []
+    silent = []
+    for vault in vaults:
+        try:
+            rules = compliance.armed_rules(vault)
+            vault_hits = compliance.replay(rules, transcripts, since=since_stamp)
+            counts, stopped = compliance.gate_blocks(vault, since=since_date.isoformat())
+            vault_blocked, vault_missed, vault_unseen = compliance.reconcile(
+                vault_hits, counts, stopped
+            )
+        except Exception as exc:
+            errors.append(f"{vault}: {type(exc).__name__}: {exc}")
+            continue
+        hits.extend(vault_hits)
+        blocked.extend(vault_blocked)
+        missed.extend(vault_missed)
+        unseen.extend(vault_unseen)
+        fired = {hit.card for hit in vault_hits}
+        silent.extend(rule.card for rule in rules if rule.card not in fired)
+
+    for hit in missed[:EXAMPLE_LIMIT]:
+        examples.append({
+            "card": hit.card, "kind": hit.kind, "at": hit.at,
+            "session": hit.session, "fragment": hit.fragment,
+        })
+
+    return {
+        "counts": {
+            "hits": len(blocked) + len(missed),
+            "blocked": len(blocked),
+            "missed": len(missed),
+            "outside_gate_view": len(unseen),
+            "silent_rules": len(set(silent)),
+            "transcripts": len(transcripts),
+        },
+        "examples": examples,
+        "commands": ["python -m epitype.compliance --selftest"] if missed else [],
+        "errors": errors,
+    }
+
+
 _SECTIONS = (
     (1, "缺別名卡", _section_missing_aliases),
     (2, "卡片型別檢查 FAIL／WARN", _section_card_lint),
@@ -1441,6 +1524,7 @@ _SECTIONS = (
     (10, "混雜卡（拆卡候選）", _section_mixed_cards),
     (11, "上限檢查", _section_caps),
     (12, "原話無決策卡承接（升決策卡候選）", _section_uncarried_quotes),
+    (13, "閘的漏擋回饋（重放昨天的對話）", _section_compliance),
 )
 # 第 15 節不在上面那張表裡：它要讀前面幾節算完的候選數，所以由 build_report 最後跑。
 _SECTION_IDS = tuple(section_id for section_id, _title, _fn in _SECTIONS) + (REVIEW_PACK_SECTION_ID,)
@@ -2056,9 +2140,13 @@ def _selftest():
             report = build_report([vault], today=today)
             by_id = {section["id"]: section for section in report["sections"]}
 
-            checks.append(("all 12 deterministic sections present with no error", all(
-                by_id[i]["error"] is None for i in range(1, 13)
+            checks.append(("all 13 deterministic sections present with no error", all(
+                by_id[i]["error"] is None for i in range(1, 14)
             )))
+            checks.append((
+                "section 13 replays the day and reports zero misses on a fixture with no transcripts",
+                by_id[13]["counts"]["missed"] == 0 and by_id[13]["counts"]["hits"] == 0,
+            ))
             checks.append(("section 1 counts the alias-less card only", by_id[1]["counts"]["missing_aliases"] == 1
                 and by_id[1]["examples"][0]["card_path"] == "feedback/no_alias.md"))
             checks.append(("section 2 sees the frontmatter-less FAIL card", by_id[2]["counts"]["fail"] >= 1
@@ -2938,7 +3026,7 @@ def _selftest():
                 os.environ[name] = value
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 68
+    total = 69
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

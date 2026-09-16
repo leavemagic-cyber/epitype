@@ -401,6 +401,11 @@ def _named(decision):
     return decision.key
 
 
+def _message_digest(message):
+    """Short digest of a turn's text — the same value the nightly replay computes."""
+    return hashlib.sha256(str(message).encode("utf-8", errors="replace")).hexdigest()[:16]
+
+
 def _claim_marker(session_id, decision_key, message):
     """One block per (session, decision, message); the marker lives in the recall
     marker directory so PreCompact's clear_recall_markers drops it with the rest.
@@ -425,9 +430,20 @@ def _claim_marker(session_id, decision_key, message):
     return True
 
 
-def _audit(config, decision_key, rule, started_at, session_id=None):
+def _audit(config, decision_key, rule, started_at, session_id=None, digest=""):
+    """The blocked message's digest goes on the row, never the message.
+
+    The nightly replay has to tell "this ruling let something through" from "the turn
+    was stopped by a different ruling and rewritten" — the gate reports one verdict
+    per turn and stops, so without the digest every second violation in a blocked
+    message reads as a miss."""
     try:
-        row = {"kind": memspec.STOP_GATE_LOG_KIND, "decision": decision_key, "rule": rule}
+        row = {
+            "kind": memspec.STOP_GATE_LOG_KIND,
+            "decision": decision_key,
+            "rule": rule,
+            "digest": digest,
+        }
         append_gate_log(
             governance_vault(config, for_write=True),
             with_session(row, session_id),
@@ -529,7 +545,7 @@ def _verdict(event, message, config, started_at, defects):
     session_id = event.get("session_id", event.get("sessionId"))
     if not _claim_marker(session_id, decision.key, message):
         return None
-    _audit(config, decision.key, rule, started_at, session_id)
+    _audit(config, decision.key, rule, started_at, session_id, _message_digest(message))
     return {"decision": "block", "reason": reason}
 
 

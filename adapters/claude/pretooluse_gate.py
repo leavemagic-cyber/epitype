@@ -553,6 +553,10 @@ def _guard_review(event, tool_name, tool_input, config, started_at, defects):
                         "rule": memspec.ACTION_GUARD_RULE,
                         "card": guard.card,
                         "tool": tool_name,
+                        # 夜間重放靠它分辨「這張卡放行了」與「同一次呼叫被別張卡擋下」。
+                        "digest": hashlib.sha256(
+                            haystack.encode("utf-8", errors="replace")
+                        ).hexdigest()[:16],
                     },
                     event.get("session_id"),
                 ),
