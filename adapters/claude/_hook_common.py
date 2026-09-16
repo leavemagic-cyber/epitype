@@ -68,7 +68,18 @@ def expired(started_at):
 
 
 def read_event(stream):
-    value = json.load(stream)
+    # 2026-09-16: Cursor (which loads this repo's hooks through its Claude-config
+    # compatibility layer) writes a UTF-8 BOM before the JSON. `json.load` raises
+    # on it, every adapter's `except Exception: pass` swallows the raise, and the
+    # hook then runs, exits 0 and does nothing — measured across 46 invocations in
+    # one Cursor session: every Epitype hook silent, zero output. Read the text and
+    # drop a leading BOM before parsing; hosts that send none are unaffected.
+    raw = stream.read()
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8-sig")
+    else:
+        raw = raw.lstrip("﻿")
+    value = json.loads(raw)
     if not isinstance(value, dict):
         raise ValueError("hook input must be a JSON object")
     return value
