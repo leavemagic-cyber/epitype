@@ -1,5 +1,9 @@
 # Epitype
 
+[![PyPI](https://img.shields.io/pypi/v/epitype.svg)](https://pypi.org/project/epitype/)
+[![Python](https://img.shields.io/pypi/pyversions/epitype.svg)](https://pypi.org/project/epitype/)
+[![License: MIT](https://img.shields.io/github/license/leavemagic-cyber/epitype.svg)](LICENSE)
+
 [English](README.md)
 
 規則明明寫在 `CLAUDE.md` 裡，它照樣做成別的樣子。
@@ -9,6 +13,47 @@
 Epitype 就是為了這件事做的一層小東西。它接 Claude Code 和 Codex 原本就有的 hook，你原本的記憶檔放在哪裡就繼續放在哪裡，它補上那些檔案自己做不到的部分：該用到的那張紙，在該用到的那一刻送到它面前；不該用的那張，擋在外面。
 
 只用 Python 標準函式庫。不必註冊服務，自己不呼叫模型，也不用付錢。
+
+## 你實際會在哪裡看到它
+
+週一你否決掉的做法，週四它又提一次。Stop 閘把那段回覆攔下來，附上當初結掉這題的那條裁定，連同日期和是誰裁的。
+
+一次檔案寫入正要把違反現行規則的內容落盤。寫檔閘在落盤前擋下來，留一列稽核，之後你查得到擋了什麼、擋了幾次，以及那條規則是不是擋過頭了。
+
+做到一半 context 被壓縮。下一輪開場會拿到一份壓縮前寫好的復原地圖路徑，讓它去讀當時真正說過的話，而不是自己重建。
+
+這三件事都不是多開一個地方存東西。它們跑的都是你 vault 裡已經有的那些紙。
+
+
+## 安裝
+
+需求：Python 3.11 以上，以及支援 hook 的 Claude Code 或 Codex。
+
+安裝：`pip install epitype`。`epitype` 統一提供安裝、搜尋、lint、筆試與診斷工具；`epitype-graft` 保留為安裝器的相容別名。
+
+npm 上的 `@hungyu/epitype` 只是指回這個 Python 專案的路標套件（npm 判裸名 `epitype` 與既有套件過於相似，不接受）。
+
+先預覽預計變更：
+
+```powershell
+epitype install --dry-run
+```
+
+確認輸出只包含預期的 host 與路徑，再安裝並跑合成體檢：
+
+```powershell
+epitype install
+epitype doctor
+```
+
+安裝器會偵測既有原生 vault；找不到時才建立空的 fallback vault。重新安裝會保留已策展的 vault 清單。若確定要改採最新偵測結果，先執行 `epitype vaults --resync --dry-run`，確認後再拿掉 `--dry-run`。
+
+
+## 這是給誰的
+
+如果你已經在用 Claude Code 或 Codex、手上有一份自己在維護的 `CLAUDE.md` 或 `AGENTS.md`、看過 agent 忘記或重開你早就裁定過的事，而且希望留下「什麼被擋下來」的紀錄，那值得試。
+
+如果你剛開始用 CLI agent、還沒累積出需要治理的規則，或者你真正想要的是「攔住危險指令」的東西，那先不急。後面那件事是宿主的職責，不是這個工具的：Claude Code 有 `permissions.deny`，Codex 有 `execpolicy`。Epitype 只擋內容，不擋動作。
 
 ## 運作方式
 
@@ -62,28 +107,8 @@ UserPromptSubmit 只端卡片。細節與量測見 `docs/FAILURE_MODES.md` §32 
 
 `epitype gates <vault> [--since Nd|YYYY-MM-DD] [--json] [--by kind|decision|session|day]` 把 vault 的 `_GATE_LOG.jsonl` 唯讀整理成閘門實際擋下什麼的報告——依 kind、決策卡或傷疤卡、天、session 分，並列出同一 session 同一卡連擋 ≥3 次的疑似誤擋提示。
 
-## 快速開始
 
-需求：Python 3.11 以上，以及支援 hook 的 Claude Code 或 Codex。
-
-安裝：`pip install epitype`。`epitype` 統一提供安裝、搜尋、lint、筆試與診斷工具；`epitype-graft` 保留為安裝器的相容別名。
-
-npm 上的 `@hungyu/epitype` 只是指回這個 Python 專案的路標套件（npm 判裸名 `epitype` 與既有套件過於相似，不接受）。
-
-先預覽預計變更：
-
-```powershell
-epitype install --dry-run
-```
-
-確認輸出只包含預期的 host 與路徑，再安裝並跑合成體檢：
-
-```powershell
-epitype install
-epitype doctor
-```
-
-安裝器會偵測既有原生 vault；找不到時才建立空的 fallback vault。重新安裝會保留已策展的 vault 清單。若確定要改採最新偵測結果，先執行 `epitype vaults --resync --dry-run`，確認後再拿掉 `--dry-run`。
+## 裝好之後
 
 ### 核准 Codex hooks
 
@@ -200,3 +225,7 @@ epitype uninstall
 - [架構說明](docs/ARCHITECTURE.md)：記憶分層、四條檢索路、決策卡、傷疤生命週期與權威規則。
 - [失敗模式](docs/FAILURE_MODES.md)：病象、對治與驗證邊界。
 - [解除安裝](docs/UNINSTALL.md)：依所有權移除與備份指引。
+
+## 專案狀態
+
+目前 v1.3.0。開發是不定期集中進行，不是固定節奏，所以安靜一週不代表棄坑。Issue 都會看，開 issue 是讓修正往前排最快的方式。

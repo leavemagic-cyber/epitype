@@ -1,5 +1,9 @@
 # Epitype
 
+[![PyPI](https://img.shields.io/pypi/v/epitype.svg)](https://pypi.org/project/epitype/)
+[![Python](https://img.shields.io/pypi/pyversions/epitype.svg)](https://pypi.org/project/epitype/)
+[![License: MIT](https://img.shields.io/github/license/leavemagic-cyber/epitype.svg)](LICENSE)
+
 [繁體中文](README.zh-TW.md)
 
 You wrote the rule in `CLAUDE.md`. The agent still did something else.
@@ -9,6 +13,49 @@ You settled a decision three days ago. Today the agent answers from the version 
 Epitype is the small layer I built for that. It runs on the hooks Claude Code and Codex already have, leaves your existing memory files where they are, and adds the part those files cannot do on their own: getting the right note in front of the agent at the moment it matters, and keeping the wrong one out.
 
 It is Python standard library only. No service to sign up for, no model calls of its own, nothing to pay for.
+
+## Where you actually notice it
+
+You rejected an approach on Monday. On Thursday the agent proposes it again. The Stop gate holds that reply back and hands over the ruling that closed the question, with its date and who made it.
+
+A file write is about to commit a line that contradicts a settled rule. The write gate stops the content before it lands and writes one audit row, so later you can ask what was blocked, how often, and whether the rule is doing more harm than good.
+
+The context gets compacted in the middle of a task. The next turn opens with the path to a recovery map written just before the compaction, so the agent can go read what was actually said instead of reconstructing it.
+
+None of this is a new place to keep things. All three run on notes already sitting in the vault your host reads.
+
+
+## Install
+
+You need Python 3.11 or newer and a Claude Code or Codex install with hook support.
+
+```powershell
+pip install epitype
+```
+
+The `epitype` command covers installation, search, lint, exam and diagnostics. `epitype-graft` still works as an alias for the installer. The `@hungyu/epitype` package on npm is only a signpost back here; npm rejects the bare name as too close to an existing package.
+
+Preview what the installer would change:
+
+```powershell
+epitype install --dry-run
+```
+
+If the preview lists only the hosts and paths you expected, install and run the synthetic health check:
+
+```powershell
+epitype install
+epitype doctor
+```
+
+The installer looks for native vaults you already have. If there are none it creates an empty one. Reinstalling keeps a vault list you curated; run `epitype vaults --resync --dry-run` and then without `--dry-run` when you do want the latest detection result.
+
+
+## Who it is for
+
+Worth a try if you already run Claude Code or Codex against a `CLAUDE.md` or `AGENTS.md` you maintain, you have watched an agent forget or reopen something you settled, and you want a record of what got stopped.
+
+Probably not yet if you are new to CLI agents and have no accumulated rules to govern, or if what you actually want is something that refuses dangerous commands. That last one is the host's job, not this one's: `permissions.deny` in Claude Code, `execpolicy` in Codex. Epitype gates content, never actions.
 
 ## How it works
 
@@ -62,30 +109,8 @@ Missing indexes, stale indexes, shim failures, malformed cards and lock contenti
 
 `epitype gates <vault> [--since Nd|YYYY-MM-DD] [--json] [--by kind|decision|session|day]` turns a vault's `_GATE_LOG.jsonl` into a read-only report of what the gates actually blocked, by kind, card, day and session, and flags the same card blocking three times in one session as a likely false positive.
 
-## Quickstart
 
-You need Python 3.11 or newer and a Claude Code or Codex install with hook support.
-
-```powershell
-pip install epitype
-```
-
-The `epitype` command covers installation, search, lint, exam and diagnostics. `epitype-graft` still works as an alias for the installer. The `@hungyu/epitype` package on npm is only a signpost back here; npm rejects the bare name as too close to an existing package.
-
-Preview what the installer would change:
-
-```powershell
-epitype install --dry-run
-```
-
-If the preview lists only the hosts and paths you expected, install and run the synthetic health check:
-
-```powershell
-epitype install
-epitype doctor
-```
-
-The installer looks for native vaults you already have. If there are none it creates an empty one. Reinstalling keeps a vault list you curated; run `epitype vaults --resync --dry-run` and then without `--dry-run` when you do want the latest detection result.
+## After installing
 
 ### Approve Codex hooks
 
@@ -203,3 +228,7 @@ Read [Uninstall Epitype](docs/UNINSTALL.md) before restoring a backup by hand.
 - [Architecture](docs/ARCHITECTURE.md): memory blocks, retrieval routes, decision cards, scar lifecycle, authority rules.
 - [Failure modes](docs/FAILURE_MODES.md): symptoms, countermeasures, verification boundaries.
 - [Uninstall](docs/UNINSTALL.md): ownership-aware removal and backup guidance.
+
+## Status
+
+v1.3.0. Development happens in bursts rather than on a fixed cadence, so a quiet week is not an abandoned project. Issues get read, and an issue is the fastest way to move a fix up the queue.
