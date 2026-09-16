@@ -181,7 +181,7 @@ The database lives at `<vault>/.epitype/memory_fts.sqlite3` and Git ignores it. 
 | `epitype pending <vault> [--max-age-days N] [--strict] [--json]` | Lints for zombie pending lines: a todo marker with no closing text, no runnable `verify:`, and past the age threshold. |
 | `epitype exam [corpus] [--strict] [--selftest]` | Runs the exam engine against a behavior-question corpus. |
 | `epitype trust [--home HOME]` | Checks Codex's real hook trust state; see [Approve Codex hooks](#approve-codex-hooks). |
-| `epitype install \| uninstall \| vaults \| relocate` | Installer, removal, vault resync, repository relocation. See [Quickstart](#quickstart) and [Moving or removing Epitype](#moving-or-removing-epitype). |
+| `epitype install \| uninstall \| vaults \| relocate` | Installer, removal, vault resync, repository relocation. See [Install](#install) and [Moving or removing Epitype](#moving-or-removing-epitype). |
 
 ## Verify this checkout
 
