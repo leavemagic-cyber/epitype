@@ -433,6 +433,8 @@ REHEARSAL_MIN_CHANCES = 40
 
 def demoted_cards(vault):
     """目前只計數、不攔的卡名。"""
+    if not AUTO_DISABLE_ENABLED:
+        return set()
     return {
         name for name, entry in load_health(vault).items()
         if isinstance(entry, dict) and entry.get("demoted_since")
@@ -461,8 +463,21 @@ def load_health(vault):
     return cards if isinstance(cards, dict) else {}
 
 
+# 2026-09-17 四份獨立對抗審查一致判定：自動放行與自動降級這兩條迴圈，可以在一個晚上、
+# 零人工的情況下把一條規則關掉，而且無聲。三個各自獨立的破法都實跑重現過：
+#   - 字面樣式的「命中字串」就是樣式本身，所以放行一串字＝關掉整條規則 90 天；
+#   - 相似度算的是整則訊息，長訊息就算真的照規則改了也會被判成「擋了等於沒擋」；
+#   - 彩排把閘從來看不到的回合中段訊息也算進分子，一條正在生效的規則會因此被降級。
+# 一個會自己靜音的執行層，比一個不會自我改進的執行層更糟——尤其它靜音的是「用來管我
+# 自己的規則」。所以動作停用、量測照跑：健康度與彩排數字繼續累積，之後要恢復自動動作，
+# 前提是先修好單位不一致，並且先有抓得到這三種破法的回歸測試。
+AUTO_DISABLE_ENABLED = False
+
+
 def exceptions_for(vault):
     """卡名 -> 已自動放行的字串集合；過期的不算。"""
+    if not AUTO_DISABLE_ENABLED:
+        return {}
     from datetime import date
 
     cards = load_health(vault)
@@ -782,11 +797,21 @@ def _selftest():
             ))
             update_health(vault, rules, [], day, noops)
             update_health(vault, rules, [], day, noops)
-            allowed = exceptions_for(vault)
+            stored = load_health(vault)["probe"].get("exceptions") or {}
             checks.append((
-                "累積到門檻才自動放行，放行的是那一串字",
-                allowed.get("probe") == {probe_hit.fragment},
+                "證據照記（累積到門檻就記下那一串字），但動作停用時不放行",
+                set(stored) == {probe_hit.fragment} and exceptions_for(vault) == {},
             ))
+            # 動作那條路徑本身仍要測得到，不然恢復時等於沒測過。
+            global AUTO_DISABLE_ENABLED
+            AUTO_DISABLE_ENABLED = True
+            try:
+                checks.append((
+                    "開關打開時，放行的是那一串字",
+                    exceptions_for(vault).get("probe") == {probe_hit.fragment},
+                ))
+            finally:
+                AUTO_DISABLE_ENABLED = False
             entry = load_health(vault)["probe"]["exceptions"][probe_hit.fragment]
             checks.append((
                 "放行帶起訖日，會過期",
@@ -810,14 +835,20 @@ def _selftest():
             ))
             update_health(vault, [wide], wide_hits, day,
                           rehearsed={"寬樣式": (20, 100, 0.20)})
+            marked = load_health(vault)["寬樣式"].get("demoted_since")
+            AUTO_DISABLE_ENABLED = True
+            try:
+                effective = demoted_cards(vault)
+            finally:
+                AUTO_DISABLE_ENABLED = False
             checks.append((
-                "超過門檻就自動降級成只計數不攔",
-                demoted_cards(vault) == {"寬樣式"},
+                "超過門檻就記下降級；動作停用時閘照攔，開關打開才只計數不攔",
+                bool(marked) and effective == {"寬樣式"} and demoted_cards(vault) == set(),
             ))
             update_health(vault, [wide], [], day, rehearsed={"寬樣式": (2, 100, 0.02)})
             checks.append((
                 "比率掉回來就自動恢復，降級是可逆的",
-                demoted_cards(vault) == set(),
+                not load_health(vault)["寬樣式"].get("demoted_since"),
             ))
             update_health(vault, [wide], [], day,
                           rehearsed={"寬樣式": (20, 10, 2.0)})
@@ -853,7 +884,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 23
+    total = 24
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

@@ -17,9 +17,13 @@ import sys; sys.dont_write_bytecode = True
 
 import argparse
 from collections import namedtuple
+import hashlib
 import io
+import json
 import os
 from pathlib import Path
+import shutil
+import tempfile
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
@@ -28,7 +32,9 @@ if str(_REPO_ROOT) not in sys.path:
 from epitype import core_gen, memspec
 
 Region = namedtuple("Region", "name text present current")
-Plan = namedtuple("Plan", "host path regions problems")
+Plan = namedtuple("Plan", "host path regions problems damaged")
+
+STATE_FILENAME = "host_sync_state.json"
 
 EXIT_OK = 0
 EXIT_DRIFT = 1
@@ -53,13 +59,73 @@ def _normalised(text):
     return str(text or "").replace("\r\n", "\n").strip("\n")
 
 
+def read_host(path):
+    """(原始位元組, 解碼後文字, 行尾風格)。讀不到就回 (None, None, None)。
+
+    位元組留著，因為備份必須是原檔的位元組副本——備份若經過任何正規化，出事時就還原
+    不回原狀，那份備份等於沒有。行尾風格也留著：使用者的檔是 CRLF 就要寫回 CRLF，
+    我們只負責標記之間，不該順手把他整份檔案的每一行結尾都改掉。
+    """
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return None, None, None
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"不是 UTF-8（{exc.reason}，位置 {exc.start}）") from exc
+    newline = "\r\n" if "\r\n" in text else "\n"
+    return raw, text.replace("\r\n", "\n"), newline
+
+
+def atomic_write(path, data):
+    """寫進同目錄的暫存檔、落盤、換上去；失敗不留垃圾，也不留半份檔。
+
+    與 install/graft.py 的 `_atomic_write` 同一套：單行式 `io.open(...).write(...)` 不
+    保證資料真的落盤，磁碟滿的時候截斷的內容會被 os.replace 扶正成正本。
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=path.name + ".", suffix=".epitype_tmp", dir=path.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if path.exists():
+            shutil.copymode(path, temporary)
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def contract_vaults(vaults):
+    """宿主檔該載入哪一個庫的規則：拿著工作帳本的那一個（治理庫）。
+
+    宿主檔是跨專案的契約，專案庫的規則卡屬於那個專案，不該被升格成全域規則。從每一個
+    登記庫收會把專案規則寫進使用者的 CLAUDE.md——2026-09-17 拿副本演練時實際看到三條
+    titan 專案規則要被寫進全域契約，常駐條數從 50 變 53。認不出治理庫時退回第一個，
+    因為單庫使用者的那一個本來就是治理庫。
+    """
+    paths = [Path(vault) for vault in vaults]
+    for path in paths:
+        if (path / memspec.WORK_LEDGER_FILENAME).is_file():
+            return [path]
+    return paths[:1]
+
+
 def rules_text(vaults, host):
     """這個宿主實際該載入的規則塊：共用區加它自己的宿主區。
 
     走 core_gen 的 `host_view`，與 `epitype core-gen` 是同一條判斷；兩邊若各寫一份，
     同一張卡會在產生時屬於一個宿主、在同步時屬於另一個。
     """
-    rules, unreadable = core_gen.collect_rules([Path(vault) for vault in vaults])
+    rules, unreadable = core_gen.collect_rules(contract_vaults(vaults))
     if unreadable:
         # 讀不到一部分卡就不是「規則少幾條」，是這份規則塊不完整。寧可拒絕同步，也不要
         # 把殘缺的核心寫進宿主檔——少一條規則不會有人發現。
@@ -69,8 +135,8 @@ def rules_text(vaults, host):
 
 
 def index_text(vaults):
-    """短索引的本文：第一個有 MEMORY.md 的庫，去掉它的第一行標題。"""
-    for vault in vaults:
+    """短索引的本文：治理庫的 MEMORY.md，去掉它的第一行標題。"""
+    for vault in contract_vaults(vaults):
         path = Path(vault) / memspec.HOST_SYNC_INDEX_FILENAME
         try:
             raw = io.open(path, encoding="utf-8").read()
@@ -100,38 +166,65 @@ def split_region(raw, begin, end):
 
 
 def _locate(raw, name):
-    """這一塊目前在檔裡的位置：先找產品標記，再找舊的私人標記。"""
-    for markers in (memspec.HOST_SYNC_MARKERS[name], memspec.HOST_SYNC_LEGACY_MARKERS[name]):
+    """這一塊目前在檔裡的位置：先找產品標記，再找舊的私人標記。
+
+    回傳 (切好的三段, 用到的標記, 是不是舊標記)。兩套標記同時存在時以產品標記為準，
+    舊的那一塊由 `render` 整段移除——留著的話代理會讀到兩份規則，而且兩份還會分岔。
+    """
+    for legacy, markers in ((False, memspec.HOST_SYNC_MARKERS[name]),
+                            (True, memspec.HOST_SYNC_LEGACY_MARKERS[name])):
         found = split_region(raw, *markers)
         if found is not None:
-            return found, markers
-    return None, memspec.HOST_SYNC_MARKERS[name]
+            return found, markers, legacy
+    return None, memspec.HOST_SYNC_MARKERS[name], False
+
+
+def _drop(raw, begin, end):
+    """整段移除（含標記）；不存在或壞掉就原樣回傳。"""
+    try:
+        found = split_region(raw, begin, end)
+    except ValueError:
+        return raw
+    if found is None:
+        return raw
+    head, _inner, tail = found
+    return head.rstrip("\n") + ("\n\n" if head.strip() else "") + tail.lstrip("\n")
 
 
 def render(raw, name, wanted):
     """把這一塊換成 `wanted`，回傳整份新內容。區塊不存在就建在檔尾。"""
     begin, end = memspec.HOST_SYNC_MARKERS[name]
     block = f"{begin}\n{wanted}\n{end}" if wanted else f"{begin}\n{end}"
-    found, _markers = _locate(raw, name)
+    found, _markers, legacy = _locate(raw, name)
     if found is None:
         base = raw.rstrip("\n")
         return (base + "\n\n" if base else "") + block + "\n"
     head, _current, tail = found
-    return head.rstrip("\n") + ("\n\n" if head.strip() else "") + block + "\n" + tail.lstrip("\n")
+    updated = head.rstrip("\n") + ("\n\n" if head.strip() else "") + block + "\n" + tail.lstrip("\n")
+    if not legacy:
+        # 產品標記在手，舊標記那一塊就該消失，不是留在旁邊各說各話。
+        updated = _drop(updated, *memspec.HOST_SYNC_LEGACY_MARKERS[name])
+    return updated
 
 
 def plan_for(host, vaults, home=None):
     """這個宿主檔要改什麼：每塊的現況與應有內容，以及擋住寫入的問題。"""
     path = host_path(host, home)
     try:
-        raw = io.open(path, encoding="utf-8").read().replace("\r\n", "\n")
-    except OSError:
-        raw = ""
+        _raw_bytes, raw, _newline = read_host(path)
+    except ValueError as exc:
+        return Plan(host, path, [], [f"讀不動這個檔：{exc}；請先自行處理編碼再同步"], True)
+    raw = raw or ""
     regions, problems = [], []
-    wanted = {
-        memspec.HOST_SYNC_RULES_REGION: rules_text(vaults, host),
-        memspec.HOST_SYNC_INDEX_REGION: index_text(vaults),
-    }
+    damaged = False
+    try:
+        wanted = {
+            memspec.HOST_SYNC_RULES_REGION: rules_text(vaults, host),
+            memspec.HOST_SYNC_INDEX_REGION: index_text(vaults),
+        }
+    except Exception as exc:
+        return Plan(host, path, [], [f"組不出要寫的內容：{type(exc).__name__}: {exc}"], False)
+
     for name, text in wanted.items():
         size = len(text.encode("utf-8"))
         if size > memspec.HOST_SYNC_REGION_CAP_BYTES:
@@ -140,16 +233,100 @@ def plan_for(host, vaults, home=None):
                 f"{memspec.HOST_SYNC_REGION_CAP_BYTES}；先讓內容瘦身再同步"
             )
             continue
-        try:
-            found, _markers = _locate(raw, name)
-        except ValueError as exc:
-            begin, end = memspec.HOST_SYNC_MARKERS[name]
-            problems.append(memspec.HOST_SYNC_MISSING_MARKER_REASON.format(
-                path=path, region=name, begin=raw.count(begin), end=raw.count(end)
-            ) + f"（{exc}）")
+        # 要寫進去的內容自己含標記，寫下去就會讓這個檔永遠有兩組標記，之後每次都拒絕、
+        # 只能人工手改才救得回來。寧可現在就說不。
+        # 比對每一塊的標記，不只自己那一塊：索引的內容裡出現規則的標記，一樣會把這個
+        # 檔弄成兩組標記。
+        carried = [
+            marker
+            for table in (memspec.HOST_SYNC_MARKERS, memspec.HOST_SYNC_LEGACY_MARKERS)
+            for markers in table.values()
+            for marker in markers
+            if marker in text
+        ]
+        if carried:
+            problems.append(
+                f"{name} 要寫的內容裡出現了區塊標記本身（{carried[0][:40]}…）；"
+                "寫下去會讓這個檔永遠有兩組標記，請先把卡片裡的那段字改掉"
+            )
             continue
-        regions.append(Region(name, text, found is not None, found[1] if found else None))
-    return Plan(host, path, regions, problems)
+        try:
+            found, _markers, _legacy = _locate(raw, name)
+        except ValueError as exc:
+            # 數字要報「實際壞掉的那一組標記」，不然訊息會自相矛盾。
+            counts = {
+                label: (raw.count(begin), raw.count(end))
+                for label, (begin, end) in (
+                    ("產品", memspec.HOST_SYNC_MARKERS[name]),
+                    ("舊版", memspec.HOST_SYNC_LEGACY_MARKERS[name]),
+                )
+            }
+            label, (opens, closes) = max(counts.items(), key=lambda kv: sum(kv[1]))
+            problems.append(memspec.HOST_SYNC_MISSING_MARKER_REASON.format(
+                path=path, region=f"{name}（{label}標記）", begin=opens, end=closes
+            ) + f"：{exc}")
+            damaged = True  # 檔案本身壞了：整個宿主一個位元組都不要動
+            continue
+        inner = found[1] if found else None
+        if inner is not None and not _ours(inner, text, host, name, home, legacy=_legacy):
+            problems.append(
+                f"{name} 區塊裡的內容不是我們寫的（可能是你自己在檔案裡引用過這對標記）；"
+                "覆蓋它就是把你的字弄不見，所以這裡停手。請把那段內容移出標記之間，或改用別的字說明"
+            )
+            damaged = True
+            continue
+        regions.append(Region(name, text, found is not None, inner))
+    return Plan(host, path, regions, problems, damaged)
+
+
+def _state_path(home=None):
+    return (Path(home) if home else Path.home()) / ".epitype" / STATE_FILENAME
+
+
+def _written_before(home=None):
+    """我們上次寫進每個 (宿主, 區塊) 的內容指紋。"""
+    try:
+        loaded = json.loads(io.open(_state_path(home), encoding="utf-8").read())
+    except (OSError, ValueError):
+        return {}
+    written = loaded.get("written") if isinstance(loaded, dict) else None
+    return written if isinstance(written, dict) else {}
+
+
+def _remember(home, host, name, text):
+    state = {"written": dict(_written_before(home))}
+    state["written"][f"{host}/{name}"] = _fingerprint(text)
+    try:
+        atomic_write(_state_path(home),
+                     json.dumps(state, ensure_ascii=False).encode("utf-8"))
+    except OSError:
+        pass
+
+
+def _fingerprint(text):
+    return hashlib.sha256(_normalised(text).encode("utf-8")).hexdigest()[:16]
+
+
+def _ours(inner, wanted, host, name, home, legacy=False):
+    """這一塊裡面的內容是不是我們寫的。
+
+    只有認得出是自己寫的才覆蓋。使用者可能在自己的檔案裡引用過我們的標記（說明文件、
+    範本、教學），那一對標記中間是他的字——照覆蓋就是資料損失，而且退出碼還是 0。
+    認得出來的三種：空的、跟這次要寫的一樣、指紋等於我們上次寫進去的那份；規則塊另外
+    認生成器自己的標題行，好讓既有安裝與舊標記遷移得過去。
+    """
+    if not inner.strip():
+        return True
+    if legacy:
+        # 舊標記是前一版同步工具寫下的，那一塊本來就是我們的。
+        return True
+    if _normalised(inner) == _normalised(wanted):
+        return True
+    if _written_before(home).get(f"{host}/{name}") == _fingerprint(inner):
+        return True
+    if name == memspec.HOST_SYNC_RULES_REGION:
+        return inner.lstrip().startswith(memspec.CORE_GEN_OUTPUT_TITLE)
+    return False
 
 
 def _drifted(region):
@@ -181,15 +358,23 @@ def apply(vaults, hosts=None, home=None, output=sys.stdout):
     plans = [plan_for(host, vaults, home) for host in (hosts or installed_hosts(home))]
     refused = written = 0
     for item in plans:
+        for problem in item.problems:
+            print(f"REFUSE {item.host}: {problem}", file=output)
         if item.problems:
-            for problem in item.problems:
-                print(f"REFUSE {item.host}: {problem}", file=output)
             refused += 1
-            continue  # 有問題就整個宿主不寫：半份同步比沒同步更難查
+        # 檔案本身壞了（標記不成對、區塊裡是別人的字）就整個宿主停手。只有「我們要寫的
+        # 內容有問題」那種才逐塊跳過——一塊超過上限不該連累另一塊寫不進去。
+        if item.damaged or not item.regions:
+            continue
+        # 一塊有問題不該連累另一塊：索引超過上限時，規則塊照樣要進得去，不然新使用者
+        # 會落到「規則從來沒到過代理面前」而且看不出原因。
         try:
-            raw = io.open(item.path, encoding="utf-8").read().replace("\r\n", "\n")
-        except OSError:
-            raw = ""
+            original, raw, newline = read_host(item.path)
+        except ValueError as exc:
+            print(f"REFUSE {item.host}: 讀不動這個檔：{exc}", file=output)
+            refused += 1
+            continue
+        raw = raw or ""
         updated = raw
         changed = [region.name for region in item.regions if not region.present or _drifted(region)]
         for region in item.regions:
@@ -197,18 +382,22 @@ def apply(vaults, hosts=None, home=None, output=sys.stdout):
         if updated == raw:
             print(f"OK     {item.host}: 已經一致", file=output)
             continue
+        payload = updated.replace("\n", newline or "\n").encode("utf-8")
         try:
             item.path.parent.mkdir(parents=True, exist_ok=True)
-            if raw:
-                backup = item.path.with_name(item.path.name + memspec.HOST_SYNC_BACKUP_SUFFIX)
-                io.open(backup, "w", encoding="utf-8", newline="\n").write(raw)
-            staging = item.path.with_name(f".{item.path.name}.tmp-{os.getpid()}")
-            io.open(staging, "w", encoding="utf-8", newline="\n").write(updated)
-            os.replace(staging, item.path)
+            if original is not None:
+                # 備份是原檔的位元組副本，不經任何正規化——備份若被動過（例如把 CRLF
+                # 換成 LF），出事時就還原不回原狀，那份備份等於沒有。備份先落盤再換
+                # 正本：兩步都用同一套原子寫入，所以正本被換掉時備份一定已經在。
+                atomic_write(item.path.with_name(
+                    item.path.name + memspec.HOST_SYNC_BACKUP_SUFFIX), original)
+            atomic_write(item.path, payload)
         except OSError as exc:
             print(f"REFUSE {item.host}: 寫入失敗 {type(exc).__name__}: {exc}", file=output)
             refused += 1
             continue
+        for region in item.regions:
+            _remember(home, item.host, region.name, region.text)
         written += 1
         print(f"WROTE  {item.host}: {'、'.join(changed) or '標記整理'} → {item.path}", file=output)
     if not plans:
@@ -242,6 +431,25 @@ def _selftest():
             checks.append((
                 "兩個宿主目錄都在，就認得兩個宿主",
                 installed_hosts(home) == ["claude", "codex"],
+            ))
+
+            # 專案庫的規則不得被升格成跨專案契約。
+            project = root / "project-vault"
+            project.mkdir()
+            (project / "rule-project-only.md").write_text(
+                "---\nname: rule-project-only\ndescription: 2026-09-17 只屬於這個專案\n"
+                "layer: resident\nsection: execution\norder: 10\n"
+                "text: Project scoped rule that must not reach the global contract.\n"
+                "decided_by: owner-explicit\napproved_by: owner\napproved_at: 2026-09-17\n"
+                "aliases: [專案規則]\nmetadata:\n  type: rule\n---\nbody\n",
+                encoding="utf-8",
+            )
+            (vault / memspec.WORK_LEDGER_FILENAME).write_text("# 帳本\n", encoding="utf-8")
+            contract = rules_text([project, vault], "claude")
+            checks.append((
+                "多個庫時只收治理庫（拿著工作帳本的那一個）的規則",
+                contract_vaults([project, vault]) == [vault]
+                and "Project scoped rule" not in contract,
             ))
 
             code = apply([vault], home=home, output=io.StringIO())
@@ -288,8 +496,10 @@ def _selftest():
             legacy_begin, legacy_end = memspec.HOST_SYNC_LEGACY_MARKERS[
                 memspec.HOST_SYNC_RULES_REGION]
             codex = host_path("codex", home)
+            # 舊區塊裡放的是前一版同步工具真的會寫的東西（生成器自己的標題行開頭）。
+            old_block = memspec.CORE_GEN_OUTPUT_TITLE + "\n舊內容\n"
             codex.write_text(
-                f"序言\n\n{legacy_begin}\n舊內容\n{legacy_end}\n\n結尾\n", encoding="utf-8")
+                f"序言\n\n{legacy_begin}\n{old_block}{legacy_end}\n\n結尾\n", encoding="utf-8")
             apply([vault], hosts=["codex"], home=home, output=io.StringIO())
             migrated = codex.read_text(encoding="utf-8")
             checks.append((
@@ -325,6 +535,84 @@ def _selftest():
                 code == EXIT_REFUSED and "index" in report.getvalue(),
             ))
 
+            # 以下六項來自 2026-09-17 的對抗審查。原本的 selftest 十項全綠卻一項都
+            # 沒蓋到——它測的是作者預期的路徑，等於自我認證。
+            def fresh(name, text, binary=False):
+                target = home / ".claude" / "CLAUDE.md"
+                target.write_bytes(text) if binary else target.write_text(text, encoding="utf-8")
+                return target
+
+            # 1. 標記字串出現在使用者自己寫的內容裡，不得把他的字吃掉。
+            demo = fresh("demo", f"我的筆記\n\n示範：區塊長這樣\n{begin}\n我自己的心得\n{end}\n")
+            report = io.StringIO()
+            code = apply([vault], hosts=["claude"], home=home, output=report)
+            kept = demo.read_text(encoding="utf-8")
+            checks.append((
+                "標記出現在使用者自己的內容裡：他的字要留著，不是被整段覆蓋",
+                "我的筆記" in kept and "我自己的心得" in kept,
+            ))
+
+            # 2. CRLF 的檔：行尾不得被整份改掉，備份要是原檔的位元組副本。
+            crlf_body = "我的標題\r\n\r\n第二行\r\n"
+            target = fresh("crlf", crlf_body.encode("utf-8"), binary=True)
+            original_bytes = target.read_bytes()
+            apply([vault], hosts=["claude"], home=home, output=io.StringIO())
+            after_bytes = target.read_bytes()
+            backup_path = target.with_name(target.name + memspec.HOST_SYNC_BACKUP_SUFFIX)
+            checks.append((
+                "CRLF 檔的行尾保持 CRLF，備份與原檔逐位元組相同",
+                b"\r\n" in after_bytes
+                and "第二行\r\n".encode("utf-8") in after_bytes
+                and backup_path.read_bytes() == original_bytes,
+            ))
+
+            # 3. 非 UTF-8 的檔：明說讀不動，不是丟一個看不懂的例外。
+            fresh("big5", "中文內容\n".encode("big5"), binary=True)
+            report = io.StringIO()
+            code = apply([vault], hosts=["claude"], home=home, output=report)
+            checks.append((
+                "非 UTF-8 的宿主檔：明說讀不動並拒絕，不丟例外",
+                code == EXIT_REFUSED and "不是 UTF-8" in report.getvalue(),
+            ))
+
+            # 4. 要寫的內容自己含標記：現在就拒絕，不要製造一個永遠修不好的檔。
+            poisoned = root / "poisoned"
+            poisoned.mkdir()
+            (poisoned / memspec.HOST_SYNC_INDEX_FILENAME).write_text(
+                f"# 入口\n\n說明：Epitype 會寫在 {begin} 與 {end} 之間。\n", encoding="utf-8")
+            report = io.StringIO()
+            code = check([poisoned], hosts=["codex"], home=home, output=report)
+            checks.append((
+                "要寫的內容自己含標記就拒絕，理由指名是哪一塊",
+                code == EXIT_REFUSED and "區塊標記本身" in report.getvalue(),
+            ))
+
+            # 5. 舊標記與新標記並存：舊的那一塊要消失，不能兩份規則各說各話。
+            generated = memspec.CORE_GEN_OUTPUT_TITLE
+            both = fresh(
+                "both",
+                f"序言\n\n{legacy_begin}\n{generated}\n舊規則\n{legacy_end}\n\n"
+                f"{begin}\n{generated}\n新規則\n{end}\n",
+            )
+            apply([vault], hosts=["claude"], home=home, output=io.StringIO())
+            merged = both.read_text(encoding="utf-8")
+            checks.append((
+                "新舊標記並存時，舊的那一塊整段移除",
+                legacy_begin not in merged and "舊規則" not in merged
+                and merged.count(begin) == 1 and "序言" in merged,
+            ))
+
+            # 6. 一塊超過上限不該連累另一塊。
+            report = io.StringIO()
+            fresh("cap", "使用者序言\n")
+            code = apply([big], hosts=["claude"], home=home, output=report)
+            capped = (home / ".claude" / "CLAUDE.md").read_text(encoding="utf-8")
+            checks.append((
+                "索引超過上限時，規則塊照樣寫得進去",
+                "REFUSE" in report.getvalue() and begin in capped
+                and "使用者序言" in capped,
+            ))
+
             # 沒有宿主目錄的家目錄：不生出使用者沒有的宿主。
             bare = root / "bare-home"
             bare.mkdir()
@@ -337,7 +625,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 10
+    total = 17
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
