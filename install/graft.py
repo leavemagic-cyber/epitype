@@ -1583,6 +1583,11 @@ def _install(
         # 規則，代理卻永遠讀不到——而且看不出少了什麼。裝的時候順手做掉，使用者不必
         # 知道有這個指令。同步失敗不讓安裝失敗：hook 已經裝好、卡片庫已經能用。
         try:
+            # 直接跑 `python install/graft.py` 時 sys.path[0] 是 install\，`epitype` 匯
+            # 不進來——而那正是文件與安裝器自己印出來的呼叫形式。以前這裡會安靜地跳過
+            # 整個傳動軸、照樣回報安裝成功，使用者的 CLAUDE.md 一個字都沒有。
+            if str(repo_root) not in sys.path:
+                sys.path.insert(0, str(repo_root))
             from epitype import host_sync
 
             host_sync.apply(vaults, home=home, output=output)
@@ -1769,9 +1774,27 @@ def _uninstall(home, dry_run=False, output=sys.stdout, scheduler=None):
 
         if config_dir.exists():
             print(f"{'DRY-RUN remove' if dry_run else 'REMOVE'} config directory: {config_dir}", file=output)
+        # 寫進宿主檔的規則塊也要拿回來。不拿的話，那兩個檔會永遠留著一段「由卡片生成、
+        # 勿手改」的文字，而生成它的東西已經被刪掉了——每一場都載入一份沒有主人的規則。
+        # 寫得進使用者的全域指令檔，就必須拿得回來，而且要在刪掉設定目錄之前做（狀態檔
+        # 就在裡面）。
+        print(f"{'DRY-RUN remove' if dry_run else 'REMOVE'} host file blocks", file=output)
         if dry_run:
             print("DRY-RUN complete; no files changed.", file=output)
             return 0
+        try:
+            if str(REPO_ROOT) not in sys.path:
+                sys.path.insert(0, str(REPO_ROOT))
+            from epitype import host_sync
+
+            host_sync.remove(home=home, output=output)
+        except Exception as exc:
+            print(f"HOST BLOCK REMOVAL FAILED: {type(exc).__name__}: {exc}", file=output)
+            print(
+                "  請自行跑：python -m epitype.host_sync --remove"
+                "（或手動刪掉 CLAUDE.md／AGENTS.md 裡 EPITYPE 標記之間的區塊）",
+                file=output,
+            )
         if config_dir.exists():
             shutil.rmtree(config_dir)
         print("UNINSTALL REPORT", file=output)

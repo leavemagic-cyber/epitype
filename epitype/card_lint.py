@@ -142,7 +142,9 @@ def _arming_findings(fields, counts, card_type, today):
     方寫的，不綁自己的寫法永遠比較省事，所以這個選擇不能留給寫卡的人默默做。
 
     存量卡 WARN（讓數字看得見而不是一次判掉幾百張），裁定日之後建立的卡 FAIL。"""
-    if card_type != memspec.CARD_TYPE_FEEDBACK:
+    # 只認 feedback 的話，兩行 `metadata: type: habit` 就整條繞過去了，而文件寫的是
+    # 「與卡片型別無關」。行為卡的型別不只一種，所以按型別收窄的那一份名單才是正本。
+    if card_type not in memspec.CARD_ARMING_TYPES:
         return []
     if fields.get(memspec.UNENFORCEABLE_FIELD, "").strip():
         return []
@@ -204,8 +206,11 @@ def _pattern_findings(fields, front_lines):
     for pattern in patterns:
         problem = memspec.pattern_problem(pattern)
         if problem:
+            # WARN 而不是 FAIL：閘的正本行為是退回逐字比對，那張卡照樣在擋。判死的話，
+            # 一張 forbidden 寫 Windows 路徑（`C:\Users\…` 的 `\U` 編不起來）的卡會被
+            # 寫檔閘直接拒絕，而使用者根本沒有別的欄位可以說「我本來就是要逐字比對」。
             findings.append((
-                FAIL, "pattern",
+                WARN, "pattern",
                 memspec.CARD_PATTERN_BROKEN_REASON.format(
                     pattern=pattern[:60], reason=problem),
             ))
@@ -1090,13 +1095,13 @@ def _selftest():
                 "scar FAIL: 缺 advice、incident；殘留的 trigger 只是已停用欄位的 WARN",
                 card is not None
                 and card["type"] == memspec.CARD_TYPE_SCAR
-                and rules == {(FAIL, "required"), (WARN, "deprecated-field")}
+                and rules == {(FAIL, "required"), (WARN, "deprecated-field"), (WARN, "unarmed")}
                 and sum(1 for item in card["findings"] if item["level"] == FAIL) == 2,
             ))
             rules, card = _findings_of(report, "scar-good.md")
             checks.append((
-                "scar WARN only: 自報型別＋advice＋incident 齊備，只剩過期警告",
-                card is not None and rules == {(WARN, "expired")},
+                "scar WARN only: 自報型別＋advice＋incident 齊備；過期警告，外加還沒表態擋不擋",
+                card is not None and rules == {(WARN, "expired"), (WARN, "unarmed")},
             ))
             rules, card = _findings_of(report, "trigger-retired.md")
             checks.append((
@@ -1124,7 +1129,8 @@ def _selftest():
             rules, card = _findings_of(report, "corrections/correction-bad.md")
             checks.append((
                 "correction FAIL: 缺 description",
-                card is not None and card["type"] == memspec.CARD_TYPE_CORRECTION and rules == {(FAIL, "required")},
+                card is not None and card["type"] == memspec.CARD_TYPE_CORRECTION
+                and rules == {(FAIL, "required"), (WARN, "unarmed")},
             ))
             checks.append((
                 "ruling 欄位齊備即無 finding，且不因缺 aliases 被點名",
@@ -1360,7 +1366,7 @@ def _selftest():
             git_rules, git_card = _findings_of(git_report, "git-dated.md")
             checks.append((
                 "非 git repo 的庫：四來源皆無就是 FAIL",
-                git_card is not None and git_rules == {(FAIL, "date")},
+                git_card is not None and git_rules == {(FAIL, "date"), (WARN, "unarmed")},
             ))
             if _git_commit_fixture(git_vault, "2026-08-01T00:00:00"):
                 git_report = scan_vault(git_vault, today=today)
@@ -1368,7 +1374,7 @@ def _selftest():
                 checks.append((
                     "vault 是 git repo 時，首次提交日推得日期＝WARN date-derived",
                     git_card is not None
-                    and git_rules == {(WARN, "date-derived")}
+                    and git_rules == {(WARN, "date-derived"), (WARN, "unarmed")}
                     and git_card["derived_date"] == "2026-08-01"
                     and memspec.CARD_DATE_SOURCE_GIT
                     in _reason_of(git_report, "git-dated.md", "date-derived"),

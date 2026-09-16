@@ -493,15 +493,17 @@ REHEARSAL_MIN_CHANCES = 40
 
 
 def demoted_cards(vault):
-    """目前只計數、不攔的卡名；過期的自動恢復。"""
-    from datetime import date
+    """永遠是空的：自動降級已經拿掉。
 
-    today = date.today().isoformat()
-    return {
-        name for name, entry in load_health(vault).items()
-        if isinstance(entry, dict) and entry.get("demoted_since")
-        and str(entry.get("demoted_until", "")) >= today
-    }
+    命中率分不出「規則太寬」與「我一直犯這條」。2026-09-17 驗收實跑：一條 6 次命中、
+    6 次全部擋下、0 漏擋的規則，率 0.12 就被關掉 14 天，連 heredoc 那張安全守衛卡都一
+    起關——規則因為正常運作而失效，而且受管制的那一方自己就能觸發。判準錯了就不是調
+    門檻的問題。彩排的數字照算、照存，給寫規則的人看；沒有任何東西會因為它而停止攔截。
+
+    留著這個函式是為了讓兩道閘的呼叫端不必分岔，也讓「有沒有東西被自動關掉」這件事
+    有一個確定的答案。
+    """
+    return set()
 
 
 HEALTH_FILENAME = "gate_health.json"
@@ -643,18 +645,13 @@ def _fold_rehearsal(entry, rule, measured, today):
     entry["pattern_digest"] = digest
     entry["rehearsed"] = {"matches": matches, "chances": chances, "rate": rate,
                           "on": today.isoformat()}
-    if chances < REHEARSAL_MIN_CHANCES:
-        return  # 機會太少，比率說明不了什麼，維持現狀
-    if rate > REHEARSAL_MAX_RATE:
-        entry.setdefault("demoted_since", today.isoformat())
-        # 降級也要有到期日：夜跑一停，沒有到期日的降級就是永久靜音。
-        entry["demoted_until"] = (today + timedelta(days=DEMOTION_TTL_DAYS)).isoformat()
-        if changed:
-            # 改過之後才變這麼寬：記下來，讓「這一版比它取代的那一版差」看得見。
-            entry["broadened_at"] = today.isoformat()
-    else:
-        entry.pop("demoted_since", None)
-        entry.pop("demoted_until", None)
+    # 數字只記不動作。以前這裡會把命中率高的卡關掉，而命中率高分不出「太寬」與「我一直
+    # 犯」——留下的是紀錄，判斷交給寫規則的人。
+    entry.pop("demoted_since", None)
+    entry.pop("demoted_until", None)
+    if chances >= REHEARSAL_MIN_CHANCES and rate > REHEARSAL_MAX_RATE and changed:
+        # 改過之後才變這麼寬：記下來，讓「這一版比它取代的那一版差」看得見。
+        entry["broadened_at"] = today.isoformat()
 
 
 def update_health(vault, rules, hits, today, noops=(), rehearsed=None):
@@ -954,9 +951,10 @@ def _selftest():
                           rehearsed={"寬樣式": (20, 100, 0.20)})
             entry = load_health(vault)["寬樣式"]
             checks.append((
-                "超過門檻就自動降級成只計數不攔，而且帶到期日",
-                demoted_cards(vault) == {"寬樣式"}
-                and entry.get("demoted_until", "") > entry.get("demoted_since", ""),
+                "命中率只記不動作：再高也不會有任何卡被自動關掉",
+                demoted_cards(vault) == set()
+                and "demoted_since" not in entry
+                and entry["rehearsed"]["rate"] == 0.20,
             ))
             update_health(vault, [wide], [], day, rehearsed={"寬樣式": (2, 100, 0.02)})
             checks.append((

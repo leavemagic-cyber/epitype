@@ -971,6 +971,11 @@ HOST_SYNC_MISSING_MARKER_REASON = (
 # 的欄位，或寫出 unenforceable 與理由——當著 owner 的面說「這條綁不住」。
 # 存量卡只判 WARN（數字看得見），裁定日之後的新卡判 FAIL。
 UNENFORCEABLE_FIELD = "unenforceable"
+# 哪些型別的卡要回答「你擋得住嗎」。行為卡不只 feedback 一種：糾正、傷疤、習慣偏好都
+# 是在記「以後要怎麼做」。只認 feedback 的話，兩行 metadata 改個型別就整條繞過去了。
+# 不收的是「記事實」的那幾種：決策鏈、專案、參考、待辦、授權、使用者資料、規則卡
+# （規則卡走生成核心那條路，本來就會到達代理面前）。
+CARD_ARMING_TYPES = ("feedback", "correction", "scar", "habit")
 CARD_ARMING_REQUIRED_FROM = "2026-09-16"
 CARD_ARMING_FIELDS = (FORBIDDEN_FIELD, ACTION_GUARD_TOOL_FIELD, REQUIRE_WHEN_FIELD)
 CARD_UNARMED_REASON = (

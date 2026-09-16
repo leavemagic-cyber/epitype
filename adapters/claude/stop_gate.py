@@ -269,7 +269,10 @@ def _decisions(vault, started_at, defects=None):
         )
     if verified != old_manifest or rulings != cached or cursor != old_cursor:
         _write_cache(cache_path, verified, rulings, cursor)
-    return [] if expired(started_at) else found
+    # 逾時要回「已經讀到的那些」，不是整批丟掉。以前逾時一律回空，整個庫零條生效，而
+    # 上面那行「只檢查了 N/M 張」因此永遠是假的——實際是 0。已經讀出來的裁定是這一輪
+    # 真正讀過的位元組，拿它們去比對只會多擋，不會亂擋。
+    return found
 
 
 def _priority_key(vault, rulings):

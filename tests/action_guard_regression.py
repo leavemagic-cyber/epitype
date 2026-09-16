@@ -416,7 +416,7 @@ class GuardCardLint(unittest.TestCase):
             "status: active\ncurrent_decision_at: 2026-09-17\ndecided_by: owner-explicit\n"
             "owner_quote: x\naliases: [甲名, 乙名]\nforbidden:\n  - a(b\n---\nbody\n",
         )
-        self.assertIn(("FAIL", "pattern"), rules)
+        self.assertIn(("WARN", "pattern"), rules)
         reason = next(r for lvl, rule, r in findings if rule == "pattern")
         self.assertIn("逐字比對", reason)
 
@@ -428,7 +428,7 @@ class GuardCardLint(unittest.TestCase):
             "owner_quote: x\naliases: [丙名, 丁名]\nforbidden:\n  - " + ("x" * 1100)
             + "\n---\nbody\n",
         )
-        self.assertIn(("FAIL", "pattern"), rules)
+        self.assertIn(("WARN", "pattern"), rules)
 
     def test_an_unknown_guard_tool_is_reported(self):
         rules, _ = self.findings(

@@ -105,7 +105,7 @@ UserPromptSubmit 只端卡片。細節與量測見 `docs/FAILURE_MODES.md` §32 
 
 ### 整理會自己跑（夢）
 
-離線整理批次不必等人想起來。預設 `dream.mode: piggyback`：開場時若距上次整理超過 `dream.interval_hours`（預設 24 小時），就起一個脫鉤的低優先權背景程序，開場本身不等它；lock 檔帶 pid 與時間，逾 30 分鐘視為死鎖可覆蓋，所以同一時間只會有一個。想用系統排程就 `graft install --dream nightly [--at HH:MM]` 註冊每日任務（`graft doctor` 顯示模式與上次完成時間，`graft uninstall` 反註冊），`--dream off` 則兩者都不做。背景那一趟只讀 vault，只寫 `<治理 vault>/.epitype/` 底下的審核包、狀態與 log，自己抓十分鐘時限；順路收割新素材成草稿，已經入庫的卡一張都不動，下一場開場用一行說明結果。最後一節是回饋檢討包：被 owner 事件、閘門擋下或考題失敗指到的卡各一列，列數滿門檻（`memspec.REVIEW_PACK_TRIGGER`，5）才提醒該開一場檢討；它不判斷、不改任何一張卡。全程不呼叫模型——整理的模型那半永遠手動，分享版不會偷跑你的模型額度。
+離線整理批次不必等人想起來。預設 `dream.mode: piggyback`：開場時若距上次整理超過 `dream.interval_hours`（預設 24 小時），就起一個脫鉤的低優先權背景程序，開場本身不等它；lock 檔帶 pid 與時間，逾 30 分鐘視為死鎖可覆蓋，所以同一時間只會有一個。想用系統排程就 `graft install --dream nightly [--at HH:MM]` 註冊每日任務（`graft doctor` 顯示模式與上次完成時間，`graft uninstall` 反註冊），`--dream off` 則兩者都不做。背景那一趟自己抓十分鐘時限，會寫三個地方：`<治理 vault>/.epitype/` 底下的審核包、狀態、log 與閘門健康度；索引漂掉時的治理庫 `MEMORY.md`；以及——這一項值得知道，因為它是無人看著的時候發生的——`~/.claude/CLAUDE.md` 與 `~/.codex/AGENTS.md` 裡標記之間的區塊，所以你改了一張規則卡，隔天早上代理讀到的就是新的，不必記得跑任何指令。只動標記之間，寫之前先備份，`epitype sync --remove`（或 `graft uninstall`）可以整段拿回去。順路收割新素材成草稿，已經入庫的卡一張都不動，下一場開場用一行說明結果。最後一節是回饋檢討包：被 owner 事件、閘門擋下或考題失敗指到的卡各一列，列數滿門檻（`memspec.REVIEW_PACK_TRIGGER`，5）才提醒該開一場檢討；它不判斷、不改任何一張卡。全程不呼叫模型——整理的模型那半永遠手動，分享版不會偷跑你的模型額度。
 
 ### 失敗會留下證據
 
