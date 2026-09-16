@@ -63,16 +63,35 @@ Memory is usually delivered as advisory context. Enforcement hooks may exist, bu
 
 ### Epitype countermeasure
 
-2026-09-09 (§34) settled where the enforcement belongs. A card is advisory context; it never refuses a tool call. Two things Epitype does refuse, both content the model is about to commit and neither expressible as a host rule: the write gate checks the text a file write would land against the owner's settled `forbidden` patterns and against `card_lint`'s contract for the card's own type, and the Stop gate checks the last assistant message of a turn against the same rulings through the same validator. Both append an audit row naming the rule, the ruling and the filename — never the content. Irreversible *actions* — destructive git, killing the host process, reading credential material — are the host's own native rules (Claude `permissions.deny`, Codex `execpolicy`), which refuse the call before it runs and cannot be turned off by a malformed card.
+2026-09-09 (§34) settled where the enforcement belongs, and 2026-09-16 corrected one half of that settlement after testing its premise.
+
+What Epitype refuses on content, unchanged since §34: the write gate checks the text a file write would land against the owner's settled `forbidden` patterns and against `card_lint`'s contract for the card's own type, and the Stop gate checks the last assistant message of a turn against the same rulings through the same validator. Both append an audit row naming the rule, the ruling and the filename — never the content.
+
+**The premise that failed.** §34 removed card-driven action interception on the understanding that irreversible actions would move to the host's own native rules (Claude `permissions.deny`, Codex `execpolicy`). Four of nine hazard classes moved across. The remaining five could not: Claude's Bash permission patterns match the command text positionally with no AND operator, and the documentation states they "aren't a security boundary". A rule written for the heredoc hazard was installed and verified not to block anything. Those five classes were therefore homeless for a week, and on 2026-09-16 one of them — a heredoc eating one level of backslashes — was hit four times in a single session with the lesson already carded three times over.
+
+**What came back, and how narrow it is.** The owner lifted the "cards may not carry an action condition" half of §34 that day. A card may declare `guard_tool` plus `guard_all_of`, a list of literal fragments; the call is denied only when *every* fragment appears in the call's own text. §34's three objections were each answered rather than waived:
+
+- *A regex cannot be a shell parser.* There is no regex. `fragment in text` does not claim to parse a shell, so it neither over-matches greedily nor misses on quoting rules. It over-approximates toward denial, which is the safe direction.
+- *Every tool call pays for it.* `PreToolUse` already runs for the write gate, and guard discovery shares the same manifest-cache design as the Stop gate's rulings, so the marginal cost is a few substring checks.
+- *A mis-written card fails silently.* `card_lint` FAILs a guard with no fragments, too many fragments, or a single fragment short enough to disable a whole tool — and FAILs any card whose gate fields were written one level deep, which is a real disarming seen the same day. A card the adapter cannot use is named on stderr instead of being dropped.
+
+**The third shape, for rules whose compliance is invisible.** A large class of rule is "do this first" — verify before claiming done, read the canonical before answering — and whether it was done happens out of sight. Restating the rule as *if you did it, say so* moves the omission into the message, where a string check reaches it: a card names `require_when` (the condition) and `require_text` (what must also appear), and the turn is blocked when the first matches and the second does not. The step is not merely skippable-but-noticed; skipping it while claiming otherwise stops being an omission and becomes a false statement, which the honesty floor already governs.
+
+**Arming is independent of card type.** The Stop gate reads any card that declares `forbidden` or `require_when`, not only cards carrying a `decision_key`, and `card_lint` requires every behaviour card to declare one of the arming fields or an explicit `unenforceable:` reason. The two halves have to match: a lint that tells an author to add `forbidden` while the gate reads only decision cards would hand out silent disarming as advice — which is exactly what happened on 2026-09-16 before the gate was widened, leaving six freshly armed cards inert.
+
+What did **not** come back: semantic judgement, intent, and any opinion about a command a card has not named. Genuinely irreversible actions — destructive git, killing the host process, reading credential material — remain the host's native rules, which refuse the call before it runs and cannot be turned off by a malformed card.
 
 ### Self-verification
 
 ```powershell
 python adapters/claude/pretooluse_gate.py --selftest
 python adapters/claude/stop_gate.py --selftest
+python tests/action_guard_regression.py
 ```
 
-The write gate's selftest covers a forbidden-content denial, the ruling text in the reason, an audit row that carries no content, the card contract's FAIL and WARN levels, the same-session dedupe, and fail-open handling of an unusable pattern — plus the negative half of §34: a card that still declares `trigger:` denies nothing and audits nothing.
+The write gate's selftest covers a forbidden-content denial, the ruling text in the reason, an audit row that carries no content, the card contract's FAIL and WARN levels, the same-session dedupe, and fail-open handling of an unusable pattern — plus the surviving negative half of §34: a card that still declares the retired `trigger:` field denies nothing and audits nothing.
+
+The action-guard regression pins both halves of the 2026-09-16 correction. A guard denies when all of its fragments are present, and does not when any one is missing, when the tool is not its own, or when no card names the command at all — the four hazards §34 retired stay retired unless a card names them. It also fires every time rather than once per session, since a guard that stopped guarding after one hit would pass exactly the repeat it exists to prevent. On the lint side it pins that a nested gate field and an over-wide lone fragment are both FAIL.
 
 ## 4. Evaluation measures recall, not conduct
 

@@ -29,6 +29,7 @@ from _hook_common import (
     append_gate_log,
     clear_recall_markers,
     compile_bounded_regex,
+    declared_frontmatter,
     emit,
     expired,
     governance_vault,
@@ -37,6 +38,7 @@ from _hook_common import (
     read_event,
     recall_marker_directory,
     run_synthetic,
+    sequence_fields,
     with_session,
     write_config,
 )
@@ -48,12 +50,23 @@ _WHITESPACE_REGEX = re.compile(r"\s+")
 _FORBIDDEN_RULE = "forbidden"
 _QUESTION_RULE = "question"
 _DECISION_CACHE_FILENAME = "stop_decisions.json"
+# The cached entry is discovery only — whether this card declares a ruling at all.
+# Every authority the gate acts on is re-read from this turn's bytes below, so a
+# ruling that gained fields (require_when/require_text/advice) needs no version bump.
 _DECISION_CACHE_VERSION = 3
 _KEY = "key"
 _DECIDED_AT = "decided_at"
 _QUOTE = "quote"
 
-_Decision = namedtuple("_Decision", "key decided_at quote forbidden aliases path decided_by")
+_REQUIRE_RULE = "require"
+_REQUIRE_WHEN = "require_when"
+_REQUIRE_TEXT = "require_text"
+_ADVICE = "advice"
+
+_Decision = namedtuple(
+    "_Decision",
+    "key decided_at quote forbidden aliases path decided_by require_when require_text advice",
+)
 
 
 def _one_line(value):
@@ -69,83 +82,25 @@ def _normalized(text):
 
 
 def _decision_frontmatter(path):
-    """Frontmatter lines of a card that declares a decision key, else None.
+    """Frontmatter of a card this gate rules on: a decision, or any card that arms.
 
-    Only the head of the file is read: a card's frontmatter sits at the top, and a
-    Stop hook that read every card's body would cost more than the turn it guards.
-    A card whose frontmatter does not close inside that head is skipped rather than
-    guessed at — half a card's fields could name a ruling that is not there."""
-    try:
-        with path.open("rb") as stream:
-            head = stream.read(memspec.STOP_GATE_FRONTMATTER_MAX_BYTES)
-    except OSError:
-        return None
-    try:
-        # A bounded read may cut a valid UTF-8 body character after the closing
-        # boundary. Only an incomplete final character may wait for more bytes.
-        text = codecs.getincrementaldecoder("utf-8")().decode(head, final=False)
-        lines, closing = memspec.split_frontmatter(text)
-    except UnicodeError:
-        return None
-    if lines is None or closing is None:
-        return None
-    declares = any(
-        line[:1] not in " \t"
-        and ":" in line
-        and line.split(":", 1)[0].strip() == memspec.DECISION_KEY_FIELD
-        for line in lines
-    )
-    return lines if declares else None
-
-
-def _sequence_fields(front_lines, top_level_field, inline_items):
-    """Values of the two sequence fields the gate rules on: aliases and forbidden.
-
-    memspec.frontmatter_fields yields top-level scalars only, memsearch yields
-    aliases only, and card_lint yields item counts only — none of the three yields
-    `forbidden`'s values. The primitives are still the shared ones (split_frontmatter,
-    parse_scalar, memspec.split_flow_items), so a card cannot be one shape here
-    and another shape to the lints."""
-    wanted = (memspec.ALIASES_FIELD, memspec.FORBIDDEN_FIELD)
-    values = {key: [] for key in wanted}
-    parent = None
-    for raw_line in front_lines:
-        stripped = raw_line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        leading = raw_line[: len(raw_line) - len(raw_line.lstrip())]
-        if "\t" in leading:
-            parent = None
-            continue
-        if leading:
-            if parent and (stripped == "-" or stripped.startswith("- ")):
-                item, _problem = memspec.parse_scalar(stripped[1:])
-                if item:
-                    values[parent].append(item)
-            continue
-        parent = None
-        match = top_level_field.match(raw_line)
-        if match is None:
-            continue
-        key, raw_value = match.groups()
-        if key not in wanted:
-            continue
-        inline = memspec.strip_inline_comment(raw_value).strip()
-        if inline in memspec.BLOCK_SCALAR_STYLES:
-            continue
-        if inline.startswith("[") and inline.endswith("]"):
-            for piece in inline_items(inline[1:-1]):
-                item, _problem = memspec.parse_scalar(piece)
-                if item:
-                    values[key].append(item)
-            continue
-        if inline:
-            item, _problem = memspec.parse_scalar(raw_value)
-            if item:
-                values[key].append(item)
-            continue
-        parent = key
-    return values
+    Arming must not depend on the card's type. card_lint tells the author of a
+    behaviour card to add `forbidden` or `require_when`; if only decision-keyed cards
+    were read, following that instruction would enforce nothing — the same silent
+    disarming this gate exists to prevent, arriving through the lint's own advice
+    (2026-09-16: six freshly armed behaviour cards were inert for exactly this
+    reason)."""
+    for field in (
+        memspec.DECISION_KEY_FIELD,
+        memspec.FORBIDDEN_FIELD,
+        memspec.REQUIRE_WHEN_FIELD,
+    ):
+        lines = declared_frontmatter(
+            path, field, memspec.STOP_GATE_FRONTMATTER_MAX_BYTES
+        )
+        if lines is not None:
+            return lines
+    return None
 
 
 def _read_decision(path):
@@ -162,9 +117,18 @@ def _read_decision(path):
         return None
     fields, _problem = memspec.frontmatter_text("---\n" + "\n".join(front_lines) + "\n---\n")
     key = _one_line(fields.get(memspec.DECISION_KEY_FIELD))
-    if not key or _one_line(fields.get(memspec.DECISION_STATUS_FIELD)) != memspec.ACTIVE_DECISION_STATUS:
-        return None
-    sequences = _sequence_fields(front_lines, memspec.TOP_LEVEL_FIELD, memspec.split_flow_items)
+    status = _one_line(fields.get(memspec.DECISION_STATUS_FIELD))
+    if key:
+        # A ruling speaks only while it is the current one.
+        if status != memspec.ACTIVE_DECISION_STATUS:
+            return None
+    else:
+        # A behaviour card arms without carrying a ruling of its own; it is named by
+        # its own name, and anything retired or superseded stops speaking.
+        key = _one_line(fields.get(memspec.NAME_FIELD))
+        if not key or status in memspec.STOP_GATE_SILENT_STATUSES:
+            return None
+    sequences = sequence_fields(front_lines, (memspec.ALIASES_FIELD, memspec.FORBIDDEN_FIELD))
     decided_by = _one_line(fields.get(memspec.DECIDED_BY_FIELD))
     quote = _one_line(fields.get(memspec.OWNER_QUOTE_FIELD))
     if not quote and decided_by != memspec.OWNER_EXPLICIT_DECIDER:
@@ -176,6 +140,11 @@ def _read_decision(path):
         _QUOTE: quote[: memspec.STOP_GATE_QUOTE_MAX_CHARS],
         memspec.FORBIDDEN_FIELD: sequences[memspec.FORBIDDEN_FIELD],
         memspec.ALIASES_FIELD: sequences[memspec.ALIASES_FIELD],
+        _REQUIRE_WHEN: _one_line(fields.get(memspec.REQUIRE_WHEN_FIELD)),
+        _REQUIRE_TEXT: _one_line(fields.get(memspec.REQUIRE_TEXT_FIELD)),
+        _ADVICE: _one_line(fields.get(memspec.DESCRIPTION_FIELD))[
+            : memspec.STOP_GATE_QUOTE_MAX_CHARS
+        ],
     }
 
 
@@ -281,6 +250,9 @@ def _decisions(vault, started_at):
                 tuple(_strings(ruling.get(memspec.ALIASES_FIELD))),
                 vault / card_path,
                 _one_line(ruling.get(memspec.DECIDED_BY_FIELD)),
+                _one_line(ruling.get(_REQUIRE_WHEN)),
+                _one_line(ruling.get(_REQUIRE_TEXT)),
+                _one_line(ruling.get(_ADVICE)),
             )
         )
     if verified != old_manifest or rulings != cached or cursor != old_cursor:
@@ -341,6 +313,52 @@ def _forbidden_fragment(decision, message, defects):
                 continue
             return _one_line(found.group(0)) or _one_line(pattern)
     return None
+
+
+def _requirement_gap(decision, message, defects):
+    """The trigger fragment when this turn owes the card's required text and lacks it.
+
+    Whole classes of rule are "do this first", and whether I did it is invisible from
+    outside. The conversion is to require that doing it leaves a mark in the message:
+    the rule stops asking for the unobservable act and asks for the sentence that
+    reports it. Omission then becomes checkable, and a fabricated mark is no longer a
+    skipped step but a false statement, which the honesty floor already governs.
+
+    A pattern the shared validator rejects is dropped and named on stderr: a
+    requirement nobody can fix must not block every turn forever."""
+    if not decision.require_when or not decision.require_text:
+        return None
+    patterns = {}
+    for field, pattern in (
+        (memspec.REQUIRE_WHEN_FIELD, decision.require_when),
+        (memspec.REQUIRE_TEXT_FIELD, decision.require_text),
+    ):
+        try:
+            patterns[field] = compile_bounded_regex(pattern)
+        except Exception as exc:
+            defects.append(
+                memspec.STOP_GATE_PATTERN_DEFECT.format(
+                    decision=decision.key,
+                    pattern=_one_line(pattern)[: memspec.STOP_GATE_FRAGMENT_MAX_CHARS],
+                    reason=f"{field}: {type(exc).__name__}: {exc}",
+                )
+            )
+            return None
+    quoted = _quoted_spans(message)
+
+    def outside_quotes(regex):
+        for found in regex.finditer(message):
+            if any(start <= found.start() and found.end() <= end for start, end in quoted):
+                continue
+            return found
+        return None
+
+    triggered = outside_quotes(patterns[memspec.REQUIRE_WHEN_FIELD])
+    if triggered is None:
+        return None
+    if outside_quotes(patterns[memspec.REQUIRE_TEXT_FIELD]) is not None:
+        return None
+    return _one_line(triggered.group(0))[: memspec.STOP_GATE_FRAGMENT_MAX_CHARS]
 
 
 def _is_question(sentence):
@@ -465,6 +483,24 @@ def _verdict(event, message, config, started_at, defects):
                         decision=_named(decision),
                         quote=decision.quote,
                         fragment=fragment[: memspec.STOP_GATE_FRAGMENT_MAX_CHARS],
+                    ),
+                )
+            )
+            break
+    if not verdicts:
+        for decision in decisions:
+            trigger = _requirement_gap(decision, message, defects)
+            if trigger is None:
+                continue
+            verdicts.append(
+                (
+                    decision,
+                    _REQUIRE_RULE,
+                    memspec.STOP_GATE_REQUIRE_REASON.format(
+                        decision=_named(decision),
+                        trigger=trigger,
+                        expected=f"「{decision.require_text}」所指的內容",
+                        advice=decision.advice,
                     ),
                 )
             )

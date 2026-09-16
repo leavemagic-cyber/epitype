@@ -116,6 +116,109 @@ def _is_bare_term(item):
     return not any(verb in item for verb in memspec.FORBIDDEN_VERB_HINTS)
 
 
+def _disarmed_findings(fields, nested):
+    """閘門只讀頂層欄位，所以被包進下一層的閘門欄位＝這張卡什麼都不擋。
+
+    2026-09-16：三張剛寫好的裁定卡，欄位全部被包進 `metadata:` 底下一層，卡片外觀完
+    全正常、體檢也過，實測 8 個案例一個都沒擋。假裝武裝的卡比沒有卡更糟——後者至少
+    不會讓人以為有防護。所以這裡判 FAIL，不是 WARN。"""
+    findings = []
+    for key in sorted(nested):
+        parent, _, child = key.partition(".")
+        if child in memspec.CARD_GATE_FIELDS and child not in fields:
+            findings.append((
+                FAIL,
+                "disarmed-field",
+                memspec.CARD_DISARMED_REASON.format(field=child, parent=parent),
+            ))
+    return findings
+
+
+def _arming_findings(fields, counts, card_type, today):
+    """feedback 卡必須武裝，或明講它綁不住。
+
+    2026-09-16 實查：通用庫 400 張卡只有 11 張帶 forbidden，而那 11 張全是產品自己的
+    設計決策——170 張記錄 owner 行為糾正的 feedback 卡，武裝數是 0。卡是被規範的那一
+    方寫的，不綁自己的寫法永遠比較省事，所以這個選擇不能留給寫卡的人默默做。
+
+    存量卡 WARN（讓數字看得見而不是一次判掉幾百張），裁定日之後建立的卡 FAIL。"""
+    if card_type != memspec.CARD_TYPE_FEEDBACK:
+        return []
+    if fields.get(memspec.UNENFORCEABLE_FIELD, "").strip():
+        return []
+    for field in memspec.CARD_ARMING_FIELDS:
+        if fields.get(field, "").strip() or counts.get(field):
+            return []
+    cutoff = _as_date(memspec.CARD_ARMING_REQUIRED_FROM)
+    stamps = [
+        _as_date(fields.get(field, "").strip()[:10])
+        for field in memspec.CARD_DATE_FIELDS
+        if fields.get(field, "").strip()
+    ]
+    stamps = [stamp for stamp in stamps if stamp is not None]
+    level = FAIL if stamps and max(stamps) >= cutoff else WARN
+    return [(
+        level,
+        "unarmed",
+        memspec.CARD_UNARMED_REASON.format(
+            armed="／".join(memspec.CARD_ARMING_FIELDS),
+            unenforceable=memspec.UNENFORCEABLE_FIELD,
+        ),
+    )]
+
+
+def _require_findings(fields):
+    """`require_when` 與 `require_text` 成對才有意義。
+
+    只寫條件沒寫要求＝什麼都不會被檢查；只寫要求沒寫條件＝閘不知道何時該檢查。
+    兩種都是「卡片看起來有規定、實際什麼都不管」，與巢狀欄位同一種靜默失效。"""
+    when = fields.get(memspec.REQUIRE_WHEN_FIELD, "").strip()
+    text = fields.get(memspec.REQUIRE_TEXT_FIELD, "").strip()
+    if bool(when) == bool(text):
+        return []
+    present, missing = (
+        (memspec.REQUIRE_WHEN_FIELD, memspec.REQUIRE_TEXT_FIELD)
+        if when
+        else (memspec.REQUIRE_TEXT_FIELD, memspec.REQUIRE_WHEN_FIELD)
+    )
+    return [(
+        FAIL,
+        "require-pair",
+        memspec.CARD_REQUIRE_PAIR_REASON.format(present=present, missing=missing),
+    )]
+
+
+def _guard_findings(fields, front_lines):
+    """動作守衛欄位的可用性（owner 2026-09-16 解除 §34 的動作條件禁令）。
+
+    §34 對 `trigger:` 的第三個理由是「卡片寫錯會靜默失效」。這裡就是那個理由的答案：
+    守衛寫壞由體檢當場判 FAIL，不會等到該擋的時候才發現沒擋。"""
+    if memspec.ACTION_GUARD_TOOL_FIELD not in fields:
+        return []
+    findings = []
+    if not fields.get(memspec.ACTION_GUARD_TOOL_FIELD, "").strip():
+        findings.append((
+            FAIL, "guard", f"{memspec.ACTION_GUARD_TOOL_FIELD} 是空的，這一道守不到任何工具"
+        ))
+    items = memspec.sequence_items(front_lines, memspec.ACTION_GUARD_ALL_OF_FIELD)
+    if not items:
+        findings.append((
+            FAIL, "guard", f"缺 {memspec.ACTION_GUARD_ALL_OF_FIELD}：守衛卡必須寫出要比對的字面片段"
+        ))
+    elif len(items) > memspec.ACTION_GUARD_MAX_SUBSTRINGS:
+        findings.append((
+            FAIL, "guard", f"片段 {len(items)} 個，超過上限 {memspec.ACTION_GUARD_MAX_SUBSTRINGS}"
+        ))
+    elif len(items) == 1 and len(items[0]) < memspec.ACTION_GUARD_LONE_FRAGMENT_MIN_CHARS:
+        findings.append((
+            FAIL,
+            "guard",
+            f"只有一個片段「{items[0]}」且短於 {memspec.ACTION_GUARD_LONE_FRAGMENT_MIN_CHARS} 個字，"
+            "會擋掉整類工具；停用整類工具是宿主原生規則的事，請再加一個片段把條件收窄",
+        ))
+    return findings
+
+
 def _decider_findings(fields, nested, counts):
     """`decided_by` 的值域與 owner-explicit 的原話要求。
 
@@ -414,6 +517,11 @@ def _check_card(path, relative, today):
             "status",
             f"status={status} 不在 {'|'.join(allowed)}（{card_type} 型）",
         ))
+
+    findings.extend(_disarmed_findings(fields, nested))
+    findings.extend(_guard_findings(fields, front_lines))
+    findings.extend(_require_findings(fields))
+    findings.extend(_arming_findings(fields, counts, card_type, today))
 
     for field in memspec.DEPRECATED_CARD_FIELDS:
         if _declares_field(field, fields, nested, counts):
@@ -828,10 +936,11 @@ _FIXTURES = {
     "rulings/ruling-ok.md": "---\nname: ruling-ok\ndescription: owner ruling auto-captured 2026-09-02: 照舊\ncaptured_at: 2026-09-02T07:37:47Z\nsession_id: synthetic-session\n---\nbody\n",
     "pending-swsetup.md": "---\nname: pending-swsetup\ndescription: 2026-07-22 未辦（owner 自行）\nowner: owner\n---\nbody\n",
     "feedback-bad.md": "---\nname: feedback-bad\ndescription: english only description with no date\n---\nbody\n",
-    "feedback-good.md": "---\nname: feedback-good\ndescription: 2026-09-01 中文摘要\naliases:\n  - 別名\nmetadata:\n  type: feedback\n---\nbody\n",
+    # 行為卡二選一：武裝，或明講綁不住。這張走後者，示範那個出口長什麼樣。
+    "feedback-good.md": "---\nname: feedback-good\ndescription: 2026-09-01 中文摘要\naliases:\n  - 別名\nunenforceable: 判斷型，訊息裡沒有可比對的字面訊號\nmetadata:\n  type: feedback\n---\nbody\n",
     "reference-dated.md": "---\nname: reference-dated\ndescription: english only reference card\nlast_verified_at: 2026-09-01\naliases:\n  - alias only in english\nmetadata:\n  type: reference\n---\nbody\n",
     "bom-crlf.md": "﻿---\r\nname: bom-crlf\r\ndescription: 2026-09-01 BOM 加 CRLF 的卡\r\naliases:\r\n  - 別名\r\nmetadata:\r\n  type: project\r\n---\r\nbody\r\n",
-    "document-end.md": "---\nname: document-end\ndescription: 2026-09-01 以三點結尾的卡\naliases:\n  - 三點\n...\nbody\n",
+    "document-end.md": "---\nname: document-end\ndescription: 2026-09-01 以三點結尾的卡\naliases:\n  - 三點\nunenforceable: 判斷型\n...\nbody\n",
     "no-boundary.md": "---\nname: no-boundary\ndescription: 2026-09-01 沒有結束界線\n",
     "duplicate-key.md": "---\nname: duplicate-key\ndescription: 2026-09-01 重複欄位\ndescription: 第二個\naliases:\n  - 重複\nmetadata:\n  type: user\n---\nbody\n",
     "habit-empty-aliases.md": "---\nname: habit-empty-aliases\ndescription: 2026-09-01 空別名序列\naliases: []\nmetadata:\n  type: habit\n---\nbody\n",
@@ -840,7 +949,7 @@ _FIXTURES = {
     "bom-crlf-nodate.md": "﻿---\r\nname: bom-crlf-nodate\r\ndescription: BOM 加 CRLF 且欄位無日期\r\naliases:\r\n  - 無日期\r\nmetadata:\r\n  type: user\r\n---\r\n2026-08-16 正文日期\r\n",
     "stale-date-field.md": "---\nname: stale-date-field\ndescription: 欄位在但值不是日期\nlast_verified_at: 未知\naliases:\n  - 壞日期\nmetadata:\n  type: habit\n---\n2026-08-17 正文日期\n",
     "project-closed.md": "---\nname: project-closed\ndescription: 2026-09-09 已結案的專案\nstatus: closed\nclosed_at: 2026-09-09\nclosed_by: claude\naliases:\n  - 結案專案\nmetadata:\n  type: project\n---\nbody\n",
-    "feedback-closed.md": "---\nname: feedback-closed\ndescription: 2026-09-09 把專案狀態寫到回饋卡上\nstatus: closed\naliases:\n  - 錯層級\nmetadata:\n  type: feedback\n---\nbody\n",
+    "feedback-closed.md": "---\nname: feedback-closed\ndescription: 2026-09-09 把專案狀態寫到回饋卡上\nstatus: closed\naliases:\n  - 錯層級\nunenforceable: 判斷型\nmetadata:\n  type: feedback\n---\nbody\n",
 }
 
 
@@ -959,10 +1068,10 @@ def _selftest():
             ))
             rules, card = _findings_of(report, "trigger-retired.md")
             checks.append((
-                "U-J：只宣告 trigger 的卡不再被判成 scar，欄位本身只換來一則 WARN",
+                "U-J：只宣告 trigger 的卡不再被判成 scar；退役欄位不算武裝，所以同時還欠一則 unarmed",
                 card is not None
                 and card["type"] == memspec.CARD_TYPE_FEEDBACK
-                and rules == {(WARN, "deprecated-field")}
+                and rules == {(WARN, "deprecated-field"), (WARN, "unarmed")}
                 and memspec.TRIGGER_FIELD in _reason_of(report, "trigger-retired.md", "deprecated-field"),
             ))
 
@@ -1002,11 +1111,11 @@ def _selftest():
 
             rules, card = _findings_of(report, "feedback-bad.md")
             checks.append((
-                "generic FAIL 缺日期；缺 aliases 是 WARN，全英文只 INFO",
+                "generic FAIL 缺日期；缺 aliases 與未武裝各一則 WARN，全英文只 INFO",
                 card is not None
                 and card["type"] == memspec.CARD_TYPE_FEEDBACK
-                and rules == {(FAIL, "date"), (WARN, "aliases"), (INFO, "no-chinese")}
-                and card["warn"] == 1,
+                and rules == {(FAIL, "date"), (WARN, "aliases"), (WARN, "unarmed"), (INFO, "no-chinese")}
+                and card["warn"] == 2,
             ))
             checks.append((
                 "六個來源都沒有才 FAIL，訊息說明找過哪些來源",

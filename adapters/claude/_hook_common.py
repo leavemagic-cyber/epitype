@@ -1,6 +1,7 @@
 import sys; sys.dont_write_bytecode = True; [getattr(stream, "reconfigure", lambda **_: None)(encoding="utf-8", errors="replace") for stream in (sys.stdout, sys.stderr)]  # cp950 consoles must not break hook entrypoints.
 """Shared fail-open mechanics for Claude hook adapters."""
 
+import codecs
 from datetime import datetime, timezone
 import json
 import os
@@ -281,6 +282,95 @@ def compile_bounded_regex(pattern):
 # 都補一列，三天沒消）。那條寫入路徑已隨 trigger 攔截退役（2026-09-09 U-J），上限留著：
 # 稽核檔仍會長，超過就把整份改名成 .1（保留一份，不刪，不接力鏈成 .2 .3…）。
 GATE_LOG_MAX_BYTES = 2 * 1024 * 1024
+
+
+def declared_frontmatter(path, field, max_bytes):
+    """Frontmatter lines of a card that declares `field` at the top level, else None.
+
+    Only the head of the file is read: a card's frontmatter sits at the top, and a
+    gate that read every card's body would cost more than the call it guards. A card
+    whose frontmatter does not close inside that head is skipped rather than guessed
+    at — half a card's fields could name a ruling that is not there.
+
+    Shared by the Stop gate (`decision_key`) and the action guard (`guard_tool`) so a
+    card cannot be a ruling to one gate and prose to the other. A field nested under
+    a parent block is deliberately not a declaration: the gates read top-level fields
+    only, and a card whose fields were wrapped one level deep enforces nothing —
+    2026-09-16 three freshly written decision cards were silently disarmed exactly
+    that way, so the indentation test here is the difference between armed and inert.
+    """
+    try:
+        with path.open("rb") as stream:
+            head = stream.read(max_bytes)
+    except OSError:
+        return None
+    try:
+        # A bounded read may cut a valid UTF-8 body character after the closing
+        # boundary. Only an incomplete final character may wait for more bytes.
+        text = codecs.getincrementaldecoder("utf-8")().decode(head, final=False)
+        lines, closing = memspec.split_frontmatter(text)
+    except UnicodeError:
+        return None
+    if lines is None or closing is None:
+        return None
+    declares = any(
+        line[:1] not in " \t"
+        and ":" in line
+        and line.split(":", 1)[0].strip() == field
+        for line in lines
+    )
+    return lines if declares else None
+
+
+def sequence_fields(front_lines, wanted):
+    """Values of the named top-level sequence fields, in card order.
+
+    memspec.frontmatter_fields yields top-level scalars only, memsearch yields
+    aliases only, and card_lint yields item counts only — none of the three yields a
+    list like `forbidden` or `guard_all_of`. The primitives are still the shared ones
+    (parse_scalar, memspec.split_flow_items), so a card cannot be one shape here and
+    another shape to the lints. Both the block form (`key:` then `  - item`) and the
+    flow form (`key: [a, b]`) are accepted."""
+    wanted = tuple(wanted)
+    values = {key: [] for key in wanted}
+    parent = None
+    for raw_line in front_lines:
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        leading = raw_line[: len(raw_line) - len(raw_line.lstrip())]
+        if "\t" in leading:
+            parent = None
+            continue
+        if leading:
+            if parent and (stripped == "-" or stripped.startswith("- ")):
+                item, _problem = memspec.parse_scalar(stripped[1:])
+                if item:
+                    values[parent].append(item)
+            continue
+        parent = None
+        match = memspec.TOP_LEVEL_FIELD.match(raw_line)
+        if match is None:
+            continue
+        key, raw_value = match.groups()
+        if key not in wanted:
+            continue
+        inline = memspec.strip_inline_comment(raw_value).strip()
+        if inline in memspec.BLOCK_SCALAR_STYLES:
+            continue
+        if inline.startswith("[") and inline.endswith("]"):
+            for piece in memspec.split_flow_items(inline[1:-1]):
+                item, _problem = memspec.parse_scalar(piece)
+                if item:
+                    values[key].append(item)
+            continue
+        if inline:
+            item, _problem = memspec.parse_scalar(raw_value)
+            if item:
+                values[key].append(item)
+            continue
+        parent = key
+    return values
 
 
 def with_session(row, session_id):

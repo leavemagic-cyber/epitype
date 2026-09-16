@@ -273,6 +273,17 @@ def _handle(event, started_at):
             if translate:
                 pieces.append(translate)
 
+    # 動作閘的守衛快取在這裡暖：工具呼叫每次只讀得動一小片，冷快取時排在後面的守衛
+    # 卡等於還沒生效，而閘少擋是不會出聲的。開場付一次，之後每次呼叫都讀暖的。
+    # 純副作用：暖不起來就算了，不影響這場要注入什麼。
+    if _soft_remaining(started_at) > 0:
+        try:
+            import pretooluse_gate
+
+            pretooluse_gate.warm_guard_cache(resolved, started_at)
+        except Exception:
+            pass
+
     # 夢的一行跟其他一行摘要放在一起：它是狀態，不是規則。
     if _soft_remaining(started_at) > 0:
         try:

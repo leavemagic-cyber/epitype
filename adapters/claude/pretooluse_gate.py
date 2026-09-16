@@ -1,11 +1,18 @@
 import sys, time; sys.dont_write_bytecode = True; _STARTED_AT = time.monotonic(); [getattr(stream, "reconfigure", lambda **_: None)(encoding="utf-8", errors="replace") for stream in (sys.stdin, sys.stdout, sys.stderr)]  # cp950 consoles must not break hook entrypoints.
-"""Claude PreToolUse adapter for the fail-open write-content gate.
+"""Claude PreToolUse adapter: the fail-open write-content gate and the action guard.
 
-2026-09-09 (owner, docs/FAILURE_MODES.md §34): the scar-card `trigger:`
-interception is gone. Irreversible actions are the host's own native rules
-(Claude `permissions.deny`, Codex `execpolicy`); what stays here is the gate over
-the content a call is about to write, which no host rule can express."""
+2026-09-09 (owner, docs/FAILURE_MODES.md §34) removed the scar-card `trigger:`
+interception, on the premise that irreversible actions belong to the host's own
+native rules (Claude `permissions.deny`, Codex `execpolicy`). 2026-09-16 that
+premise was tested and failed: Claude's Bash patterns match positionally with no
+AND operator, so four of the nine hazard classes moved across and five could not be
+expressed at all. The owner lifted the "cards may not carry an action condition"
+half of the ruling that day, and what came back is deliberately the narrow form —
+a card names literal fragments and the call is denied when *all* of them appear in
+its text. No regex, no shell parsing, no intent. Semantic judgement and genuinely
+irreversible actions stay with the host, exactly as §34 left them."""
 
+from collections import namedtuple
 import hashlib
 import json
 import os
@@ -23,6 +30,7 @@ from _hook_common import (
     GATE_LOG_MAX_BYTES,
     append_gate_log,
     compile_bounded_regex,
+    declared_frontmatter,
     emit,
     expired,
     load_config,
@@ -30,6 +38,7 @@ from _hook_common import (
     read_event,
     resolve_vaults,
     run_synthetic,
+    sequence_fields,
     with_session,
     write_config,
 )
@@ -325,6 +334,234 @@ def _append_write_block(vault, rule, subject, target, started_at, session_id=Non
     )
 
 
+_Guard = namedtuple("_Guard", "card tool substrings advice path")
+
+
+def _read_guard(path):
+    """One card's action guard, a defect string, or None when the card declares none.
+
+    Validation is strict in the fail-open direction: a card whose substrings are too
+    short, too many, or missing enforces nothing and says so, because dropping the
+    bad items instead would leave fewer required fragments and therefore a guard that
+    matches *more* than its author wrote."""
+    front = declared_frontmatter(
+        path, memspec.ACTION_GUARD_TOOL_FIELD, memspec.STOP_GATE_FRONTMATTER_MAX_BYTES
+    )
+    if front is None:
+        return None
+    fields, _problem = memspec.frontmatter_text("---\n" + "\n".join(front) + "\n---\n")
+
+    def one_line(value):
+        return " ".join(str(value or "").split())
+
+    name = one_line(fields.get(memspec.NAME_FIELD)) or path.stem
+    tool = one_line(fields.get(memspec.ACTION_GUARD_TOOL_FIELD))
+    if not tool:
+        return memspec.ACTION_GUARD_DEFECT.format(
+            card=name, field=memspec.ACTION_GUARD_TOOL_FIELD, reason="工具名是空的"
+        )
+    substrings = sequence_fields(front, (memspec.ACTION_GUARD_ALL_OF_FIELD,))[
+        memspec.ACTION_GUARD_ALL_OF_FIELD
+    ]
+    problem = None
+    if not substrings:
+        problem = "沒有任何字面片段"
+    elif len(substrings) > memspec.ACTION_GUARD_MAX_SUBSTRINGS:
+        problem = f"片段超過 {memspec.ACTION_GUARD_MAX_SUBSTRINGS} 個"
+    elif (
+        len(substrings) == 1
+        and len(substrings[0]) < memspec.ACTION_GUARD_LONE_FRAGMENT_MIN_CHARS
+    ):
+        problem = (
+            f"只有一個片段而且短於 {memspec.ACTION_GUARD_LONE_FRAGMENT_MIN_CHARS} 個字，"
+            "會擋掉整類工具；請再加一個片段把條件收窄"
+        )
+    if problem:
+        return memspec.ACTION_GUARD_DEFECT.format(
+            card=name, field=memspec.ACTION_GUARD_ALL_OF_FIELD, reason=problem
+        )
+    advice = one_line(
+        fields.get(memspec.ACTION_GUARD_ADVICE_FIELD)
+        or fields.get(memspec.DESCRIPTION_FIELD)
+    )
+    return {
+        "card": name,
+        "tool": tool,
+        "substrings": list(substrings),
+        "advice": advice,
+    }
+
+
+def _guard_cache(vault):
+    return vault / memspec.FTS_INDEX_DIRECTORY / memspec.ACTION_GUARD_CACHE_FILENAME
+
+
+def warm_guard_cache(vaults, started_at):
+    """Read every card's guard status once, inside the caller's deadline.
+
+    A tool call may only re-read a bounded slice of a vault, so on a cold cache a
+    guard sitting past that slice is not enforced yet — the gate under-enforces
+    silently, which is the failure this whole mechanism exists to remove. SessionStart
+    has budget a tool call does not, so it pays the discovery cost once per session
+    and every later call reads a warm cache."""
+    for vault in vaults:
+        if expired(started_at):
+            return
+        try:
+            _guards(vault, started_at, [], cap=_WARM_CAP)
+        except Exception:
+            continue
+
+
+_WARM_CAP = 1 << 30
+
+
+def _guards(vault, started_at, defects, cap=None):
+    """Every usable guard in one vault, discovered through a manifest cache.
+
+    Same shape as the Stop gate's decision cache and for the same reason: reading
+    every card on every tool call is the cost §34 objected to, so discovery is cached
+    against (mtime, size, ctime, device, inode) and only changed cards — plus a
+    rotating slice of the known non-guards — are re-read, bounded per call."""
+    from epitype import memsearch
+
+    vault = Path(vault).resolve()
+    try:
+        scan = memsearch.scan_cards(vault)
+    except Exception:
+        return []
+    manifest, paths = {}, {}
+    for card_path, path, mtime_ns, size in scan:
+        if expired(started_at):
+            return []
+        try:
+            info = path.stat()
+        except OSError:
+            continue
+        manifest[card_path] = [mtime_ns, size, info.st_ctime_ns, info.st_dev, info.st_ino]
+        paths[card_path] = path
+
+    cache_path = _guard_cache(vault)
+    try:
+        loaded = json.loads(cache_path.read_text(encoding="utf-8"))
+        old_manifest = loaded.get("manifest") if isinstance(loaded, dict) else None
+        cached = loaded.get("guards") if isinstance(loaded, dict) else None
+        cursor = loaded.get("cursor") if isinstance(loaded, dict) else ""
+        if not isinstance(old_manifest, dict) or not isinstance(cached, dict):
+            old_manifest, cached, cursor = {}, {}, ""
+        if not isinstance(cursor, str):
+            cursor = ""
+    except (OSError, ValueError):
+        old_manifest, cached, cursor = {}, {}, ""
+
+    old_cursor = cursor
+    known = {key: value for key, value in cached.items() if key in paths}
+    verified = {key: old_manifest.get(key) for key in known}
+    changed = [key for key in paths if key not in cached or old_manifest.get(key) != manifest[key]]
+    negatives = sorted(key for key in paths if key in cached and key not in changed and not known.get(key))
+    rotated = [key for key in negatives if key > cursor] + [key for key in negatives if key <= cursor]
+    budget = memspec.ACTION_GUARD_MAX_CARDS_PER_VAULT if cap is None else cap
+    for card_path in (changed + rotated)[:budget]:
+        if expired(started_at):
+            break
+        try:
+            known[card_path] = _read_guard(paths[card_path])
+        except Exception:
+            known[card_path] = None
+        verified[card_path] = manifest[card_path]
+        if card_path in negatives:
+            cursor = card_path
+
+    if verified != old_manifest or known != cached or cursor != old_cursor:
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            staging = cache_path.with_name(f".{cache_path.name}.tmp-{os.getpid()}")
+            staging.write_text(
+                json.dumps(
+                    {"version": 1, "manifest": verified, "guards": known, "cursor": cursor},
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+                encoding="utf-8",
+            )
+            os.replace(staging, cache_path)
+        except OSError:
+            pass
+
+    found = []
+    for card_path in sorted(known):
+        entry = known[card_path]
+        if isinstance(entry, str):
+            defects.append(entry)
+        elif isinstance(entry, dict) and entry.get("substrings"):
+            found.append(
+                _Guard(
+                    entry.get("card", card_path),
+                    entry.get("tool", ""),
+                    tuple(item for item in entry["substrings"] if isinstance(item, str)),
+                    entry.get("advice", ""),
+                    vault / card_path,
+                )
+            )
+    return found
+
+
+def _action_text(tool_input):
+    """Every string the call carries, joined — the literal haystack a guard reads.
+
+    No field is singled out and nothing is parsed: a guard asks whether its fragments
+    all appear in what this call actually says, which is the one question a string
+    check can answer honestly about a shell command."""
+    if not isinstance(tool_input, dict):
+        return ""
+    parts = [value for value in tool_input.values() if isinstance(value, str)]
+    return "\n".join(parts)[: memspec.ACTION_GUARD_HAYSTACK_MAX_CHARS]
+
+
+def _guard_review(event, tool_name, tool_input, config, started_at, defects):
+    """(deny value, ()) when a scar card's fragments all appear in this call.
+
+    Owner 2026-09-16 lifted §34's "cards may not carry an action condition". What is
+    restored is only the literal form: every fragment must be present, as plain text.
+    Semantic judgement and genuinely irreversible actions remain the host's native
+    rules, exactly as §34 left them."""
+    haystack = _action_text(tool_input)
+    if not haystack or event.get("stop_hook_active"):
+        return None
+    folded_tool = tool_name.casefold()
+    for vault in resolve_vaults(config, event):
+        if expired(started_at):
+            return None
+        for guard in _guards(vault, started_at, defects):
+            if guard.tool.casefold() != folded_tool:
+                continue
+            if not all(fragment in haystack for fragment in guard.substrings):
+                continue
+            fragments = "、".join(
+                f"「{fragment[: memspec.ACTION_GUARD_FRAGMENT_MAX_CHARS]}」"
+                for fragment in guard.substrings
+            )
+            reason = memspec.ACTION_GUARD_REASON.format(
+                card=guard.card, tool=tool_name, fragments=fragments, advice=guard.advice
+            )
+            _best_effort_audit(
+                append_gate_log,
+                vault,
+                with_session(
+                    {
+                        "kind": memspec.ACTION_GUARD_LOG_KIND,
+                        "rule": memspec.ACTION_GUARD_RULE,
+                        "card": guard.card,
+                        "tool": tool_name,
+                    },
+                    event.get("session_id"),
+                ),
+                started_at,
+            )
+            return _deny_value(reason[: memspec.ACTION_GUARD_REASON_MAX_CHARS])
+    return None
+
+
 def _write_review(event, tool_name, tool_input, config, started_at):
     """(deny value, advice lines) for a call about to write file content.
 
@@ -414,17 +651,29 @@ def _allow_context(event, notices=()):
     return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": "\n".join(lines)}}
 
 
-def _handle(event, started_at):
-    """The gate's whole decision: only a call about to write file content can be
-    denied, and only against the owner's own settled rulings and the card
-    contract. Every other tool call is the host's native rules to judge, never
-    this hook's (owner 2026-09-09, docs/FAILURE_MODES.md §34)."""
+def _handle(event, started_at, defects=None):
+    """The gate's whole decision, in two parts.
+
+    A call about to write file content is judged against the owner's settled rulings
+    and the card contract. Any call at all is judged against the scar cards' literal
+    action guards (owner 2026-09-16, docs/FAILURE_MODES.md §34). Nothing here reads
+    intent: what is not a content rule and not a declared literal guard is the host's
+    native rules to judge, never this hook's."""
+    defects = [] if defects is None else defects
     tool_name = event.get("tool_name")
     if not isinstance(tool_name, str) or not tool_name:
         return None
     config = load_config(started_at)
     if config is None:
         return None
+    try:
+        guard_value = _guard_review(
+            event, tool_name, event.get("tool_input"), config, started_at, defects
+        )
+    except Exception:
+        guard_value = None
+    if guard_value is not None:
+        return guard_value
     try:
         write_value, notices = _write_review(
             event, tool_name, event.get("tool_input"), config, started_at
@@ -1039,9 +1288,14 @@ def _selftest():
 def main():
     if "--selftest" in sys.argv[1:]:
         return _selftest()
+    defects = []
     try:
         event = read_event(sys.stdin)
-        value = _handle(event, _STARTED_AT)
+        value = _handle(event, _STARTED_AT, defects)
+        # A guard card that stopped being enforced is the silent failure §34 warned
+        # about, so it is named on stderr rather than swallowed.
+        for line in defects[: memspec.GATE_DEFECT_MAX_LINES]:
+            print(line, file=sys.stderr)
         if value is not None:
             output = value.get("hookSpecificOutput", {})
             is_deny = output.get("permissionDecision") == "deny"

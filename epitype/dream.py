@@ -312,15 +312,15 @@ def _stop_gate_forbidden_reader():
     for extra in (str(repo_root), str(claude_adapter_dir)):
         if extra not in sys.path:
             sys.path.insert(0, extra)
-    import stop_gate
+    import _hook_common
 
     def has_forbidden(path):
-        front_lines = stop_gate._decision_frontmatter(path)
+        front_lines = _hook_common.declared_frontmatter(
+            path, memspec.DECISION_KEY_FIELD, memspec.STOP_GATE_FRONTMATTER_MAX_BYTES
+        )
         if front_lines is None:
             return False
-        values = stop_gate._sequence_fields(
-            front_lines, memspec.TOP_LEVEL_FIELD, memspec.split_flow_items
-        )
+        values = _hook_common.sequence_fields(front_lines, (memspec.FORBIDDEN_FIELD,))
         return bool(values[memspec.FORBIDDEN_FIELD])
 
     return has_forbidden

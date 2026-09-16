@@ -814,7 +814,12 @@ TOP_LEVEL_FIELD = re.compile(r"^([A-Za-z_][A-Za-z0-9_-]*)\s*:\s*(.*)$")
 # 喚回都只是「說給模型聽」，回合結束前沒有任何一道閘比對模型剛說出口的話。規則：Stop
 # 閘的上限、理由句、疑問句判定與 marker 命名在此同源，兩個 host 共用同一支 adapter。
 # 決策卡的禁詞欄位沿用既有的 FORBIDDEN_FIELD（"forbidden"），不另立同義常數。
-STOP_GATE_MAX_CARDS_PER_VAULT = 30
+# 2026-09-16 起 Stop 閘不只讀裁定卡，也讀任何帶 forbidden／require_when 的行為卡，
+# 候選數從十幾張變成數十張。上限留在 30 的話多出來的會被靜靜截掉——卡片看起來武裝、
+# 實際輪不到它。每張只讀 frontmatter 的頭幾 KB，抬高的成本遠小於漏擋。
+STOP_GATE_MAX_CARDS_PER_VAULT = 120
+# 退役或結案的卡不再說話；沒有 decision_key 的行為卡用這份名單判，而不是要求 active。
+STOP_GATE_SILENT_STATUSES = ("superseded", "closed", "retired")
 STOP_GATE_FRONTMATTER_MAX_BYTES = 16 * 1024
 STOP_GATE_MESSAGE_MAX_CHARS = 20000
 STOP_GATE_QUOTE_MAX_CHARS = 160
@@ -868,6 +873,74 @@ WRITE_GATE_CARD_ADVICE = "🧾 記憶卡建議（{card_type}）：{path} {proble
 WRITE_GATE_FORBIDDEN_RULE = "forbidden"
 WRITE_GATE_CARD_RULE = "card_contract"
 WRITE_GATE_LOG_KIND = "write_block"
+
+# 動作閘（2026-09-16，owner 解除 §34 的「卡片不得帶動作條件」）。一張傷疤卡可以宣告
+# 一組字面片段，工具呼叫的字串同時含有全部片段就擋下。§34 當初移除 `trigger:` 的三
+# 個理由，對這個形狀都不成立：
+#   1. 「正則當不了 shell parser」——這裡沒有正則，只有 `substring in text`，它不假裝
+#      解析 shell，因此不會貪婪誤配，也不會因為引號規則而漏配。
+#   2. 「每次工具呼叫都要付成本」——PreToolUse 本來就為寫檔閘在跑，多的只是每張守衛卡
+#      幾次字串 in；卡片本身走同一份 manifest 快取，不重讀。
+#   3. 「卡片寫錯會靜默失效」——欄位由 card_lint 驗（片段太短、數量超限、工具名空白都
+#      判 FAIL），而且一張卡壞只讓那一道失效，其餘照常。
+# 邊界不變：語意判斷與真正不可逆的動作仍然是宿主原生規則的事，這裡只認字面。
+ACTION_GUARD_TOOL_FIELD = "guard_tool"
+ACTION_GUARD_ALL_OF_FIELD = "guard_all_of"
+ACTION_GUARD_ADVICE_FIELD = "guard_advice"
+ACTION_GUARD_CACHE_FILENAME = "action_guards.json"
+ACTION_GUARD_MAX_SUBSTRINGS = 8
+# 收窄靠的是「全部片段都要出現」這個連言，所以單一片段可以很短（heredoc 那張卡就是
+# `<<` 加一個反斜線）。真正危險的是只有一個又很短的片段——那等於把整類工具停用，而
+# 停用整類工具是宿主原生規則的職責，不是傷疤卡的。
+ACTION_GUARD_LONE_FRAGMENT_MIN_CHARS = 4
+ACTION_GUARD_HAYSTACK_MAX_CHARS = 20000
+ACTION_GUARD_MAX_CARDS_PER_VAULT = STOP_GATE_MAX_CARDS_PER_VAULT
+ACTION_GUARD_FRAGMENT_MAX_CHARS = STOP_GATE_FRAGMENT_MAX_CHARS
+ACTION_GUARD_REASON_MAX_CHARS = WRITE_GATE_REASON_MAX_CHARS
+ACTION_GUARD_LOG_KIND = "action_block"
+ACTION_GUARD_RULE = "action_guard"
+ACTION_GUARD_REASON = "🛑 傷疤卡（{card}）：這次 {tool} 同時含有 {fragments}——{advice}"
+# 有一整類規則是「你必須先做某件事」，而那件事做了沒有，機器從外面看不見——「引用數字
+# 前先查」「宣稱完成前先驗」都是。轉換方式：規則不要求那個看不見的動作，要求「做了就要
+# 寫出來」。於是「沒寫」變成看得見、擋得下的，而寫一個假的來源就不是省略而是說謊，撞
+# 上誠實底線。兩個欄位成對使用：符合 require_when 的訊息裡，require_text 必須也出現。
+REQUIRE_WHEN_FIELD = "require_when"
+REQUIRE_TEXT_FIELD = "require_text"
+STOP_GATE_REQUIRE_REASON = (
+    "📌 這回合命中「{decision}」的條件（{trigger}），依裁定必須同時寫出{expected}。"
+    "{advice}"
+)
+# 閘門一律只讀頂層欄位。這幾個欄位一旦被包進下一層，卡片看起來武裝、實際什麼都不擋。
+CARD_GATE_FIELDS = (
+    DECISION_KEY_FIELD,
+    FORBIDDEN_FIELD,
+    ACTION_GUARD_TOOL_FIELD,
+    ACTION_GUARD_ALL_OF_FIELD,
+    REQUIRE_WHEN_FIELD,
+    REQUIRE_TEXT_FIELD,
+)
+# 一年份的 owner 糾正全部寫成只走喚回的 feedback 卡，一張都沒武裝——因為卡是被規範的
+# 那一方寫的，而不綁自己的寫法永遠比較省事。2026-09-16 owner：「把能擋的都裝上」。
+# 所以「要不要武裝」不再是寫卡的人可以默默決定的事：feedback 卡必須二選一，寫出擋得住
+# 的欄位，或寫出 unenforceable 與理由——當著 owner 的面說「這條綁不住」。
+# 存量卡只判 WARN（數字看得見），裁定日之後的新卡判 FAIL。
+UNENFORCEABLE_FIELD = "unenforceable"
+CARD_ARMING_REQUIRED_FROM = "2026-09-16"
+CARD_ARMING_FIELDS = (FORBIDDEN_FIELD, ACTION_GUARD_TOOL_FIELD, REQUIRE_WHEN_FIELD)
+CARD_UNARMED_REASON = (
+    "這是一張記錄 owner 行為糾正的卡，卻沒有任何擋得住的欄位（{armed}），"
+    "也沒有寫 {unenforceable}: <理由>。只被讀到的規則 2026-09-16 已實測無效——"
+    "請補上其中一種，或明講這條綁不住、理由是什麼"
+)
+CARD_REQUIRE_PAIR_REASON = (
+    "{present} 寫了但缺 {missing}：這兩個欄位成對才有意義——"
+    "只有條件沒有要求的話，什麼都不會被檢查"
+)
+CARD_DISARMED_REASON = (
+    "{field} 被包在 {parent} 底下一層，閘門只讀頂層欄位，這張卡實際上什麼都不擋；"
+    "請把它移到 frontmatter 的頂層"
+)
+ACTION_GUARD_DEFECT = "⚠ 守衛卡 {card} 的 {field} 無法使用（{reason}），這一道沒有生效"
 # 缺欄位要能照抄一行就補好，否則模型只知道缺、不知道長什麼樣。
 WRITE_GATE_FIELD_EXAMPLES = {
     NAME_FIELD: "name: 虛擬盤鏡像裁定",

@@ -18,6 +18,9 @@ import stop_gate as stop
 CARD = ("---\nname: fixture\ndescription: fixture rule\ndecision_key: fixture\nstatus: active\n"
         "current_decision_at: 2026-01-02\ndecided_by: owner-explicit\nowner_quote: Old owner quote\n"
         "aliases: [aliasold, otherold]\nforbidden: [badold]\n---\nbody\n")
+# Filler the gate must ignore entirely. Since 2026-09-16 an arming field makes a plain
+# behaviour card speak even without a decision key, so both have to go.
+NON_CARD = CARD.replace("decision_key:", "decision_kex:").replace("forbidden: [badold]\n", "")
 
 
 class StopFreshnessRegression(unittest.TestCase):
@@ -99,7 +102,7 @@ class StopFreshnessRegression(unittest.TestCase):
 
     def test_negative_promotion_with_all_identity_metadata_unchanged_is_eventually_discovered(self):
         for index in range(memspec.STOP_GATE_MAX_CARDS_PER_VAULT + 1):
-            self.card(f"n{index:03d}.md", CARD.replace("decision_key:", "decision_kex:"))
+            self.card(f"n{index:03d}.md", NON_CARD)
         self.decisions()
         self.decisions()
         cache = self.vault / memspec.FTS_INDEX_DIRECTORY / stop._DECISION_CACHE_FILENAME
@@ -116,7 +119,7 @@ class StopFreshnessRegression(unittest.TestCase):
         for index in range(cap + 5):
             self.card(f"d{index:03d}.md")
         for index in range(320):
-            self.card(f"n{index:03d}.md", CARD.replace("decision_key:", "decision_kex:"))
+            self.card(f"n{index:03d}.md", NON_CARD)
         for _ in range(13):
             self.decisions()
         with patch.object(stop, "_read_decision", wraps=stop._read_decision) as reader:
@@ -146,7 +149,7 @@ class StopFreshnessRegression(unittest.TestCase):
 
     def test_v2_upgrade_reuses_only_discovery_and_rechecks_existing_authority(self):
         for index in range(40):
-            self.card(f"a{index:03d}.md", CARD.replace("decision_key:", "decision_kex:"))
+            self.card(f"a{index:03d}.md", NON_CARD)
         card = self.card("z-decision.md")
         stale = stop._read_decision(card)
         self.replace_preserving_metadata(card, "owner-explicit", "owner-implicit")
