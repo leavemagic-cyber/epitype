@@ -52,8 +52,46 @@ class HookInputBomTests(unittest.TestCase):
                     _hook_common.read_event(io.StringIO(raw))
 
 
+class WorkspaceRootsTests(unittest.TestCase):
+    """A host that names the working directory `workspace_roots` must still
+    resolve a vault. Cursor sends that key, URL-style, and never sends `cwd`;
+    every vault lookup reads `cwd`, so the hooks otherwise run against no vault
+    and emit nothing, which looks exactly like a broken hook."""
+
+    def _read(self, event):
+        return _hook_common.read_event(io.StringIO(json.dumps(event, ensure_ascii=False)))
+
+    def test_url_style_windows_root_becomes_cwd(self):
+        event = self._read(dict(EVENT, workspace_roots=["/C:/Epitype/repo"]))
+        self.assertEqual(event["cwd"], "C:/Epitype/repo")
+
+    def test_posix_root_is_passed_through(self):
+        event = self._read(dict(EVENT, workspace_roots=["/home/u/project"]))
+        self.assertEqual(event["cwd"], "/home/u/project")
+
+    def test_existing_cwd_is_never_overwritten(self):
+        event = self._read(dict(EVENT, cwd="D:/real", workspace_roots=["/C:/other"]))
+        self.assertEqual(event["cwd"], "D:/real")
+
+    def test_empty_or_missing_roots_leave_cwd_absent(self):
+        for roots in ([], [""], None, "not-a-list"):
+            with self.subTest(roots=roots):
+                payload = dict(EVENT)
+                if roots is not None:
+                    payload["workspace_roots"] = roots
+                self.assertNotIn("cwd", self._read(payload))
+
+    def test_first_usable_root_wins(self):
+        event = self._read(dict(EVENT, workspace_roots=["", "/C:/second"]))
+        self.assertEqual(event["cwd"], "C:/second")
+
+
 def _selftest():
-    suite = unittest.defaultTestLoader.loadTestsFromTestCase(HookInputBomTests)
+    loader = unittest.defaultTestLoader
+    suite = unittest.TestSuite([
+        loader.loadTestsFromTestCase(HookInputBomTests),
+        loader.loadTestsFromTestCase(WorkspaceRootsTests),
+    ])
     result = unittest.TextTestRunner(verbosity=0).run(suite)
     total = result.testsRun
     failed = len(result.failures) + len(result.errors)

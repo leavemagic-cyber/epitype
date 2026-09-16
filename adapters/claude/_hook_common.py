@@ -78,10 +78,34 @@ def read_event(stream):
     if isinstance(raw, bytes):
         raw = raw.decode("utf-8-sig")
     else:
-        raw = raw.lstrip("﻿")
+        raw = raw.lstrip("\ufeff")
     value = json.loads(raw)
     if not isinstance(value, dict):
         raise ValueError("hook input must be a JSON object")
+    return _normalised_event(value)
+
+
+def _normalised_event(value):
+    """Translate a host dialect into the field names the adapters read.
+
+    Cursor names the working directory `workspace_roots` (a list) and writes
+    each entry URL-style, so a Windows path arrives as "/C:/project". Every
+    vault lookup here reads `cwd`, so without this the hooks run against no
+    vault and correctly emit nothing -- indistinguishable from a broken hook.
+    An existing `cwd` always wins; a host that sends one is untouched.
+    """
+    if "cwd" in value:
+        return value
+    roots = value.get("workspace_roots")
+    if not isinstance(roots, list):
+        return value
+    for root in roots:
+        if not isinstance(root, str) or not root.strip():
+            continue
+        if len(root) > 2 and root[0] == "/" and root[2] == ":":
+            root = root[1:]
+        value["cwd"] = root
+        break
     return value
 
 
