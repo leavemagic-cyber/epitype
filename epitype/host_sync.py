@@ -475,7 +475,14 @@ def remove(hosts=None, home=None, output=sys.stdout):
                 atomic_write(path, payload)
             else:
                 # 整個檔都是我們寫的，拿掉就沒東西了——那是產品自己建的孤兒檔。
+                # 連它的備份一起收掉：那份備份裡沒有半個字是使用者的，留著只會讓人
+                # 以為自己有東西被刪了。
                 path.unlink()
+                backup = path.with_name(path.name + memspec.HOST_SYNC_BACKUP_SUFFIX)
+                try:
+                    backup.unlink()
+                except OSError:
+                    pass
                 print(f"REMOVED {host}: 這個檔整份都是我們建的，已刪除 {path}", file=output)
                 removed += 1
                 continue
