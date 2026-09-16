@@ -992,6 +992,21 @@ def _selftest():
             ))
             io.open(poisoned, "w", encoding="utf-8", newline="\n").write(good)
 
+            # 稽核檔輪替出去的那幾份也要讀，否則輪替前擋下的都變成漏擋。
+            log = vault / memspec.GATE_LOG_FILENAME
+            rotated_path = vault / (memspec.GATE_LOG_FILENAME + ".1")
+            io.open(rotated_path, "w", encoding="utf-8", newline="\n").write(
+                json.dumps({"timestamp": "2026-09-16T09:00:00+00:00",
+                            "kind": memspec.STOP_GATE_LOG_KIND, "decision": "rotated-away",
+                            "session_id": session, "digest": "beef"},
+                           ensure_ascii=False) + "\n")
+            rotated_counts, rotated_stopped = gate_blocks(vault, since="2026-09-01")
+            checks.append((
+                "輪替出去的稽核檔也算數",
+                rotated_counts.get((session, "rotated-away")) == 1
+                and (session, "beef") in rotated_stopped,
+            ))
+
             ranks = priority_rank(vault)
             checks.append((
                 "健康度轉得出排序鍵；沒有檔案時退回一致的預設",
@@ -1019,7 +1034,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 27
+    total = 28
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

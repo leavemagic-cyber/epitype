@@ -98,6 +98,18 @@ class ActionGuardRegression(unittest.TestCase):
         for command in (PLAIN_HEREDOC, BACKSLASH_ONLY, "git status"):
             self.assertIsNone(self.denial(self.call("Bash", {"command": command})), command)
 
+    def test_the_guard_still_applies_during_a_stop_retry(self):
+        # `stop_hook_active` marks the re-run after the Stop gate blocked a turn.
+        # Honouring it here switched the guard off exactly when the model has been
+        # told to change approach and is most likely to reach for something rash.
+        self.heredoc_card()
+        value = pretool._handle(
+            {"tool_name": "Bash", "tool_input": {"command": HEREDOC_WITH_BACKSLASH},
+             "session_id": "retry", "stop_hook_active": True},
+            time.monotonic(), [],
+        )
+        self.assertIsNotNone(self.denial(value))
+
     def test_the_guard_only_applies_to_its_own_tool(self):
         self.heredoc_card()
         self.assertIsNone(self.denial(self.call("Read", {"command": HEREDOC_WITH_BACKSLASH})))

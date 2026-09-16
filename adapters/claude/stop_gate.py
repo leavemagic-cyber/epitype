@@ -315,6 +315,12 @@ def _quoted_spans(message):
             merged[-1] = (merged[-1][0], max(merged[-1][1], end))
         else:
             merged.append((start, end))
+    # 遮罩佔整則太多就整則不遮：引用一句話當證據佔比很小，把整段主張包進引號或改寫成
+    # `>` 引用行佔比就很高，而後者是把靜音開關交給被管制的那一方（U64 要豁免的是引用，
+    # 不是偽裝）。2026-09-17 對抗審查四種寫法全部繞過，這道比例上限是它的答案。
+    body = len(message.strip())
+    if body and sum(end - start for start, end in merged) / body > memspec.STOP_GATE_QUOTE_MASK_MAX_SHARE:
+        return []
     return merged
 
 

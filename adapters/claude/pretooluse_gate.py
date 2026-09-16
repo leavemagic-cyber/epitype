@@ -526,7 +526,10 @@ def _guard_review(event, tool_name, tool_input, config, started_at, defects):
     Semantic judgement and genuinely irreversible actions remain the host's native
     rules, exactly as §34 left them."""
     haystack = _action_text(tool_input)
-    if not haystack or event.get("stop_hook_active"):
+    # 刻意不看 `stop_hook_active`。那是 Stop 閘為了避免自己重入才讀的旗標，動作守衛
+    # 沒有重入問題（它不寫東西，拒絕也不會再觸發自己）。照著讀的話，Stop 閘擋下之後
+    # 的那一段續跑，工具守衛整個是關的——而那正是我被逼著換做法、最可能亂動手的時刻。
+    if not haystack:
         return None
     folded_tool = tool_name.casefold()
     for vault in resolve_vaults(config, event):

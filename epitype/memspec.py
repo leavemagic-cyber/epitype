@@ -1790,3 +1790,8 @@ STOP_GATE_QUOTE_TEXT_REGEX = re.compile(STOP_GATE_QUOTE_TEXT_PATTERN)
 STOP_GATE_BLOCKQUOTE_LINE_PATTERN = r"^[ \t]*>.*$"
 STOP_GATE_BLOCKQUOTE_LINE_REGEX = re.compile(STOP_GATE_BLOCKQUOTE_LINE_PATTERN, re.MULTILINE)
 STOP_GATE_QUOTE_MASK_ENABLED = True
+# 遮罩佔整則訊息的比例上限。引用一句話當證據，佔比很小；把整段主張包進引號或改寫成
+# `>` 引用行，佔比就會很高——後者不是引用，是把靜音開關交到被管制的那一方手上。
+# 2026-09-17 對抗審查實測：「」、直引號、反引號、`>` 四種寫法 4/4 全部繞過。超過這個
+# 比例就整則不遮，讓命中照擋；引用型的正當用法不受影響。
+STOP_GATE_QUOTE_MASK_MAX_SHARE = 0.5
