@@ -1467,7 +1467,7 @@ def _section_compliance(vaults, today, since_date, config):
     since_stamp = datetime(
         since_date.year, since_date.month, since_date.day, tzinfo=timezone.utc
     ).timestamp()
-    transcripts = compliance.transcripts_for(roots, since_stamp=since_stamp)
+    transcripts, available = compliance.transcripts_for(roots, since_stamp=since_stamp)
 
     errors, examples = [], []
     hits, blocked, missed, unseen = [], [], [], []
@@ -1520,6 +1520,8 @@ def _section_compliance(vaults, today, since_date, config):
             "outside_gate_view": len(unseen),
             "silent_rules": len(set(silent)),
             "transcripts": len(transcripts),
+            # 沒讀到的數字一定要在：只讀了一部分與「查遍全部、零漏擋」報出來長得一樣。
+            "transcripts_skipped": max(0, available - len(transcripts)),
         },
         "examples": examples,
         "commands": ["python -m epitype.compliance --selftest"] if missed else [],

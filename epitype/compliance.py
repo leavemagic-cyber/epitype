@@ -29,7 +29,7 @@ for _extra in (str(_REPO_ROOT), str(_REPO_ROOT / "adapters" / "claude")):
 from epitype import memspec
 
 # 一次夜跑最多讀幾個對話檔、每個檔最多幾 MB。夢有總預算，重放不該把它吃光。
-MAX_TRANSCRIPTS = 24
+MAX_TRANSCRIPTS = 250
 MAX_TRANSCRIPT_BYTES = 64 * 1024 * 1024
 # 一張卡連續幾天完全沒命中，就值得回頭看它是不是當初就寫廢了。
 STALE_CARD_DAYS = 30
@@ -153,6 +153,13 @@ def _turns(path, max_bytes=MAX_TRANSCRIPT_BYTES):
                 continue
             kind = row.get("type")
             if kind == "user":
+                if _is_tool_result(row):
+                    # 工具回傳也記成 `user` 列，但它不是一個回合的結束——把它當邊界的話，
+                    # 一個回合會被切成十幾段。後果有兩個：機會數（分母）虛高好幾倍，讓
+                    # 自動降級的門檻形同虛設；以及一堆工具呼叫前的中段訊息被標成「回合
+                    # 最後一則」，全部變成假漏擋。2026-09-17 對抗審查實測：某個紀錄 300
+                    # 個 user 列裡有 279 個是工具回傳。
+                    continue
                 if texts or calls:
                     yield session, stamp, texts[-1] if texts else "", list(texts), list(calls)
                 texts, calls = [], []
@@ -179,6 +186,18 @@ def _turns(path, max_bytes=MAX_TRANSCRIPT_BYTES):
                     calls.append((_one_line(block.get("name")), joined))
     if texts or calls:
         yield session, stamp, texts[-1] if texts else "", list(texts), list(calls)
+
+
+def _is_tool_result(row):
+    """這一列是不是工具回傳（宿主把它記成 user 列，但它不是使用者說話）。"""
+    message = row.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    if not isinstance(content, list):
+        return False
+    return any(
+        isinstance(block, dict) and block.get("type") == "tool_result"
+        for block in content
+    )
 
 
 def _epoch_of(stamp):
@@ -255,13 +274,24 @@ def gate_blocks(vault, since=None):
     第二份是用來分辨「這張卡放行了」與「同一則訊息被別張卡擋下、我已經重寫過」。閘一次
     只報一個理由就停手，沒有這份的話，被擋訊息裡的第二個違規會全部被算成漏擋。
     """
-    path = Path(vault) / memspec.GATE_LOG_FILENAME
+    # 輪替出去的那幾份也要讀：稽核檔滿了會改名存檔，只讀主檔的話，輪替之前每一次真的
+    # 擋下都會被算成漏擋（2026-09-17 對抗審查）。
+    root = Path(vault)
+    paths = [root / memspec.GATE_LOG_FILENAME]
+    paths += sorted(root.glob(memspec.GATE_LOG_FILENAME + ".*"))
     counts = {}
     stopped = set()
+    for path in paths:
+        _read_gate_log(path, since, counts, stopped)
+    return counts, stopped
+
+
+def _read_gate_log(path, since, counts, stopped):
+    """把一份稽核檔併進計數與指紋集合（就地更新，不回傳）。"""
     try:
         stream = io.open(path, encoding="utf-8", errors="replace")
     except OSError:
-        return counts, stopped
+        return
     with stream:
         for line in stream:
             line = line.strip()
@@ -287,7 +317,6 @@ def gate_blocks(vault, since=None):
             counts[key] = counts.get(key, 0) + 1
             if row.get("digest"):
                 stopped.add((session, row["digest"]))
-    return counts, stopped
 
 
 def reconcile(hits, blocks, stopped=()):
@@ -322,7 +351,11 @@ def reconcile(hits, blocks, stopped=()):
 
 
 def transcripts_for(roots, since_stamp=None, limit=MAX_TRANSCRIPTS):
-    """要重放的對話紀錄檔，新的優先。"""
+    """(要重放的對話紀錄檔, 符合條件的總數)，新的優先。
+
+    總數一起回傳，因為「只讀了其中一部分」與「查遍全部、零漏擋」報出來長得一模一樣。
+    2026-09-17 實測這台機器 24 小時內動過 101 個檔，當時上限 24——76% 被無聲丟掉。
+    """
     found = []
     for root in roots:
         try:
@@ -338,7 +371,7 @@ def transcripts_for(roots, since_stamp=None, limit=MAX_TRANSCRIPTS):
                 continue
             found.append((info.st_mtime, path))
     found.sort(reverse=True)
-    return [path for _mtime, path in found[:limit]]
+    return [path for _mtime, path in found[:limit]], len(found)
 
 
 def final_messages(transcripts):
@@ -752,6 +785,14 @@ def _selftest():
                     row("assistant", [{"type": "text", "text": "兩邊帳這句話不准講，所以我先把它放這裡。"}]),
                     row("user", [{"type": "text", "text": "改一下"}]),
                     row("assistant", [{"type": "text", "text": "兩邊帳這句話不准說，所以我先把它放這裡。"}]),
+                    # 工具回傳也記成 user 列，但它不是回合邊界。
+                    row("user", [{"type": "text", "text": "最後一輪"}]),
+                    row("assistant", [
+                        {"type": "text", "text": "中段：先查一下。"},
+                        {"type": "tool_use", "name": "Bash", "input": {"command": "ls"}},
+                    ]),
+                    row("user", [{"type": "tool_result", "tool_use_id": "t1"}]),
+                    row("assistant", [{"type": "text", "text": "查完了，結尾在這裡。"}]),
                 ]) + "\n",
                 encoding="utf-8",
             )
@@ -823,10 +864,15 @@ def _selftest():
             newer = root / "new.jsonl"
             newer.write_text("{}\n", encoding="utf-8")
             os.utime(newer, (time.time(), time.time()))
-            picked = transcripts_for([root], since_stamp=time.time() - 3600)
+            picked, available = transcripts_for([root], since_stamp=time.time() - 3600)
             checks.append((
-                "只挑起算時間之後動過的紀錄檔，新的排前面",
-                picked and picked[0] == newer,
+                "只挑起算時間之後動過的紀錄檔，新的排前面，並回報符合條件的總數",
+                picked and picked[0] == newer and available == len(picked),
+            ))
+            few, total = transcripts_for([root], since_stamp=time.time() - 3600, limit=1)
+            checks.append((
+                "上限砍掉幾個檔要數得出來，不能靜靜少讀",
+                len(few) == 1 and total >= 2 and total > len(few),
             ))
 
             from datetime import date
@@ -886,8 +932,13 @@ def _selftest():
             # 彩排：在歷史上命中太頻繁的樣式自動降級，掉回來自動恢復。
             chances = opportunities([transcript])
             checks.append((
-                "機會數分回合與各工具",
-                chances["turns"] == 6 and chances["tools"].get("bash") == 1,
+                "工具回傳不是回合邊界：那一輪只算一個回合，結尾是工具跑完之後那句",
+                chances["turns"] == 7 and chances["tools"].get("bash") == 2,
+            ))
+            endings = [final for _s, _t, final, _a, _c in _turns(transcript)]
+            checks.append((
+                "工具前後被切成兩段的話，結尾會是中段那句——現在不會",
+                endings[-1].startswith("查完了") and "中段" not in endings[-1],
             ))
             wide = Rule("寬樣式", "forbidden", vault / "decision-x.md", 0,
                         ["。"], "", "", "", ())
@@ -968,7 +1019,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 25
+    total = 27
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
