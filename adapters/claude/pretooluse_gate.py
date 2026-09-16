@@ -473,9 +473,9 @@ def _guards(vault, started_at, defects, cap=None):
             cursor = card_path
 
     if verified != old_manifest or known != cached or cursor != old_cursor:
+        staging = cache_path.with_name(f".{cache_path.name}.tmp-{os.getpid()}")
         try:
             cache_path.parent.mkdir(parents=True, exist_ok=True)
-            staging = cache_path.with_name(f".{cache_path.name}.tmp-{os.getpid()}")
             staging.write_text(
                 json.dumps(
                     {"version": 1, "manifest": verified, "guards": known, "cursor": cursor},
@@ -487,6 +487,12 @@ def _guards(vault, started_at, defects, cap=None):
             os.replace(staging, cache_path)
         except OSError:
             pass
+        finally:
+            # 寫失敗留下的暫存檔沒人會回頭清，而檔名帶 pid，每次失敗都是新的一個。
+            try:
+                staging.unlink()
+            except OSError:
+                pass
 
     found = []
     for card_path in sorted(known):

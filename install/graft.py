@@ -1262,9 +1262,12 @@ def _unregister_nightly(dry_run, output, runner=None):
         result = runner(argv, None)
         if getattr(result, "returncode", 1) == 0:
             return True
-        # ERROR_FILE_NOT_FOUND 是冪等移除；用 HRESULT，避免依賴 Windows 訊息語言。
+        # 找不到就是已經沒有了，冪等移除。用 HRESULT 避免依賴 Windows 訊息語言：
+        # 0x80070002 是「找不到這個工作」，0x80070003 是「連 Epitype\ 這個工作資料夾都
+        # 不存在」——乾淨機器上是後者，只認前者的話第一次安裝就會因為刪不掉一個從來
+        # 沒建立過的排程而整個回滾（2026-09-17 實測）。
         query = runner(["schtasks", "/Query", "/TN", DREAM_TASK_NAME, "/HRESULT"], None)
-        return (getattr(query, "returncode", 1) & 0xFFFFFFFF) == 0x80070002
+        return (getattr(query, "returncode", 1) & 0xFFFFFFFF) in (0x80070002, 0x80070003)
     print(f"{'DRY-RUN unschedule' if dry_run else 'UNSCHEDULE'}: crontab - {DREAM_CRON_MARKER}", file=output)
     if dry_run:
         return True
@@ -1552,9 +1555,15 @@ def _install(
 
         # nightly 才碰系統排程。改成別的模式時只在「原本就是 nightly」或使用者明講
         # 這次要換模式時反註冊——否則每次安裝都會對一個不存在的排程下刪除指令。
+        # 系統排程是整台機器共用的，`--home` 隔離不到它，而且拿家目錄去比也沒用——
+        # 沙盒本來就會把 HOME 換掉，所以 `Path.home()` 回傳的就是那個假家目錄。
+        # 唯一站得住的判準是這份設定自己的歷史：只有「這個家目錄原本真的是 nightly」
+        # 才需要反註冊。裝到一個從來沒排過程的家目錄卻下刪除指令，刪掉的是別人的東西
+        # ——2026-09-17 一次隔離驗收就是這樣刪掉真實家目錄那支還在服役的夜間排程，
+        # 兩次，而檔案層的隔離檢查完全看不出來。
         if dream[DREAM_MODE_FIELD] == "nightly":
             _register_nightly(repo_root, dream[DREAM_AT_FIELD], dry_run, output, scheduler)
-        elif dream_mode is not None or previous_dream.get(DREAM_MODE_FIELD) == "nightly":
+        elif previous_dream.get(DREAM_MODE_FIELD) == "nightly":
             if not _unregister_nightly(dry_run, output, scheduler):
                 raise InstallError("nightly dream unschedule failed; installation rolled back")
 

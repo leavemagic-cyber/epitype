@@ -1448,7 +1448,8 @@ def _section_compliance(vaults, today, since_date, config):
     # 資料；報成錯誤會讓整晚的夢被標成沒跑完。
     roots = []
     for vault in vaults:
-        for parent in Path(vault).resolve().parents:
+        resolved = Path(vault).resolve()
+        for parent in resolved.parents:
             if (
                 parent.name == memspec.HOST_PROJECTS_DIRECTORY
                 and parent.parent.name == memspec.HOST_STATE_DIRECTORY
@@ -1457,11 +1458,36 @@ def _section_compliance(vaults, today, since_date, config):
                 if parent not in roots:
                     roots.append(parent)
                 break
+        else:
+            # 記憶庫不一定住在宿主的專案目錄底下（安裝器有退路位置），但對話紀錄一定
+            # 住在那裡。只認庫的祖先目錄的話，那些使用者的夜間回饋永遠不會跑，而且回
+            # 報全零、沒有錯誤——跟「查遍全部、零漏擋」長得一模一樣。
+            # 仍然要求庫在這個家目錄底下，免得暫存目錄裡的庫去重放真機上別人的對話。
+            home = Path.home().resolve()
+            fallback = home / memspec.HOST_STATE_DIRECTORY / memspec.HOST_PROJECTS_DIRECTORY
+            if fallback.is_dir() and fallback not in roots:
+                try:
+                    resolved.relative_to(home)
+                except ValueError:
+                    continue
+                roots.append(fallback)
     if not roots:
+        # 第一天還沒有任何對話可以重放，但「這個庫武裝了幾條規則」現在就該看得見——
+        # 那個數字不存在，正是「500 張武裝卡只有 12 張生效」可以無人察覺的原因。
+        errors = []
+        armed = 0
+        # 只數，不落檔：沒有任何命中的健康度檔沒有用（排序全部平手），而這一節在沒有
+        # 東西可重放時應該是唯讀的——夢的預演測試就是釘這件事。
+        for vault in vaults:
+            try:
+                armed += len(compliance.armed_rules(vault))
+            except Exception as exc:
+                errors.append(f"{vault}: {type(exc).__name__}: {exc}")
         return {
             "counts": {"hits": 0, "blocked": 0, "missed": 0, "outside_gate_view": 0,
-                       "silent_rules": 0, "transcripts": 0},
-            "examples": [], "commands": [], "errors": [],
+                       "silent_rules": armed, "transcripts": 0, "transcripts_skipped": 0,
+                       "armed_rules": armed},
+            "examples": [], "commands": [], "errors": errors,
         }
 
     since_stamp = datetime(
