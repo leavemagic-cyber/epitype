@@ -1483,6 +1483,12 @@ def _section_compliance(vaults, today, since_date, config):
         except Exception as exc:
             errors.append(f"{vault}: {type(exc).__name__}: {exc}")
             continue
+        # 自我改進的那一步：今晚的命中直接併進健康度檔，下一次工具呼叫的讀卡順序就照
+        # 它排。不經過任何人，也不必有人讀報告。
+        try:
+            compliance.update_health(vault, rules, vault_hits, today)
+        except Exception as exc:
+            errors.append(f"{vault}: 健康度未更新 {type(exc).__name__}: {exc}")
         hits.extend(vault_hits)
         blocked.extend(vault_blocked)
         missed.extend(vault_missed)
@@ -1490,6 +1496,8 @@ def _section_compliance(vaults, today, since_date, config):
         fired = {hit.card for hit in vault_hits}
         silent.extend(rule.card for rule in rules if rule.card not in fired)
 
+    # 例子只留需要人判斷的那些：漏擋。擋成功的、沒命中的都不列——這一節的產出是改好的
+    # 健康度檔，不是給人讀的清單，多寫一行就是每天多付一次 token。
     for hit in missed[:EXAMPLE_LIMIT]:
         examples.append({
             "card": hit.card, "kind": hit.kind, "at": hit.at,

@@ -229,6 +229,10 @@ def _decisions(vault, started_at):
 
     found = []
     candidates = [key for key in sorted(rulings) if isinstance(rulings[key], dict) and rulings[key].get(_KEY)]
+    # 每回合只讀得動一個上限的卡，所以先讀哪幾張就決定了哪些規則真的生效。夜間回饋把
+    # 「近期真的攔到東西」的卡排前面，閒著的卡用剩下的額度輪——閘漏擋裡唯一機械歸因
+    # 得出來的那個原因（排在上限之外），由那份資料每晚自己修掉。
+    candidates.sort(key=_priority_key(vault, rulings))
     for card_path in candidates[:cap]:
         if expired(started_at):
             break
@@ -258,6 +262,26 @@ def _decisions(vault, started_at):
     if verified != old_manifest or rulings != cached or cursor != old_cursor:
         _write_cache(cache_path, verified, rulings, cursor)
     return [] if expired(started_at) else found
+
+
+def _priority_key(vault, rulings):
+    """Order candidates by how often each ruling has actually fired lately.
+
+    Fail-quiet on purpose: without the nightly health file every card scores the
+    same and the order stays alphabetical, which is what it was before."""
+    try:
+        from epitype import compliance
+
+        ranks = compliance.priority_rank(vault)
+    except Exception:
+        ranks = {}
+
+    def key(card_path):
+        ruling = rulings.get(card_path) or {}
+        name = ruling.get(_KEY) if isinstance(ruling, dict) else None
+        return ranks.get(name, (0, "")) + (card_path,)
+
+    return key
 
 
 def _strings(value):

@@ -14,6 +14,7 @@ pretooluse_gate._read_guard），不另寫一份：重放若用不同的判讀�
 """
 
 from collections import namedtuple
+from datetime import timedelta
 import hashlib
 import io
 import json
@@ -328,6 +329,89 @@ def transcripts_for(roots, since_stamp=None, limit=MAX_TRANSCRIPTS):
     return [path for _mtime, path in found[:limit]]
 
 
+HEALTH_FILENAME = "gate_health.json"
+HEALTH_WINDOW_DAYS = 30
+
+
+def health_path(vault):
+    return Path(vault) / memspec.FTS_INDEX_DIRECTORY / HEALTH_FILENAME
+
+
+def load_health(vault):
+    """每張武裝卡的命中健康度，讀不到就當空的。
+
+    刻意放在卡片旁邊而不是寫進卡片：寫進卡片會動到它的修改時間，而重放正是靠那個時間
+    判斷「事情發生時這張卡存不存在」——寫一次統計就把隔天的判斷弄壞。
+    """
+    try:
+        loaded = json.loads(io.open(health_path(vault), encoding="utf-8").read())
+    except (OSError, ValueError):
+        return {}
+    cards = loaded.get("cards") if isinstance(loaded, dict) else None
+    return cards if isinstance(cards, dict) else {}
+
+
+def update_health(vault, rules, hits, today):
+    """把今天的命中併進健康度，回傳新的一份（並落檔）。
+
+    夢每晚自己做完這件事，不必有人去讀報告——這份檔案下一次工具呼叫就會被閘讀到。
+    """
+    cards = dict(load_health(vault))
+    stamp = today.isoformat()
+    counted = {}
+    for hit in hits:
+        counted[hit.card] = counted.get(hit.card, 0) + 1
+    for rule in rules:
+        entry = dict(cards.get(rule.card) or {})
+        entry.setdefault("first_seen", stamp)
+        today_hits = counted.get(rule.card, 0)
+        recent = entry.get("recent")
+        recent = dict(recent) if isinstance(recent, dict) else {}
+        if today_hits:
+            recent[stamp] = recent.get(stamp, 0) + today_hits
+            entry["last_hit"] = stamp
+        cutoff = (today - timedelta(days=HEALTH_WINDOW_DAYS)).isoformat()
+        recent = {day: count for day, count in recent.items() if day >= cutoff}
+        entry["recent"] = recent
+        entry["hits_30d"] = sum(recent.values())
+        cards[rule.card] = entry
+    try:
+        target = health_path(vault)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        staging = target.with_name(f".{target.name}.tmp-{os.getpid()}")
+        io.open(staging, "w", encoding="utf-8", newline="\n").write(
+            json.dumps({"version": 1, "updated": stamp, "cards": cards},
+                       ensure_ascii=False, separators=(",", ":"))
+        )
+        os.replace(staging, target)
+    except OSError:
+        pass
+    return cards
+
+
+def priority_rank(vault):
+    """卡名 -> 排序鍵；近期真的攔到東西的排前面。
+
+    閘每次呼叫只讀得動一小片卡，所以「先讀哪幾張」決定了哪些規則實際生效。照命中排序
+    之後，會攔到東西的卡永遠落在上限之內，而閒著的卡用剩下的額度慢慢輪——這是「該擋
+    沒擋」唯一機械歸因得出來的原因，夢每晚自己修掉它，不必有人介入。
+    """
+    cards = load_health(vault)
+    ranks = {}
+    for name, entry in cards.items():
+        if not isinstance(entry, dict):
+            continue
+        hits = entry.get("hits_30d")
+        last = entry.get("last_hit") or ""
+        ranks[name] = (-(hits if isinstance(hits, int) else 0), "" if not last else _negated(last))
+    return ranks
+
+
+def _negated(stamp):
+    """讓新的日期排前面：字串比較下，反轉每一位數字。"""
+    return "".join(chr(ord("9") - (ord(ch) - ord("0"))) if ch.isdigit() else ch for ch in stamp)
+
+
 def _selftest():
     import tempfile
     import time
@@ -464,6 +548,46 @@ def _selftest():
                 picked and picked[0] == newer,
             ))
 
+            from datetime import date
+
+            day = date(2026, 9, 17)
+            cards = update_health(vault, rules, hits, day)
+            checks.append((
+                "命中併進健康度，沒命中的卡也建檔但次數是零",
+                cards["probe"]["hits_30d"] == 2
+                and cards["probe"]["last_hit"] == "2026-09-17"
+                and cards["needs"]["hits_30d"] == 1
+                and cards["測試守衛"]["hits_30d"] == 1,
+            ))
+            update_health(vault, rules, [], day + timedelta(days=1))
+            aged = load_health(vault)
+            checks.append((
+                "沒命中的那天不會清掉窗內的舊紀錄，也不會假造新的",
+                aged["probe"]["hits_30d"] == 2 and aged["probe"]["last_hit"] == "2026-09-17",
+            ))
+            faded = update_health(vault, rules, [], day + timedelta(days=HEALTH_WINDOW_DAYS + 1))
+            checks.append((
+                "超過視窗的命中自動退出統計",
+                faded["probe"]["hits_30d"] == 0,
+            ))
+
+            ranks = priority_rank(vault)
+            checks.append((
+                "健康度轉得出排序鍵；沒有檔案時退回一致的預設",
+                set(ranks) == {"probe", "needs", "測試守衛"}
+                and priority_rank(root / "no-such-vault") == {},
+            ))
+
+            # 卡片不能因為記錄統計而被動到：重放靠卡片的修改時間判斷它當時存不存在。
+            checks.append((
+                "健康度寫在卡片旁邊，不動卡片本身",
+                health_path(vault).is_file()
+                and not any(
+                    "gate_" in io.open(vault / name, encoding="utf-8").read()
+                    for name in ("decision-x.md", "scar-y.md", "decision-z.md")
+                ),
+            ))
+
             # 卡比事件新：那天還沒有這張卡，不能算成漏擋。夾具事件是 2026-09-16，
             # 卡是此刻建立的，所以真實的事件時間本身就足以判掉全部。
             checks.append((
@@ -474,7 +598,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 10
+    total = 15
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
