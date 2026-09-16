@@ -1580,33 +1580,59 @@ def _section_host_sync(vaults, today, since_date, config):
     """
     from epitype import host_sync
 
+    # 「我們換掉了認不出來的內容」這句話，在有人看著的兩條路徑（安裝器、手動跑 sync）
+    # 都印在 stdout 上。夜間這條是唯一沒人看著的，而它把輸出收進 StringIO——只撈 WROTE
+    # 的話那句就消失了，於是使用者的字被換掉、夜報零錯誤、沒有任何地方提過。修的是同一
+    # 個毛病：真的發生了的事，不能只在有人看的時候才講。
+    def replaced_in(text):
+        return [
+            line for line in text.splitlines()
+            if line.startswith(memspec.HOST_SYNC_REPLACED_PREFIX)
+        ]
+
+    def drifted_in(text):
+        return [line for line in text.splitlines() if line.startswith("DRIFT")]
+
     report = io.StringIO()
     try:
         before = host_sync.check(vaults, output=report)
     except Exception as exc:
         return {"counts": {"drifted": 0, "written": 0}, "examples": [],
                 "commands": [], "errors": [f"{type(exc).__name__}: {exc}"]}
+    seen = report.getvalue()
+    replaced = replaced_in(seen)
+    drifted = drifted_in(seen)
     if before == host_sync.EXIT_OK:
-        return {"counts": {"drifted": 0, "written": 0}, "examples": [], "commands": [], "errors": []}
+        return {"counts": {"drifted": 0, "written": 0}, "examples": [], "commands": [],
+                "errors": replaced}
 
-    lines = [line for line in report.getvalue().splitlines() if line.strip()]
+    lines = [line for line in seen.splitlines() if line.strip()]
     if before == host_sync.EXIT_REFUSED:
         # 拒絕寫的理由都是需要人動手的（標記被改壞、內容超過上限），自動重試沒有意義。
         return {"counts": {"drifted": 0, "written": 0}, "examples": lines[:EXAMPLE_LIMIT],
-                "commands": ["python -m epitype sync <vault>"], "errors": []}
+                "commands": ["python -m epitype sync <vault>"], "errors": replaced}
 
     applied = io.StringIO()
     try:
         code = host_sync.apply(vaults, output=applied)
     except Exception as exc:
-        return {"counts": {"drifted": len(lines), "written": 0}, "examples": lines[:EXAMPLE_LIMIT],
-                "commands": [], "errors": [f"{type(exc).__name__}: {exc}"]}
-    written = [line for line in applied.getvalue().splitlines() if line.startswith("WROTE")]
+        return {"counts": {"drifted": len(drifted), "written": 0},
+                "examples": lines[:EXAMPLE_LIMIT], "commands": [],
+                "errors": replaced + [f"{type(exc).__name__}: {exc}"]}
+    done = applied.getvalue()
+    written = [line for line in done.splitlines() if line.startswith("WROTE")]
+    # 兩趟都撈：check 是預告、apply 是真的做了。同一件事講兩次也不刪，因為「預告過但沒
+    # 做」與「做了」是不一樣的事，而這裡不該替使用者判斷哪一句比較重要。
+    replaced = list(dict.fromkeys(replaced + replaced_in(done)))
     return {
-        "counts": {"drifted": len(lines), "written": len(written)},
+        # 漂移只數 DRIFT 行。以前數的是「所有非空行」，連 NOTE 都算進去——只有一個區塊
+        # 漂移卻報 2，而這一版的主張就是數字要對。
+        "counts": {"drifted": len(drifted), "written": len(written),
+                   "replaced": len(replaced)},
         "examples": written[:EXAMPLE_LIMIT],
         "commands": [] if code == host_sync.EXIT_OK else ["python -m epitype sync <vault> --apply"],
-        "errors": [],
+        # 放進 errors 而不是 examples：這一晚不能被當成乾淨跑完。使用者的字被換掉了。
+        "errors": replaced,
     }
 
 

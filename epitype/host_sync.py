@@ -396,8 +396,11 @@ def check(vaults, hosts=None, home=None, output=sys.stdout):
     plans = [plan_for(host, vaults, home) for host in (hosts or installed_hosts(home))]
     drift = refused = 0
     for item in plans:
-        for notice in item.notices:
-            print(f"NOTE   {item.host}: {notice}", file=output)
+        # 整個宿主停手時不要先講一句沒發生的事：標記壞掉那一種是一個位元組都不動的。
+        if not item.damaged:
+            for notice in item.notices:
+                print(f"{memspec.HOST_SYNC_REPLACED_PREFIX} {item.host}: {notice}",
+                      file=output)
         for problem in item.problems:
             print(f"REFUSE {item.host}: {problem}", file=output)
             refused += 1
@@ -420,8 +423,10 @@ def apply(vaults, hosts=None, home=None, output=sys.stdout):
     plans = [plan_for(host, vaults, home) for host in (hosts or installed_hosts(home))]
     refused = written = 0
     for item in plans:
-        for notice in item.notices:
-            print(f"NOTE   {item.host}: {notice}", file=output)
+        if not item.damaged:
+            for notice in item.notices:
+                print(f"{memspec.HOST_SYNC_REPLACED_PREFIX} {item.host}: {notice}",
+                      file=output)
         for problem in item.problems:
             print(f"REFUSE {item.host}: {problem}", file=output)
         if item.problems:
@@ -500,12 +505,14 @@ def remove(hosts=None, home=None, output=sys.stdout):
         payload = (payload + "\n").encode("utf-8") if payload else b""
         payload = payload.replace(b"\n", (newline or "\n").encode("utf-8"))
         backup = path.with_name(path.name + memspec.HOST_SYNC_BACKUP_SUFFIX)
+        wrote_backup = False
         try:
             # 只在還沒有備份時寫，跟 apply 同一條規矩。照寫的話，解除安裝會把安裝當初留
             # 下的原檔副本換成「含我們區塊的那一版」——使用者手上唯一一份「Epitype 動它
             # 之前長什麼樣」就這樣沒了，而且是在解除安裝這一步沒的。
             if not backup.exists():
                 atomic_write(backup, original)
+                wrote_backup = True
             if payload.strip():
                 atomic_write(path, payload)
             else:
@@ -525,6 +532,15 @@ def remove(hosts=None, home=None, output=sys.stdout):
             continue
         removed += 1
         print(f"REMOVED {host}: 區塊已拿掉，其餘內容原樣保留 → {path}", file=output)
+        # 備份檔留在使用者的目錄裡，就要講。不講的話，解除安裝之後那裡多一個檔，而且
+        # 「這次剛寫的、裡面含我們的區塊」跟「安裝當初留的、是你自己的原文」是兩件很不
+        # 一樣的事——前者是我們留下的東西，後者是還給你的東西。
+        if wrote_backup:
+            print(f"        原檔副本留在 {backup}（這是拿掉區塊之前的樣子，"
+                  "裡面含我們寫的區塊；確認沒問題就可以刪）", file=output)
+        elif backup.exists():
+            print(f"        安裝當初的原檔副本仍在 {backup}"
+                  "（那是 Epitype 動它之前的樣子；確認沒問題就可以刪）", file=output)
     if not removed:
         print("宿主檔裡沒有我們寫的區塊，沒有要拿掉的東西", file=output)
     return EXIT_OK
@@ -683,6 +699,15 @@ def _selftest():
                 keeper_backup.is_file()
                 and begin not in keeper_backup.read_text(encoding="utf-8"),
             ))
+            # 留在使用者目錄裡的備份檔要講出來，而且要講清楚是哪一種。
+            removal_said = io.StringIO()
+            keeper.write_text("我自己的開頭\n\n中段筆記\n", encoding="utf-8")
+            apply([vault], hosts=["claude"], home=home, output=io.StringIO())
+            remove(hosts=["claude"], home=home, output=removal_said)
+            checks.append((
+                "移除會講出備份檔還在哪，不讓它變成沒人提過的殘留",
+                str(keeper_backup) in removal_said.getvalue(),
+            ))
 
             # 舊標記之間放的是使用者自己的字時，一樣不得覆蓋。
             legacy_rules = host_path("claude", home)
@@ -828,7 +853,8 @@ def _selftest():
             checks.append((
                 "指紋表不在而覆蓋了認不出的索引內容：講出換掉幾行、原檔備份在哪",
                 code == EXIT_OK and "我寫的第一行" not in silent.read_text(encoding="utf-8")
-                and "NOTE" in said and "2 行" in said and str(silent_backup) in said,
+                and memspec.HOST_SYNC_REPLACED_PREFIX in said and "2 行" in said
+                and str(silent_backup) in said,
             ))
             # 同一件事在 check（唯讀預覽）也要講，不然使用者是在檔案被改之後才知道。
             fresh("silent2", f"{index_begin}\n我寫的一行\n{index_end}\n")
@@ -838,7 +864,8 @@ def _selftest():
             check([vault], hosts=["claude"], home=home, output=report)
             checks.append((
                 "check 也先講：不是等檔案被改了才知道",
-                "NOTE" in report.getvalue() and "1 行" in report.getvalue(),
+                memspec.HOST_SYNC_REPLACED_PREFIX in report.getvalue()
+                and "1 行" in report.getvalue(),
             ))
             # 已經有備份時，備份裡不是這次被取代的字——不得講成「原檔備份在這裡」。
             checks.append((
@@ -870,7 +897,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 26
+    total = 27
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
