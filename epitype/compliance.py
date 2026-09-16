@@ -355,6 +355,25 @@ def final_messages(transcripts):
     return order
 
 
+def _sentence_around(text, fragment):
+    """命中所在的那一句話。找不到就退回整段。
+
+    比對範圍要跟「改了什麼」對齊。拿整則訊息算相似度的話，一則四百字的回覆就算真的
+    照規則整句改寫，整體差異也只有百分之一——長訊息必然被判成「擋了等於沒擋」。
+    """
+    body = str(text or "")
+    where = body.find(fragment) if fragment else -1
+    if where < 0:
+        return body
+    starts = max(
+        (body.rfind(mark, 0, where) for mark in memspec.STOP_GATE_SENTENCE_TERMINATORS),
+        default=-1,
+    )
+    ends = [body.find(mark, where) for mark in memspec.STOP_GATE_SENTENCE_TERMINATORS]
+    ends = [index for index in ends if index >= 0]
+    return body[starts + 1: (min(ends) + 1) if ends else len(body)].strip() or body
+
+
 def noop_blocks(blocked, finals):
     """擋了等於沒擋的那些：擋下之後重寫出來的東西跟原本幾乎一樣。
 
@@ -374,9 +393,13 @@ def noop_blocks(blocked, finals):
         if index is None or index + 1 >= len(sequence):
             continue
         rewritten = sequence[index + 1][1]
-        ratio = SequenceMatcher(None, hit.text, rewritten).ratio()
+        before = _sentence_around(hit.text, hit.fragment)
+        after = _sentence_around(rewritten, hit.fragment)
+        # 不能用「那串字還在不在」當判準：誤擋的時候我也一定會改掉那串字，不然過不了
+        # 閘。差別在改動的幅度——照規則改要重寫一整句，誤擋只換兩三個字。
+        ratio = SequenceMatcher(None, before, after).ratio()
         if ratio >= NOOP_SIMILARITY:
-            found.append((hit.card, hit.fragment, round(ratio, 3)))
+            found.append((hit.card, hit.digest, round(ratio, 3)))
     return found
 
 
@@ -409,8 +432,13 @@ def rehearse(rules, hits, chances):
     面前出錯，拿累積的紀錄重走一次就知道它會攔到什麼。一條在十次機會裡命中超過一次的
     樣式，描述的已經不是某個具體錯誤，而是我平常說話的方式——那種東西不該擋。
     """
+    # 分子只算閘看得到的：回合最後一則訊息，以及工具呼叫。回合中段的訊息 Stop 閘從來
+    # 看不到，把它們算進來會讓一條「正在生效」的規則（我已經學會不寫進結尾、推理中還會
+    # 提）因為命中率高而被自動關掉——分子分母單位不一致，2026-09-17 審查實跑重現。
     counted = {}
     for hit in hits:
+        if hit.kind != "guard" and not hit.final:
+            continue
         counted[hit.card] = counted.get(hit.card, 0) + 1
     result = {}
     for rule in rules:
@@ -432,12 +460,14 @@ REHEARSAL_MIN_CHANCES = 40
 
 
 def demoted_cards(vault):
-    """目前只計數、不攔的卡名。"""
-    if not AUTO_DISABLE_ENABLED:
-        return set()
+    """目前只計數、不攔的卡名；過期的自動恢復。"""
+    from datetime import date
+
+    today = date.today().isoformat()
     return {
         name for name, entry in load_health(vault).items()
         if isinstance(entry, dict) and entry.get("demoted_since")
+        and str(entry.get("demoted_until", "")) >= today
     }
 
 
@@ -449,18 +479,50 @@ def health_path(vault):
     return Path(vault) / memspec.FTS_INDEX_DIRECTORY / HEALTH_FILENAME
 
 
-def load_health(vault):
-    """每張武裝卡的命中健康度，讀不到就當空的。
+def load_health(vault, defects=None):
+    """每張武裝卡的命中健康度，讀不到或型別不對就當空的並出聲。
 
     刻意放在卡片旁邊而不是寫進卡片：寫進卡片會動到它的修改時間，而重放正是靠那個時間
     判斷「事情發生時這張卡存不存在」——寫一次統計就把隔天的判斷弄壞。
+
+    這個檔能決定哪些卡不生效，所以逐欄位驗型別，壞的那一筆丟掉、其餘照用。以前任何一
+    個欄位型別不對（例如 `last_hit` 寫成數字）就會在排序時丟例外，被上層整段吞掉，整
+    個庫的排序當場退回字母序而且完全無聲——2026-09-17 對抗審查實跑重現。
     """
+    defects = [] if defects is None else defects
     try:
         loaded = json.loads(io.open(health_path(vault), encoding="utf-8").read())
-    except (OSError, ValueError):
+    except OSError:
+        return {}
+    except ValueError as exc:
+        defects.append(f"健康度檔讀不動（{exc}），這一輪不採用它的排序與例外")
         return {}
     cards = loaded.get("cards") if isinstance(loaded, dict) else None
-    return cards if isinstance(cards, dict) else {}
+    if not isinstance(cards, dict):
+        defects.append("健康度檔的 cards 不是物件，這一輪不採用")
+        return {}
+
+    clean = {}
+    for name, entry in cards.items():
+        if not isinstance(name, str) or not isinstance(entry, dict):
+            defects.append(f"健康度檔有一筆型別不對（{str(name)[:40]}），已忽略")
+            continue
+        checked = {}
+        for field, wanted in (
+            ("hits_30d", int), ("last_hit", str), ("first_seen", str),
+            ("demoted_since", str), ("demoted_until", str), ("broadened_at", str),
+            ("pattern_digest", str), ("recent", dict), ("exceptions", dict),
+            ("noop_evidence", dict), ("rehearsed", dict),
+        ):
+            if field not in entry:
+                continue
+            value = entry[field]
+            if isinstance(value, wanted) and not isinstance(value, bool):
+                checked[field] = value
+            else:
+                defects.append(f"健康度檔 {name} 的 {field} 型別不對，已忽略該欄位")
+        clean[name] = checked
+    return clean
 
 
 # 2026-09-17 四份獨立對抗審查一致判定：自動放行與自動降級這兩條迴圈，可以在一個晚上、
@@ -468,16 +530,19 @@ def load_health(vault):
 #   - 字面樣式的「命中字串」就是樣式本身，所以放行一串字＝關掉整條規則 90 天；
 #   - 相似度算的是整則訊息，長訊息就算真的照規則改了也會被判成「擋了等於沒擋」；
 #   - 彩排把閘從來看不到的回合中段訊息也算進分子，一條正在生效的規則會因此被降級。
-# 一個會自己靜音的執行層，比一個不會自我改進的執行層更糟——尤其它靜音的是「用來管我
-# 自己的規則」。所以動作停用、量測照跑：健康度與彩排數字繼續累積，之後要恢復自動動作，
-# 前提是先修好單位不一致，並且先有抓得到這三種破法的回歸測試。
-AUTO_DISABLE_ENABLED = False
+# 三個都是單位算錯，不是概念錯，所以 2026-09-17 當天逐一修好後恢復：放行改認訊息指紋
+# （字面規則再也不會被一串字關掉）、相似度只比命中那一句、彩排只算閘看得到的。降級另外
+# 加上到期日——夜跑一停，沒有到期日的降級就是永久靜音。
+DEMOTION_TTL_DAYS = 14
 
 
 def exceptions_for(vault):
-    """卡名 -> 已自動放行的字串集合；過期的不算。"""
-    if not AUTO_DISABLE_ENABLED:
-        return {}
+    """卡名 -> 已自動放行的**訊息指紋**集合；過期的不算。
+
+    放行的對象刻意是「那一則訊息」而不是「那串字」。字面規則的命中字串就是規則本身，
+    放行一串字＝把整條規則關掉 90 天（2026-09-17 對抗審查實跑重現）。改成認指紋之後，
+    同一句無害的話不會被重複擋，而任何新的違規照擋——這條路徑再也不可能關掉一條規則。
+    """
     from datetime import date
 
     cards = load_health(vault)
@@ -549,11 +614,14 @@ def _fold_rehearsal(entry, rule, measured, today):
         return  # 機會太少，比率說明不了什麼，維持現狀
     if rate > REHEARSAL_MAX_RATE:
         entry.setdefault("demoted_since", today.isoformat())
+        # 降級也要有到期日：夜跑一停，沒有到期日的降級就是永久靜音。
+        entry["demoted_until"] = (today + timedelta(days=DEMOTION_TTL_DAYS)).isoformat()
         if changed:
             # 改過之後才變這麼寬：記下來，讓「這一版比它取代的那一版差」看得見。
             entry["broadened_at"] = today.isoformat()
     else:
         entry.pop("demoted_since", None)
+        entry.pop("demoted_until", None)
 
 
 def update_health(vault, rules, hits, today, noops=(), rehearsed=None):
@@ -797,22 +865,18 @@ def _selftest():
             ))
             update_health(vault, rules, [], day, noops)
             update_health(vault, rules, [], day, noops)
-            stored = load_health(vault)["probe"].get("exceptions") or {}
             checks.append((
-                "證據照記（累積到門檻就記下那一串字），但動作停用時不放行",
-                set(stored) == {probe_hit.fragment} and exceptions_for(vault) == {},
+                "累積到門檻就自動放行，而且放行的是那一則訊息、不是那串字",
+                exceptions_for(vault).get("probe") == {probe_hit.digest}
+                and probe_hit.fragment not in exceptions_for(vault)["probe"],
             ))
-            # 動作那條路徑本身仍要測得到，不然恢復時等於沒測過。
-            global AUTO_DISABLE_ENABLED
-            AUTO_DISABLE_ENABLED = True
-            try:
-                checks.append((
-                    "開關打開時，放行的是那一串字",
-                    exceptions_for(vault).get("probe") == {probe_hit.fragment},
-                ))
-            finally:
-                AUTO_DISABLE_ENABLED = False
-            entry = load_health(vault)["probe"]["exceptions"][probe_hit.fragment]
+            # 放行一則訊息不得讓同一條規則對別的訊息失效。
+            other = probe_hit._replace(digest="ffffffffffffffff")
+            checks.append((
+                "別的訊息照擋：放行永遠關不掉一條規則",
+                other.digest not in exceptions_for(vault)["probe"],
+            ))
+            entry = load_health(vault)["probe"]["exceptions"][probe_hit.digest]
             checks.append((
                 "放行帶起訖日，會過期",
                 entry["since"] == day.isoformat()
@@ -829,21 +893,19 @@ def _selftest():
                         ["。"], "", "", "", ())
             wide_hits = replay([wide], [transcript], epoch=time.time() + 60)
             measured = rehearse([wide], wide_hits, {"turns": 100, "tools": {}})
+            visible = sum(1 for hit in wide_hits if hit.final or hit.kind == "guard")
             checks.append((
-                "命中率算得出來：命中數除以機會數",
-                measured["寬樣式"][0] == len(wide_hits) and measured["寬樣式"][2] > 0,
+                "命中率的分子只算閘看得到的（回合最後一則與工具呼叫），不是全部命中",
+                measured["寬樣式"][0] == visible < len(wide_hits)
+                and measured["寬樣式"][2] > 0,
             ))
             update_health(vault, [wide], wide_hits, day,
                           rehearsed={"寬樣式": (20, 100, 0.20)})
-            marked = load_health(vault)["寬樣式"].get("demoted_since")
-            AUTO_DISABLE_ENABLED = True
-            try:
-                effective = demoted_cards(vault)
-            finally:
-                AUTO_DISABLE_ENABLED = False
+            entry = load_health(vault)["寬樣式"]
             checks.append((
-                "超過門檻就記下降級；動作停用時閘照攔，開關打開才只計數不攔",
-                bool(marked) and effective == {"寬樣式"} and demoted_cards(vault) == set(),
+                "超過門檻就自動降級成只計數不攔，而且帶到期日",
+                demoted_cards(vault) == {"寬樣式"}
+                and entry.get("demoted_until", "") > entry.get("demoted_since", ""),
             ))
             update_health(vault, [wide], [], day, rehearsed={"寬樣式": (2, 100, 0.02)})
             checks.append((
@@ -856,6 +918,28 @@ def _selftest():
                 "機會太少時不下判斷（跑兩回合命中一次不算 50% 太寬）",
                 demoted_cards(vault) == set(),
             ))
+
+            # 健康度檔是外部可寫的資料，型別壞掉不得讓整套排序無聲消失。
+            poisoned = health_path(vault)
+            good = io.open(poisoned, encoding="utf-8").read()
+            io.open(poisoned, "w", encoding="utf-8", newline="\n").write(
+                json.dumps({"version": 1, "cards": {
+                    "probe": {"hits_30d": 7},
+                    "filler": {"last_hit": 20260917},
+                    "壞的一筆": "不是物件",
+                }}, ensure_ascii=False))
+            noise = []
+            poisoned_cards = load_health(vault, noise)
+            poisoned_ranks = priority_rank(vault)
+            checks.append((
+                "健康度檔型別壞掉：丟掉壞的那幾筆、其餘照用，而且出聲",
+                poisoned_cards["probe"]["hits_30d"] == 7
+                and "last_hit" not in poisoned_cards["filler"]
+                and "壞的一筆" not in poisoned_cards
+                and len(noise) == 2
+                and poisoned_ranks.get("probe") == (-7, ""),
+            ))
+            io.open(poisoned, "w", encoding="utf-8", newline="\n").write(good)
 
             ranks = priority_rank(vault)
             checks.append((
@@ -884,7 +968,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 24
+    total = 25
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

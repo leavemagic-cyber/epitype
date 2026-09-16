@@ -345,7 +345,7 @@ def _demoted(vault):
         return set()
 
 
-def _forbidden_fragment(decision, message, defects, excepted=frozenset()):
+def _forbidden_fragment(decision, message, defects):
     """The matched fragment of the first usable `forbidden` pattern that fires
     outside a quoted citation (U64: see _quoted_spans) — a hit fully inside a
     quoted span is a citation, not a restatement; one outside still blocks,
@@ -375,12 +375,7 @@ def _forbidden_fragment(decision, message, defects, excepted=frozenset()):
         for found in regex.finditer(message):
             if any(start <= found.start() and found.end() <= end for start, end in quoted):
                 continue
-            matched = _one_line(found.group(0))
-            if matched in excepted:
-                # 夜間回饋認定這一串字擋了等於沒擋（擋完我照原樣重送），所以它自動放行。
-                # 放行的是這一串字，不是整條樣式，而且會過期。
-                continue
-            return matched or _one_line(pattern)
+            return _one_line(found.group(0)) or _one_line(pattern)
     return None
 
 
@@ -560,14 +555,19 @@ def _verdict(event, message, config, started_at, defects):
     excepted = {}
     demoted = set()
     for vault in _vaults(config, event):
-        for card, fragments in _exceptions(vault).items():
-            excepted.setdefault(card, set()).update(fragments)
+        for card, digests in _exceptions(vault).items():
+            excepted.setdefault(card, set()).update(digests)
         demoted |= _demoted(vault)
     decisions = [decision for decision in decisions if decision.key not in demoted]
+    # 自動放行認的是「這一則訊息」，不是「那串字」：同一句無害的話不再被重複擋下，而
+    # 任何別的訊息照擋。放行一串字會把字面規則整條關掉，那是 2026-09-17 審查實跑出來的。
+    digest = _message_digest(message)
+    decisions = [
+        decision for decision in decisions
+        if digest not in excepted.get(decision.key, frozenset())
+    ]
     for decision in decisions:
-        fragment = _forbidden_fragment(
-            decision, message, defects, excepted.get(decision.key, frozenset())
-        )
+        fragment = _forbidden_fragment(decision, message, defects)
         if fragment is not None:
             verdicts.append(
                 (
