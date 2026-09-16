@@ -199,6 +199,10 @@ def _decisions(vault, started_at, defects=None):
     manifest, paths = {}, {}
     for card_path, path, mtime_ns, size in scan:
         if expired(started_at):
+            # 逾時在盤點階段：這個庫這一輪一條都沒生效。靜靜回空的話，「這回合沒擋」
+            # 與「這回合根本沒檢查」長得一模一樣。
+            defects.append(memspec.STOP_GATE_INCOMPLETE_DEFECT.format(
+                checked=0, total="?", vault=vault.name))
             return []
         try:
             info = path.stat()
@@ -318,6 +322,12 @@ def _quoted_spans(message):
             merged[-1] = (merged[-1][0], max(merged[-1][1], end))
         else:
             merged.append((start, end))
+    # 引用是一句話，不是一段主張。太長的引用區段不遮——比例那一道的分母是模型自己
+    # 寫的，多打二十個字就壓得下去，絕對長度壓不下去。
+    merged = [
+        (start, end) for start, end in merged
+        if end - start <= memspec.STOP_GATE_QUOTE_SPAN_MAX_CHARS
+    ]
     # 遮罩佔整則太多就整則不遮：引用一句話當證據佔比很小，把整段主張包進引號或改寫成
     # `>` 引用行佔比就很高，而後者是把靜音開關交給被管制的那一方（U64 要豁免的是引用，
     # 不是偽裝）。2026-09-17 對抗審查四種寫法全部繞過，這道比例上限是它的答案。
@@ -354,7 +364,7 @@ def _demoted(vault):
         return set()
 
 
-def _forbidden_fragment(decision, message, defects):
+def _forbidden_fragment(decision, message, defects, masked=None):
     """The matched fragment of the first usable `forbidden` pattern that fires
     outside a quoted citation (U64: see _quoted_spans) — a hit fully inside a
     quoted span is a citation, not a restatement; one outside still blocks,
@@ -363,6 +373,7 @@ def _forbidden_fragment(decision, message, defects):
     A pattern the shared validator rejects is dropped and named on stderr, never
     silently: an unusable pattern is a ruling that stopped being enforced, and the
     turn still ends rather than being blocked by a card nobody can fix."""
+    masked = [] if masked is None else masked
     quoted = _quoted_spans(message)
     for pattern in decision.forbidden:
         # A pattern that will not compile used to be dropped, which left the card
@@ -383,6 +394,10 @@ def _forbidden_fragment(decision, message, defects):
             continue
         for found in regex.finditer(message):
             if any(start <= found.start() and found.end() <= end for start, end in quoted):
+                # 遮罩放過的命中要留痕。以前這裡直接 continue，於是繞過去之後三個地方
+                # 同時看不到：閘不擋、稽核沒紀錄、夜間重放也算不到。留一列之後，使用者
+                # 查得到「這條規則被引用豁免放過幾次」。
+                masked.append(_one_line(found.group(0))[: memspec.STOP_GATE_FRAGMENT_MAX_CHARS])
                 continue
             return _one_line(found.group(0)) or _one_line(pattern)
     return None
@@ -474,6 +489,13 @@ def _named(decision):
     return decision.key
 
 
+def _best_effort_audit(callback, *arguments):
+    try:
+        callback(*arguments)
+    except Exception:
+        pass
+
+
 def _message_digest(message):
     """Short digest of a turn's text — the same value the nightly replay computes."""
     return hashlib.sha256(str(message).encode("utf-8", errors="replace")).hexdigest()[:16]
@@ -551,9 +573,12 @@ def _handle(event, started_at, defects):
 
 def _verdict(event, message, config, started_at, defects):
     decisions = []
-    for vault in _vaults(config, event):
+    vaults = _vaults(config, event)
+    for index, vault in enumerate(vaults):
         if expired(started_at):
-            return None
+            defects.append(memspec.STOP_GATE_INCOMPLETE_DEFECT.format(
+                checked=index, total=len(vaults), vault="記憶庫"))
+            break
         decisions.extend(_decisions(vault, started_at, defects))
     if not decisions:
         return None
@@ -576,7 +601,21 @@ def _verdict(event, message, config, started_at, defects):
         if digest not in excepted.get(decision.key, frozenset())
     ]
     for decision in decisions:
-        fragment = _forbidden_fragment(decision, message, defects)
+        masked = []
+        fragment = _forbidden_fragment(decision, message, defects, masked)
+        if masked:
+            # 豁免也是一件發生過的事，要進帳。內容本身仍然不記，只記卡名與命中片段。
+            _best_effort_audit(
+                append_gate_log,
+                governance_vault(config, for_write=True),
+                with_session(
+                    {"kind": memspec.STOP_GATE_MASKED_LOG_KIND, "decision": decision.key,
+                     "rule": "quoted", "fragment": masked[0],
+                     "digest": _message_digest(message)},
+                    event.get("session_id", event.get("sessionId")),
+                ),
+                started_at,
+            )
         if fragment is not None:
             verdicts.append(
                 (

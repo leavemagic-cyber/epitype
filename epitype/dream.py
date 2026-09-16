@@ -1498,6 +1498,7 @@ def _section_compliance(vaults, today, since_date, config):
     errors, examples = [], []
     hits, blocked, missed, unseen = [], [], [], []
     silent = []
+    exempted = {}
     for vault in vaults:
         try:
             rules = compliance.armed_rules(vault)
@@ -1523,6 +1524,10 @@ def _section_compliance(vaults, today, since_date, config):
             compliance.update_health(vault, rules, vault_hits, today, noops, rehearsed)
         except Exception as exc:
             errors.append(f"{vault}: 健康度未更新 {type(exc).__name__}: {exc}")
+        try:
+            exempted.update(compliance.masked_exemptions(vault, since_date.isoformat()))
+        except Exception as exc:
+            errors.append(f"{vault}: 引用豁免統計失敗 {type(exc).__name__}: {exc}")
         hits.extend(vault_hits)
         blocked.extend(vault_blocked)
         missed.extend(vault_missed)
@@ -1548,6 +1553,9 @@ def _section_compliance(vaults, today, since_date, config):
             "transcripts": len(transcripts),
             # 沒讀到的數字一定要在：只讀了一部分與「查遍全部、零漏擋」報出來長得一樣。
             "transcripts_skipped": max(0, available - len(transcripts)),
+            # 引用豁免放過的命中。重放看不到它們（同一套遮罩），所以這個數字只能從閘
+            # 自己的稽核列來——短句加引號與真正的引用機器分不出來，分不出來至少要數。
+            "quoted_exemptions": sum(exempted.values()),
         },
         "examples": examples,
         "commands": ["python -m epitype.compliance --selftest"] if missed else [],

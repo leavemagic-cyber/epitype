@@ -1795,8 +1795,11 @@ STOP_GATE_QUOTE_TEXT_REGEX = re.compile(STOP_GATE_QUOTE_TEXT_PATTERN)
 STOP_GATE_BLOCKQUOTE_LINE_PATTERN = r"^[ \t]*>.*$"
 STOP_GATE_BLOCKQUOTE_LINE_REGEX = re.compile(STOP_GATE_BLOCKQUOTE_LINE_PATTERN, re.MULTILINE)
 STOP_GATE_QUOTE_MASK_ENABLED = True
-# 遮罩佔整則訊息的比例上限。引用一句話當證據，佔比很小；把整段主張包進引號或改寫成
-# `>` 引用行，佔比就會很高——後者不是引用，是把靜音開關交到被管制的那一方手上。
-# 2026-09-17 對抗審查實測：「」、直引號、反引號、`>` 四種寫法 4/4 全部繞過。超過這個
-# 比例就整則不遮，讓命中照擋；引用型的正當用法不受影響。
+# 遮罩的兩道上限。比例那一道不夠：分母是模型自己寫的，多打二十個字就能把佔比壓下去，
+# 2026-09-17 第三輪審查實測「違規句＋20 字」即繞過。所以再加一道**絕對長度**——引用是
+# 一句話，不是一段主張；超過這個長度的引用區段一律不遮。兩道都過才算引用。
 STOP_GATE_QUOTE_MASK_MAX_SHARE = 0.5
+STOP_GATE_QUOTE_SPAN_MAX_CHARS = 120
+# 遮罩擋掉一次命中時照樣寫稽核列。以前被遮罩放過的命中在三個地方同時消失：閘不擋、
+# 稽核沒紀錄、夜間重放也算不到——被治理的那一方繞過去之後，使用者查不到任何痕跡。
+STOP_GATE_MASKED_LOG_KIND = "stop_masked"

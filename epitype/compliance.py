@@ -319,6 +319,42 @@ def _read_gate_log(path, since, counts, stopped):
                 stopped.add((session, row["digest"]))
 
 
+def masked_exemptions(vault, since=None):
+    """引用豁免放過的命中：卡名 -> 次數。
+
+    重放看不到這些——它跟閘用同一套遮罩，所以在它眼裡那些根本不算命中。閘會為每一次
+    豁免寫一列，這裡把那些列數出來，讓「某條規則被引用豁免放過幾次」在夜報上是個數字。
+    短句加引號與真正的引用長得一樣，機器分不出來；分不出來的東西至少要數得出來。
+    """
+    root = Path(vault)
+    paths = [root / memspec.GATE_LOG_FILENAME]
+    paths += sorted(root.glob(memspec.GATE_LOG_FILENAME + ".*"))
+    counts = {}
+    for path in paths:
+        try:
+            stream = io.open(path, encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        with stream:
+            for line in stream:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(row, dict):
+                    continue
+                if row.get("kind") != memspec.STOP_GATE_MASKED_LOG_KIND:
+                    continue
+                if since and str(row.get("timestamp", ""))[:10] < since:
+                    continue
+                name = row.get("decision") or ""
+                counts[name] = counts.get(name, 0) + 1
+    return counts
+
+
 def reconcile(hits, blocks, stopped=()):
     """命中對上稽核帳：哪些當場擋了，哪些漏了。
 

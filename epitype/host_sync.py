@@ -341,7 +341,32 @@ def _drifted(region):
     return region.current != region.text
 
 
+def _report_dropped(vaults, output):
+    """哪些庫的規則卡沒有進宿主檔。不講的話，使用者會以為每個庫的規則都生效了。
+
+    同一張卡在 Stop 閘與寫檔閘是生效的，規則卡卻只有治理庫那一份進得了宿主檔——兩邊
+    作用域不一樣，而輸出只印一行 WROTE 的話，這件事沒有任何地方看得到。
+    """
+    chosen = {str(path) for path in contract_vaults(vaults)}
+    dropped = [Path(vault) for vault in vaults if str(Path(vault)) not in chosen]
+    for vault in dropped:
+        cards = 0
+        try:
+            cards = sum(1 for _ in Path(vault).rglob("rule-*.md"))
+        except OSError:
+            pass
+        if not cards:
+            continue  # 沒有規則卡就沒有東西被丟掉，講了只是噪音
+        # 記憶庫目錄常常都叫 memory，只印目錄名分不出是哪一個庫。
+        print(
+            f"NOTE   {vault.parent.name}/{vault.name} 有 {cards} 張規則卡沒有進宿主檔："
+            "宿主檔是跨專案契約，只收治理庫；這個庫的裁定卡在兩道閘仍然生效",
+            file=output,
+        )
+
+
 def check(vaults, hosts=None, home=None, output=sys.stdout):
+    _report_dropped(vaults, output)
     plans = [plan_for(host, vaults, home) for host in (hosts or installed_hosts(home))]
     drift = refused = 0
     for item in plans:
@@ -363,6 +388,7 @@ def check(vaults, hosts=None, home=None, output=sys.stdout):
 
 
 def apply(vaults, hosts=None, home=None, output=sys.stdout):
+    _report_dropped(vaults, output)
     plans = [plan_for(host, vaults, home) for host in (hosts or installed_hosts(home))]
     refused = written = 0
     for item in plans:
