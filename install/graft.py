@@ -1570,6 +1570,16 @@ def _install(
         if _doctor(home, output=output, scheduler=scheduler) != 0:
             raise InstallError("post-install doctor failed")
 
+        # 規則塊與索引同步進宿主自己會載入的那個檔。沒有這一步，使用者寫了卡、產生了
+        # 規則，代理卻永遠讀不到——而且看不出少了什麼。裝的時候順手做掉，使用者不必
+        # 知道有這個指令。同步失敗不讓安裝失敗：hook 已經裝好、卡片庫已經能用。
+        try:
+            from epitype import host_sync
+
+            host_sync.apply(vaults, home=home, output=output)
+        except Exception as exc:
+            print(f"HOST SYNC SKIPPED: {type(exc).__name__}: {exc}", file=output)
+
         print("INSTALL REPORT", file=output)
         for path in transaction.changed:
             print(f"CHANGED: {path}", file=output)

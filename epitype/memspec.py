@@ -919,6 +919,48 @@ CARD_GATE_FIELDS = (
     REQUIRE_WHEN_FIELD,
     REQUIRE_TEXT_FIELD,
 )
+# 宿主檔同步：把卡片生成的規則塊與短索引，寫進宿主自己每一場都會載入的那個檔
+# （Claude 的 CLAUDE.md、Codex 的 AGENTS.md）。沒有這一段，使用者寫了卡、產生了規則，
+# 代理卻永遠讀不到——引擎有了，傳動軸沒有。
+#
+# 標記區塊而不是整檔覆寫：那個檔是使用者自己的，裡面有他自己寫的東西，我們只負責
+# 兩個標記之間。標記必須剛好一對；重複、巢狀、順序顛倒一律拒絕，不猜。
+HOST_SYNC_FILES = {
+    "claude": (".claude", "CLAUDE.md"),
+    "codex": (".codex", "AGENTS.md"),
+}
+HOST_SYNC_RULES_REGION = "rules"
+HOST_SYNC_INDEX_REGION = "index"
+HOST_SYNC_MARKERS = {
+    HOST_SYNC_RULES_REGION: (
+        "<!-- EPITYPE RULES BEGIN - generated from cards, do not edit here -->",
+        "<!-- EPITYPE RULES END -->",
+    ),
+    HOST_SYNC_INDEX_REGION: (
+        "<!-- EPITYPE INDEX BEGIN - generated, do not edit here -->",
+        "<!-- EPITYPE INDEX END -->",
+    ),
+}
+# 2026-09-17 之前用的是私人同步腳本的標記。認得它們，`--apply` 就會就地換成產品的標記，
+# 不會在同一個檔裡長出第二塊一樣的內容。
+HOST_SYNC_LEGACY_MARKERS = {
+    HOST_SYNC_RULES_REGION: (
+        "<!-- AGENT_CONTRACT_CORE BEGIN - generated, do not edit here -->",
+        "<!-- AGENT_CONTRACT_CORE END -->",
+    ),
+    HOST_SYNC_INDEX_REGION: (
+        "<!-- SHARED_INDEX BEGIN - generated -->",
+        "<!-- SHARED_INDEX END -->",
+    ),
+}
+HOST_SYNC_INDEX_FILENAME = "MEMORY.md"
+HOST_SYNC_BACKUP_SUFFIX = ".epitype-bak"
+# 宿主檔每一場都整份載入，所以這兩塊是每一場的固定成本。超過就拒絕寫，讓使用者先瘦身。
+HOST_SYNC_REGION_CAP_BYTES = 24576
+HOST_SYNC_MISSING_MARKER_REASON = (
+    "{path} 的 {region} 區塊標記不成對（BEGIN={begin} END={end}，各要剛好一個）"
+)
+
 # 一年份的 owner 糾正全部寫成只走喚回的 feedback 卡，一張都沒武裝——因為卡是被規範的
 # 那一方寫的，而不綁自己的寫法永遠比較省事。2026-09-16 owner：「把能擋的都裝上」。
 # 所以「要不要武裝」不再是寫卡的人可以默默決定的事：feedback 卡必須二選一，寫出擋得住

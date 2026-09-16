@@ -1523,6 +1523,47 @@ def _section_compliance(vaults, today, since_date, config):
     }
 
 
+# --------------------------------------------------------------------------- section 14
+
+
+def _section_host_sync(vaults, today, since_date, config):
+    """規則改了就自己寫進宿主檔，不必有人記得跑同步。
+
+    卡片是規則的正本，但代理讀的是 `CLAUDE.md`／`AGENTS.md`。中間這一步只要靠人記得，
+    就會有「規則改了但代理讀的還是舊的」那段空窗，而且空窗期間完全沒有徵兆。
+    """
+    from epitype import host_sync
+
+    report = io.StringIO()
+    try:
+        before = host_sync.check(vaults, output=report)
+    except Exception as exc:
+        return {"counts": {"drifted": 0, "written": 0}, "examples": [],
+                "commands": [], "errors": [f"{type(exc).__name__}: {exc}"]}
+    if before == host_sync.EXIT_OK:
+        return {"counts": {"drifted": 0, "written": 0}, "examples": [], "commands": [], "errors": []}
+
+    lines = [line for line in report.getvalue().splitlines() if line.strip()]
+    if before == host_sync.EXIT_REFUSED:
+        # 拒絕寫的理由都是需要人動手的（標記被改壞、內容超過上限），自動重試沒有意義。
+        return {"counts": {"drifted": 0, "written": 0}, "examples": lines[:EXAMPLE_LIMIT],
+                "commands": ["python -m epitype sync <vault>"], "errors": []}
+
+    applied = io.StringIO()
+    try:
+        code = host_sync.apply(vaults, output=applied)
+    except Exception as exc:
+        return {"counts": {"drifted": len(lines), "written": 0}, "examples": lines[:EXAMPLE_LIMIT],
+                "commands": [], "errors": [f"{type(exc).__name__}: {exc}"]}
+    written = [line for line in applied.getvalue().splitlines() if line.startswith("WROTE")]
+    return {
+        "counts": {"drifted": len(lines), "written": len(written)},
+        "examples": written[:EXAMPLE_LIMIT],
+        "commands": [] if code == host_sync.EXIT_OK else ["python -m epitype sync <vault> --apply"],
+        "errors": [],
+    }
+
+
 _SECTIONS = (
     (1, "缺別名卡", _section_missing_aliases),
     (2, "卡片型別檢查 FAIL／WARN", _section_card_lint),
@@ -1537,6 +1578,7 @@ _SECTIONS = (
     (11, "上限檢查", _section_caps),
     (12, "原話無決策卡承接（升決策卡候選）", _section_uncarried_quotes),
     (13, "閘的漏擋回饋（重放昨天的對話）", _section_compliance),
+    (14, "宿主檔同步（規則與索引寫進代理真正會讀的檔）", _section_host_sync),
 )
 # 第 15 節不在上面那張表裡：它要讀前面幾節算完的候選數，所以由 build_report 最後跑。
 _SECTION_IDS = tuple(section_id for section_id, _title, _fn in _SECTIONS) + (REVIEW_PACK_SECTION_ID,)
@@ -2152,8 +2194,8 @@ def _selftest():
             report = build_report([vault], today=today)
             by_id = {section["id"]: section for section in report["sections"]}
 
-            checks.append(("all 13 deterministic sections present with no error", all(
-                by_id[i]["error"] is None for i in range(1, 14)
+            checks.append(("all 14 deterministic sections present with no error", all(
+                by_id[i]["error"] is None for i in range(1, 15)
             )))
             checks.append((
                 "section 13 replays the day and reports zero misses on a fixture with no transcripts",

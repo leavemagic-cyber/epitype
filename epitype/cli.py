@@ -11,6 +11,7 @@ _COMMANDS = {
     "cards": ("epitype.card_lint", "main", ()),
     "views": ("epitype.views", "main", ()),
     "core-gen": ("epitype.core_gen", "main", ()),
+    "sync": ("epitype.host_sync", "main", ()),
     "decisions": ("epitype.decision_lint", "main", ()),
     "ledger": ("epitype.ledger_gate", "main", ()),
     "compact-map": ("epitype.compact_map", "main", ()),
