@@ -176,6 +176,50 @@ class StopFreshnessRegression(unittest.TestCase):
         event = {"session_id": "split-body", "last_assistant_message": "aliasold 和 otherold 要不要調整？"}
         self.assertEqual(stop._handle(event, time.monotonic(), [])["decision"], "block")
 
+    def test_timeout_in_the_scan_loop_is_never_silent(self):
+        """A timeout before a card is recognised is the least visible one.
+
+        Those cards never enter the candidate list, so they are missing from the
+        "checked N of M" denominator too: the turn reports as fully checked. New and
+        just-edited cards sort exactly here — the ones that most need to apply.
+        """
+        for index in range(5):
+            self.card(f"d{index:03d}.md")
+        calls = []
+
+        def expired(_started_at):
+            calls.append(1)
+            return len(calls) > 5  # 盤點那 5 次先放過，逾時落在辨認迴圈裡
+
+        defects = []
+        with patch.object(stop, "expired", expired):
+            self.assertEqual(stop._decisions(self.vault, time.monotonic(), defects), [])
+        self.assertTrue(any("連認都還沒認" in line for line in defects), defects)
+        self.assertTrue(any("5" in line for line in defects), defects)
+
+    def test_timeout_on_the_last_candidate_still_reports(self):
+        """`continue` relies on the next iteration to report. There isn't one here.
+
+        On the final candidate the loop simply ends: zero decisions, zero defects —
+        identical to "checked everything, nothing to block".
+        """
+        self.card("only.md")
+        self.decisions()  # 先讓快取認得這張卡，才會走到候選迴圈
+        calls = []
+
+        def expired(_started_at):
+            # 逾時必須剛好落在「重讀完這張卡之後」那一次檢查：1=盤點、2=候選迴圈開頭
+            # （辨認迴圈此時已空）、3=重讀之後。落在第 2 次的話迴圈開頭就報了缺陷，測到
+            # 的是別條路徑——這個測試第一版就是那樣寫的，拿掉修正照樣綠。
+            calls.append(1)
+            return len(calls) > 2
+
+        defects = []
+        with patch.object(stop, "expired", expired):
+            self.assertEqual(stop._decisions(self.vault, time.monotonic(), defects), [])
+        self.assertEqual(len(calls), 3, "呼叫次序變了，這個測試已經測不到原本那條路徑")
+        self.assertTrue(any("0/1" in line for line in defects), defects)
+
     def test_malformed_cached_value_remains_eligible_for_discovery(self):
         self.card()
         self.decisions()

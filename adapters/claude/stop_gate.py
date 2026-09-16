@@ -221,8 +221,14 @@ def _decisions(vault, started_at, defects=None):
     rotated = [key for key in negatives if key > cursor] + [key for key in negatives if key <= cursor]
     refreshed = set()
     cap = memspec.STOP_GATE_MAX_CARDS_PER_VAULT
-    for card_path in (changed + rotated)[:cap]:
+    scanning = (changed + rotated)[:cap]
+    for position, card_path in enumerate(scanning):
         if expired(started_at):
+            # 這裡逾時比下面那個迴圈逾時更難看得出來：沒被認過的卡根本進不了候選名單，
+            # 於是連「檢查了 N/M 張」的分母都不含它們——報出來會像全部檢查過。新卡與剛
+            # 改過的卡正好都排在這裡，也就是最需要生效的那些。
+            defects.append(memspec.STOP_GATE_UNSCANNED_DEFECT.format(
+                skipped=len(scanning) - position, vault=vault.name))
             break
         try:
             rulings[card_path] = _read_decision(paths[card_path])
@@ -255,7 +261,14 @@ def _decisions(vault, started_at, defects=None):
                 rulings[card_path] = None
             verified[card_path] = manifest[card_path]
         ruling = rulings[card_path]
-        if expired(started_at) or not isinstance(ruling, dict) or not ruling.get(_KEY):
+        if expired(started_at):
+            # 重讀這張卡的時候剛好逾時。`continue` 會在下一圈開頭補上缺陷行，但這張是
+            # 最後一張時就沒有下一圈了——迴圈正常結束、零缺陷，跟「全部檢查完、沒有東西
+            # 要擋」長得一模一樣。這一句是把那個最後一格補起來。
+            defects.append(memspec.STOP_GATE_INCOMPLETE_DEFECT.format(
+                checked=index, total=len(candidates), vault=vault.name))
+            break
+        if not isinstance(ruling, dict) or not ruling.get(_KEY):
             continue
         found.append(
             _Decision(

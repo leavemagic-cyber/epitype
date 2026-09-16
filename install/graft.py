@@ -487,6 +487,19 @@ def _unmerge_hooks(raw, target_state):
     return encoded, removed
 
 
+def _is_empty_shell(raw):
+    """拿掉我們的區塊之後，這個檔還剩下東西嗎。
+
+    只認「頂層物件是空的」這一種，而且讀不動就一律回否——判斷不出來時留著檔案是安全的
+    那一邊，刪掉別人的設定不是。
+    """
+    try:
+        value = json.loads(raw.decode("utf-8-sig"))
+    except (UnicodeDecodeError, ValueError):
+        return False
+    return value == {}
+
+
 def _backup_name(path, timestamp):
     base = path.with_name(path.name + BACKUP_INFIX + timestamp)
     candidate = base
@@ -570,6 +583,16 @@ class Transaction:
         self.prepare(path)
         self.mkdir(path.parent)
         _atomic_write(path, data)
+        if path not in self.changed:
+            self.changed.append(path)
+        return True
+
+    def remove(self, path):
+        """刪掉一個檔，跟 write 一樣先備份、一樣進得了 rollback。"""
+        if not path.exists():
+            return False
+        self.prepare(path)
+        path.unlink()
         if path not in self.changed:
             self.changed.append(path)
         return True
@@ -755,12 +778,17 @@ def _state_bytes(value):
     return (json.dumps(value, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
 
 
-def _merge_target_state(state, name, path, created_hooks, created_events):
+def _merge_target_state(state, name, path, created_hooks, created_events,
+                        created_file=False):
     targets = state.setdefault("targets", {})
     previous = targets.get(name, {})
     previous_events = previous.get("created_events", ())
     targets[name] = {
         "path": os.fspath(path),
+        # 「這個檔本來不存在，是安裝建出來的」。第一次安裝記下來就不再翻面：之後重跑
+        # 安裝時檔案當然存在了，照現況記的話這個事實會被自己的安裝洗掉，解除安裝就留
+        # 下一個空殼。
+        "created_file": bool(previous.get("created_file")) or created_file,
         "created_hooks": bool(previous.get("created_hooks")) or created_hooks,
         "created_events": sorted(set(previous_events) | set(created_events)),
     }
@@ -1539,9 +1567,11 @@ def _install(
             targets.append(("codex", home / ".codex" / "hooks.json", _hook_template(True, hooks_root, repo_root)))
 
         for name, path, entries in targets:
-            source = path.read_bytes() if path.is_file() else b"{}\n"
+            existed = path.is_file()
+            source = path.read_bytes() if existed else b"{}\n"
             merged, created_hooks, created_events, locations = _merge_hooks(source, entries)
-            _merge_target_state(state, name, path, created_hooks, created_events)
+            _merge_target_state(state, name, path, created_hooks, created_events,
+                                created_file=not existed)
             for location in locations:
                 print(f"{'DRY-RUN merge' if dry_run else 'MERGE'} {path}: {location}", file=output)
             if merged != source:
@@ -1761,6 +1791,15 @@ def _uninstall(home, dry_run=False, output=sys.stdout, scheduler=None):
             updated, removed = _unmerge_hooks(path.read_bytes(), target_state)
             for location in removed:
                 print(f"{'DRY-RUN remove' if dry_run else 'REMOVE'} {path}: {location}", file=output)
+            # 整個檔都是我們建的、拿掉之後只剩一個空殼，就把檔一起刪掉。宿主檔那邊已經
+            # 是這個待遇（整份是我們的就刪），hooks.json 沒有的話，解除安裝之後那句
+            # 「沒留下我們的東西」在 codex 這一路就是假的。使用者原本就有的檔永遠不刪。
+            if target_state.get("created_file") and _is_empty_shell(updated):
+                print(f"{'DRY-RUN remove' if dry_run else 'REMOVE'} {path}"
+                      "：這個檔是安裝建出來的，拿掉區塊之後是空的", file=output)
+                if not dry_run:
+                    transaction.remove(path)
+                continue
             if updated != path.read_bytes():
                 if dry_run:
                     print(f"BACKUP: {_planned_backup(path)}", file=output)

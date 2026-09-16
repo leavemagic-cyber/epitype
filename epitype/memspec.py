@@ -824,6 +824,12 @@ STOP_GATE_SILENT_STATUSES = ("superseded", "closed", "retired")
 STOP_GATE_INCOMPLETE_DEFECT = (
     "⚠ 這回合逾時，{vault} 只檢查了 {checked}/{total} 張武裝卡；沒檢查到的那些這次沒有生效"
 )
+# 掃描階段逾時：還沒被辨認出來的卡不會進候選名單，所以連「檢查了幾張」都算不進去——
+# 它們這回合等於不存在。跟上面那句分開講，不然數字會把「全部檢查過」說得理直氣壯。
+STOP_GATE_UNSCANNED_DEFECT = (
+    "⚠ 這回合逾時，{vault} 有 {skipped} 張卡連認都還沒認（新卡或剛改過的卡）；"
+    "它們這次不在檢查範圍內"
+)
 STOP_GATE_FRONTMATTER_MAX_BYTES = 16 * 1024
 STOP_GATE_MESSAGE_MAX_CHARS = 20000
 STOP_GATE_QUOTE_MAX_CHARS = 160
@@ -963,6 +969,13 @@ HOST_SYNC_BACKUP_SUFFIX = ".epitype-bak"
 HOST_SYNC_REGION_CAP_BYTES = 24576
 HOST_SYNC_MISSING_MARKER_REASON = (
     "{path} 的 {region} 區塊標記不成對（BEGIN={begin} END={end}，各要剛好一個）"
+)
+# 指紋表不在時，索引塊認不出區塊裡的字是不是自己寫的，只能以標記為準照寫。取捨本身是
+# 對的（不然解除安裝過一次就再也同步不回來），但推測錯的時候消失的是使用者的字——所以
+# 至少要當場講清楚換掉了幾行、原檔備份在哪。默默做才是真正的問題。
+HOST_SYNC_UNRECOGNISED_NOTICE = (
+    "{region} 區塊裡原本有 {lines} 行，認不出是不是我們寫的（指紋紀錄不在），"
+    "這次同步會用生成內容取代它；{backup}"
 )
 
 # 一年份的 owner 糾正全部寫成只走喚回的 feedback 卡，一張都沒武裝——因為卡是被規範的

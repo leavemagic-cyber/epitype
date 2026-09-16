@@ -1525,7 +1525,13 @@ def _section_compliance(vaults, today, since_date, config):
         except Exception as exc:
             errors.append(f"{vault}: 健康度未更新 {type(exc).__name__}: {exc}")
         try:
-            exempted.update(compliance.masked_exemptions(vault, since_date.isoformat()))
+            # 逐鍵累加，不是覆蓋。同一張卡在兩個庫各有稽核列時，`update` 會讓前一個庫
+            # 的數字整個消失——而這一版賴以成立的主張就是「分不出來至少數得出來」，
+            # 計數器不能是錯的。
+            for card, count in compliance.masked_exemptions(
+                vault, since_date.isoformat()
+            ).items():
+                exempted[card] = exempted.get(card, 0) + count
         except Exception as exc:
             errors.append(f"{vault}: 引用豁免統計失敗 {type(exc).__name__}: {exc}")
         hits.extend(vault_hits)
