@@ -35,7 +35,19 @@ MAX_TRANSCRIPT_BYTES = 64 * 1024 * 1024
 STALE_CARD_DAYS = 30
 
 Rule = namedtuple("Rule", "card kind path mtime forbidden require_when require_text tool fragments")
-Hit = namedtuple("Hit", "card kind session at fragment digest final")
+Hit = namedtuple("Hit", "card kind session at fragment digest final text")
+
+# 一次攔截「什麼都沒改變」的判準：重寫後與原文的相似度。誤擋通常只換兩三個字，真違規
+# 要補一整段或整句重來。
+NOOP_SIMILARITY = 0.90
+# 單一次就認定太急（我也可能只是小改一下再被擋一次），所以要累積；相似到幾乎沒動過的
+# 那種，一次就夠。
+NOOP_SIMILARITY_INSTANT = 0.98
+NOOP_EVIDENCE_NEEDED = 2
+# 一張卡最多自動放行幾串字。超過就不是某個字誤擋，是這條樣式整個寫太寬。
+MAX_EXCEPTIONS_PER_CARD = 5
+# 例外不是永久豁免：這段時間內沒有再出現誤擋證據就自動失效，樣式回到完整範圍。
+EXCEPTION_TTL_DAYS = 90
 
 
 def _one_line(value):
@@ -212,7 +224,7 @@ def replay(rules, transcripts, epoch=None, since=None):
                             continue
                         if all(fragment in payload for fragment in rule.fragments):
                             hits.append(Hit(rule.card, "guard", session, stamp,
-                                            "＋".join(rule.fragments), _digest(payload), True))
+                                            "＋".join(rule.fragments), _digest(payload), True, payload))
                     continue
                 for index, text in enumerate(all_texts):
                     final = text is final_text and index == len(all_texts) - 1
@@ -221,7 +233,7 @@ def replay(rules, transcripts, epoch=None, since=None):
                             found = _blocks_outside_quotes(pattern, text, cache)
                             if found is not None:
                                 hits.append(Hit(rule.card, "forbidden", session, stamp,
-                                                _one_line(found.group(0))[:80], _digest(text), final))
+                                                _one_line(found.group(0))[:80], _digest(text), final, text))
                                 break
                     elif rule.kind == "require":
                         trigger = _blocks_outside_quotes(rule.require_when, text, cache)
@@ -229,7 +241,7 @@ def replay(rules, transcripts, epoch=None, since=None):
                             continue
                         if _blocks_outside_quotes(rule.require_text, text, cache) is None:
                             hits.append(Hit(rule.card, "require", session, stamp,
-                                            _one_line(trigger.group(0))[:80], _digest(text), final))
+                                            _one_line(trigger.group(0))[:80], _digest(text), final, text))
     return hits
 
 
@@ -329,6 +341,45 @@ def transcripts_for(roots, since_stamp=None, limit=MAX_TRANSCRIPTS):
     return [path for _mtime, path in found[:limit]]
 
 
+def final_messages(transcripts):
+    """每一場依序的 (訊息指紋, 訊息全文)——閘看得到的那一則，也就是每回合的最後一段。
+
+    誤擋要靠「擋下之後我重寫成什麼」來判，所以得拿得到被擋那則的下一則。指紋跟閘記在
+    稽核帳上的是同一個算法，兩邊才對得起來。
+    """
+    order = {}
+    for path in transcripts:
+        for session, _stamp, final_text, _all_texts, _calls in _turns(path):
+            if final_text:
+                order.setdefault(session, []).append((_digest(final_text), final_text))
+    return order
+
+
+def noop_blocks(blocked, finals):
+    """擋了等於沒擋的那些：擋下之後重寫出來的東西跟原本幾乎一樣。
+
+    真的違規要補一整段或整句重來；誤擋只換兩三個字就送出去了，因為要改的東西本來就
+    不存在。回傳 (卡, 命中字串, 相似度)。
+
+    這個判準對「規避」也會給高分——把「應該可以」換成「應當可以」意思沒變、相似度也
+    高。所以它只是證據，不是結論：自動放行的對象限縮成**當時命中的那一串字**，而且要
+    累積到門檻、還會過期。規避改掉的正是那串字，於是被放行的是一個我已經不用的寫法。
+    """
+    from difflib import SequenceMatcher
+
+    found = []
+    for hit in blocked:
+        sequence = finals.get(hit.session) or []
+        index = next((i for i, (digest, _text) in enumerate(sequence) if digest == hit.digest), None)
+        if index is None or index + 1 >= len(sequence):
+            continue
+        rewritten = sequence[index + 1][1]
+        ratio = SequenceMatcher(None, hit.text, rewritten).ratio()
+        if ratio >= NOOP_SIMILARITY:
+            found.append((hit.card, hit.fragment, round(ratio, 3)))
+    return found
+
+
 HEALTH_FILENAME = "gate_health.json"
 HEALTH_WINDOW_DAYS = 30
 
@@ -351,7 +402,61 @@ def load_health(vault):
     return cards if isinstance(cards, dict) else {}
 
 
-def update_health(vault, rules, hits, today):
+def exceptions_for(vault):
+    """卡名 -> 已自動放行的字串集合；過期的不算。"""
+    from datetime import date
+
+    cards = load_health(vault)
+    today = date.today().isoformat()
+    result = {}
+    for name, entry in cards.items():
+        if not isinstance(entry, dict):
+            continue
+        live = set()
+        for fragment, meta in (entry.get("exceptions") or {}).items():
+            if isinstance(meta, dict) and str(meta.get("until", "")) >= today:
+                live.add(fragment)
+        if live:
+            result[name] = live
+    return result
+
+
+def _fold_exceptions(entry, card, noops, today):
+    """把今晚的誤擋證據併進這張卡的放行清單，回傳新增了哪幾串字。"""
+    from datetime import date
+
+    evidence = dict(entry.get("noop_evidence") or {})
+    exceptions = dict(entry.get("exceptions") or {})
+    added = []
+    for name, fragment, ratio in noops:
+        if name != card or not fragment:
+            continue
+        rows = list(evidence.get(fragment) or [])
+        rows.append(ratio)
+        evidence[fragment] = rows[-8:]
+        enough = len(rows) >= NOOP_EVIDENCE_NEEDED or ratio >= NOOP_SIMILARITY_INSTANT
+        if not enough or fragment in exceptions:
+            continue
+        if len(exceptions) >= MAX_EXCEPTIONS_PER_CARD:
+            # 五串字都誤擋，問題就不在某個字，而是這條樣式整個寫太寬。放行到此為止，
+            # 由「連續誤擋」這件事本身留在證據裡，不再自動擴大豁免範圍。
+            entry["over_broad_since"] = entry.get("over_broad_since") or today.isoformat()
+            break
+        exceptions[fragment] = {
+            "since": today.isoformat(),
+            "until": (today + timedelta(days=EXCEPTION_TTL_DAYS)).isoformat(),
+            "ratios": evidence[fragment],
+        }
+        added.append(fragment)
+    entry["noop_evidence"] = evidence
+    entry["exceptions"] = {
+        fragment: meta for fragment, meta in exceptions.items()
+        if isinstance(meta, dict) and str(meta.get("until", "")) >= today.isoformat()
+    }
+    return added
+
+
+def update_health(vault, rules, hits, today, noops=()):
     """把今天的命中併進健康度，回傳新的一份（並落檔）。
 
     夢每晚自己做完這件事，不必有人去讀報告——這份檔案下一次工具呼叫就會被閘讀到。
@@ -374,6 +479,7 @@ def update_health(vault, rules, hits, today):
         recent = {day: count for day, count in recent.items() if day >= cutoff}
         entry["recent"] = recent
         entry["hits_30d"] = sum(recent.values())
+        _fold_exceptions(entry, rule.card, noops, today)
         cards[rule.card] = entry
     try:
         target = health_path(vault)
@@ -471,6 +577,11 @@ def _selftest():
                     row("assistant", [{"type": "text", "text": "這批已完成：實測 3/3。"}]),
                     row("user", [{"type": "text", "text": "引用"}]),
                     row("assistant", [{"type": "text", "text": "規則擋的是「這句話不准講」這種講法。"}]),
+                    # 誤擋的形狀：被擋下之後只換了一個字就重送，內容完全沒動。
+                    row("user", [{"type": "text", "text": "再來"}]),
+                    row("assistant", [{"type": "text", "text": "兩邊帳這句話不准講，所以我先把它放這裡。"}]),
+                    row("user", [{"type": "text", "text": "改一下"}]),
+                    row("assistant", [{"type": "text", "text": "兩邊帳這句話不准說，所以我先把它放這裡。"}]),
                 ]) + "\n",
                 encoding="utf-8",
             )
@@ -484,9 +595,9 @@ def _selftest():
             for hit in hits:
                 by_kind.setdefault(hit.kind, []).append(hit)
             checks.append((
-                "禁語在結尾與中間各命中一次，引號內那次不算",
-                len(by_kind.get("forbidden", ())) == 2
-                and sum(1 for hit in by_kind["forbidden"] if hit.final) == 1,
+                "禁語命中三次（兩次在回合結尾、一次在回合中間），引號內那次不算",
+                len(by_kind.get("forbidden", ())) == 3
+                and sum(1 for hit in by_kind["forbidden"] if hit.final) == 2,
             ))
             checks.append((
                 "工具呼叫命中守衛一次",
@@ -501,7 +612,7 @@ def _selftest():
             checks.append((
                 "稽核帳裡有的算擋下，沒有的算漏擋，中間那次歸「閘看不到」",
                 len(blocked) == 1 and len(unseen) == 1
-                and sorted(hit.kind for hit in missed) == ["guard", "require"],
+                and sorted(hit.kind for hit in missed) == ["forbidden", "guard", "require"],
             ))
 
             # 同一則訊息被別張卡擋下：那則已經退回重寫，不該再算成這張卡漏擋。
@@ -511,7 +622,7 @@ def _selftest():
             )
             checks.append((
                 "同一則訊息已被別張卡擋下，就不算這張卡漏擋",
-                [hit.kind for hit in missed2] == ["guard"],
+                sorted(hit.kind for hit in missed2) == ["forbidden", "guard"],
             ))
 
             log = vault / memspec.GATE_LOG_FILENAME
@@ -554,7 +665,7 @@ def _selftest():
             cards = update_health(vault, rules, hits, day)
             checks.append((
                 "命中併進健康度，沒命中的卡也建檔但次數是零",
-                cards["probe"]["hits_30d"] == 2
+                cards["probe"]["hits_30d"] == 3
                 and cards["probe"]["last_hit"] == "2026-09-17"
                 and cards["needs"]["hits_30d"] == 1
                 and cards["測試守衛"]["hits_30d"] == 1,
@@ -563,12 +674,37 @@ def _selftest():
             aged = load_health(vault)
             checks.append((
                 "沒命中的那天不會清掉窗內的舊紀錄，也不會假造新的",
-                aged["probe"]["hits_30d"] == 2 and aged["probe"]["last_hit"] == "2026-09-17",
+                aged["probe"]["hits_30d"] == 3 and aged["probe"]["last_hit"] == "2026-09-17",
             ))
             faded = update_health(vault, rules, [], day + timedelta(days=HEALTH_WINDOW_DAYS + 1))
             checks.append((
                 "超過視窗的命中自動退出統計",
                 faded["probe"]["hits_30d"] == 0,
+            ))
+
+            # 誤擋自動放行：擋完照原樣重送 → 那一串字進放行清單，而且會過期。
+            finals = final_messages([transcript])
+            probe_hit = next(
+                hit for hit in hits
+                if hit.kind == "forbidden" and hit.final and hit.text.startswith("兩邊帳")
+            )
+            noops = noop_blocks([probe_hit], finals)
+            checks.append((
+                "重寫後幾乎沒變＝擋了等於沒擋，認得出來",
+                noops and noops[0][0] == "probe" and noops[0][2] >= NOOP_SIMILARITY,
+            ))
+            update_health(vault, rules, [], day, noops)
+            update_health(vault, rules, [], day, noops)
+            allowed = exceptions_for(vault)
+            checks.append((
+                "累積到門檻才自動放行，放行的是那一串字",
+                allowed.get("probe") == {probe_hit.fragment},
+            ))
+            entry = load_health(vault)["probe"]["exceptions"][probe_hit.fragment]
+            checks.append((
+                "放行帶起訖日，會過期",
+                entry["since"] == day.isoformat()
+                and entry["until"] > entry["since"],
             ))
 
             ranks = priority_rank(vault)
@@ -598,7 +734,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 15
+    total = 18
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

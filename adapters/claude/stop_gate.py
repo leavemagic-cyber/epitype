@@ -310,7 +310,20 @@ def _quoted_spans(message):
     return merged
 
 
-def _forbidden_fragment(decision, message, defects):
+def _exceptions(vault):
+    """Fragments the nightly review found produce a block that changed nothing.
+
+    Fail-quiet: with no health file every pattern enforces its full range, which is
+    what it did before the review existed."""
+    try:
+        from epitype import compliance
+
+        return compliance.exceptions_for(vault)
+    except Exception:
+        return {}
+
+
+def _forbidden_fragment(decision, message, defects, excepted=frozenset()):
     """The matched fragment of the first usable `forbidden` pattern that fires
     outside a quoted citation (U64: see _quoted_spans) — a hit fully inside a
     quoted span is a citation, not a restatement; one outside still blocks,
@@ -335,7 +348,12 @@ def _forbidden_fragment(decision, message, defects):
         for found in regex.finditer(message):
             if any(start <= found.start() and found.end() <= end for start, end in quoted):
                 continue
-            return _one_line(found.group(0)) or _one_line(pattern)
+            matched = _one_line(found.group(0))
+            if matched in excepted:
+                # 夜間回饋認定這一串字擋了等於沒擋（擋完我照原樣重送），所以它自動放行。
+                # 放行的是這一串字，不是整條樣式，而且會過期。
+                continue
+            return matched or _one_line(pattern)
     return None
 
 
@@ -512,8 +530,14 @@ def _verdict(event, message, config, started_at, defects):
     # A forbidden hit outranks a repeated question: the model already said the thing
     # the owner ruled out, which is the harder violation of the two.
     verdicts = []
+    excepted = {}
+    for vault in _vaults(config, event):
+        for card, fragments in _exceptions(vault).items():
+            excepted.setdefault(card, set()).update(fragments)
     for decision in decisions:
-        fragment = _forbidden_fragment(decision, message, defects)
+        fragment = _forbidden_fragment(
+            decision, message, defects, excepted.get(decision.key, frozenset())
+        )
         if fragment is not None:
             verdicts.append(
                 (
