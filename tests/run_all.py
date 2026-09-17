@@ -144,8 +144,18 @@ def main(argv=None):
     offenders = _unresolved_fixture_roots(repo_root)
     if offenders:
         print("RESULT FAIL fixture roots must use Path(temp_dir).resolve(): " + ", ".join(offenders), file=sys.stderr)
+    # CI 另跑全倉隱私掃描；本機只跑 selftest 的話，v1.4.0 那種只在 CI 紅的情況會再發生。
+    scan = subprocess.run(
+        [sys.executable, str(repo_root / "tests" / "privacy_lint.py")],
+        cwd=repo_root, env=environment, capture_output=True, text=True,
+        encoding="utf-8", errors="replace", check=False,
+    )
+    _emit(scan.stdout, sys.stdout)
+    _emit(scan.stderr, sys.stderr)
+    if scan.returncode != 0:
+        print("RESULT FAIL privacy scan of tracked files", file=sys.stderr)
     print(f"TOTAL PASS {passed}/{len(SELFTESTS)}")
-    return 0 if passed == len(SELFTESTS) and not offenders else 1
+    return 0 if passed == len(SELFTESTS) and not offenders and scan.returncode == 0 else 1
 
 
 if __name__ == "__main__":
