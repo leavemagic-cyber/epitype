@@ -32,7 +32,9 @@ if str(_REPO_ROOT) not in sys.path:
 from epitype import core_gen, memspec
 
 Region = namedtuple("Region", "name text present current")
-Plan = namedtuple("Plan", "host path regions problems damaged notices", defaults=((),))
+# capped：problems 裡有幾條是「內容超過上限」。這種拒寫是我們自己的內容太大，不牽涉使用者的字；
+# 夜間無人看著時，只有全部拒寫都屬這種的宿主才照寫其餘區塊。
+Plan = namedtuple("Plan", "host path regions problems damaged notices capped", defaults=((), 0))
 
 STATE_FILENAME = "host_sync_state.json"
 
@@ -228,6 +230,7 @@ def plan_for(host, vaults, home=None):
     # 設了 core_cap_bytes 就是規則塊的上限：core-gen 超過會拒寫，而代理真正讀到的是這裡
     # 寫進去的字，這裡不守的話那個上限等於沒設。
     rules_cap = core_gen._cap_of(None, memspec.config_options())
+    capped = 0
     for name, text in wanted.items():
         size = len(text.encode("utf-8"))
         if size > memspec.HOST_SYNC_REGION_CAP_BYTES:
@@ -235,12 +238,14 @@ def plan_for(host, vaults, home=None):
                 f"{name} 有 {size} 位元組，超過每場固定成本上限 "
                 f"{memspec.HOST_SYNC_REGION_CAP_BYTES}；先讓內容瘦身再同步"
             )
+            capped += 1
             continue
         if name == memspec.HOST_SYNC_RULES_REGION and rules_cap is not None and size > rules_cap:
             problems.append(
                 f"{name} 有 {size} 位元組，超過設定的 {memspec.CONFIG_CORE_CAP_BYTES_FIELD} "
                 f"{rules_cap}；先讓規則瘦身或調整上限再同步"
             )
+            capped += 1
             continue
         # 要寫進去的內容自己含標記，寫下去就會讓這個檔永遠有兩組標記，之後每次都拒絕、
         # 只能人工手改才救得回來。寧可現在就說不。
@@ -301,7 +306,7 @@ def plan_for(host, vaults, home=None):
             # 前」，不該由索引塊的問題造成。整檔停手只留給標記本身壞掉那一種。
             continue
         regions.append(Region(name, text, found is not None, inner))
-    return Plan(host, path, regions, problems, damaged, notices)
+    return Plan(host, path, regions, problems, damaged, notices, capped)
 
 
 def _state_path(home=None):

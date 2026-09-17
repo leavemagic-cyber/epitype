@@ -1711,29 +1711,54 @@ def _section_host_sync(vaults, today, since_date, config):
                 "errors": replaced}
 
     lines = [line for line in seen.splitlines() if line.strip()]
-    # 有一處拒寫（標記被改壞、規則超過上限）也照跑 apply：apply 自己逐宿主、逐塊停手，
-    # 其餘照寫。整晚跳過的話，一塊超上限就讓兩家的索引跟著停在舊版，夜報還零錯誤。
-    applied = io.StringIO()
+    # 夜間沒人看著，所以分兩種拒寫：
+    # - 只因內容超過上限（我們自己的字太大）：這個宿主其餘區塊照寫。整晚跳過的話，規則一
+    #   超上限，兩家的索引就跟著停在舊版。
+    # - 其他理由（標記壞掉、區塊裡是使用者的字）：這個宿主整晚一個位元組都不動。檔裡有使用
+    #   者的字時，另一塊認不出來的內容也可能是他的，不在無人看著時替他換掉。
     try:
-        code = host_sync.apply(vaults, output=applied)
+        plans = [host_sync.plan_for(host, vaults) for host in host_sync.installed_hosts()]
     except Exception as exc:
         return {"counts": {"drifted": len(drifted), "written": 0},
                 "examples": lines[:EXAMPLE_LIMIT], "commands": [],
-                "errors": replaced + [f"{type(exc).__name__}: {exc}"]}
-    done = applied.getvalue()
+                "errors": [f"{type(exc).__name__}: {exc}"]}
+    held = [plan.host for plan in plans if plan.damaged or len(plan.problems) > plan.capped]
+    unattended = [plan.host for plan in plans if plan.host not in held]
+
+    def host_of(line):
+        return line.split(":", 1)[0].split()[-1]
+
+    done = ""
+    code = host_sync.EXIT_OK
+    if unattended:  # apply 收到空清單會退回「全部宿主」，所以空的時候根本不呼叫
+        applied = io.StringIO()
+        try:
+            code = host_sync.apply(vaults, hosts=unattended, output=applied)
+        except Exception as exc:
+            return {"counts": {"drifted": len(drifted), "written": 0},
+                    "examples": lines[:EXAMPLE_LIMIT], "commands": [],
+                    "errors": [f"{type(exc).__name__}: {exc}"]}
+        done = applied.getvalue()
     written = [line for line in done.splitlines() if line.startswith("WROTE")]
-    # 拒寫要人動手，放進 errors：開場那一行才會說這一晚不乾淨。
-    refused = [line for line in done.splitlines() if line.startswith("REFUSE")]
-    # 兩趟都撈：check 是預告、apply 是真的做了。同一件事講兩次也不刪，因為「預告過但沒
-    # 做」與「做了」是不一樣的事，而這裡不該替使用者判斷哪一句比較重要。
-    replaced = list(dict.fromkeys(replaced + replaced_in(done)))
+    # 拒寫要人動手，放進 errors：開場那一行才會說這一晚不乾淨。停手的宿主沒跑 apply，
+    # 它的拒寫只在 check 的輸出裡。
+    refused = list(dict.fromkeys(
+        [line for line in seen.splitlines() if line.startswith("REFUSE")]
+        + [line for line in done.splitlines() if line.startswith("REFUSE")]
+    ))
+    if held:
+        code = host_sync.EXIT_REFUSED
+    # 兩趟都撈：check 是預告、apply 是真的做了。停手宿主的預告沒有成真，不算。
+    replaced = list(dict.fromkeys(
+        [line for line in replaced if host_of(line) in unattended] + replaced_in(done)
+    ))
     return {
         # 漂移只數 DRIFT 行。以前數的是「所有非空行」，連 NOTE 都算進去——只有一個區塊
         # 漂移卻報 2，而這一版的主張就是數字要對。
         "counts": {"drifted": len(drifted), "written": len(written),
-                   "replaced": len(replaced), "refused": len(refused)},
+                   "replaced": len(replaced), "refused": len(refused), "held_hosts": len(held)},
         "examples": (refused + written)[:EXAMPLE_LIMIT],
-        "commands": [] if code == host_sync.EXIT_OK else ["python -m epitype sync <vault> --apply"],
+        "commands": [] if code == host_sync.EXIT_OK else ["epitype sync <vault> --apply"],
         # 放進 errors 而不是 examples：這一晚不能被當成乾淨跑完。使用者的字被換掉了。
         "errors": replaced + refused,
     }
@@ -1816,8 +1841,9 @@ def _next_steps(sections, shaping=()):
     sync = counts(14)
     if sync.get("refused", 0) > 0:
         steps.append(
-            f"宿主檔同步拒寫 {sync['refused']} 處（規則超過上限，或區塊不是 Epitype 寫的）"
-            " → 代理讀到的還是舊版；看第 14 節處理後跑 python -m epitype sync <vault> --apply"
+            f"宿主檔同步拒寫 {sync['refused']} 處（規則超過上限，或區塊不是 Epitype 寫的"
+            f"；其中 {sync.get('held_hosts', 0)} 個宿主整晚未動）"
+            " → 代理讀到的還是舊版；看第 14 節處理後跑 epitype sync <vault> --apply"
         )
     uncarried = counts(12)
     if uncarried.get("uncarried_quotes", 0) > 0:

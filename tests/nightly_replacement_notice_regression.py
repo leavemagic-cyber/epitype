@@ -132,8 +132,8 @@ def main():
             and host_path.read_bytes() == before_bytes,
         ))
 
-    # 規則塊是使用者自己的字 → 那一塊停手、使用者的字不動；索引塊照一般夜晚處理（真的換了才報
-    # REPLACE）；拒寫本身要報，不然隔天開場說這一晚乾淨。
+    # 規則塊是使用者自己的字 → 夜間這個宿主整個不動（索引塊裡認不出的字也可能是他的），
+    # 沒發生的取代不報；拒寫本身要報，不然隔天開場說這一晚乾淨。
     with tempfile.TemporaryDirectory(prefix="epitype-nightly-refused-") as temp_dir:
         root = Path(temp_dir).resolve()
         rules_begin, rules_end = memspec.HOST_SYNC_MARKERS[memspec.HOST_SYNC_RULES_REGION]
@@ -149,14 +149,12 @@ def main():
             refused = dream._section_host_sync([vault], today, today, config={})
         finally:
             Path.home = original_home
-        after_refused = host_path.read_text(encoding="utf-8")
-        reported_replace = any(
-            line.startswith(memspec.HOST_SYNC_REPLACED_PREFIX) for line in refused["errors"])
         checks.append((
-            "拒寫那一塊使用者的字不動；取代只在真的換掉時才報",
-            "使用者自己的規則" in after_refused
-            and reported_replace == ("我寫的一行" not in after_refused)
-            and before_bytes != b"",
+            "區塊裡有使用者的字：夜間這個宿主一個位元組不動，沒發生的取代不報",
+            host_path.read_bytes() == before_bytes
+            and not any(line.startswith(memspec.HOST_SYNC_REPLACED_PREFIX)
+                        for line in refused["errors"])
+            and refused["counts"].get("held_hosts") == 1,
         ))
         checks.append((
             "拒寫本身進 errors 與計數，下一步有一行",
