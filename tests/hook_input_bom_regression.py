@@ -66,8 +66,8 @@ class WorkspaceRootsTests(unittest.TestCase):
         self.assertEqual(event["cwd"], "C:/Epitype/repo")
 
     def test_posix_root_is_passed_through(self):
-        event = self._read(dict(EVENT, workspace_roots=["/home/u/project"]))
-        self.assertEqual(event["cwd"], "/home/u/project")
+        event = self._read(dict(EVENT, workspace_roots=["/srv/u/project"]))
+        self.assertEqual(event["cwd"], "/srv/u/project")
 
     def test_existing_cwd_is_never_overwritten(self):
         event = self._read(dict(EVENT, cwd="D:/real", workspace_roots=["/C:/other"]))

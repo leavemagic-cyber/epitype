@@ -26,7 +26,7 @@ import pretooluse_gate as pretool
 
 HEREDOC_WITH_BACKSLASH = "python - <<'PY'\n" + r"path = 'C:\Users\x'" + "\nPY\n"
 PLAIN_HEREDOC = "python - <<'PY'\nprint(sum(range(10)))\nPY\n"
-BACKSLASH_ONLY = r"findstr /C:'x' C:\Users\x\notes.txt"
+BACKSLASH_ONLY = r"findstr /C:'x' D:\data\x\notes.txt"
 
 
 def card(**fields):
