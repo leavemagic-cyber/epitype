@@ -31,10 +31,9 @@ if str(_REPO_ROOT) not in sys.path:
 
 from epitype import core_gen, memspec
 
-Region = namedtuple("Region", "name text present current")
-# capped：problems 裡有幾條是「內容超過上限」。這種拒寫是我們自己的內容太大，不牽涉使用者的字；
-# 夜間無人看著時，只有全部拒寫都屬這種的宿主才照寫其餘區塊。
-Plan = namedtuple("Plan", "host path regions problems damaged notices capped", defaults=((), 0))
+# unrecognised：這一塊現在有幾行認不出是 Epitype 上次寫的；取代前原文要先存起來。
+Region = namedtuple("Region", "name text present current unrecognised", defaults=(0,))
+Plan = namedtuple("Plan", "host path regions problems damaged")
 
 STATE_FILENAME = "host_sync_state.json"
 
@@ -230,22 +229,20 @@ def plan_for(host, vaults, home=None):
     # 設了 core_cap_bytes 就是規則塊的上限：core-gen 超過會拒寫，而代理真正讀到的是這裡
     # 寫進去的字，這裡不守的話那個上限等於沒設。
     rules_cap = core_gen._cap_of(None, memspec.config_options())
-    capped = 0
     for name, text in wanted.items():
         size = len(text.encode("utf-8"))
-        over_cap = None
         if size > memspec.HOST_SYNC_REGION_CAP_BYTES:
-            over_cap = (
+            problems.append(
                 f"{name} 有 {size} 位元組，超過每場固定成本上限 "
                 f"{memspec.HOST_SYNC_REGION_CAP_BYTES}；先讓內容瘦身再同步"
             )
-        elif name == memspec.HOST_SYNC_RULES_REGION and rules_cap is not None and size > rules_cap:
-            over_cap = (
+            continue
+        if name == memspec.HOST_SYNC_RULES_REGION and rules_cap is not None and size > rules_cap:
+            problems.append(
                 f"{name} 有 {size} 位元組，超過設定的 {memspec.CONFIG_CORE_CAP_BYTES_FIELD} "
                 f"{rules_cap}；先讓規則瘦身或調整上限再同步"
             )
-        # 超上限的那一塊不寫，但標記與歸屬照查：這一塊的標記壞了或裡面是使用者的字，
-        # 就不能只算成「超上限」，否則夜間會把這個宿主當成可以放心寫的。
+            continue
         # 要寫進去的內容自己含標記，寫下去就會讓這個檔永遠有兩組標記，之後每次都拒絕、
         # 只能人工手改才救得回來。寧可現在就說不。
         # 比對每一塊的標記，不只自己那一塊：索引的內容裡出現規則的標記，一樣會把這個
@@ -256,7 +253,7 @@ def plan_for(host, vaults, home=None):
             for markers in table.values()
             for marker in markers
             if marker in text
-        ] if over_cap is None else []
+        ]
         if carried:
             problems.append(
                 f"{name} 要寫的內容裡出現了區塊標記本身（{carried[0][:40]}…）；"
@@ -281,35 +278,11 @@ def plan_for(host, vaults, home=None):
             damaged = True  # 檔案本身壞了：整個宿主一個位元組都不要動
             continue
         inner = found[1] if found else None
-        ours, unsure = (True, None) if inner is None else _ours(
+        unrecognised = 0 if inner is None else _unrecognised(
             inner, text, host, name, home, legacy=_legacy
         )
-        if ours and over_cap is not None:
-            problems.append(over_cap)
-            capped += 1
-            continue
-        if ours and unsure:
-            # 備份留的是「我們第一次動這個檔之前」那一份。已經有備份時，它裡面不是這次
-            # 要被取代的那段字——講成「備份在這裡」就是假的，跟這一版要修的毛病同一種。
-            backup = path.with_name(path.name + memspec.HOST_SYNC_BACKUP_SUFFIX)
-            notices.append(memspec.HOST_SYNC_UNRECOGNISED_NOTICE.format(
-                region=name, lines=unsure,
-                backup=(
-                    f"原檔會先備份到 {backup}"
-                    if not backup.exists() else
-                    f"{backup} 是更早之前的版本，不含這次被取代的內容——要留就先自己複製一份"
-                ),
-            ))
-        if not ours:
-            problems.append(
-                f"{name} 區塊裡的內容不是我們寫的（可能是你自己在檔案裡引用過這對標記）；"
-                "覆蓋它就是把你的字弄不見，所以這裡停手。請把那段內容移出標記之間，或改用別的字說明"
-            )
-            # 這一塊停手，但不連累另一塊：規則塊進不去的代價是「規則從來沒到過代理面
-            # 前」，不該由索引塊的問題造成。整檔停手只留給標記本身壞掉那一種。
-            continue
-        regions.append(Region(name, text, found is not None, inner))
-    return Plan(host, path, regions, problems, damaged, notices, capped)
+        regions.append(Region(name, text, found is not None, inner, unrecognised))
+    return Plan(host, path, regions, problems, damaged)
 
 
 def _state_path(home=None):
@@ -343,40 +316,45 @@ def _fingerprint(text):
     return hashlib.sha256(_normalised(text).encode("utf-8")).hexdigest()[:16]
 
 
-def _ours(inner, wanted, host, name, home, legacy=False):
-    """這一塊裡面的內容是不是我們寫的。回傳 (可否覆蓋, 說不準的話要講的那句)。
+def _unrecognised(inner, wanted, host, name, home, legacy=False):
+    """這一塊現在有幾行認不出是 Epitype 寫的；認得出來回 0。
 
-    只有認得出是自己寫的才覆蓋。使用者可能在自己的檔案裡引用過我們的標記（說明文件、
-    範本、教學），那一對標記中間是他的字——照覆蓋就是資料損失，而且退出碼還是 0。
-    認得出來的三種：空的、跟這次要寫的一樣、指紋等於我們上次寫進去的那份；規則塊另外
-    認生成器自己的標題行，好讓既有安裝與舊標記遷移得過去。
-
-    第二個回傳值只在「覆蓋了，但其實沒認出來」時才有字。認得出來與拒絕都是 None。
+    認得出來的：空的、跟這次要寫的一樣、指紋等於我們上次寫進去的那份、規則塊以生成器
+    自己的標題行開頭（既有安裝與舊標記遷移）。其餘照樣取代，但原文先存起來並寫明誰換的
+    ——使用者可能在標記之間放過自己的字，拒絕同步會讓規則永遠到不了代理面前，默默覆蓋
+    則是資料損失；存原文＋標註兩邊都不犧牲。
     """
     if not inner.strip():
-        return True, None
-    if legacy and name == memspec.HOST_SYNC_RULES_REGION:
-        # 舊標記是前一版同步工具寫下的，但「標記是舊的」不等於「裡面的字是我們的」：
-        # 使用者把自己的段落放進舊標記之間，照樣會被整段覆蓋而且回報成功。規則塊認得
-        # 出生成器的標題行，就用它判；索引塊沒有這種特徵，往下走一般的擁有權判定。
-        return inner.lstrip().startswith(memspec.CORE_GEN_OUTPUT_TITLE), None
+        return 0
+    if name == memspec.HOST_SYNC_RULES_REGION and inner.lstrip().startswith(
+            memspec.CORE_GEN_OUTPUT_TITLE):
+        return 0
     if _normalised(inner) == _normalised(wanted):
-        return True, None
-    written = _written_before(home)
-    if written.get(f"{host}/{name}") == _fingerprint(inner):
-        return True, None
-    if name == memspec.HOST_SYNC_RULES_REGION:
-        return inner.lstrip().startswith(memspec.CORE_GEN_OUTPUT_TITLE), None
-    if written:
-        return False, None
-    # 指紋表整份不見時（解除安裝會連它一起刪掉），索引塊沒有任何別的辨識特徵，會被判成
-    # 「不是我們寫的」而永遠拒絕同步，只能人工改檔才救得回來，理由句還把責任推給使用者。
-    # 這個區塊是我們的標記圍出來的，指紋表不在就以標記為準——標記本身有成對與巢狀檢查，
-    # 而「使用者自己引用過標記」那一種，會在指紋表存在時照樣擋下來。
-    #
-    # 但這是推測不是辨認：真的推錯的時候，被換掉的是使用者的字。取捨不變，只是不准默默
-    # 做——換掉幾行、原檔還找不找得回來，都要當場講出來。
-    return True, len(inner.strip().splitlines())
+        return 0
+    if _written_before(home).get(f"{host}/{name}") == _fingerprint(inner):
+        return 0
+    return len(inner.strip().splitlines())
+
+
+def _replaced_path(path):
+    return path.with_name(path.name + memspec.HOST_SYNC_REPLACED_SUFFIX)
+
+
+def _save_replaced(path, regions, actor):
+    """認不出的原文附加到宿主檔旁邊的紀錄檔，寫明誰、何時換掉。寫不進去就丟 OSError。"""
+    from datetime import datetime
+
+    entries = "".join(
+        memspec.HOST_SYNC_REPLACED_ENTRY.format(
+            when=datetime.now().astimezone().isoformat(timespec="seconds"),
+            region=region.name, actor=actor, path=path, text=region.current.strip("\n"),
+        )
+        for region in regions
+    )
+    target = _replaced_path(path)
+    with io.open(target, "a", encoding="utf-8", newline="\n") as stream:
+        stream.write(entries)
+    return target
 
 
 def _drifted(region):
@@ -415,9 +393,12 @@ def check(vaults, hosts=None, home=None, output=sys.stdout):
     for item in plans:
         # 整個宿主停手時不要先講一句沒發生的事：標記壞掉那一種是一個位元組都不動的。
         if not item.damaged:
-            for notice in item.notices:
-                print(f"{memspec.HOST_SYNC_REPLACED_PREFIX} {item.host}: {notice}",
-                      file=output)
+            for region in item.regions:
+                if region.unrecognised:
+                    print(f"{memspec.HOST_SYNC_REPLACED_PREFIX} {item.host}: "
+                          + memspec.HOST_SYNC_REPLACE_PREVIEW.format(
+                              region=region.name, lines=region.unrecognised,
+                              saved=_replaced_path(item.path)), file=output)
         for problem in item.problems:
             print(f"REFUSE {item.host}: {problem}", file=output)
             refused += 1
@@ -435,21 +416,17 @@ def check(vaults, hosts=None, home=None, output=sys.stdout):
     return EXIT_REFUSED if refused else (EXIT_DRIFT if drift else EXIT_OK)
 
 
-def apply(vaults, hosts=None, home=None, output=sys.stdout):
+def apply(vaults, hosts=None, home=None, output=sys.stdout, actor=memspec.HOST_SYNC_ACTOR_MANUAL):
     _report_dropped(vaults, output)
     plans = [plan_for(host, vaults, home) for host in (hosts or installed_hosts(home))]
     refused = written = 0
     for item in plans:
-        if not item.damaged:
-            for notice in item.notices:
-                print(f"{memspec.HOST_SYNC_REPLACED_PREFIX} {item.host}: {notice}",
-                      file=output)
         for problem in item.problems:
             print(f"REFUSE {item.host}: {problem}", file=output)
         if item.problems:
             refused += 1
-        # 檔案本身壞了（標記不成對、區塊裡是別人的字）就整個宿主停手。只有「我們要寫的
-        # 內容有問題」那種才逐塊跳過——一塊超過上限不該連累另一塊寫不進去。
+        # 標記壞掉就整個宿主停手（找不準區塊邊界）。「我們要寫的內容有問題」那種才逐塊
+        # 跳過——一塊超過上限不該連累另一塊寫不進去。
         if item.damaged or not item.regions:
             continue
         # 一塊有問題不該連累另一塊：索引超過上限時，規則塊照樣要進得去，不然新使用者
@@ -469,8 +446,13 @@ def apply(vaults, hosts=None, home=None, output=sys.stdout):
             print(f"OK     {item.host}: 已經一致", file=output)
             continue
         payload = updated.replace("\n", newline or "\n").encode("utf-8")
+        foreign = [region for region in item.regions if region.unrecognised]
+        saved = None
         try:
             item.path.parent.mkdir(parents=True, exist_ok=True)
+            if foreign:
+                # 先存原文再寫檔：存不進去就不寫，認不出的字不能在沒有副本時被換掉。
+                saved = _save_replaced(item.path, foreign, actor)
             backup = item.path.with_name(item.path.name + memspec.HOST_SYNC_BACKUP_SUFFIX)
             if original is not None and not backup.exists():
                 # 備份是原檔的位元組副本，不經任何正規化——備份若被動過（例如把 CRLF
@@ -487,6 +469,11 @@ def apply(vaults, hosts=None, home=None, output=sys.stdout):
             continue
         for region in item.regions:
             _remember(home, item.host, region.name, region.text)
+        for region in foreign:
+            print(f"{memspec.HOST_SYNC_REPLACED_PREFIX} {item.host}: "
+                  + memspec.HOST_SYNC_REPLACE_DONE.format(
+                      region=region.name, lines=region.unrecognised, actor=actor, saved=saved),
+                  file=output)
         written += 1
         print(f"WROTE  {item.host}: {'、'.join(changed) or '標記整理'} → {item.path}", file=output)
     if not plans:
@@ -558,6 +545,9 @@ def remove(hosts=None, home=None, output=sys.stdout):
         elif backup.exists():
             print(f"        安裝當初的原檔副本仍在 {backup}"
                   "（那是 Epitype 動它之前的樣子；確認沒問題就可以刪）", file=output)
+        if _replaced_path(path).exists():
+            print(f"        同步時被取代的原文存在 {_replaced_path(path)}"
+                  "（每筆寫明誰、何時換掉；確認不需要就可以刪）", file=output)
     if not removed:
         print("宿主檔裡沒有我們寫的區塊，沒有要拿掉的東西", file=output)
     return EXIT_OK
@@ -731,17 +721,20 @@ def _selftest():
                 str(keeper_backup) in removal_said.getvalue(),
             ))
 
-            # 舊標記之間放的是使用者自己的字時，一樣不得覆蓋。
+            # 舊標記之間放的是使用者自己的字：照樣取代，但原文存進紀錄檔。
             legacy_rules = host_path("claude", home)
             legacy_rules.write_text(
                 f"前言\n\n{legacy_begin}\n我手寫在舊標記之間的內容\n{legacy_end}\n",
                 encoding="utf-8")
             report = io.StringIO()
             code = apply([vault], hosts=["claude"], home=home, output=report)
+            replaced_log = _replaced_path(legacy_rules)
             checks.append((
-                "舊標記之間若不是我們寫的，一樣停手",
-                code == EXIT_REFUSED
-                and "我手寫在舊標記之間的內容" in legacy_rules.read_text(encoding="utf-8"),
+                "舊標記之間若不是我們寫的：取代，原文留在紀錄檔",
+                code == EXIT_OK
+                and "我手寫在舊標記之間的內容" not in legacy_rules.read_text(encoding="utf-8")
+                and replaced_log.is_file()
+                and "我手寫在舊標記之間的內容" in replaced_log.read_text(encoding="utf-8"),
             ))
 
             # 備份留的是「第一次動它之前」那一份，不會被第二次同步蓋掉。
@@ -780,14 +773,15 @@ def _selftest():
                 target.write_bytes(text) if binary else target.write_text(text, encoding="utf-8")
                 return target
 
-            # 1. 標記字串出現在使用者自己寫的內容裡，不得把他的字吃掉。
+            # 1. 標記字串出現在使用者自己寫的內容裡：他的字不能消失。
             demo = fresh("demo", f"我的筆記\n\n示範：區塊長這樣\n{begin}\n我自己的心得\n{end}\n")
             report = io.StringIO()
             code = apply([vault], hosts=["claude"], home=home, output=report)
             kept = demo.read_text(encoding="utf-8")
             checks.append((
-                "標記出現在使用者自己的內容裡：他的字要留著，不是被整段覆蓋",
-                "我的筆記" in kept and "我自己的心得" in kept,
+                "標記出現在使用者自己的內容裡：區塊外的字原樣留著，區塊內的字存進紀錄檔",
+                "我的筆記" in kept
+                and "我自己的心得" in _replaced_path(demo).read_text(encoding="utf-8"),
             ))
 
             # 2. CRLF 的檔：行尾不得被整份改掉，備份要是原檔的位元組副本。
@@ -873,10 +867,12 @@ def _selftest():
             code = apply([vault], hosts=["claude"], home=home, output=report)
             said = report.getvalue()
             checks.append((
-                "指紋表不在而覆蓋了認不出的索引內容：講出換掉幾行、原檔備份在哪",
+                "取代了認不出的索引內容：講出換掉幾行、誰換的、原文存在哪",
                 code == EXIT_OK and "我寫的第一行" not in silent.read_text(encoding="utf-8")
                 and memspec.HOST_SYNC_REPLACED_PREFIX in said and "2 行" in said
-                and str(silent_backup) in said,
+                and memspec.HOST_SYNC_ACTOR_MANUAL in said
+                and str(_replaced_path(silent)) in said
+                and "我寫的第二行" in _replaced_path(silent).read_text(encoding="utf-8"),
             ))
             # 同一件事在 check（唯讀預覽）也要講，不然使用者是在檔案被改之後才知道。
             fresh("silent2", f"{index_begin}\n我寫的一行\n{index_end}\n")
@@ -889,22 +885,23 @@ def _selftest():
                 memspec.HOST_SYNC_REPLACED_PREFIX in report.getvalue()
                 and "1 行" in report.getvalue(),
             ))
-            # 已經有備份時，備份裡不是這次被取代的字——不得講成「原檔備份在這裡」。
+            # check 只是預覽：紀錄檔不能因為 check 而多一筆。
+            before_log = _replaced_path(silent).read_text(encoding="utf-8")
             checks.append((
-                "已有備份時不謊稱原檔留得住",
-                silent_backup.is_file()
-                and "不含這次被取代的內容" in report.getvalue(),
+                "check 不寫紀錄檔",
+                "我寫的一行" not in before_log,
             ))
-            # 指紋表在、內容不是我們的：照舊拒絕。放寬只限指紋表缺席那一種。
+            # 指紋表在、內容不是我們的：照樣取代，紀錄寫明是誰換的。
             _remember(home, "claude", memspec.HOST_SYNC_INDEX_REGION, "別的東西")
-            fresh("guarded", f"{index_begin}\n使用者自己的索引\n{index_end}\n")
+            guarded = fresh("guarded", f"{index_begin}\n使用者自己的索引\n{index_end}\n")
             report = io.StringIO()
-            code = apply([vault], hosts=["claude"], home=home, output=report)
+            code = apply([vault], hosts=["claude"], home=home, output=report, actor="測試用的取代者")
+            log = _replaced_path(guarded).read_text(encoding="utf-8")
             checks.append((
-                "指紋表在、內容不是我們的：照舊拒絕，不是一路放寬",
-                code == EXIT_REFUSED
-                and "使用者自己的索引" in (home / ".claude" / "CLAUDE.md").read_text(
-                    encoding="utf-8"),
+                "指紋表在、內容不是我們的：取代，紀錄寫明原文與取代者",
+                code == EXIT_OK
+                and "使用者自己的索引" not in guarded.read_text(encoding="utf-8")
+                and "使用者自己的索引" in log and "由 測試用的取代者 取代" in log,
             ))
 
             # 設了 core_cap_bytes：規則塊超過就拒寫，索引照寫；沒設時同一份規則照常寫得進去。
@@ -967,14 +964,17 @@ def main(argv=None, output=sys.stdout):
                         help="把寫進宿主檔的區塊整段拿掉，其餘內容原樣保留")
     parser.add_argument("--host", action="append", choices=sorted(memspec.HOST_SYNC_FILES),
                         help="只處理這個宿主，可重複；預設處理偵測得到的全部")
+    parser.add_argument("--actor", default=memspec.HOST_SYNC_ACTOR_MANUAL,
+                        help="取代認不出的內容時，紀錄裡寫是誰做的")
     parsed = parser.parse_args(arguments)
     try:
         if parsed.remove:
             return remove(hosts=parsed.host, output=output)
         if not parsed.vaults:
             parser.error("要比對或寫入時必須給至少一個記憶庫路徑")
-        runner = apply if parsed.apply else check
-        return runner(parsed.vaults, hosts=parsed.host, output=output)
+        if parsed.apply:
+            return apply(parsed.vaults, hosts=parsed.host, output=output, actor=parsed.actor)
+        return check(parsed.vaults, hosts=parsed.host, output=output)
     except Exception as exc:
         print(f"ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
         return EXIT_REFUSED

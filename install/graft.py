@@ -1620,7 +1620,8 @@ def _install(
                 sys.path.insert(0, str(repo_root))
             from epitype import host_sync
 
-            host_sync.apply(vaults, home=home, output=output)
+            host_sync.apply(vaults, home=home, output=output,
+                            actor=host_sync.memspec.HOST_SYNC_ACTOR_INSTALLER)
         except Exception as exc:
             print(f"HOST SYNC SKIPPED: {type(exc).__name__}: {exc}", file=output)
 

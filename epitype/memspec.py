@@ -991,10 +991,20 @@ HOST_SYNC_MISSING_MARKER_REASON = (
 # 有個機器認得出來的記號，才能把它撈出來當成錯誤報出去。NOTE 是「順便告訴你」，REPLACE
 # 是「你的字被換掉了」——兩者不該長得一樣。
 HOST_SYNC_REPLACED_PREFIX = "REPLACE"
-HOST_SYNC_UNRECOGNISED_NOTICE = (
-    "{region} 區塊裡原本有 {lines} 行，認不出是不是我們寫的（指紋紀錄不在），"
-    "這次同步會用生成內容取代它；{backup}"
+# 區塊裡有認不出是 Epitype 寫的字時照樣取代，但原文先附加存到宿主檔旁邊這個檔，並寫明
+# 是誰、何時換掉的（owner 2026-09-17：「換掉就是標註誰做得就好了」）。放在宿主檔旁邊而不是
+# ~/.epitype：解除安裝會刪 ~/.epitype，使用者的原文不能跟著消失。
+HOST_SYNC_REPLACED_SUFFIX = ".epitype-replaced.md"
+HOST_SYNC_ACTOR_MANUAL = "手動 epitype sync"
+HOST_SYNC_ACTOR_INSTALLER = "Epitype 安裝器"
+HOST_SYNC_ACTOR_NIGHTLY = "Epitype 夜間同步（夢第 14 節）"
+HOST_SYNC_REPLACE_PREVIEW = (
+    "{region} 區塊裡有 {lines} 行不是 Epitype 上次寫的，同步時會取代；原文會先存到 {saved}"
 )
+HOST_SYNC_REPLACE_DONE = (
+    "{region} 區塊裡有 {lines} 行不是 Epitype 上次寫的，已由 {actor} 取代；原文存到 {saved}"
+)
+HOST_SYNC_REPLACED_ENTRY = "## {when}｜{region} 區塊｜由 {actor} 取代｜原本在 {path}\n\n{text}\n\n"
 
 # 一年份的 owner 糾正全部寫成只走喚回的 feedback 卡，一張都沒武裝——因為卡是被規範的
 # 那一方寫的，而不綁自己的寫法永遠比較省事。2026-09-16 owner：「把能擋的都裝上」。

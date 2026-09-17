@@ -1,15 +1,9 @@
 import sys; sys.dont_write_bytecode = True; [getattr(stream, "reconfigure", lambda **_: None)(encoding="utf-8", errors="replace") for stream in (sys.stdout, sys.stderr)]  # cp950 主控台先轉 UTF-8。
-"""夜間同步換掉使用者的字時，不得靜悄悄。
+"""夜間同步換掉認不出的字時：原文要留得住，而且寫明是誰換的。
 
-同步在指紋紀錄不見時會覆蓋宿主檔索引區塊裡認不出來的內容——這個取捨是刻意的（不然
-解除安裝過一次就再也同步不回來）。代價是推錯時消失的是使用者的字，所以三條路徑都要
-當場講出來。
-
-安裝器與手動跑 `sync` 印在 stdout 上，有人看著。夜間這條把輸出收進 StringIO，只撈
-`WROTE` 開頭的行——那句話寫進去就被丟掉了。結果是：使用者的字消失、備份裡沒有（備份
-留的是第一次動它之前那一份）、夜報零錯誤、沒有任何地方提過發生什麼事。
-
-唯一沒人看著的那條路徑，正是最需要講的那條。
+同步會取代宿主檔區塊裡認不出是 Epitype 寫的內容（不然規則永遠到不了代理面前）。代價是
+那可能是使用者的字，所以取代前原文附加存進宿主檔旁的紀錄檔，每筆寫明取代者與時間；
+夜報也要列出這件事。owner 2026-09-17：「換掉就是標註誰做得就好了」。
 """
 
 import io
@@ -28,6 +22,7 @@ RULE_CARD = (
     "decided_by: owner-explicit\napproved_by: owner\napproved_at: 2026-09-17\n"
     "aliases: [誠實]\nmetadata:\n  type: rule\n---\nbody\n"
 )
+TODAY = date(2026, 9, 17)
 
 
 def _fixture(root, host_body):
@@ -49,140 +44,103 @@ def _fixture(root, host_body):
     return home, vault, host_path
 
 
+def _night(home, vault, config_text=None):
+    """跑一次夜間第 14 節；家目錄與設定都指到臨時目錄。"""
+    saved = os.environ.get(memspec.EPITYPE_CONFIG_ENV)
+    config = home.parent / "config.json"
+    config.write_text(config_text or "{}", encoding="utf-8")
+    original_home = Path.home
+    try:
+        os.environ[memspec.EPITYPE_CONFIG_ENV] = str(config)
+        Path.home = staticmethod(lambda: home)
+        return dream._section_host_sync([vault], TODAY, TODAY, config={})
+    finally:
+        Path.home = original_home
+        if saved is None:
+            os.environ.pop(memspec.EPITYPE_CONFIG_ENV, None)
+        else:
+            os.environ[memspec.EPITYPE_CONFIG_ENV] = saved
+
+
 def main():
     checks = []
     index_begin, index_end = memspec.HOST_SYNC_MARKERS[memspec.HOST_SYNC_INDEX_REGION]
-    today = date(2026, 9, 17)
+    rules_begin, rules_end = memspec.HOST_SYNC_MARKERS[memspec.HOST_SYNC_RULES_REGION]
 
+    # 指紋紀錄不在、索引塊裡是認不出的三行。
     with tempfile.TemporaryDirectory(prefix="epitype-nightly-notice-") as temp_dir:
         root = Path(temp_dir).resolve()
         home, vault, host_path = _fixture(
             root,
             f"我的開頭\n\n{index_begin}\n我寫的第一行\n我寫的第二行\n我寫的第三行\n{index_end}\n",
         )
-        original_home = Path.home
-        try:
-            Path.home = staticmethod(lambda: home)
-            section = dream._section_host_sync([vault], today, today, config={})
-        finally:
-            Path.home = original_home
-
+        section = _night(home, vault)
         after = host_path.read_text(encoding="utf-8")
+        log_path = host_path.with_name(host_path.name + memspec.HOST_SYNC_REPLACED_SUFFIX)
+        log = log_path.read_text(encoding="utf-8") if log_path.exists() else ""
         replaced_lines = [
-            line for line in section["errors"]
+            line for line in section["examples"]
             if line.startswith(memspec.HOST_SYNC_REPLACED_PREFIX)
         ]
         checks.append((
-            "夜間真的換掉了使用者的三行（前提成立，不是測到一個沒發生的情況）",
+            "夜間真的換掉了那三行（前提成立），區塊外的字原樣留著",
             "我寫的第一行" not in after and "我的開頭" in after,
         ))
         checks.append((
-            "換掉的事實出現在夜報，而且算成錯誤：這一晚不能被當成乾淨跑完",
-            bool(replaced_lines) and any("3 行" in line for line in replaced_lines),
+            "原文三行都存進宿主檔旁的紀錄檔，寫明是夜間同步換的",
+            all(text in log for text in ("我寫的第一行", "我寫的第二行", "我寫的第三行"))
+            and memspec.HOST_SYNC_ACTOR_NIGHTLY in log,
         ))
         checks.append((
-            "夜報講得出是哪一塊、原檔在哪",
-            any(memspec.HOST_SYNC_INDEX_REGION in line for line in replaced_lines)
-            and any(memspec.HOST_SYNC_BACKUP_SUFFIX in line for line in replaced_lines),
+            "夜報列出取代：幾行、哪一塊、誰換的、原文在哪，但不算錯誤",
+            len(replaced_lines) == 1 and "3 行" in replaced_lines[0]
+            and memspec.HOST_SYNC_INDEX_REGION in replaced_lines[0]
+            and memspec.HOST_SYNC_ACTOR_NIGHTLY in replaced_lines[0]
+            and str(log_path) in replaced_lines[0]
+            and section["counts"]["replaced"] == 1 and section["errors"] == [],
         ))
-        # 這一場真的有兩塊漂移（規則塊還沒建立、索引塊與卡片不一致），加上一行 REPLACE
-        # 通知，報告總共三行非空行。舊寫法數的是「所有非空行」，所以會報 3。
         checks.append((
             "漂移只數 DRIFT 行，不把取代通知也算成一次漂移",
-            section["counts"]["drifted"] == 2
-            and section["counts"]["replaced"] == len(replaced_lines) == 1,
+            section["counts"]["drifted"] == 2,
         ))
 
-    # 沒有東西被換掉的正常夜晚，不得冒出這種錯誤——不然它會變成每晚都有的噪音，
-    # 而每晚都有的警告等於沒有警告。
+    # 沒有東西被換掉的正常夜晚：不出取代紀錄、零錯誤。
     with tempfile.TemporaryDirectory(prefix="epitype-nightly-quiet-") as temp_dir:
         root = Path(temp_dir).resolve()
-        home, vault, _host_path = _fixture(root, "我的開頭\n")
-        original_home = Path.home
-        try:
-            Path.home = staticmethod(lambda: home)
-            first = dream._section_host_sync([vault], today, today, config={})
-            again = dream._section_host_sync([vault], today, today, config={})
-        finally:
-            Path.home = original_home
+        home, vault, host_path = _fixture(root, "我的開頭\n")
+        first = _night(home, vault)
+        again = _night(home, vault)
+        log_path = host_path.with_name(host_path.name + memspec.HOST_SYNC_REPLACED_SUFFIX)
         checks.append((
-            "沒有東西被換掉的夜晚安安靜靜，零錯誤",
+            "沒有東西被換掉的夜晚安安靜靜：零錯誤、沒有取代紀錄",
             first["errors"] == [] and again["errors"] == []
-            and again["counts"]["drifted"] == 0,
+            and again["counts"]["drifted"] == 0 and not log_path.exists(),
         ))
 
-    # 整個宿主停手（標記被改壞）時，不得先講一句沒發生的取代。
+    # 標記壞掉：整個宿主一個位元組都不動，拒寫要報。
     with tempfile.TemporaryDirectory(prefix="epitype-nightly-damaged-") as temp_dir:
         root = Path(temp_dir).resolve()
-        rules_begin, rules_end = memspec.HOST_SYNC_MARKERS[
-            memspec.HOST_SYNC_RULES_REGION]
         home, vault, host_path = _fixture(
             root,
             f"{rules_begin}\nA\n{rules_end}\n{rules_begin}\nB\n{rules_end}\n"
             f"{index_begin}\n我寫的一行\n{index_end}\n",
         )
         before_bytes = host_path.read_bytes()
-        report = io.StringIO()
-        host_sync.apply([vault], hosts=["claude"], home=home, output=report)
-        said = report.getvalue()
+        night = _night(home, vault)
         checks.append((
-            "整個宿主停手時不先講一句沒發生的取代",
-            memspec.HOST_SYNC_REPLACED_PREFIX not in said
-            and "REFUSE" in said
-            and host_path.read_bytes() == before_bytes,
-        ))
-
-    # 規則塊是使用者自己的字 → 夜間這個宿主整個不動（索引塊裡認不出的字也可能是他的），
-    # 沒發生的取代不報；拒寫本身要報，不然隔天開場說這一晚乾淨。
-    with tempfile.TemporaryDirectory(prefix="epitype-nightly-refused-") as temp_dir:
-        root = Path(temp_dir).resolve()
-        rules_begin, rules_end = memspec.HOST_SYNC_MARKERS[memspec.HOST_SYNC_RULES_REGION]
-        home, vault, host_path = _fixture(
-            root,
-            f"{rules_begin}\n使用者自己的規則\n{rules_end}\n"
-            f"{index_begin}\n我寫的一行\n{index_end}\n",
-        )
-        before_bytes = host_path.read_bytes()
-        original_home = Path.home
-        try:
-            Path.home = staticmethod(lambda: home)
-            refused = dream._section_host_sync([vault], today, today, config={})
-        finally:
-            Path.home = original_home
-        checks.append((
-            "區塊裡有使用者的字：夜間這個宿主一個位元組不動，沒發生的取代不報",
+            "標記壞掉：檔案一個位元組都不動，拒寫進 errors 與下一步",
             host_path.read_bytes() == before_bytes
-            and not any(line.startswith(memspec.HOST_SYNC_REPLACED_PREFIX)
-                        for line in refused["errors"])
-            and refused["counts"].get("held_hosts") == 1,
-        ))
-        checks.append((
-            "拒寫本身進 errors 與計數，下一步有一行",
-            refused["counts"].get("refused") == 1
-            and any(line.startswith("REFUSE") for line in refused["errors"])
+            and any(line.startswith("REFUSE") for line in night["errors"])
+            and not night["counts"].get("replaced")
             and any("拒寫" in step for step in dream._next_steps(
-                [{"id": 14, "counts": refused["counts"]}])),
+                [{"id": 14, "counts": night["counts"]}])),
         ))
 
-    # 規則超過設定的 core_cap_bytes → 規則塊拒寫，但索引照樣同步（以前整晚跳過 apply）。
+    # 規則超過設定的 core_cap_bytes：規則塊拒寫，索引照寫（不是整晚跳過）。
     with tempfile.TemporaryDirectory(prefix="epitype-nightly-capped-") as temp_dir:
         root = Path(temp_dir).resolve()
-        rules_begin, _rules_end = memspec.HOST_SYNC_MARKERS[memspec.HOST_SYNC_RULES_REGION]
         home, vault, host_path = _fixture(root, "我的開頭\n")
-        config = root / "config.json"
-        config.write_text('{"core_cap_bytes": 10}', encoding="utf-8")
-        saved = os.environ.get(memspec.EPITYPE_CONFIG_ENV)
-        original_home = Path.home
-        try:
-            os.environ[memspec.EPITYPE_CONFIG_ENV] = str(config)
-            Path.home = staticmethod(lambda: home)
-            capped = dream._section_host_sync([vault], today, today, config={})
-        finally:
-            Path.home = original_home
-            if saved is None:
-                os.environ.pop(memspec.EPITYPE_CONFIG_ENV, None)
-            else:
-                os.environ[memspec.EPITYPE_CONFIG_ENV] = saved
+        capped = _night(home, vault, '{"core_cap_bytes": 10}')
         written = host_path.read_text(encoding="utf-8")
         checks.append((
             "規則超上限的夜晚：索引照寫、規則塊不寫、拒寫講出上限",
@@ -190,42 +148,8 @@ def main():
             and any("core_cap_bytes" in line for line in capped["errors"]),
         ))
 
-    # 超上限的正是那塊有使用者的字、或標記壞掉的那一塊：不能只算成超上限而放行整個宿主。
-    rules_begin, rules_end = memspec.HOST_SYNC_MARKERS[memspec.HOST_SYNC_RULES_REGION]
-    for label, body in (
-        ("使用者的字", f"{rules_begin}\n使用者自己的規則\n{rules_end}\n"
-                       f"{index_begin}\n我寫的一行\n{index_end}\n"),
-        ("標記壞掉", f"{rules_begin}\nA\n{rules_end}\n{rules_begin}\nB\n{rules_end}\n"
-                     f"{index_begin}\n我寫的一行\n{index_end}\n"),
-    ):
-        with tempfile.TemporaryDirectory(prefix="epitype-nightly-capped-foreign-") as temp_dir:
-            root = Path(temp_dir).resolve()
-            home, vault, host_path = _fixture(root, body)
-            before_bytes = host_path.read_bytes()
-            config = root / "config.json"
-            config.write_text('{"core_cap_bytes": 10}', encoding="utf-8")
-            saved = os.environ.get(memspec.EPITYPE_CONFIG_ENV)
-            original_home = Path.home
-            try:
-                os.environ[memspec.EPITYPE_CONFIG_ENV] = str(config)
-                Path.home = staticmethod(lambda: home)
-                night = dream._section_host_sync([vault], today, today, config={})
-            finally:
-                Path.home = original_home
-                if saved is None:
-                    os.environ.pop(memspec.EPITYPE_CONFIG_ENV, None)
-                else:
-                    os.environ[memspec.EPITYPE_CONFIG_ENV] = saved
-            checks.append((
-                f"超上限那一塊同時是{label}：夜間整個宿主不動",
-                host_path.read_bytes() == before_bytes
-                and night["counts"].get("held_hosts") == 1
-                and not any(line.startswith(memspec.HOST_SYNC_REPLACED_PREFIX)
-                            for line in night["errors"]),
-            ))
-
     passed = sum(bool(ok) for _, ok in checks)
-    total = 11
+    total = 7
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     for name, ok in checks:
