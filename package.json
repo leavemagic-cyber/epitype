@@ -5,7 +5,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/leavemagic-cyber/epitype.git"
+    "url": "git+https://github.com/leavemagic-cyber/epitype.git"
   },
   "bin": {
     "epitype": "bin/epitype.js"
