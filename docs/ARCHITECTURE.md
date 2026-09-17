@@ -154,6 +154,9 @@ Two refusals, both of which write nothing at all:
 - **Over the cap, no generation.** `--cap-bytes`, else `core_cap_bytes` from the
   config; unset means no cap, because a cap the product guessed is not the owner's
   threshold (failure mode 36). Over it, the ten longest cards are listed instead.
+  `epitype sync` refuses the rules block it writes into `CLAUDE.md` / `AGENTS.md` past
+  the same `core_cap_bytes`, measured on that host's own view; the agent reads those
+  files, not the generated one, so a cap only core-gen honoured would bound nothing.
 
 A successful run also writes an approval pack to `<vault>/.epitype/core_gen_latest.json`:
 per card the vault, path, layer, section, order, approver, and the SHA-256 of its

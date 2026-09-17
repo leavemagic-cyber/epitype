@@ -225,12 +225,21 @@ def plan_for(host, vaults, home=None):
     except Exception as exc:
         return Plan(host, path, [], [f"組不出要寫的內容：{type(exc).__name__}: {exc}"], False)
 
+    # 設了 core_cap_bytes 就是規則塊的上限：core-gen 超過會拒寫，而代理真正讀到的是這裡
+    # 寫進去的字，這裡不守的話那個上限等於沒設。
+    rules_cap = core_gen._cap_of(None, memspec.config_options())
     for name, text in wanted.items():
         size = len(text.encode("utf-8"))
         if size > memspec.HOST_SYNC_REGION_CAP_BYTES:
             problems.append(
                 f"{name} 有 {size} 位元組，超過每場固定成本上限 "
                 f"{memspec.HOST_SYNC_REGION_CAP_BYTES}；先讓內容瘦身再同步"
+            )
+            continue
+        if name == memspec.HOST_SYNC_RULES_REGION and rules_cap is not None and size > rules_cap:
+            problems.append(
+                f"{name} 有 {size} 位元組，超過設定的 {memspec.CONFIG_CORE_CAP_BYTES_FIELD} "
+                f"{rules_cap}；先讓規則瘦身或調整上限再同步"
             )
             continue
         # 要寫進去的內容自己含標記，寫下去就會讓這個檔永遠有兩組標記，之後每次都拒絕、
@@ -550,9 +559,14 @@ def _selftest():
     import tempfile
 
     checks = []
+    saved_config = os.environ.get(memspec.EPITYPE_CONFIG_ENV)
     try:
         with tempfile.TemporaryDirectory(prefix="epitype-hostsync-") as temp_dir:
             root = Path(temp_dir).resolve()
+            # 這台機器的真設定可能設了 core_cap_bytes；自測不能被真上限左右。
+            selftest_config = root / "selftest-config.json"
+            selftest_config.write_text("{}", encoding="utf-8")
+            os.environ[memspec.EPITYPE_CONFIG_ENV] = str(selftest_config)
             home = root / "home"
             (home / ".claude").mkdir(parents=True)
             (home / ".codex").mkdir(parents=True)
@@ -885,6 +899,27 @@ def _selftest():
                     encoding="utf-8"),
             ))
 
+            # 設了 core_cap_bytes：規則塊超過就拒寫，索引照寫；沒設時同一份規則照常寫得進去。
+            fresh("corecap", "序言\n")
+            if _state_path(home).exists():
+                _state_path(home).unlink()
+            selftest_config.write_text(
+                json.dumps({memspec.CONFIG_CORE_CAP_BYTES_FIELD: 10}), encoding="utf-8")
+            report = io.StringIO()
+            code = apply([vault], hosts=["claude"], home=home, output=report)
+            written = (home / ".claude" / "CLAUDE.md").read_text(encoding="utf-8")
+            checks.append((
+                "規則塊超過設定的 core_cap_bytes：拒寫並指名上限，索引照寫",
+                code == EXIT_REFUSED and memspec.CONFIG_CORE_CAP_BYTES_FIELD in report.getvalue()
+                and begin not in written and "一張卡" in written,
+            ))
+            selftest_config.write_text("{}", encoding="utf-8")
+            code = apply([vault], hosts=["claude"], home=home, output=io.StringIO())
+            checks.append((
+                "上限拿掉後同一份規則寫得進去",
+                code == EXIT_OK and begin in (home / ".claude" / "CLAUDE.md").read_text(encoding="utf-8"),
+            ))
+
             # 沒有宿主目錄的家目錄：不生出使用者沒有的宿主。
             bare = root / "bare-home"
             bare.mkdir()
@@ -895,9 +930,14 @@ def _selftest():
             ))
     except Exception as exc:
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
+    finally:
+        if saved_config is None:
+            os.environ.pop(memspec.EPITYPE_CONFIG_ENV, None)
+        else:
+            os.environ[memspec.EPITYPE_CONFIG_ENV] = saved_config
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 27
+    total = 29
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
