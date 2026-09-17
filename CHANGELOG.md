@@ -8,6 +8,7 @@
 - An action guard card for `Bash` also covers the same shell tool under other hosts' names (Cursor sends `Shell`); exact name matching had left every guard silently off in Cursor.
 - Recall searches this project's vault and the governance vault, the same scope the Stop gate uses, instead of every configured vault; with no cwd it still searches all. A card name already shown from an earlier vault in the same prompt is not shown again (a project's pointer card and the canonical card it points to).
 - `config_guard` guards GPT-5.6 Terra and GPT-5.5 with the same 272K whole-request cliff as Sol, and reports GPT-6 Astra as exempt instead of "no data".
+- The nightly review pack places an event on a card through `carried_by` and section 12's carrying test when `matched_card` is absent. Nothing wrote `matched_card`, so every event was unmapped and "a second occurrence forces a review" could never fire; real vaults went from 187 unmapped events to 83.
 - The Stop gate checks everything said during a turn, not only the last message; a claim made before a tool call was out of every card's reach. The nightly replay uses the same turn text, so digests reconcile. FAILURE_MODES §44.
 
 ## v1.4.0 (2026-09-17)

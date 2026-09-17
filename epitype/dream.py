@@ -110,7 +110,7 @@ REVIEW_PACK_NEXT_STEP = (
     "改層（升常駐、降層）才交 owner 核定；夢只給候選，不判型別、不改卡、不動層"
 )
 REVIEW_PACK_COMMAND = "人工逐列判來源、原因與最小修法；沒有對應的自動 CLI 指令"
-REVIEW_PACK_UNMAPPED_NOTE = "{count} 則事件沒有 {field} 欄，對不到卡（不強迫每場搜）"
+REVIEW_PACK_UNMAPPED_NOTE = "{count} 則事件對不到卡：沒有 {field}／{carried} 欄，也沒有決策卡提名或逐字引用（不強迫每場搜）"
 REVIEW_PACK_UNVERIFIED_NOTE = "{count} 則事件 {field}: {value}（待核，不算已核實事故）"
 REVIEW_PACK_NO_EXAM_NOTE = "沒有 {filename}，這一節的考題失敗數是「未量」而不是 0"
 REVIEW_PACK_EXAM_UNMAPPED_NOTE = "{count} 題失敗但題目沒寫對到哪張卡"
@@ -1185,8 +1185,9 @@ def _section_review_pack(vaults, today, since_date, config, sections):
 
     「待判問題」＝列出來的卡數，因為檢討場是逐列判的：一列＝一張卡＋它身上所有的證據。
     兩種東西刻意不進這個數字，否則同一件事會被算兩次、門檻也會永遠成立——(1) 第 8–12
-    節的候選（那五節各自已經有自己的下一步行）；(2) 對不到卡的事件（沒有 `matched_card`
-    就沒有列可判，而「這句原話沒有決策卡承接」正是第 12 節在數的東西）。兩者的數字都
+    節的候選（那五節各自已經有自己的下一步行）；(2) 對不到卡的事件（`matched_card`、
+    `carried_by`、第 12 節承接判定都指不出卡，就沒有列可判，而「這句原話沒有決策卡承接」
+    正是第 12 節在數的東西）。兩者的數字都
     留在 counts 與備註裡，看得到、但不冒充待判項。
     """
     rows = {}
@@ -1265,7 +1266,7 @@ def _section_review_pack(vaults, today, since_date, config, sections):
     )
     if unmapped:
         notes.append(REVIEW_PACK_UNMAPPED_NOTE.format(
-            count=unmapped, field=memspec.MATCHED_CARD_FIELD))
+            count=unmapped, field=memspec.MATCHED_CARD_FIELD, carried=memspec.CARRIED_BY_FIELD))
     if unverified:
         notes.append(REVIEW_PACK_UNVERIFIED_NOTE.format(
             count=unverified, field=memspec.VERIFIED_FIELD, value=memspec.VERIFIED_FALSE))
