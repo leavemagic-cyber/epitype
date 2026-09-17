@@ -233,20 +233,19 @@ def plan_for(host, vaults, home=None):
     capped = 0
     for name, text in wanted.items():
         size = len(text.encode("utf-8"))
+        over_cap = None
         if size > memspec.HOST_SYNC_REGION_CAP_BYTES:
-            problems.append(
+            over_cap = (
                 f"{name} 有 {size} 位元組，超過每場固定成本上限 "
                 f"{memspec.HOST_SYNC_REGION_CAP_BYTES}；先讓內容瘦身再同步"
             )
-            capped += 1
-            continue
-        if name == memspec.HOST_SYNC_RULES_REGION and rules_cap is not None and size > rules_cap:
-            problems.append(
+        elif name == memspec.HOST_SYNC_RULES_REGION and rules_cap is not None and size > rules_cap:
+            over_cap = (
                 f"{name} 有 {size} 位元組，超過設定的 {memspec.CONFIG_CORE_CAP_BYTES_FIELD} "
                 f"{rules_cap}；先讓規則瘦身或調整上限再同步"
             )
-            capped += 1
-            continue
+        # 超上限的那一塊不寫，但標記與歸屬照查：這一塊的標記壞了或裡面是使用者的字，
+        # 就不能只算成「超上限」，否則夜間會把這個宿主當成可以放心寫的。
         # 要寫進去的內容自己含標記，寫下去就會讓這個檔永遠有兩組標記，之後每次都拒絕、
         # 只能人工手改才救得回來。寧可現在就說不。
         # 比對每一塊的標記，不只自己那一塊：索引的內容裡出現規則的標記，一樣會把這個
@@ -257,7 +256,7 @@ def plan_for(host, vaults, home=None):
             for markers in table.values()
             for marker in markers
             if marker in text
-        ]
+        ] if over_cap is None else []
         if carried:
             problems.append(
                 f"{name} 要寫的內容裡出現了區塊標記本身（{carried[0][:40]}…）；"
@@ -285,6 +284,10 @@ def plan_for(host, vaults, home=None):
         ours, unsure = (True, None) if inner is None else _ours(
             inner, text, host, name, home, legacy=_legacy
         )
+        if ours and over_cap is not None:
+            problems.append(over_cap)
+            capped += 1
+            continue
         if ours and unsure:
             # 備份留的是「我們第一次動這個檔之前」那一份。已經有備份時，它裡面不是這次
             # 要被取代的那段字——講成「備份在這裡」就是假的，跟這一版要修的毛病同一種。

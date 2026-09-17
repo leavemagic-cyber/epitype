@@ -190,8 +190,42 @@ def main():
             and any("core_cap_bytes" in line for line in capped["errors"]),
         ))
 
+    # 超上限的正是那塊有使用者的字、或標記壞掉的那一塊：不能只算成超上限而放行整個宿主。
+    rules_begin, rules_end = memspec.HOST_SYNC_MARKERS[memspec.HOST_SYNC_RULES_REGION]
+    for label, body in (
+        ("使用者的字", f"{rules_begin}\n使用者自己的規則\n{rules_end}\n"
+                       f"{index_begin}\n我寫的一行\n{index_end}\n"),
+        ("標記壞掉", f"{rules_begin}\nA\n{rules_end}\n{rules_begin}\nB\n{rules_end}\n"
+                     f"{index_begin}\n我寫的一行\n{index_end}\n"),
+    ):
+        with tempfile.TemporaryDirectory(prefix="epitype-nightly-capped-foreign-") as temp_dir:
+            root = Path(temp_dir).resolve()
+            home, vault, host_path = _fixture(root, body)
+            before_bytes = host_path.read_bytes()
+            config = root / "config.json"
+            config.write_text('{"core_cap_bytes": 10}', encoding="utf-8")
+            saved = os.environ.get(memspec.EPITYPE_CONFIG_ENV)
+            original_home = Path.home
+            try:
+                os.environ[memspec.EPITYPE_CONFIG_ENV] = str(config)
+                Path.home = staticmethod(lambda: home)
+                night = dream._section_host_sync([vault], today, today, config={})
+            finally:
+                Path.home = original_home
+                if saved is None:
+                    os.environ.pop(memspec.EPITYPE_CONFIG_ENV, None)
+                else:
+                    os.environ[memspec.EPITYPE_CONFIG_ENV] = saved
+            checks.append((
+                f"超上限那一塊同時是{label}：夜間整個宿主不動",
+                host_path.read_bytes() == before_bytes
+                and night["counts"].get("held_hosts") == 1
+                and not any(line.startswith(memspec.HOST_SYNC_REPLACED_PREFIX)
+                            for line in night["errors"]),
+            ))
+
     passed = sum(bool(ok) for _, ok in checks)
-    total = 9
+    total = 11
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     for name, ok in checks:
