@@ -237,4 +237,4 @@ Read [Uninstall Epitype](docs/UNINSTALL.md) before restoring a backup by hand.
 
 ## Status
 
-v1.3.0. Development happens in bursts rather than on a fixed cadence, so a quiet week is not an abandoned project. Issues get read, and an issue is the fastest way to move a fix up the queue.
+v1.4.0. Development happens in bursts rather than on a fixed cadence, so a quiet week is not an abandoned project. Issues get read, and an issue is the fastest way to move a fix up the queue.
