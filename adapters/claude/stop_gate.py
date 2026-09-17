@@ -570,6 +570,43 @@ def _vaults(config, event):
     return vaults
 
 
+def _turn_texts(transcript_path):
+    """Assistant text blocks since the last real user prompt, in order; [] if unreadable.
+
+    Tool results are logged as user rows but do not end a turn (same rule as the
+    nightly replay's `compliance._turns`)."""
+    try:
+        path = Path(str(transcript_path))
+        size = path.stat().st_size
+        with path.open("rb") as stream:
+            stream.seek(max(0, size - memspec.STOP_GATE_TURN_TAIL_BYTES))
+            lines = stream.read().decode("utf-8", "replace").splitlines()
+    except (OSError, ValueError, TypeError):
+        return []
+    texts = []
+    for line in reversed(lines):
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(row, dict):
+            continue
+        content = (row.get("message") or {}).get("content") if isinstance(row.get("message"), dict) else None
+        if row.get("type") == "user":
+            if isinstance(content, list) and any(
+                isinstance(block, dict) and block.get("type") == "tool_result" for block in content
+            ):
+                continue
+            break
+        if row.get("type") != "assistant" or not isinstance(content, list):
+            continue
+        for block in reversed(content):
+            if isinstance(block, dict) and block.get("type") == "text" and str(block.get("text") or "").strip():
+                texts.append(block["text"])
+    texts.reverse()
+    return texts
+
+
 def _handle(event, started_at, defects):
     # The host re-runs Stop after a block; blocking that run again would loop forever.
     if event.get("stop_hook_active"):
@@ -577,7 +614,12 @@ def _handle(event, started_at, defects):
     message = event.get("last_assistant_message")
     if not isinstance(message, str) or not message.strip():
         return None
-    message = message[: memspec.STOP_GATE_MESSAGE_MAX_CHARS]
+    # Mid-turn text reaches the owner too; reading only the last message let every card
+    # miss whatever was said before a tool call.
+    texts = _turn_texts(event.get("transcript_path")) if event.get("transcript_path") else []
+    if message.strip() not in memspec.join_turn_text(texts):
+        texts.append(message)
+    message = memspec.join_turn_text(texts)
     config = load_config(started_at)
     if config is None:
         return None

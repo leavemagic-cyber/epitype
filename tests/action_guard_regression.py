@@ -11,6 +11,7 @@ These tests pin the narrow form that came back, and equally pin what did NOT: no
 regex, no shell parsing, no guess about what a command means. A call is denied only
 when every literal fragment a card names is present in the call's own text.
 """
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -252,6 +253,77 @@ class RequireWhenThen(unittest.TestCase):
              "last_assistant_message": message},
             time.monotonic(), [],
         )
+
+    def block_turn(self, rows, final):
+        import stop_gate
+
+        markers = patch.object(stop_gate, "recall_marker_directory",
+                               lambda session: self.root / "markers" / str(session))
+        markers.start()
+        self.addCleanup(markers.stop)
+        transcript = self.root / f"turn-{len(rows)}-{abs(hash(final))}.jsonl"
+        transcript.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows), encoding="utf-8")
+        return stop_gate._handle(
+            {"session_id": "turn-" + transcript.stem, "stop_hook_active": False,
+             "last_assistant_message": final, "transcript_path": str(transcript)},
+            time.monotonic(), [],
+        )
+
+    @staticmethod
+    def said(text, tool=False):
+        content = [{"type": "text", "text": text}]
+        if tool:
+            content.append({"type": "tool_use", "name": "Bash", "input": {"command": "ls"}})
+        return {"type": "assistant", "message": {"content": content}}
+
+    PROMPT = {"type": "user", "message": {"content": "請處理"}}
+    TOOL_RESULT = {"type": "user", "message": {"content": [{"type": "tool_result", "content": "ok"}]}}
+
+    def test_a_claim_made_mid_turn_is_checked_not_only_the_last_message(self):
+        # 2026-09-17: the false claim sat before a tool call; the gate read only the
+        # turn's last message, so no card could ever reach it.
+        rows = [self.PROMPT, self.said("全部通過了", tool=True), self.TOOL_RESULT, self.said("接著看下一步")]
+        value = self.block_turn(rows, "接著看下一步")
+        self.assertEqual((value or {}).get("decision"), "block")
+        self.assertIsNone(self.block("接著看下一步"))  # 只看最後一則的話，這個回合永遠過
+
+    def test_evidence_anywhere_in_the_turn_satisfies_the_requirement(self):
+        rows = [self.PROMPT, self.said("跑了全套測試", tool=True), self.TOOL_RESULT, self.said("全部通過了")]
+        self.assertIsNone(self.block_turn(rows, "全部通過了"))
+
+    def test_an_earlier_turn_does_not_count(self):
+        rows = [self.PROMPT, self.said("全部通過了"), {"type": "user", "message": {"content": "新問題"}},
+                self.said("好")]
+        self.assertIsNone(self.block_turn(rows, "好"))
+
+    def test_the_gate_and_the_nightly_replay_record_the_same_turn_digest(self):
+        from epitype import compliance
+
+        rows = [self.PROMPT, self.said("全部通過了", tool=True), self.TOOL_RESULT, self.said("接著看下一步")]
+        for row in rows:
+            row["sessionId"], row["timestamp"] = "digest-session", "2026-09-17T01:00:00+00:00"
+        self.assertEqual((self.block_turn(rows, "接著看下一步") or {}).get("decision"), "block")
+        transcript = sorted(self.root.glob("turn-*.jsonl"))[-1]
+        logged = [json.loads(line) for line in (self.vault / memspec.GATE_LOG_FILENAME).read_text(
+            encoding="utf-8").splitlines() if line.strip()]
+        gate_digests = {row.get("digest") for row in logged if row.get("digest")}
+        rules = [rule._replace(mtime=0) for rule in compliance.armed_rules(self.vault)]
+        replayed = {hit.digest for hit in compliance.replay(rules, [transcript]) if hit.kind == "require"}
+        self.assertTrue(replayed and replayed <= gate_digests, (replayed, gate_digests))
+
+    def test_an_unreadable_transcript_falls_back_to_the_last_message(self):
+        import stop_gate
+
+        markers = patch.object(stop_gate, "recall_marker_directory",
+                               lambda session: self.root / "markers" / str(session))
+        markers.start()
+        self.addCleanup(markers.stop)
+        value = stop_gate._handle(
+            {"session_id": "turn-missing", "stop_hook_active": False, "last_assistant_message": "全部通過了",
+             "transcript_path": str(self.root / "no-such.jsonl")},
+            time.monotonic(), [],
+        )
+        self.assertEqual((value or {}).get("decision"), "block")
 
     def test_a_behaviour_card_arms_without_carrying_a_ruling_of_its_own(self):
         # card_lint tells a behaviour card's author to add `forbidden` or

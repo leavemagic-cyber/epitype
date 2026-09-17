@@ -244,7 +244,7 @@ Everything else lands under `<vault>/_drafts/captured_pending/YYYYMMDD/` with th
 Epitype refuses exactly two things, both about content the model is about to commit, and neither expressible as a host rule:
 
 - **Write gate** (`PreToolUse`, `adapters/claude/pretooluse_gate.py`). Before a file write lands, the new text is checked against the settled rulings — rule A blocks content that re-states what the owner already ruled out — and a card written into a registered vault must satisfy `card_lint`'s contract for its own type (rule B: FAIL blocks, WARN advises). Every block appends one audit row to `<vault>/_GATE_LOG.jsonl` naming the rule, the ruling, and the filename — never the content. Anything else proceeds untouched.
-- **Stop gate** (`adapters/claude/stop_gate.py`). At the end of a turn, the last assistant message is checked against the same decision cards and the same `forbidden` patterns, through one shared validator, so a sentence that cannot be written into a file cannot be said at the end of a turn either.
+- **Stop gate** (`adapters/claude/stop_gate.py`). At the end of a turn, everything the assistant said during that turn (every text block since the last user prompt, read from the transcript; the last message alone if the host sends no readable transcript) is checked against the same decision cards and the same `forbidden` patterns, through one shared validator, so a sentence that cannot be written into a file cannot be said at the end of a turn either.
 
 Both gates fail open, and both are exercised by their own synthetic events:
 

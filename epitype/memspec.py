@@ -837,6 +837,15 @@ RECALL_QUIET_WINDOW_DAYS = 14
 RECALL_QUIET_MIN_SEGMENTS = 10
 RECALL_QUIET_TYPES = ("project", "reference", "pending")
 STOP_GATE_MESSAGE_MAX_CHARS = 20000
+# Stop 閘檢查整個回合，不只最後一則：回合中段說的話 owner 一樣看得到（2026-09-17）。
+STOP_GATE_TURN_TAIL_BYTES = 8 * 1024 * 1024
+STOP_GATE_TURN_MAX_CHARS = 60000
+
+
+def join_turn_text(texts):
+    """一個回合裡助手說過的文字併成一段。閘與夜間重放共用，指紋才對得起來。"""
+    joined = "\n\n".join(text for text in texts if isinstance(text, str) and text.strip())
+    return joined[-STOP_GATE_TURN_MAX_CHARS:]
 STOP_GATE_QUOTE_MAX_CHARS = 160
 STOP_GATE_FRAGMENT_MAX_CHARS = 40
 # 單字別名會命中任何句子；兩個以上別名同時出現在同一個問句，才是同一件已裁定的事。

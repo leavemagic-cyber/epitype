@@ -5,6 +5,8 @@
 - Recall no longer re-sends a card already in context when the set of vaults a prompt used changes (1,404 identical lines in 7 days). FAILURE_MODES §43.
 - Recall quiets project/reference/pending cards shown in 10+ segments over 14 days and never used; decisions, armed cards and behaviour types are never quieted. Simulated on the real vaults: 56 cards, 12% of card showings.
 - `tests/run_all.py` also runs the tracked-file privacy scan that CI runs, so the local gate and the CI gate are the same command.
+- An action guard card for `Bash` also covers the same shell tool under other hosts' names (Cursor sends `Shell`); exact name matching had left every guard silently off in Cursor.
+- The Stop gate checks everything said during a turn, not only the last message; a claim made before a tool call was out of every card's reach. The nightly replay uses the same turn text, so digests reconcile. FAILURE_MODES §44.
 
 ## v1.4.0 (2026-09-17)
 

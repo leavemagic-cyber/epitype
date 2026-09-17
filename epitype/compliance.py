@@ -124,11 +124,10 @@ def _blocks_outside_quotes(pattern, text, cache):
 
 
 def _turns(path, max_bytes=MAX_TRANSCRIPT_BYTES):
-    """(session, 時間, 這一輪最後一段文字, 這一輪全部文字, 這一輪的工具呼叫)。
+    """(session, 時間, 閘看到的整回合文字, 這一輪逐段文字, 這一輪的工具呼叫)。
 
-    閘只看得到一輪的最後一段話，中間那些它從來看不到。兩者分開回傳，因為
-    「最後一段命中卻沒擋」是漏擋，「中間命中」是閘的視野之外——兩種要分開講，混成
-    一個數字會把設計邊界說成缺陷。
+    Stop 閘看整個回合（`memspec.join_turn_text`），所以第三欄是同一個函式併出來的文字，
+    指紋才跟稽核帳對得起來。
     """
     read = 0
     session, stamp = "", ""
@@ -161,7 +160,7 @@ def _turns(path, max_bytes=MAX_TRANSCRIPT_BYTES):
                     # 個 user 列裡有 279 個是工具回傳。
                     continue
                 if texts or calls:
-                    yield session, stamp, texts[-1] if texts else "", list(texts), list(calls)
+                    yield session, stamp, memspec.join_turn_text(texts), list(texts), list(calls)
                 texts, calls = [], []
                 continue
             if kind != "assistant":
@@ -185,7 +184,7 @@ def _turns(path, max_bytes=MAX_TRANSCRIPT_BYTES):
                     ) if isinstance(payload, dict) else ""
                     calls.append((_one_line(block.get("name")), joined))
     if texts or calls:
-        yield session, stamp, texts[-1] if texts else "", list(texts), list(calls)
+        yield session, stamp, memspec.join_turn_text(texts), list(texts), list(calls)
 
 
 def _is_tool_result(row):
@@ -239,28 +238,27 @@ def replay(rules, transcripts, epoch=None, since=None):
                     continue
                 if rule.kind == "guard":
                     for tool, payload in calls:
-                        if tool.casefold() != rule.tool.casefold() or not payload:
+                        if not payload or not memspec.action_guard_tool_matches(rule.tool, tool):
                             continue
                         if all(fragment in payload for fragment in rule.fragments):
                             hits.append(Hit(rule.card, "guard", session, stamp,
                                             "＋".join(rule.fragments), _digest(payload), True, payload))
                     continue
-                for index, text in enumerate(all_texts):
-                    final = text is final_text and index == len(all_texts) - 1
-                    if rule.kind == "forbidden":
-                        for pattern in rule.forbidden:
-                            found = _blocks_outside_quotes(pattern, text, cache)
-                            if found is not None:
-                                hits.append(Hit(rule.card, "forbidden", session, stamp,
-                                                _one_line(found.group(0))[:80], _digest(text), final, text))
-                                break
-                    elif rule.kind == "require":
-                        trigger = _blocks_outside_quotes(rule.require_when, text, cache)
-                        if trigger is None:
-                            continue
-                        if _blocks_outside_quotes(rule.require_text, text, cache) is None:
-                            hits.append(Hit(rule.card, "require", session, stamp,
-                                            _one_line(trigger.group(0))[:80], _digest(text), final, text))
+                text = final_text  # 閘看的是整個回合，重放也是
+                if not text:
+                    continue
+                if rule.kind == "forbidden":
+                    for pattern in rule.forbidden:
+                        found = _blocks_outside_quotes(pattern, text, cache)
+                        if found is not None:
+                            hits.append(Hit(rule.card, "forbidden", session, stamp,
+                                            _one_line(found.group(0))[:80], _digest(text), True, text))
+                            break
+                elif rule.kind == "require":
+                    trigger = _blocks_outside_quotes(rule.require_when, text, cache)
+                    if trigger is not None and _blocks_outside_quotes(rule.require_text, text, cache) is None:
+                        hits.append(Hit(rule.card, "require", session, stamp,
+                                        _one_line(trigger.group(0))[:80], _digest(text), True, text))
     return hits
 
 
@@ -360,7 +358,8 @@ def reconcile(hits, blocks, stopped=()):
 
     三件事不算漏擋，因為它們都是設計而不是缺口：
     - 同一場、同一張卡、同一段話重複出現——Stop 閘只擋一次，不然改不動就被永遠擋著。
-    - 回合中間的訊息——Stop 閘只看最後一段，中間那些它從來看不到，另外歸一類。
+    - 閘視野之外的命中另外歸一類（Stop 閘 2026-09-17 起看整個回合，重放也照整回合算，
+      這一類現在應為零；留著是為了宿主送不出對話紀錄時仍講得出來）。
     - 同一則訊息已經被別張卡擋下——閘一次只報一個理由就停手，那則訊息已經被退回重寫。
     """
     remaining = dict(blocks)
@@ -839,9 +838,9 @@ def _selftest():
             for hit in hits:
                 by_kind.setdefault(hit.kind, []).append(hit)
             checks.append((
-                "禁語命中三次（兩次在回合結尾、一次在回合中間），引號內那次不算",
-                len(by_kind.get("forbidden", ())) == 3
-                and sum(1 for hit in by_kind["forbidden"] if hit.final) == 2,
+                "禁語命中兩次：同一回合中段與結尾都講算一次（閘看整回合），引號內那次不算",
+                len(by_kind.get("forbidden", ())) == 2
+                and all(hit.final for hit in by_kind["forbidden"]),
             ))
             checks.append((
                 "工具呼叫命中守衛一次",
@@ -854,8 +853,8 @@ def _selftest():
 
             blocked, missed, unseen = reconcile(hits, {(session, "probe"): 1})
             checks.append((
-                "稽核帳裡有的算擋下，沒有的算漏擋，中間那次歸「閘看不到」",
-                len(blocked) == 1 and len(unseen) == 1
+                "稽核帳裡有的算擋下，沒有的算漏擋；閘看整回合，沒有「閘看不到」的命中",
+                len(blocked) == 1 and len(unseen) == 0
                 and sorted(hit.kind for hit in missed) == ["forbidden", "guard", "require"],
             ))
 
@@ -914,7 +913,7 @@ def _selftest():
             cards = update_health(vault, rules, hits, day)
             checks.append((
                 "命中併進健康度，沒命中的卡也建檔但次數是零",
-                cards["probe"]["hits_30d"] == 3
+                cards["probe"]["hits_30d"] == 2
                 and cards["probe"]["last_hit"] == "2026-09-17"
                 and cards["needs"]["hits_30d"] == 1
                 and cards["測試守衛"]["hits_30d"] == 1,
@@ -923,7 +922,7 @@ def _selftest():
             aged = load_health(vault)
             checks.append((
                 "沒命中的那天不會清掉窗內的舊紀錄，也不會假造新的",
-                aged["probe"]["hits_30d"] == 3 and aged["probe"]["last_hit"] == "2026-09-17",
+                aged["probe"]["hits_30d"] == 2 and aged["probe"]["last_hit"] == "2026-09-17",
             ))
             faded = update_health(vault, rules, [], day + timedelta(days=HEALTH_WINDOW_DAYS + 1))
             checks.append((
@@ -970,8 +969,8 @@ def _selftest():
             ))
             endings = [final for _s, _t, final, _a, _c in _turns(transcript)]
             checks.append((
-                "工具前後被切成兩段的話，結尾會是中段那句——現在不會",
-                endings[-1].startswith("查完了") and "中段" not in endings[-1],
+                "工具前後的話同屬一個回合，閘看到的是兩句併起來，不是只有最後那句",
+                endings[-1] == memspec.join_turn_text(["中段：先查一下。", "查完了，結尾在這裡。"]),
             ))
             wide = Rule("寬樣式", "forbidden", vault / "decision-x.md", 0,
                         ["。"], "", "", "", ())
@@ -979,8 +978,8 @@ def _selftest():
             measured = rehearse([wide], wide_hits, {"turns": 100, "tools": {}})
             visible = sum(1 for hit in wide_hits if hit.final or hit.kind == "guard")
             checks.append((
-                "命中率的分子只算閘看得到的（回合最後一則與工具呼叫），不是全部命中",
-                measured["寬樣式"][0] == visible < len(wide_hits)
+                "命中率的分子＝閘看得到的命中；閘看整回合，所以每回合最多算一次",
+                measured["寬樣式"][0] == visible == len(wide_hits) <= chances["turns"]
                 and measured["寬樣式"][2] > 0,
             ))
             update_health(vault, [wide], wide_hits, day,

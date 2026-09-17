@@ -65,7 +65,7 @@ Memory is usually delivered as advisory context. Enforcement hooks may exist, bu
 
 2026-09-09 (§34) settled where the enforcement belongs, and 2026-09-16 corrected one half of that settlement after testing its premise.
 
-What Epitype refuses on content, unchanged since §34: the write gate checks the text a file write would land against the owner's settled `forbidden` patterns and against `card_lint`'s contract for the card's own type, and the Stop gate checks the last assistant message of a turn against the same rulings through the same validator. Both append an audit row naming the rule, the ruling and the filename — never the content.
+What Epitype refuses on content, unchanged since §34: the write gate checks the text a file write would land against the owner's settled `forbidden` patterns and against `card_lint`'s contract for the card's own type, and the Stop gate checks everything the assistant said during a turn (see §44) against the same rulings through the same validator. Both append an audit row naming the rule, the ruling and the filename — never the content.
 
 **The premise that failed.** §34 removed card-driven action interception on the understanding that irreversible actions would move to the host's own native rules (Claude `permissions.deny`, Codex `execpolicy`). Four of nine hazard classes moved across. The remaining five could not: Claude's Bash permission patterns match the command text positionally with no AND operator, and the documentation states they "aren't a security boundary". A rule written for the heredoc hazard was installed and verified not to block anything. Those five classes were therefore homeless for a week, and on 2026-09-16 one of them — a heredoc eating one level of backslashes — was hit four times in a single session with the lesson already carded three times over.
 
@@ -265,7 +265,7 @@ Injection is advice, not enforcement. `SessionStart` and `UserPromptSubmit` both
 
 ### Epitype countermeasure
 
-The `Stop` hook compares the turn's last assistant message against the active decision cards of the cwd vault and the governance vault before the turn is allowed to end. A card's `forbidden` sequence — regular expressions or literals, validated by the same rejection rules the action gate uses, so a card cannot hang the turn it guards — blocks the turn and quotes the owner back. A question sentence naming one card by two of its `aliases` blocks it as well: putting a settled matter back to the owner is the same failure as proposing it. A block emits `{"decision": "block", "reason": ...}` and is audited to `_GATE_LOG.jsonl` as `stop_block`. The host re-runs `Stop` after a block, so `stop_hook_active` is never blocked twice, and one `(decision, message)` pair blocks once per session — the marker lives in the recall marker directory, so compaction clears it with the rest.
+The `Stop` hook compares what the assistant said during the turn (every text block since the last user prompt, §44) against the active decision cards of the cwd vault and the governance vault before the turn is allowed to end. A card's `forbidden` sequence — regular expressions or literals, validated by the same rejection rules the action gate uses, so a card cannot hang the turn it guards — blocks the turn and quotes the owner back. A question sentence naming one card by two of its `aliases` blocks it as well: putting a settled matter back to the owner is the same failure as proposing it. A block emits `{"decision": "block", "reason": ...}` and is audited to `_GATE_LOG.jsonl` as `stop_block`. The host re-runs `Stop` after a block, so `stop_hook_active` is never blocked twice, and one `(decision, message)` pair blocks once per session — the marker lives in the recall marker directory, so compaction clears it with the rest.
 
 Every other path fails open: a missing or unreadable config, an unusable pattern (named on stderr, never silently dropped), a vault with no decision cards, or the hook's own deadline all let the turn end.
 
@@ -1908,3 +1908,33 @@ quiet (37 project, 19 reference), 12% of all card showings.
 Regression: `epitype/recall_quiet.py --selftest`,
 `tests/recall_selection_regression.py` (alias renumbering does not re-send a card; a
 quiet ordinary card is skipped while a decision on the same list is not).
+
+## 44. Every card missed what was said before a tool call (2026-09-17)
+
+The Stop gate read `last_assistant_message`: the turn's final text only. A turn that
+talks, calls a tool, and talks again shows the owner all of it, but the gate saw only
+the last part. On 2026-09-17 a false claim ("this was never verified on Cursor", when
+it had been, the day before) sat before a tool call; the card armed that same day to
+catch exactly that sentence could not have reached it. Every armed `forbidden` and
+`require_when` card had the same blind spot.
+
+The gate now reads the transcript tail (`STOP_GATE_TURN_TAIL_BYTES`) back to the last
+real user prompt (tool results are logged as user rows and do not end a turn), joins
+the turn's text blocks with `memspec.join_turn_text`, and checks that. Evidence given
+anywhere in the turn satisfies a `require_text`. A transcript that cannot be read falls
+back to the last message, the previous behaviour. The re-run after a block is still
+never blocked (`stop_hook_active`), so a correction cannot loop.
+
+The nightly replay uses the same join, so a turn has one digest on both sides and the
+"outside the gate's view" count is now expected to be zero. The replay's guard matching
+also uses `memspec.action_guard_tool_matches`, the same tool-name equivalence as the gate.
+
+What this does not change: text already shown mid-turn cannot be unsaid. A block makes
+the turn end with a correction instead of standing uncorrected. Hosts whose Stop hook
+cannot block (Cursor) gain nothing here; Codex transcripts use a different format and
+fall back to the last message.
+
+Regression: `tests/action_guard_regression.py` (a mid-turn claim is blocked while the
+last-message-only reading passes it; evidence earlier in the turn satisfies the
+requirement; an earlier turn does not count; an unreadable transcript falls back; the
+gate and the replay record the same digest), `epitype/compliance.py --selftest`.
