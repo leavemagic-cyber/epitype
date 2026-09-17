@@ -857,8 +857,8 @@ def _section_caps(vaults, today, since_date, config):
     else:
         for path in named:
             try:
-                size = path.stat().st_size
-            except OSError as exc:
+                size = _core_file_loaded_bytes(path)
+            except (OSError, UnicodeError, ValueError) as exc:
                 errors.append(f"{path}: {type(exc).__name__}: {exc}")
                 continue
             if size > core_cap:
@@ -876,6 +876,19 @@ def _section_caps(vaults, today, since_date, config):
     }
 
 
+def _core_file_loaded_bytes(path):
+    """上限量的是一個宿主實際載入的量（共用區＋自己那一區），與 core-gen、sync 同一種量法。
+
+    兩個宿主區從來不會在同一場一起付；量整個檔會比另外兩條路早報超標。
+    """
+    try:  # lazy import：核心生成器只有這一節要
+        from . import core_gen
+    except ImportError:  # Direct script execution keeps the CLI contract.
+        import core_gen
+    text = path.read_text(encoding="utf-8").replace("\r\n", "\n")
+    return max(core_gen.host_loads(text).values())
+
+
 def _core_drift(vaults, core_files):
     """生成塊漂移候選：`core_files` 每個檔與規則卡重組出來的核心塊比一次。
 
@@ -890,10 +903,16 @@ def _core_drift(vaults, core_files):
     except ImportError:  # Direct script execution keeps the CLI contract.
         import core_gen
 
+    try:
+        from . import host_sync
+    except ImportError:  # Direct script execution keeps the CLI contract.
+        import host_sync
+    # 生成塊是跨專案契約，只從治理庫組；拿全部登記庫組會混進專案規則，每晚都報漂移。
+    contract = host_sync.contract_vaults(vaults)
     found = []
     for path in core_files:
         try:
-            if core_gen.drifted(vaults, path):
+            if core_gen.drifted(contract, path):
                 found.append({"path": str(path), "kind": CAP_DRIFT_KIND})
         except Exception:
             continue  # 一個讀不了的檔不得讓整節失敗；缺口由 errors 以外的節照常報
@@ -1692,12 +1711,8 @@ def _section_host_sync(vaults, today, since_date, config):
                 "errors": replaced}
 
     lines = [line for line in seen.splitlines() if line.strip()]
-    if before == host_sync.EXIT_REFUSED:
-        # 拒絕寫的理由都是需要人動手的（標記被改壞、內容超過上限），自動重試沒有意義。
-        # 這條路徑不呼叫 apply，REPLACE 預告今晚不會成真；它留在 examples 裡，描述的是手動 sync。
-        return {"counts": {"drifted": 0, "written": 0}, "examples": lines[:EXAMPLE_LIMIT],
-                "commands": ["python -m epitype sync <vault>"], "errors": []}
-
+    # 有一處拒寫（標記被改壞、規則超過上限）也照跑 apply：apply 自己逐宿主、逐塊停手，
+    # 其餘照寫。整晚跳過的話，一塊超上限就讓兩家的索引跟著停在舊版，夜報還零錯誤。
     applied = io.StringIO()
     try:
         code = host_sync.apply(vaults, output=applied)
@@ -1707,6 +1722,8 @@ def _section_host_sync(vaults, today, since_date, config):
                 "errors": replaced + [f"{type(exc).__name__}: {exc}"]}
     done = applied.getvalue()
     written = [line for line in done.splitlines() if line.startswith("WROTE")]
+    # 拒寫要人動手，放進 errors：開場那一行才會說這一晚不乾淨。
+    refused = [line for line in done.splitlines() if line.startswith("REFUSE")]
     # 兩趟都撈：check 是預告、apply 是真的做了。同一件事講兩次也不刪，因為「預告過但沒
     # 做」與「做了」是不一樣的事，而這裡不該替使用者判斷哪一句比較重要。
     replaced = list(dict.fromkeys(replaced + replaced_in(done)))
@@ -1714,11 +1731,11 @@ def _section_host_sync(vaults, today, since_date, config):
         # 漂移只數 DRIFT 行。以前數的是「所有非空行」，連 NOTE 都算進去——只有一個區塊
         # 漂移卻報 2，而這一版的主張就是數字要對。
         "counts": {"drifted": len(drifted), "written": len(written),
-                   "replaced": len(replaced)},
-        "examples": written[:EXAMPLE_LIMIT],
+                   "replaced": len(replaced), "refused": len(refused)},
+        "examples": (refused + written)[:EXAMPLE_LIMIT],
         "commands": [] if code == host_sync.EXIT_OK else ["python -m epitype sync <vault> --apply"],
         # 放進 errors 而不是 examples：這一晚不能被當成乾淨跑完。使用者的字被換掉了。
-        "errors": replaced,
+        "errors": replaced + refused,
     }
 
 
@@ -1795,6 +1812,12 @@ def _next_steps(sections, shaping=()):
         steps.append(
             f"生成塊漂移 {caps['drift']} 個檔案（與規則卡重組的結果不一致）"
             " → 人工判斷重生成或查手改；夢不改檔"
+        )
+    sync = counts(14)
+    if sync.get("refused", 0) > 0:
+        steps.append(
+            f"宿主檔同步拒寫 {sync['refused']} 處（規則超過上限，或區塊不是 Epitype 寫的）"
+            " → 代理讀到的還是舊版；看第 14 節處理後跑 python -m epitype sync <vault> --apply"
         )
     uncarried = counts(12)
     if uncarried.get("uncarried_quotes", 0) > 0:

@@ -13,6 +13,7 @@ import sys; sys.dont_write_bytecode = True; [getattr(stream, "reconfigure", lamb
 """
 
 import io
+import os
 import tempfile
 from datetime import date
 from pathlib import Path
@@ -131,7 +132,8 @@ def main():
             and host_path.read_bytes() == before_bytes,
         ))
 
-    # 規則塊是使用者自己的字 → 夜間拒絕、不呼叫 apply；索引塊的取代今晚不會發生，不得報成錯誤。
+    # 規則塊是使用者自己的字 → 那一塊停手、使用者的字不動；索引塊照一般夜晚處理（真的換了才報
+    # REPLACE）；拒寫本身要報，不然隔天開場說這一晚乾淨。
     with tempfile.TemporaryDirectory(prefix="epitype-nightly-refused-") as temp_dir:
         root = Path(temp_dir).resolve()
         rules_begin, rules_end = memspec.HOST_SYNC_MARKERS[memspec.HOST_SYNC_RULES_REGION]
@@ -147,13 +149,51 @@ def main():
             refused = dream._section_host_sync([vault], today, today, config={})
         finally:
             Path.home = original_home
+        after_refused = host_path.read_text(encoding="utf-8")
+        reported_replace = any(
+            line.startswith(memspec.HOST_SYNC_REPLACED_PREFIX) for line in refused["errors"])
         checks.append((
-            "拒絕寫入的夜晚不把沒發生的取代報成錯誤，檔案一個位元組不動",
-            refused["errors"] == [] and host_path.read_bytes() == before_bytes,
+            "拒寫那一塊使用者的字不動；取代只在真的換掉時才報",
+            "使用者自己的規則" in after_refused
+            and reported_replace == ("我寫的一行" not in after_refused)
+            and before_bytes != b"",
+        ))
+        checks.append((
+            "拒寫本身進 errors 與計數，下一步有一行",
+            refused["counts"].get("refused") == 1
+            and any(line.startswith("REFUSE") for line in refused["errors"])
+            and any("拒寫" in step for step in dream._next_steps(
+                [{"id": 14, "counts": refused["counts"]}])),
+        ))
+
+    # 規則超過設定的 core_cap_bytes → 規則塊拒寫，但索引照樣同步（以前整晚跳過 apply）。
+    with tempfile.TemporaryDirectory(prefix="epitype-nightly-capped-") as temp_dir:
+        root = Path(temp_dir).resolve()
+        rules_begin, _rules_end = memspec.HOST_SYNC_MARKERS[memspec.HOST_SYNC_RULES_REGION]
+        home, vault, host_path = _fixture(root, "我的開頭\n")
+        config = root / "config.json"
+        config.write_text('{"core_cap_bytes": 10}', encoding="utf-8")
+        saved = os.environ.get(memspec.EPITYPE_CONFIG_ENV)
+        original_home = Path.home
+        try:
+            os.environ[memspec.EPITYPE_CONFIG_ENV] = str(config)
+            Path.home = staticmethod(lambda: home)
+            capped = dream._section_host_sync([vault], today, today, config={})
+        finally:
+            Path.home = original_home
+            if saved is None:
+                os.environ.pop(memspec.EPITYPE_CONFIG_ENV, None)
+            else:
+                os.environ[memspec.EPITYPE_CONFIG_ENV] = saved
+        written = host_path.read_text(encoding="utf-8")
+        checks.append((
+            "規則超上限的夜晚：索引照寫、規則塊不寫、拒寫講出上限",
+            "一張卡" in written and rules_begin not in written
+            and any("core_cap_bytes" in line for line in capped["errors"]),
         ))
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 7
+    total = 9
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     for name, ok in checks:
