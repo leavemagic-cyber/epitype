@@ -1499,7 +1499,19 @@ def _section_compliance(vaults, today, since_date, config):
     hits, blocked, missed, unseen = [], [], [], []
     silent = []
     exempted = {}
+    quieted = 0
+    try:
+        from epitype import recall_quiet
+        shown = recall_quiet.measure(transcripts, since=since_date.isoformat())
+    except Exception as exc:
+        shown = None
+        errors.append(f"喚回用量統計失敗 {type(exc).__name__}: {exc}")
     for vault in vaults:
+        if shown is not None:
+            try:
+                quieted += len(recall_quiet.update(vault, shown, today))
+            except Exception as exc:
+                errors.append(f"{vault}: 喚回靜音名單未更新 {type(exc).__name__}: {exc}")
         try:
             rules = compliance.armed_rules(vault)
             vault_hits = compliance.replay(rules, transcripts, since=since_stamp)
@@ -1562,6 +1574,7 @@ def _section_compliance(vaults, today, since_date, config):
             # 引用豁免放過的命中。重放看不到它們（同一套遮罩），所以這個數字只能從閘
             # 自己的稽核列來——短句加引號與真正的引用機器分不出來，分不出來至少要數。
             "quoted_exemptions": sum(exempted.values()),
+            "recall_quiet": quieted,
         },
         "examples": examples,
         "commands": ["python -m epitype.compliance --selftest"] if missed else [],

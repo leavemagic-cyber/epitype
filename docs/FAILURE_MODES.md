@@ -1871,3 +1871,40 @@ Regression: `epitype/dream.py --selftest` (a reviewed card with two headings is
 skipped, a superseded card over the cap is skipped, a fresh split is not relisted
 while an unmarked twin with the same description still is, a split card that grew two
 headings is listed again, and the count reported is the count taken off the list).
+
+## 43. Recall was the largest token cost, and most of it went unused (2026-09-17)
+
+Measured over 7 days of real transcripts (96 sessions, about 13,000 model calls; token
+counts estimated): recall injected roughly 570K tokens, and because injected context is
+re-read on every later call until compaction, it carried roughly 78M cache-read tokens.
+Every other Epitype mechanism was at least an order of magnitude smaller. Stop-gate
+rewrites (7 in the week) and action-guard denials (13) were cheap.
+
+Two separate wastes:
+
+- **Re-sending cards already in context.** Aliases (`V1`, `V2`...) are numbered by which
+  vaults a given prompt used, and the per-session dedup digest included them, so a card
+  already delivered was sent again whenever that set changed: 1,404 identical lines
+  re-sent within one compaction segment, median 3 prompts apart. Dedup now keys on the
+  real vault path (`recall_hook._card_identity`), which still keeps an identical line
+  from another vault distinct.
+- **Cards that are shown and never used.** A loose proxy (the card's name appears in a
+  later reply or tool call) put use at 4% for project cards and 7% for reference cards.
+  `epitype/recall_quiet.py` counts, nightly in dream §13, how many compaction segments
+  each card was shown in and whether it was used, over a rolling
+  `RECALL_QUIET_WINDOW_DAYS` (14). A card shown in at least `RECALL_QUIET_MIN_SEGMENTS`
+  (10) segments with zero use goes on the vault's quiet list and recall skips it.
+
+What is never quieted: decision cards (pinned), any card carrying a gate field, and every
+type outside `RECALL_QUIET_TYPES` (`project`, `reference`, `pending`). A behaviour card
+that is never named may still be shaping behaviour; the proxy cannot tell, so those
+types are out of scope. A quiet card stops accumulating showings, so it falls back out of
+the window and is re-evaluated; memsearch still finds it. A missing or malformed health
+file quiets nothing.
+
+Simulated on the real vaults before shipping (14 days, read-only): 56 cards would go
+quiet (37 project, 19 reference), 12% of all card showings.
+
+Regression: `epitype/recall_quiet.py --selftest`,
+`tests/recall_selection_regression.py` (alias renumbering does not re-send a card; a
+quiet ordinary card is skipped while a decision on the same list is not).

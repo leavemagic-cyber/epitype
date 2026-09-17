@@ -14,7 +14,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from epitype import memsearch, memspec
+from epitype import memsearch, memspec, recall_quiet
 # 捕捉核心住在 epitype.capture，讓離線回放（harvest）套用同一份觸發與遮罩規則；
 # 這裡保留原本的私名，呼叫端與 selftest 不因搬移而改。
 from epitype.capture import (
@@ -238,6 +238,7 @@ def _recall(event, started_at, config, delivery_markers=None):
         if expired(started_at):
             return None
         alias = f"V{len(legend) + 1}"
+        quiet = recall_quiet.quiet_cards(vault)
         used = False
         body_only = 0
         ordinary = 0
@@ -252,6 +253,8 @@ def _recall(event, started_at, config, delivery_markers=None):
                     continue  # A retired/unreadable ruling is not an ordinary hit.
             if decision is None and _event_card(hit, path):
                 continue  # 原話事件檔只在 memsearch 端出（U-H）；卡片層才進喚回。
+            if decision is None and _one_line(hit.get("card_path")) in quiet:
+                continue  # 夜間判定一再端出卻從沒用到的資訊型卡；裁定永遠不靜音。
             # A card matched only in its body is a weak lexical hit; two per vault
             # is plenty. A decision card is never weak, so its kind is decided
             # before the cap (adversarial review 2026-09-03 #1).

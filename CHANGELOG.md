@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Recall no longer re-sends a card already in context when the set of vaults a prompt used changes (1,404 identical lines in 7 days). FAILURE_MODES §43.
+- Recall quiets project/reference/pending cards shown in 10+ segments over 14 days and never used; decisions, armed cards and behaviour types are never quieted. Simulated on the real vaults: 56 cards, 12% of card showings.
+- `tests/run_all.py` also runs the tracked-file privacy scan that CI runs, so the local gate and the CI gate are the same command.
+
 ## v1.4.0 (2026-09-17)
 
 ### 這一版做完的一件事：卡片從「被讀到」變成「擋得住」

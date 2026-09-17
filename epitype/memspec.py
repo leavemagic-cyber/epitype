@@ -831,6 +831,11 @@ STOP_GATE_UNSCANNED_DEFECT = (
     "它們這次不在檢查範圍內"
 )
 STOP_GATE_FRONTMATTER_MAX_BYTES = 16 * 1024
+# 喚回自我修正（epitype.recall_quiet）。只靜音資訊型卡：行為與授權類的卡沒被點名不代表沒起作用。
+RECALL_HEALTH_FILENAME = "recall_health.json"
+RECALL_QUIET_WINDOW_DAYS = 14
+RECALL_QUIET_MIN_SEGMENTS = 10
+RECALL_QUIET_TYPES = ("project", "reference", "pending")
 STOP_GATE_MESSAGE_MAX_CHARS = 20000
 STOP_GATE_QUOTE_MAX_CHARS = 160
 STOP_GATE_FRAGMENT_MAX_CHARS = 40

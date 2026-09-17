@@ -116,6 +116,18 @@ class RecallSelectionRegression(unittest.TestCase):
             recall._card_identity("- sameneedle | V2/same.md", {"V2": "C:/vault-a"}),
         )
 
+    def test_nightly_quiet_list_skips_ordinary_cards_but_never_decisions(self):
+        self.card(self.vaults[0], "noisy", "quietneedle")
+        self.card(self.vaults[0], "keeper", "quietneedle")
+        self.card(self.vaults[0], "ruling", "quietneedle", decision=True)
+        memsearch.build_index(self.vaults[0])
+        health = self.vaults[0] / memspec.FTS_INDEX_DIRECTORY / memspec.RECALL_HEALTH_FILENAME
+        health.write_text(json.dumps({"days": {}, "quiet": ["noisy.md", "ruling.md"]}), encoding="utf-8")
+        delivered = self.invoke(prompt="quietneedle")
+        self.assertNotIn("/noisy.md", delivered)
+        self.assertIn("/keeper.md", delivered)
+        self.assertIn("/ruling.md", delivered)
+
     def test_absent_session_has_no_persistent_dedupe(self):
         self.populate()
         self.assertEqual(self.invoke(session=""), self.invoke(session=""))
