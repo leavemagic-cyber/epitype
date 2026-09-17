@@ -93,6 +93,29 @@ class RecallSelectionRegression(unittest.TestCase):
         self.assertFalse(any(line.startswith("- " + memspec.DECISION_PREFIX) for line in second))
         self.assertEqual(self.invoke(), "")  # procedure already sent this session (owner 2026-09-09)
 
+    def test_card_is_not_resent_when_the_alias_numbering_changes(self):
+        # 代號依這則提問用到哪些庫而編：beta 第一次是 V1，第二次變 V2。指紋若含代號就會整批重送。
+        self.card(self.vaults[0], "alpha", "sharedneedle alphaneedle")
+        self.card(self.vaults[1], "beta", "sharedneedle betaneedle")
+        for vault in self.vaults:
+            memsearch.build_index(vault)
+        first = self.lines(self.invoke(prompt="betaneedle"))
+        second = self.lines(self.invoke(prompt="sharedneedle"))
+        self.assertTrue(any("/beta.md" in line for line in first), first)
+        self.assertFalse(any("/beta.md" in line for line in second), second)
+        self.assertTrue(any("/alpha.md" in line for line in second), second)
+
+    def test_same_line_text_in_another_vault_is_a_different_card(self):
+        line = "- sameneedle | V1/same.md"
+        self.assertNotEqual(
+            recall._card_identity(line, {"V1": "C:/vault-a"}),
+            recall._card_identity(line, {"V1": "C:/vault-b"}),
+        )
+        self.assertEqual(
+            recall._card_identity("- sameneedle | V1/same.md", {"V1": "C:/vault-a"}),
+            recall._card_identity("- sameneedle | V2/same.md", {"V2": "C:/vault-a"}),
+        )
+
     def test_absent_session_has_no_persistent_dedupe(self):
         self.populate()
         self.assertEqual(self.invoke(session=""), self.invoke(session=""))

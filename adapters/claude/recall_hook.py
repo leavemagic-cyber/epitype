@@ -182,6 +182,17 @@ def _bounded_recall(pieces, budget, required_count, header_count):
     return "\n".join(selected) if selected else None
 
 
+def _card_identity(line, aliases):
+    """A card line with its alias replaced by the vault path the alias stands for.
+
+    The same line text under a different alias mapping is a different card; the same
+    card under a different alias number is the same card.
+    """
+    text, separator, located = line.rpartition(" | ")
+    alias, slash, rest = located.partition("/")
+    return f"{text}{separator}{aliases.get(alias, alias)}{slash}{rest}"
+
+
 def _handle(event, started_at, delivery_markers=None):
     prompt = event.get("prompt")
     if not isinstance(prompt, str) or not prompt.strip():
@@ -296,11 +307,13 @@ def _recall(event, started_at, config, delivery_markers=None):
     # compaction, which clears the markers); each distinct legend is sent once.
     head_digest = "head-" + hashlib.sha256(head.encode("utf-8")).hexdigest()[:24]
     head_seen = bool(session_id) and (recall_marker_directory(session_id) / head_digest).is_file()
-    # Deduplicate actual card lines, including their legend's identity. A line cut
-    # by the byte budget has not been delivered and must remain eligible.
+    # Deduplicate by card identity (real vault path), not by alias: aliases are numbered
+    # per prompt, so keying on them re-sent every card whenever the set of vaults used
+    # changed. A line cut by the byte budget has not been delivered and stays eligible.
+    aliases = dict(entry.split("=", 1) for entry in legend)
     pending = []
     for line in [*pinned, *others]:
-        digest = "card-" + hashlib.sha256((head_digest + "\0" + line).encode("utf-8")).hexdigest()
+        digest = "card-" + hashlib.sha256(_card_identity(line, aliases).encode("utf-8")).hexdigest()
         if not session_id or not (recall_marker_directory(session_id) / digest).is_file():
             pending.append((line, digest))
     if not pending:
