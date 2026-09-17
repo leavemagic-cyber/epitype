@@ -106,8 +106,8 @@ REVIEW_PACK_BLOCK_KINDS = (memspec.STOP_GATE_LOG_KIND, memspec.WRITE_GATE_LOG_KI
 REVIEW_PACK_READY_NOTE = "檢討包達門檻（{count}/{trigger}）"
 REVIEW_PACK_BELOW_NOTE = "未達門檻（{count}/{trigger}）"
 REVIEW_PACK_NEXT_STEP = (
-    "檢討包達門檻（{count}/{trigger}）→ 人工開一場檢討（Claude 整理＋Codex 挑戰，"
-    "owner 一包核決）；夢只給候選，不判型別、不改卡、不動層"
+    "檢討包達門檻（{count}/{trigger}）→ 由 AI 逐列處理卡片層的修正（別名、武裝、誤擋）；"
+    "改層（升常駐、降層）才交 owner 核定；夢只給候選，不判型別、不改卡、不動層"
 )
 REVIEW_PACK_COMMAND = "人工逐列判來源、原因與最小修法；沒有對應的自動 CLI 指令"
 REVIEW_PACK_UNMAPPED_NOTE = "{count} 則事件沒有 {field} 欄，對不到卡（不強迫每場搜）"
@@ -1069,21 +1069,56 @@ def _section_uncarried_quotes(vaults, today, since_date, config):
 # --------------------------------------------------------------------------- section 15
 
 
+def _decision_carrier_list(vault):
+    """每張決策卡各自一份（身分, 提名文字, owner_quote 片段），答得出「是哪一張」接住。
+
+    身分用 decision_key，與閘門紀錄的 `decision` 欄同一個值，事件和攔截才會落在同一列。
+    """
+    carriers = []
+    for path in memsearch.card_files(vault):
+        try:
+            text = path.read_text(encoding="utf-8-sig")
+        except (OSError, UnicodeError):
+            continue
+        relative = path.relative_to(vault).as_posix()
+        card_type, fields = card_lint.card_type_of(relative, text, path)
+        if card_type != memspec.CARD_TYPE_DECISION:
+            continue
+        named = "\n".join([_body_of(text)] + [fields.get(f, "") for f in DECISION_CARRIER_FIELDS])
+        label = fields.get(memspec.DECISION_KEY_FIELD, "").strip() or relative
+        carriers.append((label, named, _quote_fragments(fields.get(memspec.OWNER_QUOTE_FIELD, ""))))
+    return carriers
+
+
 def _review_events_of(vault):
     """庫裡每張事件卡的證據列：對到哪張卡、是哪一則事件、什麼時候、核實了沒。
 
-    `matched_card` 是「這一則糾正明確指到哪一條規則」；收斂第 2 條刻意不強迫每場搜，
-    所以沒有那一欄就是對不到卡——那種列進「未對到卡」，不會被算到某張卡頭上。
+    卡面有 `matched_card` 就用它；沒有時沿用第 12 節的承接判定（`carried_by`、決策卡
+    提名檔名或 decision_key、owner_quote 逐字引用）指出是哪一張。以前只認 `matched_card`，
+    而沒有任何東西寫那一欄，事件全數對不到卡，「第二次強制檢討」永遠不會成立。
     `event_id` 沒有的舊卡用它的路徑當身分：一張卡至少是一則事件，去重時不能互相蓋掉。
     """
     rows = []
+    carriers = None
     for path in memsearch.card_files(vault):
         relative = path.relative_to(vault).as_posix()
         if _EVENT_TYPE_BY_DIR.get(relative.split("/", 1)[0]) is None:
             continue
         fields, _problem = memspec.frontmatter_fields(path)
+        card = fields.get(memspec.MATCHED_CARD_FIELD, "").strip() or fields.get(memspec.CARRIED_BY_FIELD, "").strip()
+        if not card:
+            carriers = _decision_carrier_list(vault) if carriers is None else carriers
+            key = fields.get(memspec.DECISION_KEY_FIELD, "").strip()
+            try:
+                body = _body_of(path.read_text(encoding="utf-8-sig"))
+            except (OSError, UnicodeError):
+                body = ""
+            for label, named, fragments in carriers:
+                if path.name in named or (key and key in named) or _quoted_verbatim(body, fragments):
+                    card = label
+                    break
         rows.append({
-            "card": fields.get(memspec.MATCHED_CARD_FIELD, "").strip(),
+            "card": card,
             # 事件身分跨庫比對：event_id 已經含宿主與對話，同一則事件被寫進兩個庫也只
             # 算一次；沒有 event_id 的舊卡退回「這個庫的這個路徑」。
             "event": fields.get(memspec.EVENT_ID_FIELD, "").strip() or f"{vault}::{relative}",
@@ -2691,6 +2726,23 @@ def _selftest():
                 and memspec.MATCHED_CARD_FIELD in review["note"]
                 and memspec.VERIFIED_FALSE in review["note"],
             ))
+            # 事件卡沒寫 matched_card：用第 12 節的承接判定指出是哪一張決策卡。
+            carry_vault = Path(temp_dir).resolve() / "carry-vault"
+            _write_card(carry_vault / "decisions" / "carry.md",
+                        "---\nname: carry\ndescription: 2026-09-17 synthetic\n"
+                        f"{memspec.DECISION_KEY_FIELD}: carry-key\n"
+                        f"{memspec.OWNER_QUOTE_FIELD}: 「這一句原話一定要被決策卡接住才算數」\n---\nbody\n")
+            _write_card(carry_vault / memspec.CORRECTION_DIRECTORY / "quoted.md",
+                        "---\nname: quoted\ndescription: owner auto-captured\n---\n這一句原話一定要被決策卡接住才算數\n")
+            _write_card(carry_vault / memspec.CORRECTION_DIRECTORY / "named.md",
+                        f"---\nname: named\ndescription: owner auto-captured\n{memspec.CARRIED_BY_FIELD}: other-key\n---\n另一句\n")
+            _write_card(carry_vault / memspec.CORRECTION_DIRECTORY / "loose.md",
+                        "---\nname: loose\ndescription: owner auto-captured\n---\n沒有任何決策卡提到的一句話\n")
+            carried = {Path(r["event"].split("::")[-1]).stem: r["card"] for r in _review_events_of(carry_vault)}
+            checks.append((
+                "an event without matched_card is placed on the decision card that quotes it, or on its carried_by",
+                carried == {"quoted": "carry-key", "named": "other-key", "loose": ""},
+            ))
             checks.append((
                 "the trigger fires at five deduplicated rows and says so in the next steps",
                 review["counts"]["cards"] == 5
@@ -3220,7 +3272,7 @@ def _selftest():
                 os.environ[name] = value
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 69
+    total = 70
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
