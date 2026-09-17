@@ -127,7 +127,8 @@ class CaptureRecallRegression(unittest.TestCase):
         memsearch.build_index(self.vault)
         context = self.context()
         self.assertIn(memspec.DECISION_PREFIX + "fixturehistory-key（2026-01-02）", context)
-        self.assertIn("fixturehistory 一律照這條走", context)
+        # The card layer shows the card's description; the verbatim quote stays one level down.
+        self.assertNotIn("fixturehistory 一律照這條走", context)
 
     def test_budget_drops_whole_card_without_delivery_marker(self):
         path = self.plain_card()

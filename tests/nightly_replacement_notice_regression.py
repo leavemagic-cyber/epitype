@@ -104,6 +104,22 @@ def main():
             section["counts"]["drifted"] == 2,
         ))
 
+    # 規則塊以生成器標題開頭、後面接使用者加的字：不能因為標題像我們的就不留原文。
+    with tempfile.TemporaryDirectory(prefix="epitype-nightly-titled-") as temp_dir:
+        root = Path(temp_dir).resolve()
+        home, vault, host_path = _fixture(
+            root,
+            f"{rules_begin}\n{memspec.CORE_GEN_OUTPUT_TITLE}\n我加在標題後面的一句\n{rules_end}\n",
+        )
+        _night(home, vault)
+        log_path = host_path.with_name(host_path.name + memspec.HOST_SYNC_REPLACED_SUFFIX)
+        checks.append((
+            "標題行開頭的規則塊裡使用者加的字：換掉前存進紀錄檔",
+            "我加在標題後面的一句" not in host_path.read_text(encoding="utf-8")
+            and log_path.exists()
+            and "我加在標題後面的一句" in log_path.read_text(encoding="utf-8"),
+        ))
+
     # 沒有東西被換掉的正常夜晚：不出取代紀錄、零錯誤。
     with tempfile.TemporaryDirectory(prefix="epitype-nightly-quiet-") as temp_dir:
         root = Path(temp_dir).resolve()
@@ -149,7 +165,7 @@ def main():
         ))
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 7
+    total = 8
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     for name, ok in checks:

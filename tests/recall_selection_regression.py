@@ -244,10 +244,8 @@ class RecallSelectionRegression(unittest.TestCase):
             self.assertNotIn("V1/short.md", retried)
 
     def test_oversized_pinned_policy_is_not_bypassed_by_small_ordinary_card(self):
-        self.card(self.vaults[0], "policy", "packneedle", decision=True)
-        policy = self.vaults[0] / "policy.md"
-        policy.write_text(policy.read_text(encoding="utf-8").replace(
-            "Keep the synthetic policy", "長" * 500), encoding="utf-8")
+        # The pinned line carries the decision's description, so that is what is made oversized.
+        self.card(self.vaults[0], "policy", "packneedle " + "長" * 500, decision=True)
         self.card(self.vaults[0], "short", "packneedle")
         memsearch.build_index(self.vaults[0])
         common.write_config(self.config, [self.vaults[0]], budget=700)

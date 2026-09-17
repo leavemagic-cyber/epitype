@@ -319,15 +319,13 @@ def _fingerprint(text):
 def _unrecognised(inner, wanted, host, name, home, legacy=False):
     """這一塊現在有幾行認不出是 Epitype 寫的；認得出來回 0。
 
-    認得出來的：空的、跟這次要寫的一樣、指紋等於我們上次寫進去的那份、規則塊以生成器
-    自己的標題行開頭（既有安裝與舊標記遷移）。其餘照樣取代，但原文先存起來並寫明誰換的
-    ——使用者可能在標記之間放過自己的字，拒絕同步會讓規則永遠到不了代理面前，默默覆蓋
-    則是資料損失；存原文＋標註兩邊都不犧牲。
+    認得出來的：空的、跟這次要寫的一樣、指紋等於我們上次寫進去的那份。其餘照樣取代，
+    但原文先存起來並寫明誰換的——使用者可能在標記之間放過自己的字，拒絕同步會讓規則永遠
+    到不了代理面前，默默覆蓋則是資料損失；存原文＋標註兩邊都不犧牲。
+    「以生成器標題行開頭」不算認得：標題後面接的可能是使用者加的字。指紋紀錄不在時
+    （解除安裝過、舊標記遷移）舊的生成內容會被多存一份，那是副本，不是損失。
     """
     if not inner.strip():
-        return 0
-    if name == memspec.HOST_SYNC_RULES_REGION and inner.lstrip().startswith(
-            memspec.CORE_GEN_OUTPUT_TITLE):
         return 0
     if _normalised(inner) == _normalised(wanted):
         return 0

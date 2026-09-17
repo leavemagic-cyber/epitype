@@ -297,7 +297,7 @@
       },
       "expect": {
         "decision": "block",
-        "reason_contains": "合成練習的兩份設定必須一致"
+        "reason_contains": "合成練習：兩份設定必須一致"
       }
     },
     {
@@ -390,10 +390,11 @@
       "expect": {
         "pinned_contains": [
           "⚖ 裁定：synthetic-pinboard（2026-07-01）",
-          "合成置頂卡要帶原話"
+          "合成練習的置頂示例"
         ],
         "pinned_excludes": [
-          "pinboard-quote"
+          "pinboard-quote",
+          "合成置頂卡要帶原話"
         ]
       }
     },

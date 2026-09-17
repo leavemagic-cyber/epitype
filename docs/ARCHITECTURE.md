@@ -59,6 +59,14 @@ one of those directories that is itself an active decision card (`decision_key` 
 `status: active`): that is level 2 material that happens to sit in a capture
 directory, and it keeps its pinned seat.
 
+The same line holds inside a decision card. Its `owner_quote` is the owner's verbatim
+words — level-4 material kept on the card as evidence that the owner said it, and as
+one of the ways the dream links captured events to the card. What recall pins, and
+what both gates quote when they block, is the card's `description`: what was decided,
+in understood words, uncut. A quote fragment without its question ("「B」（Q7）")
+reads as nothing; the verbatim quote is one step down, in the card file itself
+(owner 2026-09-17). The quote is shown only when a card has no description.
+
 `closed` changes the reading level and nothing else — the card stays in the search
 index and is still recalled. Only `superseded` changes recall, by redirecting to the
 successor. Two lint checks hold the pair together, because being listed in a view is

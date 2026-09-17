@@ -234,7 +234,7 @@ def _forbidden_write(event, config, target, additions, prospective, started_at, 
                     decision.key,
                     memspec.WRITE_GATE_FORBIDDEN_REASON.format(
                         decision=stop_gate._named(decision),
-                        quote=decision.quote,
+                        quote=decision.advice or decision.quote,
                         fragment=fragment[: memspec.WRITE_GATE_FRAGMENT_MAX_CHARS],
                     ),
                 )
@@ -945,11 +945,11 @@ def _selftest():
             )
             forbidden_reason = forbidden_out.get("permissionDecisionReason", "")
             checks.append((
-                "Write 的內容命中現行裁定的 forbidden 就擋，理由帶裁定鍵、日期、owner 原話與命中片段",
+                "Write 的內容命中現行裁定的 forbidden 就擋，理由帶裁定鍵、日期、裁定說明與命中片段",
                 forbidden_write.returncode == 0
                 and forbidden_out.get("permissionDecision") == "deny"
                 and "virtual-mirrors-live，2026-08-13" in forbidden_reason
-                and "虛擬必須鏡像實盤" in forbidden_reason
+                and "虛擬盤與實盤參數一致" in forbidden_reason
                 and "兩套參數" in forbidden_reason,
             ))
             write_log = write_vault / memspec.GATE_LOG_FILENAME

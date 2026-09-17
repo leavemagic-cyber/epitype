@@ -678,7 +678,7 @@ def _verdict(event, message, config, started_at, defects):
                     _FORBIDDEN_RULE,
                     memspec.STOP_GATE_FORBIDDEN_REASON.format(
                         decision=_named(decision),
-                        quote=decision.quote,
+                        quote=decision.advice or decision.quote,
                         fragment=fragment[: memspec.STOP_GATE_FRAGMENT_MAX_CHARS],
                     ),
                 )
@@ -715,7 +715,7 @@ def _verdict(event, message, config, started_at, defects):
                 (
                     decision,
                     _QUESTION_RULE,
-                    template.format(decided_at=decision.decided_at, quote=decision.quote),
+                    template.format(decided_at=decision.decided_at, quote=decision.advice or decision.quote),
                 )
             )
             break
@@ -820,7 +820,7 @@ def _selftest():
                 "a forbidden phrase is blocked and audited as stop_block",
                 forbidden_result.returncode == 0
                 and forbidden_value.get("decision") == "block"
-                and "虛擬必須鏡像實盤" in forbidden_value.get("reason", "")
+                and "虛擬盤與實盤參數一致" in forbidden_value.get("reason", "")
                 and "virtual-mirrors-live，2026-08-13" in forbidden_value.get("reason", "")
                 and "虛擬盤先用不同參數" in forbidden_value.get("reason", "")
                 and any(
@@ -894,7 +894,7 @@ def _selftest():
                 "同訊息一次加引號、一次沒加：沒加引號那次仍照擋",
                 mixed_result.returncode == 0
                 and mixed_value.get("decision") == "block"
-                and "虛擬必須鏡像實盤" in mixed_value.get("reason", "")
+                and "虛擬盤與實盤參數一致" in mixed_value.get("reason", "")
                 and "虛擬盤先用不同參數" in mixed_value.get("reason", ""),
             ))
 
@@ -931,7 +931,7 @@ def _selftest():
                 split_result.returncode == 0
                 and not split_value
                 and two_alias_value.get("decision") == "block"
-                and "排程只由我改" in two_alias_value.get("reason", ""),
+                and "排程由 owner 決定" in two_alias_value.get("reason", ""),
             ))
 
             active_event = {

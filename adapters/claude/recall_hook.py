@@ -282,10 +282,13 @@ def _recall(event, started_at, config, delivery_markers=None):
             description = _one_line(hit.get("description"))[: memspec.RECALL_DESCRIPTION_MAX_CHARS]
             if decision is not None:
                 key, decided_at, quote = decision
-                # The decision's own key and date identify it better than a card
-                # name, and the owner's words go in uncut: a ruling paraphrased
-                # into 120 characters is what let 08-13 come back as an option.
-                parts = (key + (f"（{decided_at}）" if decided_at else ""), quote or description, located)
+                # The card layer carries what was decided in understood words; the
+                # owner's verbatim quote is raw memory, one level down, reached by
+                # opening the card (owner 2026-09-17). A quote fragment without its
+                # context reads as nothing. The description goes in uncut: a ruling
+                # cut to 120 characters is what let 08-13 come back as an option.
+                full = _one_line(hit.get("description"))
+                parts = (key + (f"（{decided_at}）" if decided_at else ""), full or quote, located)
             else:
                 # Say each fact once: a name the path already spells is not repeated.
                 parts = (description, located) if located.endswith(f"/{name}.md") else (name, description, located)
@@ -1218,11 +1221,13 @@ def _selftest():
             ]
             checks.append(
                 (
-                    "an active decision card is pinned with its key, date and the owner's own words",
+                    "an active decision card is pinned with its key, date and what was decided, "
+                    "not the owner's raw quote",
                     decision_result.returncode == 0
                     and bool(decision_pinned)
                     and decision_lines[0].startswith("- " + memspec.DECISION_PREFIX)
-                    and any("（2026-08-1" in line and "只有 6s 是標準合約" in line for line in decision_pinned),
+                    and any("（2026-08-1" in line and "decisionneedle 摘要" in line for line in decision_pinned)
+                    and not any("只有 6s 是標準合約" in line for line in decision_pinned),
                 )
             )
             checks.append(
@@ -1281,7 +1286,7 @@ def _selftest():
                     and len(promoted_lines) == 1
                     and promoted_lines[0].startswith("- " + memspec.DECISION_PREFIX)
                     and "promoted-key（2026-09-07）" in promoted_lines[0]
-                    and "promotedneedle 一律照這條走" in promoted_lines[0]
+                    and "promotedneedle 由 owner 裁定" in promoted_lines[0]
                     and "rawquote" not in promoted_context,
                 )
             )
