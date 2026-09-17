@@ -1841,6 +1841,12 @@ def _uninstall(home, dry_run=False, output=sys.stdout, scheduler=None):
             print(f"CHANGED: {path}", file=output)
         for source, backup in transaction.backups:
             print(f"BACKUP: {source} -> {backup}", file=output)
+        # 安裝時留下的備份也還在使用者目錄裡；只報這次的，那些就成了沒人提過的殘留。
+        fresh = {backup for _source, backup in transaction.backups}
+        for target in targets.values():
+            for earlier in sorted(target.parent.glob(target.name + BACKUP_INFIX + "*")):
+                if earlier not in fresh:
+                    print(f"EARLIER BACKUP KEPT: {earlier}", file=output)
         print("VAULTS PRESERVED: native vaults and ~/.epitype-vault were not removed.", file=output)
         return 0
     except Exception:

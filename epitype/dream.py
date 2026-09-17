@@ -1609,8 +1609,9 @@ def _section_host_sync(vaults, today, since_date, config):
     lines = [line for line in seen.splitlines() if line.strip()]
     if before == host_sync.EXIT_REFUSED:
         # 拒絕寫的理由都是需要人動手的（標記被改壞、內容超過上限），自動重試沒有意義。
+        # 這條路徑不呼叫 apply，REPLACE 預告今晚不會成真；它留在 examples 裡，描述的是手動 sync。
         return {"counts": {"drifted": 0, "written": 0}, "examples": lines[:EXAMPLE_LIMIT],
-                "commands": ["python -m epitype sync <vault>"], "errors": replaced}
+                "commands": ["python -m epitype sync <vault>"], "errors": []}
 
     applied = io.StringIO()
     try:

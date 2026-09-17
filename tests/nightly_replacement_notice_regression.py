@@ -131,8 +131,29 @@ def main():
             and host_path.read_bytes() == before_bytes,
         ))
 
+    # 規則塊是使用者自己的字 → 夜間拒絕、不呼叫 apply；索引塊的取代今晚不會發生，不得報成錯誤。
+    with tempfile.TemporaryDirectory(prefix="epitype-nightly-refused-") as temp_dir:
+        root = Path(temp_dir).resolve()
+        rules_begin, rules_end = memspec.HOST_SYNC_MARKERS[memspec.HOST_SYNC_RULES_REGION]
+        home, vault, host_path = _fixture(
+            root,
+            f"{rules_begin}\n使用者自己的規則\n{rules_end}\n"
+            f"{index_begin}\n我寫的一行\n{index_end}\n",
+        )
+        before_bytes = host_path.read_bytes()
+        original_home = Path.home
+        try:
+            Path.home = staticmethod(lambda: home)
+            refused = dream._section_host_sync([vault], today, today, config={})
+        finally:
+            Path.home = original_home
+        checks.append((
+            "拒絕寫入的夜晚不把沒發生的取代報成錯誤，檔案一個位元組不動",
+            refused["errors"] == [] and host_path.read_bytes() == before_bytes,
+        ))
+
     passed = sum(bool(ok) for _, ok in checks)
-    total = 6
+    total = 7
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     for name, ok in checks:
