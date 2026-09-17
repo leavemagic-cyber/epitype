@@ -77,6 +77,7 @@ MIXED_COMMAND = "人工判斷要不要拆成多張卡（一張卡＝一個記憶
 MIXED_SKIP_REVIEWED = "reviewed"
 MIXED_SKIP_SUPERSEDED = "superseded"
 MIXED_SKIP_FRESH_SPLIT = "fresh_split"
+MIXED_SKIP_RECORD_TYPE = "record_type"
 MIXED_SKIPPED_NOTE = "已審過略過 {count} 張"
 CAP_UNSET_NOTE = "{field} 未設定，這一項跳過"
 CAP_COMMAND = "人工判斷超上限的檔案要精簡還是提高上限；夢不改檔"
@@ -102,6 +103,8 @@ UNCARRIED_COMMAND = "人工判斷這句原話該不該升成決策卡（或標 v
 REVIEW_PACK_SECTION_ID = 15
 REVIEW_PACK_TITLE = "檢討包 / review pack"
 REVIEW_PACK_MAX_ROWS = 50
+# 獨立事故＝不同場次。同一場裡重試同一句話只是同一件事（門檻卡 2026-09-17）。
+REVIEW_PACK_INCIDENT_SESSIONS = 2
 REVIEW_PACK_BLOCK_KINDS = (memspec.STOP_GATE_LOG_KIND, memspec.WRITE_GATE_LOG_KIND)
 REVIEW_PACK_READY_NOTE = "檢討包達門檻（{count}/{trigger}）"
 REVIEW_PACK_BELOW_NOTE = "未達門檻（{count}/{trigger}）"
@@ -110,6 +113,10 @@ REVIEW_PACK_NEXT_STEP = (
     "改層（升常駐、降層）才交 owner 核定；夢只給候選，不判型別、不改卡、不動層"
 )
 REVIEW_PACK_COMMAND = "人工逐列判來源、原因與最小修法；沒有對應的自動 CLI 指令"
+HOST_SYNC_READ_ONLY_NOTE = "這一趟只比對：呼叫端沒有要求寫入宿主檔"
+REVIEW_PACK_BACKGROUND_NOTE = (
+    "另有 {count} 張卡只被原話關聯到、或只擋下過一次：列在下面當背景，不算待判"
+)
 REVIEW_PACK_UNMAPPED_NOTE = "{count} 則事件對不到卡：沒有 {field}／{carried} 欄，也沒有決策卡提名或逐字引用（不強迫每場搜）"
 REVIEW_PACK_UNVERIFIED_NOTE = "{count} 則事件 {field}: {value}（待核，不算已核實事故）"
 REVIEW_PACK_NO_EXAM_NOTE = "沒有 {filename}，這一節的考題失敗數是「未量」而不是 0"
@@ -208,11 +215,33 @@ def _section_pending(vaults, today, since_date, config):
 # --------------------------------------------------------------------------- section 4
 
 
+def _draft_judged(path):
+    """這份草稿是不是已經有人判過了（`triaged:` 有值，且不是 hold）。
+
+    判過的檔案照留當紀錄（歸位不刪），但不該再算成「待審」：2026-09-18 實測 455 份草稿
+    裡 360 份是 09-09 判完標成 retired 的，headline 因此虛報六倍。
+    """
+    try:
+        fields, _problem = memspec.frontmatter_fields(path)
+    except (OSError, UnicodeError):
+        return False
+    value = (fields.get(memspec.DRAFT_TRIAGED_FIELD) or "").strip().lower()
+    return bool(value) and value not in memspec.DRAFT_TRIAGED_PENDING_VALUES
+
+
 def _drafts_of(vault):
+    """（待審的草稿, 判過保留的份數）。"""
     root = Path(vault) / DRAFT_DIRNAME
     if not root.is_dir():
-        return []
-    return sorted(root.rglob("*.md"))
+        return [], 0
+    judged = 0
+    waiting = []
+    for path in sorted(root.rglob("*.md")):
+        if _draft_judged(path):
+            judged += 1
+        else:
+            waiting.append(path)
+    return waiting, judged
 
 
 def _harvest_drafts(vaults, context):
@@ -249,7 +278,9 @@ def _section_drafts(vaults, today, since_date, config, context=None):
     errors = [*harvest_errors, *errors]
     by_subdir = {}
     entries = []
-    for vault, paths in results:
+    judged_kept = 0
+    for vault, (paths, judged) in results:
+        judged_kept += judged
         for path in paths:
             relative = path.relative_to(vault).as_posix()
             parts = relative.split("/")
@@ -262,7 +293,7 @@ def _section_drafts(vaults, today, since_date, config, context=None):
     # 整形移出的行不是捕捉草稿，`--reevaluate` 對它沒有意義（那條路問的是「今天的規則
     # 還會不會捕捉這句話」）；它只是人要看的紀錄，所以不觸發任何建議指令。
     replayable = {pending_root, pruned_root}
-    for vault, paths in results:
+    for vault, (paths, _judged) in results:
         if any(replayable.isdisjoint(path.parts) for path in paths):
             commands.append(
                 f'python epitype/harvest.py --reevaluate "{Path(vault) / DRAFT_DIRNAME / "decisions"}" [--apply]'
@@ -282,6 +313,8 @@ def _section_drafts(vaults, today, since_date, config, context=None):
     return {
         "counts": {
             "total_drafts": len(entries),
+            # 判過的照留當紀錄，但不冒充待審：headline 要的是「還有幾份等人判」。
+            "judged_kept": judged_kept,
             "by_subdir": by_subdir,
             "captured_pending": by_subdir.get(pending_root, 0),
             "harvest_new_drafts": new_drafts,
@@ -640,7 +673,8 @@ def _section_pocket_vaults(vaults, today, since_date, config):
 
 def _draft_aging_of(vault, today):
     entries = []
-    for path in _drafts_of(vault):
+    waiting, _judged = _drafts_of(vault)
+    for path in waiting:
         try:
             stamp = path.stat().st_mtime
         except OSError:
@@ -749,6 +783,12 @@ def _mixed_cards_of(vault):
         except (OSError, UnicodeError):
             continue
         fields, _problem = memspec.frontmatter_text(text)
+        # 「一卡一事」管的是規範層。紀錄型的卡（專案進度、參考資料、捕捉事件、待辦清單）
+        # 本來就是流水帳，長是它的功能。
+        card_type, _fields = card_lint.card_type_of(path.relative_to(vault).as_posix(), text, path)
+        if card_type not in memspec.MIXED_CARD_TYPES:
+            skipped[MIXED_SKIP_RECORD_TYPE] = skipped.get(MIXED_SKIP_RECORD_TYPE, 0) + 1
+            continue
         body = _body_of(text)
         reasons = []
         headings = _body_heading_count(body)
@@ -1161,6 +1201,8 @@ def _review_blocks_of(vault):
         {
             "card": row.label,
             "date": row.timestamp.astimezone(timezone.utc).date().isoformat(),
+            "session": row.session_id or "",
+            "digest": row.digest or "",
         }
         for row in rows
         if row.kind in REVIEW_PACK_BLOCK_KINDS and row.label
@@ -1216,6 +1258,7 @@ def _section_review_pack(vaults, today, since_date, config, sections):
         return rows.setdefault(card, {
             "card": card, "events": 0, "unverified_events": 0,
             "blocks": 0, "exam_failures": 0, "last_seen": "",
+            "block_sessions": 0, "repeat_blocks": 0, "judge": False,
         })
 
     def touch(entry, date_text):
@@ -1243,12 +1286,25 @@ def _section_review_pack(vaults, today, since_date, config, sections):
     block_results, block_errors = _bounded(vaults, _review_blocks_of)
     errors.extend(block_errors)
     blocks = 0
+    sessions_by_card = {}
+    digests_by_card = {}
     for _vault, found in block_results:
         for item in found:
             blocks += 1
             entry = row(item["card"])
             entry["blocks"] += 1
             touch(entry, item["date"])
+            # 獨立事故＝不同場次各算一次；同一場重試同一句不是第二次事故（門檻卡
+            # 2026-09-17）。同一句被擋兩次以上另記：那是規則沒讓行為改變。
+            if item["session"]:
+                sessions_by_card.setdefault(item["card"], set()).add(item["session"])
+            if item["digest"]:
+                seen_digests = digests_by_card.setdefault(item["card"], set())
+                if item["digest"] in seen_digests:
+                    entry["repeat_blocks"] += 1
+                seen_digests.add(item["digest"])
+    for card, seen_sessions in sessions_by_card.items():
+        rows[card]["block_sessions"] = len(seen_sessions)
 
     exam = _exam_results(governance_vault(vaults))
     exam_failures = exam_unmapped = 0
@@ -1271,11 +1327,24 @@ def _section_review_pack(vaults, today, since_date, config, sections):
         "uncarried_quotes": by_id.get(12, {}).get("uncarried_quotes", 0),
     }
 
+    # 待判＝有東西沒生效或需要人判斷：同一張卡在兩場以上獨立擋下（門檻卡的「第二次」）、
+    # 同一句被擋兩次以上（擋了但行為沒改）、或考題失敗。只被原話關聯到的卡什麼事都沒發生，
+    # 列在背景就好——2026-09-18 實測 94 列裡有 80 列屬於這種，門檻因此永遠成立。
+    for entry in rows.values():
+        entry["judge"] = bool(
+            entry["block_sessions"] >= REVIEW_PACK_INCIDENT_SESSIONS
+            or entry["repeat_blocks"]
+            or entry["exam_failures"]
+        )
     listed = sorted(
         rows.values(),
-        key=lambda item: (-(item["events"] + item["blocks"] + item["exam_failures"]), item["card"]),
+        key=lambda item: (not item["judge"],
+                          -(item["blocks"] + item["exam_failures"] + item["events"]),
+                          item["card"]),
     )
-    review_items = len(listed)
+    judgeable = [item for item in listed if item["judge"]]
+    background = len(listed) - len(judgeable)
+    review_items = len(judgeable)
     trigger = memspec.REVIEW_PACK_TRIGGER
     at_threshold = review_items >= trigger
     notes.append(
@@ -1283,6 +1352,8 @@ def _section_review_pack(vaults, today, since_date, config, sections):
             count=review_items, trigger=trigger
         )
     )
+    if background:
+        notes.append(REVIEW_PACK_BACKGROUND_NOTE.format(count=background))
     if unmapped:
         notes.append(REVIEW_PACK_UNMAPPED_NOTE.format(
             count=unmapped, field=memspec.MATCHED_CARD_FIELD, carried=memspec.CARRIED_BY_FIELD))
@@ -1297,6 +1368,7 @@ def _section_review_pack(vaults, today, since_date, config, sections):
         "counts": {
             "cards": len(listed),
             "review_items": review_items,
+            "background_cards": background,
             "trigger": trigger,
             "at_threshold": at_threshold,
             "events": events,
@@ -1676,7 +1748,7 @@ def _section_compliance(vaults, today, since_date, config):
 # --------------------------------------------------------------------------- section 14
 
 
-def _section_host_sync(vaults, today, since_date, config):
+def _section_host_sync(vaults, today, since_date, config, context=None):
     """規則改了就自己寫進宿主檔，不必有人記得跑同步。
 
     卡片是規則的正本，但代理讀的是 `CLAUDE.md`／`AGENTS.md`。中間這一步只要靠人記得，
@@ -1695,6 +1767,7 @@ def _section_host_sync(vaults, today, since_date, config):
     def drifted_in(text):
         return [line for line in text.splitlines() if line.startswith("DRIFT")]
 
+    write_hosts = bool((context or {}).get("write_hosts"))
     report = io.StringIO()
     try:
         before = host_sync.check(vaults, output=report)
@@ -1708,6 +1781,12 @@ def _section_host_sync(vaults, today, since_date, config):
                 "errors": []}
 
     lines = [line for line in seen.splitlines() if line.strip()]
+    if not write_hosts:
+        # 只比對：組報告的呼叫不該改使用者每場都載入的檔。
+        return {"counts": {"drifted": len(drifted), "written": 0},
+                "examples": lines[:EXAMPLE_LIMIT],
+                "commands": ["epitype sync <vault> --apply"], "errors": [],
+                "note": HOST_SYNC_READ_ONLY_NOTE}
     # 有一處拒寫也照跑 apply：它自己逐塊停手（超上限、內容含標記）、標記壞掉的宿主整個
     # 不動，其餘照寫。整晚跳過的話，規則一超上限，兩家的索引就跟著停在舊版。
     applied = io.StringIO()
@@ -1732,6 +1811,9 @@ def _section_host_sync(vaults, today, since_date, config):
         "errors": refused,
     }
 
+
+# 吃 context 的節：第 4 節要家目錄（harvest），第 14 節要知道可不可以寫宿主檔。
+_CONTEXT_SECTIONS = (_section_drafts, _section_host_sync)
 
 _SECTIONS = (
     (1, "缺別名卡", _section_missing_aliases),
@@ -1843,7 +1925,7 @@ def _next_steps(sections, shaping=()):
 
 
 def build_report(vaults, today=None, since_date=None, deadline=None, shaping=None, config=None,
-                 harvest_home=None, dry_run=False):
+                 harvest_home=None, dry_run=False, write_hosts=False):
     today = today or datetime.now(timezone.utc).date()
     since_date = since_date or (today - timedelta(days=DEFAULT_EVENT_AGING_DAYS))
     # 設定讀一次就好：第 8 節要「登記了哪些庫」、第 11 節要三個上限鍵。讀不到就是空
@@ -1862,10 +1944,15 @@ def build_report(vaults, today=None, since_date=None, deadline=None, shaping=Non
 
     # 第 4 節在盤點草稿之前順手跑一趟 harvest，所以它多收一個執行脈絡：家目錄（沒有
     # 就不跑）、夢的 --dry-run 透傳、整體時限。其餘各節的簽章不變。
-    context = {"home": harvest_home, "dry_run": bool(dry_run), "deadline": deadline}
+    # `write_hosts` 預設關：組報告是讀的動作，不該順手改使用者每場都載入的 CLAUDE.md／
+    # AGENTS.md。2026-09-18 一個臨時腳本拿 build_report 跑合成庫，兩個宿主檔的規則區塊
+    # 就被寫成空的——呼叫端看不出這個副作用，那是 API 的問題，不是呼叫端不小心。
+    context = {"home": harvest_home, "dry_run": bool(dry_run), "deadline": deadline,
+               "write_hosts": bool(write_hosts)}
     sections = [
         run(section_id, title, lambda fn=fn: (
-            fn(vaults, today, since_date, config, context) if fn is _section_drafts
+            fn(vaults, today, since_date, config, context)
+            if fn in _CONTEXT_SECTIONS
             else fn(vaults, today, since_date, config)
         ))
         for section_id, title, fn in _SECTIONS
@@ -2691,9 +2778,30 @@ def _selftest():
             (review_vault / memspec.GATE_LOG_FILENAME).write_text(
                 "\n".join(json.dumps(row, ensure_ascii=False) for row in (
                     {"timestamp": "2026-09-07T01:00:00+00:00",
-                     "kind": memspec.STOP_GATE_LOG_KIND, "decision": "decisions/three.md"},
+                     "kind": memspec.STOP_GATE_LOG_KIND, "decision": "decisions/three.md",
+                     "session_id": "s-a", "digest": "d1"},
+                    {"timestamp": "2026-09-07T02:00:00+00:00",
+                     "kind": memspec.STOP_GATE_LOG_KIND, "decision": "decisions/three.md",
+                     "session_id": "s-b", "digest": "d2"},
                     {"timestamp": "2026-09-08T01:00:00+00:00",
-                     "kind": memspec.WRITE_GATE_LOG_KIND, "decision": "decisions/one.md"},
+                     "kind": memspec.WRITE_GATE_LOG_KIND, "decision": "decisions/one.md",
+                     "session_id": "s-a", "digest": "d3"},
+                    {"timestamp": "2026-09-08T03:00:00+00:00",
+                     "kind": memspec.WRITE_GATE_LOG_KIND, "decision": "decisions/one.md",
+                     "session_id": "s-c", "digest": "d4"},
+                    # 同一句在同一場被擋兩次：擋了但行為沒改，也要判。
+                    {"timestamp": "2026-09-08T04:00:00+00:00",
+                     "kind": memspec.STOP_GATE_LOG_KIND, "decision": "decisions/five.md",
+                     "session_id": "s-d", "digest": "d5"},
+                    {"timestamp": "2026-09-08T05:00:00+00:00",
+                     "kind": memspec.STOP_GATE_LOG_KIND, "decision": "decisions/five.md",
+                     "session_id": "s-d", "digest": "d5"},
+                    {"timestamp": "2026-09-08T06:00:00+00:00",
+                     "kind": memspec.STOP_GATE_LOG_KIND, "decision": "decisions/six.md",
+                     "session_id": "s-e", "digest": "d6"},
+                    {"timestamp": "2026-09-08T07:00:00+00:00",
+                     "kind": memspec.STOP_GATE_LOG_KIND, "decision": "decisions/six.md",
+                     "session_id": "s-f", "digest": "d7"},
                     # 動作閘的 deny 不是這一節要數的東西（U-P 只讀 Stop 與寫檔兩種）。
                     {"timestamp": "2026-09-08T02:00:00+00:00", "card": "decisions/deny-only.md"},
                 )) + "\n",
@@ -2725,12 +2833,13 @@ def _selftest():
                 review["error"] is None
                 and review["counts"]["events"] == 4
                 and review_rows["decisions/one.md"]["events"] == 1
-                and review_rows["decisions/one.md"]["blocks"] == 1
+                and review_rows["decisions/one.md"]["blocks"] == 2
                 and review_rows["decisions/one.md"]["last_seen"] == "2026-09-08"
                 and review_rows["decisions/two.md"] == {
                     "card": "decisions/two.md", "events": 0, "unverified_events": 1,
-                    "blocks": 0, "exam_failures": 0, "last_seen": "2026-09-05"}
-                and review_rows["decisions/three.md"]["blocks"] == 1
+                    "blocks": 0, "exam_failures": 0, "last_seen": "2026-09-05",
+                    "block_sessions": 0, "repeat_blocks": 0, "judge": False}
+                and review_rows["decisions/three.md"]["blocks"] == 2
                 and review_rows["decisions/four.md"]["exam_failures"] == 1
                 and review_rows["decisions/five.md"]["events"] == 1
                 and "decisions/deny-only.md" not in review_rows,
@@ -2762,9 +2871,12 @@ def _selftest():
                 carried == {"quoted": "carry-key", "named": "other-key", "loose": ""},
             ))
             checks.append((
-                "the trigger fires at five deduplicated rows and says so in the next steps",
-                review["counts"]["cards"] == 5
+                "待判只算兩場獨立擋下、同句重擋或考題失敗的卡；只被原話關聯到的是背景",
+                review["counts"]["cards"] == 6
                 and review["counts"]["review_items"] == 5
+                and review["counts"]["background_cards"] == 1
+                and review_rows["decisions/five.md"]["repeat_blocks"] == 1
+                and review_rows["decisions/two.md"]["judge"] is False
                 and review["counts"]["trigger"] == memspec.REVIEW_PACK_TRIGGER
                 and review["counts"]["at_threshold"] is True
                 and any("檢討包達門檻" in step for step in review_report["next_steps"])
@@ -2799,10 +2911,11 @@ def _selftest():
             thin = {s["id"]: s for s in thin_report["sections"]}[REVIEW_PACK_SECTION_ID]
             checks.append((
                 "below the trigger the pack says how far off it is and adds no next step",
-                thin["counts"]["review_items"] == 1
+                thin["counts"]["review_items"] == 0
+                and thin["counts"]["background_cards"] == 1
                 and thin["counts"]["at_threshold"] is False
                 and thin["note"].startswith(
-                    REVIEW_PACK_BELOW_NOTE.format(count=1, trigger=memspec.REVIEW_PACK_TRIGGER))
+                    REVIEW_PACK_BELOW_NOTE.format(count=0, trigger=memspec.REVIEW_PACK_TRIGGER))
                 and memspec.EXAM_RESULTS_FILENAME in thin["note"]
                 and not any("檢討包" in step for step in thin_report["next_steps"])
                 and thin["commands"] == [],
@@ -3389,6 +3502,8 @@ def main(argv=None, output=sys.stdout):
             vaults, today=today, since_date=since_date, deadline=deadline, shaping=shaping,
             # 家目錄同源 harvest CLI（沒有 --home 時就是 Path.home()），不另立第二套推導。
             harvest_home=Path.home(), dry_run=parsed.dry_run,
+            # CLI 是有人（或排程）明確叫的那條路：規則改了要寫進宿主檔。--dry-run 不寫。
+            write_hosts=not parsed.dry_run,
         )
         rendered = json.dumps(report, ensure_ascii=False, indent=1)
         content = rendered if parsed.json else _render_markdown(report)

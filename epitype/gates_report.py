@@ -32,6 +32,7 @@ class Row:
     label: str | None
     session_id: str | None
     reason: str | None
+    digest: str | None = None
 
 
 def parse_since(value, now):
@@ -107,6 +108,7 @@ def load_rows(path):
                     label=_row_label(record),
                     session_id=session_id,
                     reason=reason,
+                    digest=record.get("digest") if isinstance(record.get("digest"), str) else None,
                 )
             )
     return rows, bad

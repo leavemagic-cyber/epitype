@@ -637,6 +637,17 @@ CARD_MIXED_DESCRIPTION_JOINERS = ("＋", "；")
 # 從哪張拆出來的」。值本身不是機器判準，只有鍵的存在是。
 MIXED_REVIEWED_FIELD = "mixed_reviewed"
 SPLIT_FROM_FIELD = "split_from"
+# 「一卡一事」是規範層的話：規則、裁定、行為回饋、傷疤，一張卡就是一條。紀錄型的卡
+# （專案進度、參考資料、捕捉到的事件、待辦清單）本來就是流水帳，長是它的功能，列成
+# 拆卡候選只會讓清單永遠清不掉——2026-09-18 實測 77 張候選裡 48 張是紀錄型。
+MIXED_CARD_TYPES = (
+    CARD_TYPE_RULE, CARD_TYPE_DECISION, CARD_TYPE_FEEDBACK, CARD_TYPE_SCAR,
+    CARD_TYPE_USER, CARD_TYPE_HABIT,
+)
+# 草稿被判過就不再是「待審」：`triaged` 記下判給了什麼結果（retired／carded…），檔案
+# 照留當紀錄（歸位不刪）。只有 hold 仍在等——那是「今天還判不了」。
+DRAFT_TRIAGED_FIELD = "triaged"
+DRAFT_TRIAGED_PENDING_VALUES = ("hold",)
 # 這些欄位必須是至少一項的序列，空清單等於沒有欄位。
 CARD_LIST_FIELDS = (ALIASES_FIELD, FORBIDDEN_FIELD, RULE_INCIDENTS_FIELD, RULE_HOSTS_FIELD)
 CARD_EVENT_REQUIRED_FIELDS = (NAME_FIELD, DESCRIPTION_FIELD, CAPTURED_AT_FIELD, SESSION_FIELD)

@@ -53,7 +53,8 @@ def _night(home, vault, config_text=None):
     try:
         os.environ[memspec.EPITYPE_CONFIG_ENV] = str(config)
         Path.home = staticmethod(lambda: home)
-        return dream._section_host_sync([vault], TODAY, TODAY, config={})
+        return dream._section_host_sync([vault], TODAY, TODAY, config={},
+                                        context={"write_hosts": True})
     finally:
         Path.home = original_home
         if saved is None:
@@ -164,8 +165,31 @@ def main():
             and any("core_cap_bytes" in line for line in capped["errors"]),
         ))
 
+    # 組報告是讀的動作：沒有明說要寫，宿主檔一個位元組都不能動（2026-09-18 事故）。
+    with tempfile.TemporaryDirectory(prefix="epitype-nightly-readonly-") as temp_dir:
+        root = Path(temp_dir).resolve()
+        home, vault, host_path = _fixture(root, "我的開頭\n")
+        before_bytes = host_path.read_bytes()
+        original_home = Path.home
+        try:
+            Path.home = staticmethod(lambda: home)
+            read_only = dream.build_report([vault], today=TODAY)
+            after_read = host_path.read_bytes()
+            dream.build_report([vault], today=TODAY, write_hosts=True)
+            after_write = host_path.read_bytes()
+        finally:
+            Path.home = original_home
+        section = {s["id"]: s for s in read_only["sections"]}[14]
+        checks.append((
+            "build_report 預設不寫宿主檔，明說 write_hosts 才寫",
+            after_read == before_bytes and after_write != before_bytes
+            and section["counts"]["written"] == 0
+            and section["counts"]["drifted"] >= 1
+            and dream.HOST_SYNC_READ_ONLY_NOTE in (section.get("note") or ""),
+        ))
+
     passed = sum(bool(ok) for _, ok in checks)
-    total = 8
+    total = 9
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     for name, ok in checks:
