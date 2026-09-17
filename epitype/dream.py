@@ -55,9 +55,9 @@ _EVENT_TYPE_BY_DIR = dict(memspec.EVENT_CARD_DIRECTORIES)  # {"grants": "grant",
 # 第 8–12 節（U-K，owner 2026-09-09）：全部只列候選，一個檔都不搬、不改、不刪。夢的
 # 這五節回答的是「有什麼東西沒經過確認就留在那裡」，處置一律是人的動作。
 POCKET_VAULT_MAX_ROWS = 50
-POCKET_VAULT_CANDIDATE = "歸戶候選"
+POCKET_VAULT_CANDIDATE = "專案資料夾已不在"
 POCKET_VAULT_NOTE = "只列候選：夢不搬、不改、不刪任何口袋庫的檔案"
-POCKET_VAULT_COMMAND = "人工判斷每個口袋庫該歸哪一戶（登記進 config 的 vaults，或確認它就該留在原地）；沒有自動 CLI 指令"
+POCKET_VAULT_COMMAND = "專案資料夾已不在的原生庫：卡片要留就搬進對應的庫，不留就移走；專案還在的原生庫在自己的專案裡本來就會被找到，不列"
 DRAFT_AGING_WARN_DAYS = 7
 # 第 4 節順手跑的 harvest（U-R2）：只產草稿，所以報告要說的是「這一趟實際多出幾張
 # 提案」，不是「掃到幾句話」——沒有新增就是 0，不是「沒跑」。
@@ -540,6 +540,36 @@ def _pocket_vault_cards(directory):
     return count, newest
 
 
+def _project_dir_exists(project_dir, max_rows=40):
+    """這個原生庫的專案資料夾還在不在：讀同目錄最新一份對話紀錄裡的 cwd。
+
+    原生庫在自己的專案裡本來就會被喚回與閘找到，不需要登記；只有專案資料夾已經不在的
+    才是沒人管的庫。slug 反推不回原路徑（非英數字元都變成 `-`），所以看宿主記下的 cwd。
+    宿主開專案目錄時一定留下對話紀錄；一份都沒有＝有人手動放的（例如專案搬家後把庫
+    搬過來），不當成孤兒。
+    """
+    try:
+        transcripts = sorted(Path(project_dir).glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+    except OSError:
+        return False
+    if not transcripts:
+        return True
+    for transcript in transcripts[:3]:
+        try:
+            with transcript.open(encoding="utf-8", errors="replace") as stream:
+                for _index, line in zip(range(max_rows), stream):
+                    try:
+                        row = json.loads(line)
+                    except ValueError:
+                        continue
+                    cwd = row.get("cwd") if isinstance(row, dict) else None
+                    if isinstance(cwd, str) and cwd.strip():
+                        return Path(cwd).is_dir()
+        except OSError:
+            continue
+    return False
+
+
 def _section_pocket_vaults(vaults, today, since_date, config):
     """未登記卻裝著卡的目錄＝口袋庫；只列歸戶候選，不搬不改。
 
@@ -559,6 +589,7 @@ def _section_pocket_vaults(vaults, today, since_date, config):
             continue
     errors = []
     found = []
+    live = 0
     seen = set()  # 兩個根指到同一個目錄時只算一次。
     roots = _projects_roots(vaults)
     for root, leaves in sorted(roots.items()):
@@ -580,6 +611,9 @@ def _section_pocket_vaults(vaults, today, since_date, config):
                 cards, newest = _pocket_vault_cards(resolved)
                 if cards < 1:
                     continue
+                if _project_dir_exists(project):
+                    live += 1
+                    continue
                 found.append({
                     "path": str(resolved),
                     "cards": cards,
@@ -591,6 +625,7 @@ def _section_pocket_vaults(vaults, today, since_date, config):
         "counts": {
             "pocket_vaults": len(found),
             "pocket_cards": sum(item["cards"] for item in found),
+            "native_vaults_in_live_projects": live,
             "roots_scanned": len(roots),
         },
         "examples": found[:POCKET_VAULT_MAX_ROWS],
@@ -2200,7 +2235,24 @@ def _selftest():
                 projects / "pocket-project" / memspec.HOST_MEMORY_DIRECTORY / "stray.md",
                 "---\nname: stray\ndescription: 2026-06-01 synthetic\n---\nbody\n",
             )
+            (projects / "pocket-project" / "s0.jsonl").write_text(
+                json.dumps({"type": "user", "cwd": os.fspath(Path(temp_dir).resolve() / "gone")}) + "\n",
+                encoding="utf-8")
+            # 沒有對話紀錄的原生庫是有人手動放的（專案搬家後搬過來），不算孤兒。
+            _write_card(
+                projects / "placed-project" / memspec.HOST_MEMORY_DIRECTORY / "moved.md",
+                "---\nname: moved\ndescription: 2026-06-01 synthetic\n---\nbody\n",
+            )
             (projects / "empty-project" / memspec.HOST_MEMORY_DIRECTORY).mkdir(parents=True)
+            # 專案資料夾還在的原生庫：在自己的專案裡會被找到，不算沒人管。
+            live_project = Path(temp_dir).resolve() / "live-project"
+            live_project.mkdir()
+            _write_card(
+                projects / "live-project" / memspec.HOST_MEMORY_DIRECTORY / "kept.md",
+                "---\nname: kept\ndescription: 2026-06-01 synthetic\n---\nbody\n",
+            )
+            (projects / "live-project" / "s1.jsonl").write_text(
+                json.dumps({"type": "user", "cwd": os.fspath(live_project)}) + "\n", encoding="utf-8")
             selftest_config = Path(temp_dir).resolve() / "selftest-config.json"
             selftest_config.write_text(
                 json.dumps({memspec.CONFIG_VAULTS_FIELD: [os.fspath(vault)]}, ensure_ascii=False),
@@ -2320,8 +2372,9 @@ def _selftest():
 
             # --- 第 8–12 節：只列候選，一個檔都不動 ---
             # 各自用一個獨立的小庫，才不會讓新題目的資料改動前面七節的數字。
-            checks.append(("section 8 lists the unregistered pocket vault, skipping the empty one and the registered vault", (
+            checks.append(("section 8 lists the orphaned vault only: not the empty one, the registered one, or one whose project still exists", (
                 by_id[8]["counts"]["pocket_vaults"] == 1
+                and by_id[8]["counts"]["native_vaults_in_live_projects"] == 2
                 and by_id[8]["counts"]["pocket_cards"] == 1
                 and by_id[8]["examples"][0]["path"] == os.fspath(
                     projects / "pocket-project" / memspec.HOST_MEMORY_DIRECTORY)
