@@ -114,6 +114,14 @@ class ActionGuardRegression(unittest.TestCase):
         self.heredoc_card()
         self.assertIsNone(self.denial(self.call("Read", {"command": HEREDOC_WITH_BACKSLASH})))
 
+    def test_a_bash_card_guards_the_same_shell_tool_under_another_host_s_name(self):
+        # Cursor sends its shell tool as "Shell" (probe log 2026-09-16); exact name
+        # matching left every Bash guard silently off there.
+        self.heredoc_card()
+        for tool in ("Shell", "exec_command"):
+            self.assertIsNotNone(self.denial(self.call(tool, {"command": HEREDOC_WITH_BACKSLASH})), tool)
+        self.assertIsNone(self.denial(self.call("PowerShell", {"command": HEREDOC_WITH_BACKSLASH})))
+
     def test_the_guard_fires_every_time_not_once_per_session(self):
         # A guard that stops guarding after one hit would pass the second attempt,
         # which is precisely the repeat it exists to prevent.

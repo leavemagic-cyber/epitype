@@ -550,7 +550,7 @@ def _guard_review(event, tool_name, tool_input, config, started_at, defects):
         except Exception:
             demoted = set()
         for guard in _guards(vault, started_at, defects):
-            if guard.tool.casefold() != folded_tool or guard.card in demoted:
+            if not memspec.action_guard_tool_matches(guard.tool, folded_tool) or guard.card in demoted:
                 continue
             if not all(fragment in haystack for fragment in guard.substrings):
                 continue

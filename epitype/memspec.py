@@ -1017,11 +1017,25 @@ ACTION_GUARD_DEFECT = "⚠ 守衛卡 {card} 的 {field} 無法使用（{reason}�
 # 認得的工具名。不在名單裡不等於一定錯（宿主可能有別的工具），所以只提醒不判死——但
 # 打錯字的守衛卡永遠不會攔到東西，而且不出聲，這一行就是唯一的訊號。
 ACTION_GUARD_KNOWN_TOOLS = frozenset((
-    "bash", "powershell", "shell", "run_terminal_cmd",
+    "bash", "powershell", "shell", "run_terminal_cmd", "exec_command", "local_shell",
     "write", "write_file", "create_file",
     "edit", "edit_file", "str_replace_editor", "multiedit", "multi_edit", "apply_edits",
     "read", "glob", "grep", "notebookedit", "webfetch", "websearch", "agent", "task",
 ))
+# 同一個工具在不同宿主叫不同名字：卡寫 Bash，Cursor 送 Shell（2026-09-16 實測日誌）。
+# 只比名字相等的話，守衛在別的宿主上不生效也不出聲。PowerShell 不併入：卡片本來就分開寫。
+ACTION_GUARD_TOOL_EQUIVALENTS = (
+    frozenset(("bash", "shell", "run_terminal_cmd", "exec_command", "local_shell")),
+)
+
+
+def action_guard_tool_matches(card_tool, event_tool):
+    card_tool, event_tool = card_tool.casefold(), event_tool.casefold()
+    if card_tool == event_tool:
+        return True
+    return any(card_tool in group and event_tool in group for group in ACTION_GUARD_TOOL_EQUIVALENTS)
+
+
 CARD_PATTERN_BROKEN_REASON = (
     "樣式「{pattern}」編不起來（{reason}）。閘會退回逐字比對，所以這張卡不會完全失效，"
     "但那多半不是你要的意思——把它改成看得懂的寫法，或確認你本來就是要逐字比對"
