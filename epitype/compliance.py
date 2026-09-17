@@ -409,6 +409,37 @@ def transcripts_for(roots, since_stamp=None, limit=MAX_TRANSCRIPTS):
     return [path for _mtime, path in found[:limit]], len(found)
 
 
+def first_call_input_tokens(transcripts, since=None):
+    """新場次第一次呼叫的輸入 token 中位數（含快取讀寫）：每一場都要付的固定成本。
+
+    `since`（epoch 秒）只收「第一次呼叫」發生在這之後的場次；沒有就回 None。
+    """
+    import statistics
+
+    totals = []
+    for path in transcripts:
+        try:
+            stream = io.open(path, encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        with stream:
+            for line in stream:
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(row, dict) or row.get("type") != "assistant":
+                    continue
+                usage = (row.get("message") or {}).get("usage") or {}
+                total = sum(int(usage.get(key) or 0) for key in (
+                    "input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
+                happened = _epoch_of(row.get("timestamp"))
+                if total and (since is None or happened is None or happened >= since):
+                    totals.append(total)
+                break
+    return int(statistics.median(totals)) if totals else None
+
+
 def final_messages(transcripts):
     """每一場依序的 (訊息指紋, 訊息全文)——閘看得到的那一則，也就是每回合的最後一段。
 
@@ -962,6 +993,22 @@ def _selftest():
             ))
 
             # 彩排：在歷史上命中太頻繁的樣式自動降級，掉回來自動恢復。
+            costs = []
+            for index, (stamp, tokens) in enumerate((("2026-09-16T01:00:00Z", 30000), ("2026-09-16T02:00:00Z", 50000),
+                                                     ("2026-01-01T00:00:00Z", 999999))):
+                session_file = root / f"first-{index}.jsonl"
+                session_file.write_text("\n".join(json.dumps(row) for row in (
+                    {"type": "user", "timestamp": stamp},
+                    {"type": "assistant", "timestamp": stamp, "message": {"usage": {
+                        "input_tokens": 10, "cache_creation_input_tokens": tokens - 10}}},
+                    {"type": "assistant", "timestamp": stamp, "message": {"usage": {"input_tokens": 1}}},
+                )) + "\n", encoding="utf-8")
+                costs.append(session_file)
+            checks.append((
+                "新場次首次呼叫的輸入 token 取中位數，只算窗內開始的場次，後續呼叫不算",
+                first_call_input_tokens(costs, since=_epoch_of("2026-09-15T00:00:00Z")) == 40000,
+            ))
+
             chances = opportunities([transcript])
             checks.append((
                 "工具回傳不是回合邊界：那一輪只算一個回合，結尾是工具跑完之後那句",
@@ -1067,7 +1114,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 28
+    total = 29
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

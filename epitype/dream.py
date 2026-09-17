@@ -1610,6 +1610,7 @@ def _section_compliance(vaults, today, since_date, config):
             # 自己的稽核列來——短句加引號與真正的引用機器分不出來，分不出來至少要數。
             "quoted_exemptions": sum(exempted.values()),
             "recall_quiet": quieted,
+            "first_call_input_tokens_median": compliance.first_call_input_tokens(transcripts, since_stamp),
         },
         "examples": examples,
         "commands": ["python -m epitype.compliance --selftest"] if missed else [],
