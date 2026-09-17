@@ -34,7 +34,7 @@ from _hook_common import (
     payload_fits,
     read_event,
     recall_marker_directory,
-    resolve_vaults,
+    scoped_vaults,
     run_synthetic,
     session_component,
     write_config,
@@ -226,7 +226,8 @@ def _recall(event, started_at, config, delivery_markers=None):
     pinned = []
     ordinary_groups = []
     legend = []
-    for vault in resolve_vaults(config, event):
+    shown_names = set()  # 同檔名跨庫（專案的指路卡與通用庫正本）一則只端一張，先到的庫優先
+    for vault in scoped_vaults(config, event):
         if expired(started_at):
             return None
         try:
@@ -255,6 +256,9 @@ def _recall(event, started_at, config, delivery_markers=None):
                 continue  # 原話事件檔只在 memsearch 端出（U-H）；卡片層才進喚回。
             if decision is None and _one_line(hit.get("card_path")) in quiet:
                 continue  # 夜間判定一再端出卻從沒用到的資訊型卡；裁定永遠不靜音。
+            card_name = Path(_one_line(hit.get("card_path")) or path).name
+            if decision is None and card_name in shown_names:
+                continue
             # A card matched only in its body is a weak lexical hit; two per vault
             # is plenty. A decision card is never weak, so its kind is decided
             # before the cap (adversarial review 2026-09-03 #1).
@@ -291,6 +295,7 @@ def _recall(event, started_at, config, delivery_markers=None):
                 pinned.append(line)
             else:
                 ordinary_lines.append((hit.get("matched_term_count", 0), line))
+            shown_names.add(card_name)
             used = True
         ordinary_groups.append(ordinary_lines)
         if used:

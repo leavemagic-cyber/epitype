@@ -14,14 +14,16 @@ import tempfile
 import tomllib
 
 
+# OpenAI rate card (checked 2026-09-10): input over 272K reprices the whole request for
+# GPT-5.6 Sol/Terra and GPT-5.5; GPT-6 Astra is exempt inside Codex. A model missing here
+# is unprotected, so "exempt" must stay distinguishable from "unknown".
 MODEL_CLIFFS_JSON = r'''{
-  "gpt-5.6-sol": {
-    "cliff_input": 272000,
-    "window": 240000,
-    "auto_compact": 210000
-  }
+  "gpt-5.6-sol": {"cliff_input": 272000, "window": 240000, "auto_compact": 210000},
+  "gpt-5.6-terra": {"cliff_input": 272000, "window": 240000, "auto_compact": 210000},
+  "gpt-5.5": {"cliff_input": 272000, "window": 240000, "auto_compact": 210000}
 }'''
 MODEL_CLIFFS = json.loads(MODEL_CLIFFS_JSON)
+MODEL_NO_CLIFF = frozenset({"gpt-6-astra"})
 TARGETS = (
     ("model_context_window", "window"),
     ("model_auto_compact_token_limit", "auto_compact"),
@@ -154,7 +156,10 @@ def _run_check(path, apply_changes=False, output=sys.stdout):
     print(f"model: {_display(model)}", file=output)
     cliff = MODEL_CLIFFS.get(model) if isinstance(model, str) else None
     if cliff is None:
-        print("無斷崖資料；設定檔未修改。", file=output)
+        if model in MODEL_NO_CLIFF:
+            print("此模型在 Codex 內沒有長上下文加價門檻；設定檔未修改。", file=output)
+        else:
+            print("無斷崖資料；設定檔未修改。", file=output)
         return 0
 
     print(f"cliff_input: {cliff['cliff_input']}", file=output)
@@ -256,6 +261,25 @@ def _selftest():
                 and not list(root.glob("unknown.toml.bak_epitype_*")),
             ))
 
+            exempt = root / "astra.toml"
+            exempt_source = b'model = "gpt-6-astra"\nmodel_context_window = 999999\n'
+            exempt.write_bytes(exempt_source)
+            exempt_output = io.StringIO()
+            exempt_code = _run_check(exempt, apply_changes=True, output=exempt_output)
+            terra = root / "terra.toml"
+            terra.write_bytes(b'model = "gpt-5.6-terra"\nmodel_context_window = 999999\n')
+            terra_output = io.StringIO()
+            _run_check(terra, apply_changes=False, output=terra_output)
+            checks.append((
+                "exempt model is told apart from unknown; a model sharing the cliff is guarded",
+                exempt_code == 0
+                and exempt.read_bytes() == exempt_source
+                and "沒有長上下文加價門檻" in exempt_output.getvalue()
+                and "無斷崖資料" not in exempt_output.getvalue()
+                and "cliff_input: 272000" in terra_output.getvalue()
+                and "CHANGE" in terra_output.getvalue(),
+            ))
+
             cp950_environment = os.environ.copy()
             cp950_environment["PYTHONUTF8"] = "0"
             cp950_environment["PYTHONIOENCODING"] = "cp950"
@@ -276,7 +300,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 5
+    total = 6
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

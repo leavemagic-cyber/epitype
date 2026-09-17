@@ -196,6 +196,20 @@ def resolve_vaults(config, event, home=None):
     return vaults
 
 
+def scoped_vaults(config, event, home=None):
+    """This project's own vault(s) plus the governance vault; every configured vault when
+    the host sends no cwd. Another project's cards are noise in this session and are
+    re-read on every later call. The Stop gate already uses this scope."""
+    cwd = event.get("cwd") if isinstance(event, dict) else None
+    if not isinstance(cwd, str) or not cwd.strip():
+        return resolve_vaults(config, event, home)
+    vaults = native_cwd_vaults(cwd, home)
+    governance = governance_vault(config)
+    if governance not in vaults:
+        vaults.append(governance)
+    return vaults
+
+
 def governance_vault(config, *, for_write=False):
     """Return the configured ledger holder, falling back to the legacy first vault."""
     # A missing vault may have held the ledger; never reinterpret its absence

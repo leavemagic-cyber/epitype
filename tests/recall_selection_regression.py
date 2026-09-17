@@ -54,9 +54,12 @@ class RecallSelectionRegression(unittest.TestCase):
                 self.card(vault, f"fixture-{index}-{number}")
             memsearch.build_index(vault)
 
-    def invoke(self, session="refill", prompt="refillneedle"):
+    def invoke(self, session="refill", prompt="refillneedle", cwd=None):
         output = io.StringIO()
-        with patch.object(sys, "stdin", io.StringIO(json.dumps({"prompt": prompt, "session_id": session}))), \
+        event = {"prompt": prompt, "session_id": session}
+        if cwd is not None:
+            event["cwd"] = cwd
+        with patch.object(sys, "stdin", io.StringIO(json.dumps(event))), \
              patch.object(sys, "argv", ["recall"]), \
              patch.object(recall, "_STARTED_AT", time.monotonic()), \
              contextlib.redirect_stdout(output):
@@ -116,6 +119,38 @@ class RecallSelectionRegression(unittest.TestCase):
             recall._card_identity("- sameneedle | V2/same.md", {"V2": "C:/vault-a"}),
         )
 
+    def native_vault(self, cwd):
+        from epitype import capture_route
+
+        vault = (self.root / "home" / ".claude" / "projects" / capture_route.project_slug(cwd) / "memory")
+        vault.mkdir(parents=True)
+        return vault
+
+    def test_recall_stays_in_this_project_and_the_governance_vault(self):
+        # vaults[0] holds the ledger, so it is the governance vault; vaults[1] is another project.
+        (self.vaults[0] / memspec.WORK_LEDGER_FILENAME).write_text("# ledger\n", encoding="utf-8")
+        cwd = str(self.root / "workspace")
+        here = self.native_vault(cwd)
+        for vault, name in ((self.vaults[0], "governance-card"), (self.vaults[1], "other-project-card"),
+                            (here, "this-project-card")):
+            self.card(vault, name, "scopeneedle")
+            memsearch.build_index(vault)
+        scoped = self.invoke(session="scoped", prompt="scopeneedle", cwd=cwd)
+        self.assertIn("this-project-card", scoped)
+        self.assertIn("governance-card", scoped)
+        self.assertNotIn("other-project-card", scoped)
+        unscoped = self.invoke(session="unscoped", prompt="scopeneedle")
+        self.assertIn("other-project-card", unscoped)  # 沒有 cwd 判斷不出專案，照舊搜全部
+
+    def test_a_card_name_already_shown_from_an_earlier_vault_is_not_shown_again(self):
+        self.card(self.vaults[0], "shared-name", "dupeneedle first")
+        self.card(self.vaults[1], "shared-name", "dupeneedle second")
+        for vault in self.vaults:
+            memsearch.build_index(vault)
+        lines = [line for line in self.lines(self.invoke(session="dupe", prompt="dupeneedle"))
+                 if "shared-name.md" in line]
+        self.assertEqual(len(lines), 1, lines)
+
     def test_nightly_quiet_list_skips_ordinary_cards_but_never_decisions(self):
         self.card(self.vaults[0], "noisy", "quietneedle")
         self.card(self.vaults[0], "keeper", "quietneedle")
@@ -136,7 +171,7 @@ class RecallSelectionRegression(unittest.TestCase):
     def test_stronger_query_evidence_in_later_vault_gets_first_slot(self):
         for vault in self.vaults:
             for number in range(5):
-                self.card(vault, f"weak-{number}", "selectneedle")
+                self.card(vault, f"weak-{vault.name}-{number}", "selectneedle")
         third = self.root / "third"
         third.mkdir()
         self.vaults.append(third)
@@ -193,7 +228,7 @@ class RecallSelectionRegression(unittest.TestCase):
         hits = memsearch.recall_index(self.vaults[0], "packneedle")["results"]
         hits.sort(key=lambda hit: hit["card_path"] != "long.md")
         with patch.object(recall.memsearch, "recall_index", return_value={"results": hits}), \
-             patch.object(recall, "resolve_vaults", return_value=[self.vaults[0]]):
+             patch.object(recall, "scoped_vaults", return_value=[self.vaults[0]]):
             # Measure only the fixed legend/header; keep a whole small card, not the long one.
             full = self.invoke(session="")
             header = full.split("\n- ", 1)[0]
