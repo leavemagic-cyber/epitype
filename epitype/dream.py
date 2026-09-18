@@ -370,8 +370,18 @@ def _section_decisions(vaults, today, since_date, config):
             if status == memspec.ACTIVE_DECISION_STATUS:
                 active += 1
                 has_quote = bool(card.fields.get(memspec.OWNER_QUOTE_FIELD, "").strip())
-                has_forbidden = has_forbidden_reader(card.path)
-                if not has_quote or not has_forbidden:
+                # 武裝不只有禁語一種：配對（說了 A 就必須同時有 B）同樣擋得住，而且
+                # 有一整類裁定本來就無可擋——「掛鉤逾時 10 秒」「CI 觸發維持窄範圍」是
+                # 設定決定，沒有任何一句話可以禁。只認 forbidden 的話，前者被誤報成沒
+                # 武裝、後者被要求做一件做不到的事，兩種都會叫人去做白工（2026-09-19）。
+                armed = (
+                    has_forbidden_reader(card.path)
+                    or bool(card.fields.get(memspec.REQUIRE_WHEN_FIELD, "").strip()
+                            and card.fields.get(memspec.REQUIRE_TEXT_FIELD, "").strip())
+                    or bool(card.fields.get(memspec.UNENFORCEABLE_FIELD, "").strip())
+                )
+                has_forbidden = armed
+                if not has_quote or not armed:
                     try:
                         relative = card.path.relative_to(vault).as_posix()
                     except ValueError:
