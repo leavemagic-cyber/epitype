@@ -389,6 +389,34 @@ def _declares_field(field, fields, nested, counts):
     )
 
 
+def _indented_alias_count(front_lines):
+    """排在下一層的別名有幾個。
+
+    只數這一個鍵，而且只在體檢裡用來把「缺別名」跟「別名位置不對」分開——共用的
+    `sequence_items` 維持只認頂層，動它會改掉規則卡 `forbidden`／`hosts` 的讀法。"""
+    if not front_lines:
+        return 0
+    collecting, found = False, 0
+    for raw in front_lines:
+        stripped = raw.strip()
+        if not stripped or stripped == raw:
+            collecting = False
+            continue
+        if stripped.startswith("-"):
+            if collecting and stripped[1:].strip():
+                found += 1
+            continue
+        if ":" not in stripped:
+            continue
+        key, _, value = stripped.partition(":")
+        collecting = key.strip() == memspec.ALIASES_FIELD
+        if collecting and value.strip():
+            # 行列式（`aliases: [a, b]`）只要判「有沒有」，數幾個不影響任何決定。
+            found += 1
+            collecting = False
+    return found
+
+
 def _has_value(field, fields, nested, counts):
     if field in memspec.CARD_LIST_FIELDS:
         return counts.get(field, 0) >= 1
@@ -608,12 +636,23 @@ def _check_card(path, relative, today):
             ))
     elif card_type in memspec.GENERIC_CARD_TYPES:
         if not _has_value(memspec.ALIASES_FIELD, fields, nested, counts):
-            findings.append((
-                WARN,
-                "aliases",
-                f"缺 {memspec.ALIASES_FIELD}（同義詞檢索空手）→ "
-                "python epitype/alias_batch.py export <vault>，審核 suggested 後 apply",
-            ))
+            # 宿主重排過的卡片，別名會在下一層。搜尋 2026-09-19 起讀得到它，所以這裡不能
+            # 再報「缺」——一邊找得到、一邊說沒有，就是同一天修掉的那種互斥規範。
+            indented = _indented_alias_count(front_lines)
+            if indented:
+                findings.append((
+                    INFO,
+                    "aliases-indented",
+                    f"{memspec.ALIASES_FIELD} 有 {indented} 個但被排在下一層（宿主寫入器會這樣重排）；"
+                    "搜尋讀得到，頂層仍是規範位置",
+                ))
+            else:
+                findings.append((
+                    WARN,
+                    "aliases",
+                    f"缺 {memspec.ALIASES_FIELD}（同義詞檢索空手）→ "
+                    "python epitype/alias_batch.py export <vault>，審核 suggested 後 apply",
+                ))
         if not _has_date(fields, nested):
             derived = _derived_date(fields, relative, _body_text(text, closing))
             if derived is None:

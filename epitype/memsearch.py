@@ -226,7 +226,30 @@ def _parse_frontmatter(text):
             continue
         if block_key and (line.startswith(" ") or line.startswith("\t")):
             block_lines.append(stripped)
-        elif list_key == memspec.ALIASES_FIELD and stripped.startswith("-"):
+            continue
+        if ":" in stripped and not stripped.startswith("-"):
+            # 縮排的鍵。宿主的記憶寫入器會把 `aliases` 重排到 `metadata:` 底下一層，而同義詞
+            # 清單放在哪一層，意思都一樣。只認頂層的後果不是「這次搜不到」，是**下一次索引
+            # 重建時那張卡的別名整組消失**：卡還在、內容還在、用別名就是找不到，而且沒有任何
+            # 訊號。2026-09-19 真庫兩張卡就是這個狀態，當下還搜得到只因為索引那兩列是舊的；
+            # 在複本上重建後，別名欄變空、別名查詢 0 筆。
+            # 武裝欄位不比照放寬：`forbidden` 掛在別的鍵底下就真的不是同一件事（閘只讀頂層），
+            # 體檢判它 FAIL 是刻意的。這裡放寬的只有這一個純檢索用的鍵。
+            nested_key = stripped.split(":", 1)[0].strip()
+            if nested_key == memspec.ALIASES_FIELD:
+                raw = stripped.split(":", 1)[1]
+                try:
+                    aliases.extend(_alias_values(raw))
+                except ValueError:
+                    # 寫壞的行列式別名照舊整行忽略——這條路徑以前根本不讀它，
+                    # 現在讀了卻讓整張卡解析失敗的話，這個修法會比原本的缺陷更糟。
+                    pass
+                list_key = memspec.ALIASES_FIELD if not raw.strip() else None
+            else:
+                # 另一個鍵開始了，前一組別名就此結束——不然它底下的 `- 項目` 會被收成別名。
+                list_key = None
+            continue
+        if list_key == memspec.ALIASES_FIELD and stripped.startswith("-"):
             item = _scalar(stripped[1:])
             if item:
                 aliases.append(item)
