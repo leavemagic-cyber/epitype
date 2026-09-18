@@ -1018,6 +1018,9 @@ WRITE_GATE_FIXTURE_DIRECTORIES = frozenset(("tests", "test", "__tests__", "fixtu
 SUBAGENT_STOP_EVENT = "SubagentStop"
 READ_WASTE_TOOLS = frozenset(("read", "read_file", "view", "notebookread"))
 READ_WASTE_FREE_REPEATS = 1
+# 有界讀取的寫法不只一種：offset／limit 是行，pages 是 PDF 頁碼，cell/cells 是筆記本格子。
+# 只認前兩個的話，帶頁碼範圍的讀取會被當成「整檔拉進來」擋掉（2026-09-19 真的發生）。
+READ_WASTE_BOUND_FIELDS = ("offset", "limit", "pages", "page", "cell", "cells", "range")
 READ_WASTE_STATE_MAX_ENTRIES = 400
 READ_WASTE_REPEAT_NOTICE = "ℹ 這一場已經讀過這一段、而且內容沒變（第 {count} 次）：{path}"
 READ_WASTE_REPEAT_REASON = (

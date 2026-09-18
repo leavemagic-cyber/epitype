@@ -448,6 +448,16 @@ class ReadWaste(unittest.TestCase):
             time.monotonic(), [])
         self.assertIsNone(self.denial(sliced))
 
+    def test_a_page_range_counts_as_a_bounded_read(self):
+        # 2026-09-19：這道閘上線半小時就誤擋了一次帶頁碼範圍的 PDF 讀取。
+        big = self.root / "big.pdf"
+        big.write_text("x" * (memspec.READ_WASTE_BIG_FILE_BYTES + 10), encoding="utf-8")
+        value = pretool._handle(
+            {"tool_name": "Read", "tool_input": {"file_path": str(big), "pages": "1-6"},
+             "session_id": "waste-pdf"},
+            time.monotonic(), [])
+        self.assertIsNone(self.denial(value))
+
     def test_other_tools_are_untouched(self):
         value = pretool._handle(
             {"tool_name": "Bash", "tool_input": {"command": "git status"}, "session_id": "waste-test"},

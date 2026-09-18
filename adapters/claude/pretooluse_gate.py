@@ -814,10 +814,14 @@ def _waste_review(event, tool_name, tool_input, config, started_at):
     except OSError:
         return None, None
 
+    # 有界讀取不只有 offset／limit 一種寫法：PDF 給的是頁碼範圍，筆記本給的是格子。
+    # 2026-09-19 這道閘上線半小時就誤擋了一次帶頁碼範圍的 PDF 讀取——擋的理由是
+    # 「整檔拉進來」，而那次呼叫本來就只要六頁。
+    bounds = [tool_input.get(field) for field in memspec.READ_WASTE_BOUND_FIELDS]
+    bounded = any(str(value or "").strip() for value in bounds)
     offset = tool_input.get("offset")
     limit = tool_input.get("limit")
-    if (info.st_size >= memspec.READ_WASTE_BIG_FILE_BYTES
-            and not str(limit or "").strip() and not str(offset or "").strip()):
+    if info.st_size >= memspec.READ_WASTE_BIG_FILE_BYTES and not bounded:
         return _deny_value(memspec.READ_WASTE_BIG_FILE_REASON.format(
             path=raw, size=info.st_size)), None
 
