@@ -243,6 +243,88 @@ class ActionGuardRegression(unittest.TestCase):
         )
         self.assertIsNone(self.denial(value))
 
+    # ---- 必填欄位型的守衛：擋的是「這次呼叫少了什麼」，字面比對看不到不存在的欄位 ----
+
+    def dispatch_card(self, **overrides):
+        fields = {
+            "name": "派工要指名模型",
+            "description": "派工不指名模型就沿用主線的貴模型去做機械工作",
+            "guard_tool": "Task",
+            "guard_requires": ["model"],
+            "guard_unless": ["subagent_type=fork"],
+            "guard_advice": "機械工作指定便宜的、判斷工作指定強的，不要留空",
+        }
+        fields.update(overrides)
+        self.write_card("scar-dispatch.md", **fields)
+
+    def test_a_call_missing_the_required_field_is_denied_and_names_the_field(self):
+        self.dispatch_card()
+        reason = self.denial(self.call("Task", {"prompt": "去查一個檔", "subagent_type": "scout"}))
+        self.assertIsNotNone(reason)
+        self.assertIn("model", reason)
+        self.assertIn("派工要指名模型", reason)
+        self.assertIn("不要留空", reason)
+
+    def test_the_same_call_carrying_the_field_passes(self):
+        self.dispatch_card()
+        self.assertIsNone(self.denial(
+            self.call("Task", {"prompt": "去查一個檔", "subagent_type": "scout", "model": "haiku"})
+        ))
+
+    def test_a_blank_field_counts_as_missing(self):
+        # 空字串跟沒有這個欄位是同一件事：宿主一樣會去繼承主線的模型。
+        self.dispatch_card()
+        self.assertIsNotNone(self.denial(
+            self.call("Task", {"prompt": "x", "model": "   "})
+        ))
+
+    def test_the_declared_exemption_lets_the_host_s_own_exception_through(self):
+        # fork 型子代理的 model 是宿主明文忽略的；沒有逃生口，這種呼叫會被永久擋住，
+        # 而且照擋下來的訊息去改也過不了——改不過去的閘會被繞過，不會被遵守。
+        self.dispatch_card()
+        self.assertIsNone(self.denial(
+            self.call("Task", {"prompt": "x", "subagent_type": "fork"})
+        ))
+
+    def test_the_field_requirement_only_applies_to_its_own_tool(self):
+        self.dispatch_card()
+        self.assertIsNone(self.denial(self.call("Bash", {"command": "git status"})))
+
+    def test_fragments_and_required_fields_declared_together_must_both_hold(self):
+        self.dispatch_card(guard_all_of=['"deploy"'])
+        self.assertIsNone(self.denial(self.call("Task", {"prompt": "查個檔"})))
+        self.assertIsNotNone(self.denial(self.call("Task", {"prompt": "deploy 這包"})))
+
+    def test_a_malformed_exemption_disarms_the_whole_card(self):
+        # 反方向（忽略壞掉的那一條）會讓守衛擋得比作者寫的更多，而擋過頭沒有人會來報案。
+        defects = []
+        self.dispatch_card(guard_unless=["subagent_type"])
+        self.assertIsNone(self.denial(self.call("Task", {"prompt": "x"}, defects)))
+        self.assertTrue(any(memspec.ACTION_GUARD_UNLESS_FIELD in line for line in defects), defects)
+
+    def test_more_required_fields_than_the_cap_disarms_the_card(self):
+        defects = []
+        self.dispatch_card(guard_requires=["a", "b", "c", "d", "e"])
+        self.assertIsNone(self.denial(self.call("Task", {"prompt": "x"}, defects)))
+        self.assertTrue(any(memspec.ACTION_GUARD_REQUIRES_FIELD in line for line in defects), defects)
+
+    def test_a_field_requirement_counts_as_armed_but_is_not_replayed_as_a_hit(self):
+        # 夜間重放手上只有呼叫的字串，看不到「少了哪個欄位」。空片段序列的 all() 是真，
+        # 所以少寫一個「有片段才比對」的條件，就會把每一次同類呼叫都算成命中。
+        from epitype import compliance
+
+        self.dispatch_card()
+        rules = compliance.armed_rules(self.vault)
+        self.assertTrue(any(rule.card == "派工要指名模型" for rule in rules), rules)
+        transcript = self.root / "dispatch.jsonl"
+        transcript.write_text(json.dumps({
+            "type": "assistant", "sessionId": "replay", "timestamp": "2026-09-19T01:00:00+00:00",
+            "message": {"content": [{"type": "tool_use", "name": "Task",
+                                     "input": {"prompt": "去查一個檔", "subagent_type": "scout"}}]},
+        }, ensure_ascii=False) + "\n", encoding="utf-8")
+        hits = compliance.replay([rule._replace(mtime=0) for rule in rules], [transcript])
+        self.assertEqual([hit for hit in hits if hit.kind == "guard"], [])
+
 
 class RequireWhenThen(unittest.TestCase):
     """The conversion for rules whose compliance is invisible from outside.
@@ -523,6 +605,19 @@ class GuardCardLint(unittest.TestCase):
             "---\nname: 沒片段\ndescription: 2026-09-16 缺 guard_all_of\nguard_tool: Bash\n---\nbody\n",
         )
         self.assertIn(("FAIL", "guard"), rules)
+
+    def test_a_guard_with_required_fields_and_no_fragments_passes_the_lint(self):
+        # 2026-09-19：只認字面片段的檢查會把照規範寫的必填欄位型守衛判成不合格——
+        # 那就是同一天修掉的「兩套規範互斥」再來一次。
+        from epitype import card_lint
+
+        rules, findings = self.findings(
+            "scar-dispatch.md",
+            "---\nname: 派工要指名模型\ndescription: 2026-09-19 派工不指名模型就繼承貴模型\n"
+            "guard_tool: Task\nguard_requires:\n  - model\n"
+            "guard_unless:\n  - subagent_type=fork\n---\nbody\n",
+        )
+        self.assertNotIn((card_lint.FAIL, "guard"), rules, findings)
 
     def test_a_pattern_that_cannot_compile_fails_the_lint(self):
         # A card whose pattern will not compile looks perfect and enforces nothing:

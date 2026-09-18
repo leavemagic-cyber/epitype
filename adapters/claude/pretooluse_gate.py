@@ -334,7 +334,7 @@ def _append_write_block(vault, rule, subject, target, started_at, session_id=Non
     )
 
 
-_Guard = namedtuple("_Guard", "card tool substrings advice path")
+_Guard = namedtuple("_Guard", "card tool substrings advice path requires unless")
 
 
 def _read_guard(path):
@@ -360,12 +360,65 @@ def _read_guard(path):
         return memspec.ACTION_GUARD_DEFECT.format(
             card=name, field=memspec.ACTION_GUARD_TOOL_FIELD, reason="工具名是空的"
         )
-    substrings = sequence_fields(front, (memspec.ACTION_GUARD_ALL_OF_FIELD,))[
-        memspec.ACTION_GUARD_ALL_OF_FIELD
-    ]
+    declared = sequence_fields(
+        front,
+        (
+            memspec.ACTION_GUARD_ALL_OF_FIELD,
+            memspec.ACTION_GUARD_REQUIRES_FIELD,
+            memspec.ACTION_GUARD_UNLESS_FIELD,
+        ),
+    )
+    substrings = declared[memspec.ACTION_GUARD_ALL_OF_FIELD]
+    requires = declared[memspec.ACTION_GUARD_REQUIRES_FIELD]
+    unless_items = declared[memspec.ACTION_GUARD_UNLESS_FIELD]
     problem = None
+    field_name = re.compile(memspec.ACTION_GUARD_FIELD_NAME_PATTERN + r"\Z")
+    unless = []
+    for item in unless_items:
+        name_part, _, value_part = str(item).partition("=")
+        # 逃生口寫壞就整張卡不生效。反過來（忽略壞掉的那一條）會讓守衛擋得比作者寫的更多，
+        # 而擋過頭的那一方沒有人會來報案——被擋的人只會換個寫法繞過去。
+        if not field_name.match(name_part.strip()) or not value_part.strip():
+            problem = (
+                f"{memspec.ACTION_GUARD_UNLESS_FIELD} 的「{item}」不是 欄位=值 的寫法"
+            )
+            break
+        unless.append((name_part.strip(), value_part.strip()))
+    if problem:
+        return memspec.ACTION_GUARD_DEFECT.format(
+            card=name, field=memspec.ACTION_GUARD_UNLESS_FIELD, reason=problem
+        )
+    for item in requires:
+        if not field_name.match(str(item).strip()):
+            return memspec.ACTION_GUARD_DEFECT.format(
+                card=name,
+                field=memspec.ACTION_GUARD_REQUIRES_FIELD,
+                reason=f"「{item}」不是一個欄位名",
+            )
+    if len(requires) > memspec.ACTION_GUARD_MAX_REQUIRES:
+        return memspec.ACTION_GUARD_DEFECT.format(
+            card=name,
+            field=memspec.ACTION_GUARD_REQUIRES_FIELD,
+            reason=f"必填欄位 {len(requires)} 個，超過上限 {memspec.ACTION_GUARD_MAX_REQUIRES}",
+        )
+    if not substrings and requires:
+        # 必填欄位型的守衛不需要字面片段：它問的是「少了什麼」，而少掉的東西沒有字面。
+        return {
+            "card": name,
+            "tool": tool,
+            "substrings": [],
+            "advice": one_line(
+                fields.get(memspec.ACTION_GUARD_ADVICE_FIELD)
+                or fields.get(memspec.DESCRIPTION_FIELD)
+            ),
+            "requires": [str(item).strip() for item in requires],
+            "unless": [list(pair) for pair in unless],
+        }
     if not substrings:
-        problem = "沒有任何字面片段"
+        problem = (
+            f"既沒有 {memspec.ACTION_GUARD_ALL_OF_FIELD} 的字面片段，"
+            f"也沒有 {memspec.ACTION_GUARD_REQUIRES_FIELD} 的必填欄位"
+        )
     elif len(substrings) > memspec.ACTION_GUARD_MAX_SUBSTRINGS:
         problem = f"片段超過 {memspec.ACTION_GUARD_MAX_SUBSTRINGS} 個"
     elif (
@@ -389,6 +442,8 @@ def _read_guard(path):
         "tool": tool,
         "substrings": list(substrings),
         "advice": advice,
+        "requires": [str(item).strip() for item in requires],
+        "unless": [list(pair) for pair in unless],
     }
 
 
@@ -499,14 +554,20 @@ def _guards(vault, started_at, defects, cap=None):
         entry = known[card_path]
         if isinstance(entry, str):
             defects.append(entry)
-        elif isinstance(entry, dict) and entry.get("substrings"):
+        elif isinstance(entry, dict) and (entry.get("substrings") or entry.get("requires")):
             found.append(
                 _Guard(
                     entry.get("card", card_path),
                     entry.get("tool", ""),
-                    tuple(item for item in entry["substrings"] if isinstance(item, str)),
+                    tuple(item for item in (entry.get("substrings") or ()) if isinstance(item, str)),
                     entry.get("advice", ""),
                     vault / card_path,
+                    tuple(item for item in (entry.get("requires") or ()) if isinstance(item, str)),
+                    tuple(
+                        (pair[0], pair[1])
+                        for pair in (entry.get("unless") or ())
+                        if isinstance(pair, (list, tuple)) and len(pair) == 2
+                    ),
                 )
             )
     return found
@@ -538,11 +599,13 @@ def _guard_review(event, tool_name, tool_input, config, started_at, defects):
     Semantic judgement and genuinely irreversible actions remain the host's native
     rules, exactly as §34 left them."""
     haystack = _action_text(tool_input)
+    # 必填欄位型的守衛問的是「少了什麼」，所以呼叫沒有任何可比對的字串時它仍然要判——
+    # 只有連 tool_input 都不是個欄位集合時，這道閘才真的沒有東西可問。
+    if not haystack and not isinstance(tool_input, dict):
+        return None
     # 刻意不看 `stop_hook_active`。那是 Stop 閘為了避免自己重入才讀的旗標，動作守衛
     # 沒有重入問題（它不寫東西，拒絕也不會再觸發自己）。照著讀的話，Stop 閘擋下之後
     # 的那一段續跑，工具守衛整個是關的——而那正是我被逼著換做法、最可能亂動手的時刻。
-    if not haystack:
-        return None
     folded_tool = tool_name.casefold()
     for vault in resolve_vaults(config, event):
         if expired(started_at):
@@ -558,15 +621,35 @@ def _guard_review(event, tool_name, tool_input, config, started_at, defects):
         for guard in _guards(vault, started_at, defects):
             if not memspec.action_guard_tool_matches(guard.tool, folded_tool) or guard.card in demoted:
                 continue
-            if not all(fragment in haystack for fragment in guard.substrings):
+            if guard.substrings and not all(
+                fragment in haystack for fragment in guard.substrings
+            ):
                 continue
-            fragments = "、".join(
-                f"「{fragment[: memspec.ACTION_GUARD_FRAGMENT_MAX_CHARS]}」"
-                for fragment in guard.substrings
-            )
-            reason = memspec.ACTION_GUARD_REASON.format(
-                card=guard.card, tool=tool_name, fragments=fragments, advice=guard.advice
-            )
+            fields = tool_input if isinstance(tool_input, dict) else {}
+            if any(
+                str(fields.get(name, "")).strip() == value for name, value in guard.unless
+            ):
+                continue
+            missing = [
+                name for name in guard.requires if not str(fields.get(name, "") or "").strip()
+            ]
+            if guard.requires and not missing:
+                continue
+            if missing:
+                reason = memspec.ACTION_GUARD_REQUIRES_REASON.format(
+                    card=guard.card,
+                    tool=tool_name,
+                    fields="、".join(f"「{name}」" for name in missing),
+                    advice=guard.advice,
+                )
+            else:
+                fragments = "、".join(
+                    f"「{fragment[: memspec.ACTION_GUARD_FRAGMENT_MAX_CHARS]}」"
+                    for fragment in guard.substrings
+                )
+                reason = memspec.ACTION_GUARD_REASON.format(
+                    card=guard.card, tool=tool_name, fragments=fragments, advice=guard.advice
+                )
             _best_effort_audit(
                 append_gate_log,
                 vault,

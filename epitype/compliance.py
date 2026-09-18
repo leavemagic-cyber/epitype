@@ -85,7 +85,7 @@ def armed_rules(vault):
             guard = pretooluse_gate._read_guard(path)
         except Exception:
             guard = None
-        if isinstance(guard, dict) and guard.get("substrings"):
+        if isinstance(guard, dict) and (guard.get("substrings") or guard.get("requires")):
             rules.append(
                 Rule(
                     _one_line(guard.get("card")) or path.stem,
@@ -96,7 +96,7 @@ def armed_rules(vault):
                     "",
                     "",
                     _one_line(guard.get("tool")),
-                    tuple(guard["substrings"]),
+                    tuple(guard.get("substrings") or ()),
                 )
             )
     return rules
@@ -237,6 +237,11 @@ def replay(rules, transcripts, epoch=None, since=None):
                 if happened is not None and rule.mtime > happened:
                     continue
                 if rule.kind == "guard":
+                    # 必填欄位型的守衛（fragments 空）重放不了：重放手上只有呼叫的字串，
+                    # 看不到「少了哪個欄位」。這裡必須明寫 `rule.fragments and`——空序列的
+                    # all() 是真，照原樣走下去會把每一次同類呼叫都算成命中，夜間報表整排變假。
+                    if not rule.fragments:
+                        continue
                     for tool, payload in calls:
                         if not payload or not memspec.action_guard_tool_matches(rule.tool, tool):
                             continue

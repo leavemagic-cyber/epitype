@@ -940,6 +940,17 @@ ACTION_GUARD_REASON_MAX_CHARS = WRITE_GATE_REASON_MAX_CHARS
 ACTION_GUARD_LOG_KIND = "action_block"
 ACTION_GUARD_RULE = "action_guard"
 ACTION_GUARD_REASON = "🛑 傷疤卡（{card}）：這次 {tool} 同時含有 {fragments}——{advice}"
+# 另一類危害不是「呼叫裡出現了什麼字」，而是「呼叫少了什麼」。派工不指名模型就是這種：
+# 空欄位會沿用主線那個貴模型去做機械工作，而字面比對永遠看不到一個不存在的欄位。所以
+# 守衛卡也能宣告「這個工具的呼叫必須帶哪些欄位」——機制只問欄位在不在，該帶什麼、為何
+# 要帶，仍然寫在卡上。`guard_unless` 是必要的逃生口：宿主對某些呼叫本來就忽略那個欄位
+# （fork 型子代理的 model 是宿主明文忽略的），沒有逃生口那種呼叫會被永久擋住，而且照
+# 擋下來的訊息去改也過不了——一道改不過去的閘會被繞過，不會被遵守。
+ACTION_GUARD_REQUIRES_FIELD = "guard_requires"
+ACTION_GUARD_UNLESS_FIELD = "guard_unless"
+ACTION_GUARD_MAX_REQUIRES = 4
+ACTION_GUARD_FIELD_NAME_PATTERN = r"[A-Za-z0-9_]{1,40}"
+ACTION_GUARD_REQUIRES_REASON = "🛑 傷疤卡（{card}）：這次 {tool} 沒有帶 {fields}——{advice}"
 # 有一整類規則是「你必須先做某件事」，而那件事做了沒有，機器從外面看不見——「引用數字
 # 前先查」「宣稱完成前先驗」都是。轉換方式：規則不要求那個看不見的動作，要求「做了就要
 # 寫出來」。於是「沒寫」變成看得見、擋得下的，而寫一個假的來源就不是省略而是說謊，撞
@@ -1061,6 +1072,9 @@ ACTION_GUARD_KNOWN_TOOLS = frozenset((
 # 只比名字相等的話，守衛在別的宿主上不生效也不出聲。PowerShell 不併入：卡片本來就分開寫。
 ACTION_GUARD_TOOL_EQUIVALENTS = (
     frozenset(("bash", "shell", "run_terminal_cmd", "exec_command", "local_shell")),
+    # 派工子代理的工具在不同版本送 Task 或 Agent（2026-09-19 實測：同一天兩種都出現在
+    # 真實呼叫裡）。卡片只能寫一個名字，所以不併起來的話守衛在一半的場次上不生效。
+    frozenset(("task", "agent")),
 )
 
 

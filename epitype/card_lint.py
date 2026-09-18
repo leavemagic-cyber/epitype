@@ -237,10 +237,25 @@ def _guard_findings(fields, front_lines):
             FAIL, "guard", f"{memspec.ACTION_GUARD_TOOL_FIELD} 是空的，這一道守不到任何工具"
         ))
     items = memspec.sequence_items(front_lines, memspec.ACTION_GUARD_ALL_OF_FIELD)
-    if not items:
+    requires = memspec.sequence_items(front_lines, memspec.ACTION_GUARD_REQUIRES_FIELD)
+    if len(requires) > memspec.ACTION_GUARD_MAX_REQUIRES:
         findings.append((
-            FAIL, "guard", f"缺 {memspec.ACTION_GUARD_ALL_OF_FIELD}：守衛卡必須寫出要比對的字面片段"
+            FAIL,
+            "guard",
+            f"{memspec.ACTION_GUARD_REQUIRES_FIELD} {len(requires)} 個，"
+            f"超過上限 {memspec.ACTION_GUARD_MAX_REQUIRES}",
         ))
+    if not items and not requires:
+        # 兩種守衛各自成立：比對字面片段的，和問「呼叫少了哪個欄位」的。只認前者會讓
+        # 照規範寫的後者被判不合格——而那正是 2026-09-19 修掉的那種互斥規範。
+        findings.append((
+            FAIL,
+            "guard",
+            f"缺 {memspec.ACTION_GUARD_ALL_OF_FIELD} 的字面片段，"
+            f"也缺 {memspec.ACTION_GUARD_REQUIRES_FIELD} 的必填欄位：守衛卡至少要有一種條件",
+        ))
+    elif not items:
+        pass
     elif len(items) > memspec.ACTION_GUARD_MAX_SUBSTRINGS:
         findings.append((
             FAIL, "guard", f"片段 {len(items)} 個，超過上限 {memspec.ACTION_GUARD_MAX_SUBSTRINGS}"
