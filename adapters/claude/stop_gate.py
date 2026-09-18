@@ -54,7 +54,7 @@ _DECISION_CACHE_FILENAME = "stop_decisions.json"
 # The cached entry is discovery only — whether this card declares a ruling at all.
 # Every authority the gate acts on is re-read from this turn's bytes below, so a
 # ruling that gained fields (require_when/require_text/advice) needs no version bump.
-_DECISION_CACHE_VERSION = 3
+_DECISION_CACHE_VERSION = 4
 _KEY = "key"
 _DECIDED_AT = "decided_at"
 _QUOTE = "quote"
@@ -63,6 +63,7 @@ _REQUIRE_RULE = "require"
 _REQUIRE_WHEN = "require_when"
 _REQUIRE_TEXT = "require_text"
 _ADVICE = "advice"
+_EXPIRES = "expires"
 
 _Decision = namedtuple(
     "_Decision",
@@ -146,6 +147,9 @@ def _read_decision(path):
         _ADVICE: _one_line(fields.get(memspec.DESCRIPTION_FIELD))[
             : memspec.STOP_GATE_QUOTE_MAX_CHARS
         ],
+        # 只把日期存下來，過沒過期在用的時候才判：卡片不動也會過期，而這裡的結果進快取。
+        _EXPIRES: _one_line(fields.get(memspec.VALID_UNTIL_FIELD))
+        or _one_line(fields.get(memspec.GRANT_EXPIRES_FIELD)),
     }
 
 
@@ -269,6 +273,10 @@ def _decisions(vault, started_at, defects=None):
                 checked=index, total=len(candidates), vault=vault.name))
             break
         if not isinstance(ruling, dict) or not ruling.get(_KEY):
+            continue
+        if memspec.card_expired(ruling.get(_EXPIRES)):
+            # 過期的卡不再擋人。時限型的規則（試行一週、某日之前不要做某事）本來就該
+            # 自己停下來，靠人記得去拔掉的話，它會一直擋到有人被擋為止。
             continue
         found.append(
             _Decision(

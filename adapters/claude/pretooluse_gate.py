@@ -444,6 +444,10 @@ def _read_guard(path):
         "advice": advice,
         "requires": [str(item).strip() for item in requires],
         "unless": [list(pair) for pair in unless],
+        # 到期日只存不判：卡片不動也會過期，而這裡的結果會進快取。
+        "expires": one_line(
+            fields.get(memspec.VALID_UNTIL_FIELD) or fields.get(memspec.GRANT_EXPIRES_FIELD)
+        ),
     }
 
 
@@ -469,6 +473,8 @@ def warm_guard_cache(vaults, started_at):
 
 
 _WARM_CAP = 1 << 30
+# 2：守衛的項目多了必填欄位、逃生口與到期日；版本不對就整份重讀。
+_GUARD_CACHE_VERSION = 2
 
 
 def _guards(vault, started_at, defects, cap=None):
@@ -499,6 +505,10 @@ def _guards(vault, started_at, defects, cap=None):
     cache_path = _guard_cache(vault)
     try:
         loaded = json.loads(cache_path.read_text(encoding="utf-8"))
+        # 版本沒對上就整份重讀。以前這裡不看版本，於是舊格式的項目會缺新欄位、而清單
+        # 又只在檔案變動時才重讀——新加的判斷（例如到期）對既有的卡永遠不會生效。
+        if isinstance(loaded, dict) and loaded.get("version") != _GUARD_CACHE_VERSION:
+            loaded = None
         old_manifest = loaded.get("manifest") if isinstance(loaded, dict) else None
         cached = loaded.get("guards") if isinstance(loaded, dict) else None
         cursor = loaded.get("cursor") if isinstance(loaded, dict) else ""
@@ -533,7 +543,8 @@ def _guards(vault, started_at, defects, cap=None):
             cache_path.parent.mkdir(parents=True, exist_ok=True)
             staging.write_text(
                 json.dumps(
-                    {"version": 1, "manifest": verified, "guards": known, "cursor": cursor},
+                    {"version": _GUARD_CACHE_VERSION, "manifest": verified,
+                     "guards": known, "cursor": cursor},
                     ensure_ascii=False,
                     separators=(",", ":"),
                 ),
@@ -555,6 +566,9 @@ def _guards(vault, started_at, defects, cap=None):
         if isinstance(entry, str):
             defects.append(entry)
         elif isinstance(entry, dict) and (entry.get("substrings") or entry.get("requires")):
+            if memspec.card_expired(entry.get("expires")):
+                # 過期的守衛不再攔人；時限型的規則要自己停下來，不能靠人記得去拔。
+                continue
             found.append(
                 _Guard(
                     entry.get("card", card_path),

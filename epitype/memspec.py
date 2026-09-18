@@ -951,6 +951,16 @@ ACTION_GUARD_UNLESS_FIELD = "guard_unless"
 ACTION_GUARD_MAX_REQUIRES = 4
 ACTION_GUARD_FIELD_NAME_PATTERN = r"[A-Za-z0-9_]{1,40}"
 ACTION_GUARD_REQUIRES_REASON = "🛑 傷疤卡（{card}）：這次 {tool} 沒有帶 {fields}——{advice}"
+# 一道守衛短時間內一直擋同一件事，代表我在動手之前根本不知道它在那裡：擋下來是對的，
+# 但每一次都要先撞牆才想起來，一次一輪。2026-09-18 一天之內同一張卡擋了 20 次、跨四個
+# 視窗，而宿主的自動模式指示本來就叫人用 shell 改檔——兩邊互相打，擋的那一方只能一直贏
+# 一直浪費。把最近一直擋人的那一兩張的建議在開場就說出來，讓它在我伸手之前抵達。
+# 門檻看「最近一天擋了幾次」，所以不再被撞的規則這一行自己會消失，不必有人回來拔。
+GUARD_REPEAT_NOTICE_WINDOW_HOURS = 24
+GUARD_REPEAT_NOTICE_THRESHOLD = 5
+GUARD_REPEAT_NOTICE_MAX_CARDS = 2
+GUARD_REPEAT_NOTICE_LOG_TAIL_BYTES = 300_000
+GUARD_REPEAT_NOTICE = "⚠ 這道守衛最近一天擋了 {count} 次（{card}）：{advice}"
 # 有一整類規則是「你必須先做某件事」，而那件事做了沒有，機器從外面看不見——「引用數字
 # 前先查」「宣稱完成前先驗」都是。轉換方式：規則不要求那個看不見的動作，要求「做了就要
 # 寫出來」。於是「沒寫」變成看得見、擋得下的，而寫一個假的來源就不是省略而是說謊，撞
@@ -1283,6 +1293,23 @@ def join_block_scalar(style, lines):
     if style.startswith("|"):
         return "\n".join(lines).strip()
     return " ".join(line for line in lines if line).strip()
+
+
+def card_expired(value, today=None):
+    """這張卡的到期日是不是已經過了。
+
+    體檢早就把過期的卡標成「讀取端應視為失效」，但兩道閘原本不看到期日，於是同一張卡
+    在體檢眼裡失效、在閘眼裡照樣擋人——又一組互斥規範（2026-09-19）。日期壞掉或空白
+    一律當成沒過期：一個寫錯的日期不該安靜地把一條規則關掉，那種錯由體檢去喊。
+    到期要在「用的時候」判，不是在解析或進快取的時候判——卡片不動也會過期。"""
+    text = " ".join(str(value or "").split())
+    if not text:
+        return False
+    try:
+        stamped = date.fromisoformat(text[:10])
+    except ValueError:
+        return False
+    return stamped < (today or date.today())
 
 
 def is_iso_date(value):

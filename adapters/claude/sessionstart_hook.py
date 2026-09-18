@@ -43,6 +43,70 @@ def _soft_remaining(started_at):
     return memspec.SESSIONSTART_BUDGET_SECONDS - (time.monotonic() - started_at)
 
 
+def _repeat_guard_notices(vaults, started_at, now=None):
+    """最近一天一直擋人的守衛，一張一行（最多兩行）。
+
+    這不是規則注入，是狀態：它報的是「這道守衛剛剛擋了你幾次」。規則本身在卡上，
+    這一行只是讓它在我伸手之前抵達——2026-09-18 同一張卡一天擋 20 次、跨四個視窗，
+    每一次都是先撞牆才想起來。次數掉下來這一行自己消失，不需要有人回來拔掉。"""
+    import time as _time
+    from datetime import datetime
+
+    from epitype import memspec as _memspec
+
+    cutoff = (now if now is not None else _time.time()) - _memspec.GUARD_REPEAT_NOTICE_WINDOW_HOURS * 3600
+    counts = {}
+    for vault in vaults:
+        path = Path(vault) / _memspec.GATE_LOG_FILENAME
+        try:
+            size = path.stat().st_size
+            with path.open("rb") as stream:
+                if size > _memspec.GUARD_REPEAT_NOTICE_LOG_TAIL_BYTES:
+                    stream.seek(size - _memspec.GUARD_REPEAT_NOTICE_LOG_TAIL_BYTES)
+                    stream.readline()
+                lines = stream.read().decode("utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            if _memspec.ACTION_GUARD_LOG_KIND not in line:
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if row.get("kind") != _memspec.ACTION_GUARD_LOG_KIND:
+                continue
+            stamp = str(row.get("timestamp") or "")
+            try:
+                when = datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
+            except ValueError:
+                continue
+            if when < cutoff:
+                continue
+            card = str(row.get("card") or "").strip()
+            if card:
+                counts[card] = counts.get(card, 0) + 1
+
+    ranked = [item for item in sorted(counts.items(), key=lambda item: -item[1])
+              if item[1] >= _memspec.GUARD_REPEAT_NOTICE_THRESHOLD]
+    if not ranked:
+        return []
+    advice = {}
+    try:
+        import pretooluse_gate
+
+        for vault in vaults:
+            for guard in pretooluse_gate._guards(Path(vault), started_at, []):
+                advice.setdefault(guard.card, guard.advice)
+    except Exception:
+        pass
+    lines = []
+    for card, count in ranked[: _memspec.GUARD_REPEAT_NOTICE_MAX_CARDS]:
+        lines.append(_memspec.GUARD_REPEAT_NOTICE.format(
+            count=count, card=card, advice=advice.get(card, "")).strip().rstrip("：").strip())
+    return lines
+
+
 def _segment_budget(started_at, want):
     """這一段能拿到的秒數；剩太少就回 None＝整段省略（半段的數字是錯的數字）。"""
     remaining = _soft_remaining(started_at)
@@ -281,6 +345,13 @@ def _handle(event, started_at):
             import pretooluse_gate
 
             pretooluse_gate.warm_guard_cache(resolved, started_at)
+        except Exception:
+            pass
+
+    # 最近一直擋人的守衛，開場先說。擋得對但每次都要撞一輪，是這個機制自己的浪費。
+    if _soft_remaining(started_at) > 0:
+        try:
+            pieces.extend(_repeat_guard_notices(resolved, started_at))
         except Exception:
             pass
 

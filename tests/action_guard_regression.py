@@ -243,6 +243,28 @@ class ActionGuardRegression(unittest.TestCase):
         )
         self.assertIsNone(self.denial(value))
 
+    def test_an_expired_guard_card_stops_guarding(self):
+        self.write_card(
+            "scar-expired.md",
+            name="過期的守衛",
+            description="時限型的守衛要自己停下來",
+            guard_tool="Bash",
+            guard_all_of=['"<<"', '"\\\\"'],
+            valid_until="2026-09-18",
+        )
+        self.assertIsNone(self.denial(self.call("Bash", {"command": HEREDOC_WITH_BACKSLASH})))
+
+    def test_a_guard_inside_its_window_still_guards(self):
+        self.write_card(
+            "scar-live.md",
+            name="期限內的守衛",
+            description="還沒到期",
+            guard_tool="Bash",
+            guard_all_of=['"<<"', '"\\\\"'],
+            valid_until="2099-01-01",
+        )
+        self.assertIsNotNone(self.denial(self.call("Bash", {"command": HEREDOC_WITH_BACKSLASH})))
+
     # ---- 必填欄位型的守衛：擋的是「這次呼叫少了什麼」，字面比對看不到不存在的欄位 ----
 
     def dispatch_card(self, **overrides):
@@ -324,6 +346,75 @@ class ActionGuardRegression(unittest.TestCase):
         }, ensure_ascii=False) + "\n", encoding="utf-8")
         hits = compliance.replay([rule._replace(mtime=0) for rule in rules], [transcript])
         self.assertEqual([hit for hit in hits if hit.kind == "guard"], [])
+
+
+class RepeatGuardNotice(unittest.TestCase):
+    """擋得對但一直擋，代表這道守衛在我伸手之前沒有抵達。開場先說最近一直擋人的那幾張。"""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="epitype-repeat-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+        self.vault = self.root / "vault"
+        self.vault.mkdir()
+        self.config = self.root / "config.json"
+        common.write_config(self.config, [self.vault])
+        environment = patch.dict(os.environ, {
+            memspec.EPITYPE_CONFIG_ENV: str(self.config),
+            memspec.DREAM_MODE_ENV: memspec.DREAM_MODE_OFF,
+            "HOME": str(self.root / "home"), "USERPROFILE": str(self.root / "home"),
+        })
+        environment.start()
+        self.addCleanup(environment.stop)
+        (self.vault / "scar-heredoc.md").write_text(
+            card(name="重複的坑", description="說明", guard_tool="Bash",
+                 guard_all_of=['"<<"', '"\\\\"'], guard_advice="改用寫檔工具"),
+            encoding="utf-8")
+
+    def log(self, rows):
+        import json as _json
+
+        (self.vault / memspec.GATE_LOG_FILENAME).write_text(
+            "\n".join(_json.dumps(row, ensure_ascii=False) for row in rows) + "\n",
+            encoding="utf-8")
+
+    @staticmethod
+    def entry(card_name, hours_ago):
+        from datetime import datetime, timedelta, timezone
+
+        when = datetime.now(timezone.utc) - timedelta(hours=hours_ago)
+        return {"timestamp": when.isoformat(), "kind": memspec.ACTION_GUARD_LOG_KIND,
+                "rule": memspec.ACTION_GUARD_RULE, "card": card_name, "tool": "Bash"}
+
+    def notices(self):
+        import sessionstart_hook
+
+        return sessionstart_hook._repeat_guard_notices([self.vault], time.monotonic())
+
+    def test_a_guard_blocking_all_day_is_announced_with_its_advice(self):
+        self.log([self.entry("重複的坑", 1) for _ in range(memspec.GUARD_REPEAT_NOTICE_THRESHOLD)])
+        lines = self.notices()
+        self.assertEqual(len(lines), 1, lines)
+        self.assertIn("重複的坑", lines[0])
+        self.assertIn("改用寫檔工具", lines[0])
+
+    def test_below_the_threshold_says_nothing(self):
+        self.log([self.entry("重複的坑", 1)
+                  for _ in range(memspec.GUARD_REPEAT_NOTICE_THRESHOLD - 1)])
+        self.assertEqual(self.notices(), [])
+
+    def test_yesterday_s_blocks_do_not_keep_the_line_alive(self):
+        # 次數掉下來這一行要自己消失，不然它就是另一條沒人拔的常駐規則。
+        self.log([self.entry("重複的坑", 40)
+                  for _ in range(memspec.GUARD_REPEAT_NOTICE_THRESHOLD * 3)])
+        self.assertEqual(self.notices(), [])
+
+    def test_at_most_two_cards_are_announced(self):
+        rows = []
+        for name in ("坑一", "坑二", "坑三"):
+            rows.extend(self.entry(name, 1) for _ in range(memspec.GUARD_REPEAT_NOTICE_THRESHOLD))
+        self.log(rows)
+        self.assertLessEqual(len(self.notices()), memspec.GUARD_REPEAT_NOTICE_MAX_CARDS)
 
 
 class RequireWhenThen(unittest.TestCase):
@@ -489,6 +580,34 @@ class RequireWhenThen(unittest.TestCase):
             encoding="utf-8",
         )
         self.assertIsNone(self.block("這裡出現退役禁語。"))
+
+    def test_an_expired_card_stops_speaking_although_the_file_never_changed(self):
+        # 時限型的規則（試行一週、某日之前先不要做）必須自己停下來。體檢早就把過期的卡
+        # 標成「讀取端應視為失效」，閘卻照樣擋——同一張卡兩種身分。到期也必須在用的時候
+        # 判，因為卡片不動也會過期，而解析結果是進快取的。
+        (self.vault / "feedback-trial.md").write_text(
+            "---\nname: 一週試行\ndescription: 說明\nvalid_until: 2026-09-18\n"
+            "forbidden:\n  - 試行期禁語\n---\nbody\n",
+            encoding="utf-8",
+        )
+        self.assertIsNone(self.block("這裡出現試行期禁語。"))
+
+    def test_a_card_still_inside_its_window_keeps_blocking(self):
+        (self.vault / "feedback-live-trial.md").write_text(
+            "---\nname: 還在期限內\ndescription: 說明\nvalid_until: 2099-01-01\n"
+            "forbidden:\n  - 期限內禁語\n---\nbody\n",
+            encoding="utf-8",
+        )
+        self.assertIsNotNone(self.block("這裡出現期限內禁語。"))
+
+    def test_a_broken_expiry_date_does_not_quietly_switch_a_rule_off(self):
+        # 寫錯的日期不該把規則關掉：那種錯由體檢喊，不是由閘默默放行。
+        (self.vault / "feedback-bad-date.md").write_text(
+            "---\nname: 日期寫壞\ndescription: 說明\nvalid_until: 明天\n"
+            "forbidden:\n  - 壞日期禁語\n---\nbody\n",
+            encoding="utf-8",
+        )
+        self.assertIsNotNone(self.block("這裡出現壞日期禁語。"))
 
     def test_a_completion_claim_without_evidence_is_blocked(self):
         value = self.block("這批已完成，可以進下一步。")
