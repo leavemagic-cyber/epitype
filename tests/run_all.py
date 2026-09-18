@@ -62,6 +62,7 @@ SELFTESTS = (
     Path("tests") / "compact_map_destination_regression.py",
     Path("tests") / "hook_input_bom_regression.py",
     Path("tests") / "action_guard_regression.py",
+    Path("tests") / "handoff_regression.py",
     Path("tests") / "quote_exemption_count_regression.py",
     Path("tests") / "nightly_replacement_notice_regression.py",
     Path("tests") / "core_drift_contract_vault_regression.py",

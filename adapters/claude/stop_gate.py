@@ -1162,6 +1162,22 @@ def main():
     try:
         event = read_event(sys.stdin)
         value = _handle(event, _STARTED_AT, defects)
+        # 斷點檔：不管這一回合有沒有被擋，都把「改了什麼、跑了什麼、最後一句話」寫下來。
+        # 進度只存在對話裡的話，這一場結束或被停掉就等於沒發生過（owner 2026-09-19）。
+        # 純副作用，寫不出來也不影響這道閘的判斷。
+        try:
+            from epitype import handoff
+
+            config = load_config(_STARTED_AT)
+            if config is not None and not expired(_STARTED_AT):
+                handoff.update(
+                    governance_vault(config, for_write=True),
+                    event.get("session_id"),
+                    event.get("transcript_path"),
+                    event.get("cwd"),
+                )
+        except Exception:
+            pass
         for line in defects[: memspec.GATE_DEFECT_MAX_LINES]:
             print(line, file=sys.stderr)
         if _emits(value, _STARTED_AT):
