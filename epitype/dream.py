@@ -1904,10 +1904,15 @@ def _next_steps(sections, shaping=()):
     if alias.get("missing_aliases", 0) > 20:
         steps.append(f"缺別名卡 {alias['missing_aliases']} 張超過門檻，跑別名批次 → epitype aliases export <vault>")
     draft = counts(4)
-    if draft.get("total_drafts", 0) > 0:
+    # 下一步報的是「該動手的那一批」，不是總數。捕捉提案是一條隊伍：今天捕到的明天還在
+    # 排隊很正常，把總數寫成待辦，這一行就永遠清不掉。放超過七天還沒人升的那些才是積壓。
+    stale_drafts = counts(9).get("over_7_days", 0)
+    if stale_drafts > 0:
         held = draft.get("captured_pending", 0)
-        held_note = f"（其中捕捉提案 {held} 份，未核不得當依據）" if held else ""
-        steps.append(f"草稿待審 {draft['total_drafts']} 份{held_note} → 人工審閱 _drafts/**")
+        held_note = f"（隊伍裡共 {held} 份捕捉提案，未核不得當依據）" if held else ""
+        steps.append(
+            f"草稿放超過 {DRAFT_AGING_WARN_DAYS} 天沒審的有 {stale_drafts} 份{held_note} → 人工審閱 _drafts/**"
+        )
     pending = counts(3)
     if pending.get("zombie_cards", 0) > 0:
         steps.append(f"殭屍待辦 {pending['zombie_lines']} 行／{pending['zombie_cards']} 卡 → epitype pending <vault>")
@@ -3019,9 +3024,11 @@ def _selftest():
             )))
 
             # next steps surface the pending/draft/decision findings deterministically.
-            checks.append(("next steps name the overdue pending line and the drafts", any(
+            # 2026-09-19：草稿那一行改報「放超過門檻沒人審的那些」，不報總數——
+            # 捕捉提案是一條隊伍，今天捕到的明天還在排隊很正常，把總數當待辦就永遠清不掉。
+            checks.append(("next steps name the overdue pending line and the stale drafts", any(
                 "殭屍待辦" in step for step in report["next_steps"]
-            ) and any("草稿待審" in step for step in report["next_steps"])))
+            ) and any("草稿放超過" in step for step in report["next_steps"])))
 
             # --dry-run prints to the given stream and writes nothing to disk.
             import io
