@@ -991,6 +991,9 @@ ACTION_GUARD_REQUIRES_REASON = "🛑 傷疤卡（{card}）：這次 {tool} 沒�
 # 白話規則就是前者：它擋掉對 owner 丟機器名稱，但同一個字寫進程式碼註解或英文提交訊息是
 # 正當的。兩道閘共用同一批卡，不分的話，管說話的規則會連程式碼一起擋——2026-09-19 真的
 # 擋下一則純英文的提交訊息。沒寫這個欄位＝兩邊都管，維持既有行為。
+# 測試目錄裡的禁語是樣本。一條規則的回歸測試本來就要寫得出那句被禁的話，不然這道閘
+# 擋掉的第一份東西，就是用來證明它有效的那份測試（2026-09-19 兩次）。
+WRITE_GATE_FIXTURE_DIRECTORIES = frozenset(("tests", "test", "__tests__", "fixtures"))
 APPLIES_TO_FIELD = "applies_to"
 APPLIES_TO_SPEECH = "speech"
 APPLIES_TO_WRITE = "write"

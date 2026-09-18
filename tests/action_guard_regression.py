@@ -243,6 +243,22 @@ class ActionGuardRegression(unittest.TestCase):
         )
         self.assertIsNone(self.denial(value))
 
+    def test_a_test_file_may_contain_the_forbidden_form(self):
+        # 規則的回歸測試必須寫得出那句被禁的話。2026-09-19 兩次：為新規則寫測試樣本時，
+        # 被新規則自己擋下——這道閘擋掉的第一份東西就是證明它有效的那份測試。
+        self.write_card(
+            "decision-fixture.md",
+            name="樣本測試",
+            description="說明",
+            forbidden=["內部代號DDD"],
+        )
+        blocked = self.call("Write", {"file_path": str(self.root / "note.md"),
+                                      "content": "內部代號DDD"})
+        self.assertIsNotNone(self.denial(blocked))
+        fixture = self.call("Write", {"file_path": str(self.root / "tests" / "case.py"),
+                                      "content": 'assert blocks("內部代號DDD")'})
+        self.assertIsNone(self.denial(fixture))
+
     def test_a_speech_only_ruling_does_not_judge_file_content(self):
         # 2026-09-19：白話規則（管的是對 owner 丟機器名稱）擋下了一則純英文的提交訊息。
         # 同一批卡兩道閘共用，不分適用範圍的話，管說話的規則會連程式碼一起擋。

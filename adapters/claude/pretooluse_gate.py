@@ -181,6 +181,14 @@ def _forbidden_rule_edit(decision, target, fragment, texts):
                 return True
         except OSError:
             pass
+    # 測試檔裡的禁語是樣本，不是主張：一條規則的回歸測試必須寫得出那句被禁的話，否則
+    # 這道閘擋掉的第一個東西就是「證明它有效」的那份測試。2026-09-19 真的發生兩次。
+    try:
+        if any(part.casefold() in memspec.WRITE_GATE_FIXTURE_DIRECTORIES
+               for part in target.parts):
+            return True
+    except (AttributeError, OSError):
+        pass
     for text_value in texts:
         if not isinstance(text_value, str) or not text_value:
             continue
