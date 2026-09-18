@@ -956,6 +956,14 @@ ACTION_GUARD_REQUIRES_REASON = "🛑 傷疤卡（{card}）：這次 {tool} 沒�
 # 視窗，而宿主的自動模式指示本來就叫人用 shell 改檔——兩邊互相打，擋的那一方只能一直贏
 # 一直浪費。把最近一直擋人的那一兩張的建議在開場就說出來，讓它在我伸手之前抵達。
 # 門檻看「最近一天擋了幾次」，所以不再被撞的規則這一行自己會消失，不必有人回來拔。
+# 有些裁定管的是「我對 owner 說出口的話」，有些管的是「寫進檔案的內容」，兩者不是同一件事。
+# 白話規則就是前者：它擋掉對 owner 丟機器名稱，但同一個字寫進程式碼註解或英文提交訊息是
+# 正當的。兩道閘共用同一批卡，不分的話，管說話的規則會連程式碼一起擋——2026-09-19 真的
+# 擋下一則純英文的提交訊息。沒寫這個欄位＝兩邊都管，維持既有行為。
+APPLIES_TO_FIELD = "applies_to"
+APPLIES_TO_SPEECH = "speech"
+APPLIES_TO_WRITE = "write"
+APPLIES_TO_VALUES = (APPLIES_TO_SPEECH, APPLIES_TO_WRITE)
 GUARD_REPEAT_NOTICE_WINDOW_HOURS = 24
 GUARD_REPEAT_NOTICE_THRESHOLD = 5
 GUARD_REPEAT_NOTICE_MAX_CARDS = 2

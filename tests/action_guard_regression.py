@@ -243,6 +243,20 @@ class ActionGuardRegression(unittest.TestCase):
         )
         self.assertIsNone(self.denial(value))
 
+    def test_a_speech_only_ruling_does_not_judge_file_content(self):
+        # 2026-09-19：白話規則（管的是對 owner 丟機器名稱）擋下了一則純英文的提交訊息。
+        # 同一批卡兩道閘共用，不分適用範圍的話，管說話的規則會連程式碼一起擋。
+        self.write_card(
+            "decision-speech-only.md",
+            name="只管說話",
+            description="說明",
+            applies_to="speech",
+            forbidden=["內部代號CCC"],
+        )
+        value = self.call("Write", {"file_path": str(self.root / "note.md"),
+                                    "content": "commit message mentioning 內部代號CCC"})
+        self.assertIsNone(self.denial(value))
+
     def test_an_expired_guard_card_stops_guarding(self):
         self.write_card(
             "scar-expired.md",
@@ -608,6 +622,23 @@ class RequireWhenThen(unittest.TestCase):
             encoding="utf-8",
         )
         self.assertIsNotNone(self.block("這裡出現壞日期禁語。"))
+
+    def test_a_speech_only_ruling_still_blocks_what_i_say(self):
+        (self.vault / "decision-speech.md").write_text(
+            "---\nname: 只管說話\ndescription: 說明\napplies_to: speech\n"
+            "forbidden:\n  - 內部代號AAA\n---\nbody\n",
+            encoding="utf-8",
+        )
+        self.assertIsNotNone(self.block("這裡出現內部代號AAA。"))
+
+    def test_a_write_only_ruling_does_not_judge_what_i_say(self):
+        # 管寫檔內容的裁定講的是檔案裡不該有什麼，不是我不該說什麼。
+        (self.vault / "decision-write.md").write_text(
+            "---\nname: 只管寫檔\ndescription: 說明\napplies_to: write\n"
+            "forbidden:\n  - 內部代號BBB\n---\nbody\n",
+            encoding="utf-8",
+        )
+        self.assertIsNone(self.block("這裡出現內部代號BBB。"))
 
     def test_a_completion_claim_without_evidence_is_blocked(self):
         value = self.block("這批已完成，可以進下一步。")

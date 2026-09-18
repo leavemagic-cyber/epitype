@@ -675,6 +675,16 @@ def _check_card(path, relative, today):
             ))
 
     findings.extend(_expiry_warnings(fields, today))
+    scope_value = fields.get(memspec.APPLIES_TO_FIELD, "").strip().casefold()
+    if scope_value and scope_value not in memspec.APPLIES_TO_VALUES:
+        # 打錯這個值的後果是「這張卡在某一道閘上安靜地不生效」，跟沒寫規則一樣，
+        # 所以是 FAIL 而不是提醒。
+        findings.append((
+            FAIL,
+            "applies-to",
+            f"{memspec.APPLIES_TO_FIELD}=「{scope_value}」不是認得的值"
+            f"（只有 {'／'.join(memspec.APPLIES_TO_VALUES)}；不寫＝說話與寫檔都管）",
+        ))
     return card_type, findings, derived
 
 

@@ -219,6 +219,10 @@ def _forbidden_write(event, config, target, additions, prospective, started_at, 
         if expired(started_at):
             return None
         for decision in stop_gate._decisions(vault, started_at):
+            # 管「說出口的話」的裁定不套在寫檔上：白話規則擋的是對 owner 丟機器名稱，
+            # 而同一個字寫進程式碼註解或英文提交訊息是正當的。
+            if decision.applies_to == memspec.APPLIES_TO_SPEECH:
+                continue
             for index, text in enumerate(additions):
                 # Defects are collected from the first text only; the same broken
                 # pattern repeated once per edit would say nothing new.

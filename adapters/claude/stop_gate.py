@@ -67,7 +67,8 @@ _EXPIRES = "expires"
 
 _Decision = namedtuple(
     "_Decision",
-    "key decided_at quote forbidden aliases path decided_by require_when require_text advice",
+    "key decided_at quote forbidden aliases path decided_by require_when require_text advice"
+    " applies_to",
 )
 
 
@@ -150,6 +151,7 @@ def _read_decision(path):
         # 只把日期存下來，過沒過期在用的時候才判：卡片不動也會過期，而這裡的結果進快取。
         _EXPIRES: _one_line(fields.get(memspec.VALID_UNTIL_FIELD))
         or _one_line(fields.get(memspec.GRANT_EXPIRES_FIELD)),
+        memspec.APPLIES_TO_FIELD: _one_line(fields.get(memspec.APPLIES_TO_FIELD)).casefold(),
     }
 
 
@@ -290,6 +292,7 @@ def _decisions(vault, started_at, defects=None):
                 _one_line(ruling.get(_REQUIRE_WHEN)),
                 _one_line(ruling.get(_REQUIRE_TEXT)),
                 _one_line(ruling.get(_ADVICE)),
+                _one_line(ruling.get(memspec.APPLIES_TO_FIELD)).casefold(),
             )
         )
     if verified != old_manifest or rulings != cached or cursor != old_cursor:
@@ -656,6 +659,11 @@ def _verdict(event, message, config, started_at, defects):
             excepted.setdefault(card, set()).update(digests)
         demoted |= _demoted(vault)
     decisions = [decision for decision in decisions if decision.key not in demoted]
+    # 只管寫檔內容的裁定不在回合結束比對：那一類講的是檔案裡不該出現什麼，不是我不該說什麼。
+    decisions = [
+        decision for decision in decisions
+        if decision.applies_to != memspec.APPLIES_TO_WRITE
+    ]
     # 自動放行認的是「這一則訊息」，不是「那串字」：同一句無害的話不再被重複擋下，而
     # 任何別的訊息照擋。放行一串字會把字面規則整條關掉，那是 2026-09-17 審查實跑出來的。
     digest = _message_digest(message)
