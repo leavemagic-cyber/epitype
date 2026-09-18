@@ -112,6 +112,50 @@ def render(state):
     return "\n".join(lines)
 
 
+SUBAGENT_DIRECTORY = "subagent_log"
+SUBAGENT_TEXT_MAX_CHARS = 20_000
+
+
+def record_subagent(vault, event, turn_texts=None, now=None):
+    """把子代理結束時說的話落檔。回傳寫出去的檔案，沒東西可寫回 None。
+
+    2026-09-19 實測：子代理的對話不在宿主的對話紀錄裡（母場紀錄那個欄位全是否），
+    而它自己的工作檔是 0 位元組。也就是它說過的話**哪裡都沒有**——當下擋得住，事後
+    查不到，夜間重放看不到，檢討機制對子代理整段是盲的。
+
+    唯一看得見那句話的地方，就是這個時機本身（它收得到子代理的最後一段話）。所以在
+    這裡落檔：一天一個檔，一次呼叫一列。這不是日誌癖，是讓檢討有東西可讀。
+    """
+    text = event.get("last_assistant_message")
+    if not isinstance(text, str) or not text.strip():
+        return None
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(now or time.time()))
+    row = {
+        "timestamp": stamp,
+        "kind": "subagent_say",
+        "session_id": str(event.get("session_id") or ""),
+        "cwd": str(event.get("cwd") or ""),
+        "text": text[:SUBAGENT_TEXT_MAX_CHARS],
+    }
+    if turn_texts:
+        # 2026-09-19 實測必須標清楚：這個時機拿到的紀錄路徑是**母場**的，子代理不在裡面。
+        # 所以這幾段是母場當時在說什麼（子代理被派去做什麼的脈絡），不是子代理說的話。
+        # 存成子代理的話會污染檢討語料——重放會把母場的句子算成子代理的行為。
+        joined = "\n".join(str(item) for item in turn_texts if str(item).strip())
+        row["parent_turn_text_count"] = len(turn_texts)
+        if joined and joined.strip() != text.strip():
+            row["parent_turn_text"] = joined[:SUBAGENT_TEXT_MAX_CHARS]
+    folder = Path(vault) / memspec.FTS_INDEX_DIRECTORY / SUBAGENT_DIRECTORY
+    target = folder / (time.strftime("%Y%m%d", time.localtime(now or time.time())) + ".jsonl")
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        with target.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(row, ensure_ascii=False) + "\n")
+        return target
+    except OSError:
+        return None
+
+
 def update(vault, session_id, transcript_path, cwd=None, now=None):
     """把這一回合看得到的事實併進這一場的斷點檔。回傳寫出去的路徑，失敗回 None。"""
     session = "".join(char for char in str(session_id or "") if char.isalnum() or char in "-_")

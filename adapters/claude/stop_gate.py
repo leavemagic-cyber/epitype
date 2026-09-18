@@ -1170,12 +1170,19 @@ def main():
 
             config = load_config(_STARTED_AT)
             if config is not None and not expired(_STARTED_AT):
-                handoff.update(
-                    governance_vault(config, for_write=True),
-                    event.get("session_id"),
-                    event.get("transcript_path"),
-                    event.get("cwd"),
-                )
+                vault = governance_vault(config, for_write=True)
+                if str(event.get("hook_event_name") or "") == memspec.SUBAGENT_STOP_EVENT:
+                    # 子代理說過的話哪裡都沒有：不在宿主的對話紀錄裡，它自己的工作檔是
+                    # 0 位元組。這個時機是唯一看得見那句話的地方，所以在這裡落檔——
+                    # 不落檔就等於「當下擋得住、事後查不到」，檢討對子代理整段是盲的。
+                    handoff.record_subagent(vault, event, _turn_texts(event.get("transcript_path")))
+                else:
+                    handoff.update(
+                        vault,
+                        event.get("session_id"),
+                        event.get("transcript_path"),
+                        event.get("cwd"),
+                    )
         except Exception:
             pass
         for line in defects[: memspec.GATE_DEFECT_MAX_LINES]:

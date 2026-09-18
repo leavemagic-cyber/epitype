@@ -91,6 +91,50 @@ class HandoffState(unittest.TestCase):
         self.assertIsNotNone(self.update(self.root / "no-such.jsonl"))
         self.assertIn("斷點", self.read())
 
+    def test_what_a_subagent_said_is_written_down(self):
+        # 2026-09-19 實測：子代理的話不在宿主的對話紀錄裡，它自己的工作檔是 0 位元組。
+        # 當下擋得住、事後查不到，檢討對子代理整段就是盲的。
+        target = handoff.record_subagent(
+            self.vault,
+            {"hook_event_name": "SubagentStop", "session_id": "parent-1",
+             "cwd": "C:/work", "last_assistant_message": "全套測試都過了，所以已經上線。"},
+        )
+        self.assertIsNotNone(target)
+        rows = [json.loads(line) for line in
+                Path(target).read_text(encoding="utf-8").splitlines() if line.strip()]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["kind"], "subagent_say")
+        self.assertIn("已經上線", rows[0]["text"])
+        self.assertEqual(rows[0]["session_id"], "parent-1")
+
+    def test_the_parent_s_own_words_are_not_filed_as_the_subagent_s(self):
+        # 這個時機拿到的紀錄路徑是母場的，子代理不在裡面。2026-09-19 第一版把母場那幾段
+        # 存成子代理說的話——重放會把母場的句子算成子代理的行為，等於自己造假資料。
+        target = handoff.record_subagent(
+            self.vault,
+            {"session_id": "parent-1", "last_assistant_message": "子代理的結論"},
+            turn_texts=["母場在派工前說的話", "母場的另一段"],
+        )
+        row = json.loads(Path(target).read_text(encoding="utf-8").splitlines()[0])
+        self.assertEqual(row["text"], "子代理的結論")
+        self.assertIn("parent_turn_text", row)
+        self.assertNotIn("turn_text", row)
+        self.assertIn("母場", row["parent_turn_text"])
+
+    def test_several_subagents_in_one_day_append_rather_than_overwrite(self):
+        for index in range(3):
+            handoff.record_subagent(
+                self.vault,
+                {"session_id": "parent-1", "last_assistant_message": "第 %d 個回報" % index})
+        folder = self.vault / ".epitype" / handoff.SUBAGENT_DIRECTORY
+        lines = [line for path in folder.glob("*.jsonl")
+                 for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        self.assertEqual(len(lines), 3)
+
+    def test_a_subagent_that_said_nothing_writes_nothing(self):
+        self.assertIsNone(handoff.record_subagent(
+            self.vault, {"session_id": "parent-1", "last_assistant_message": "   "}))
+
     def test_a_session_without_an_id_writes_nothing(self):
         self.assertIsNone(handoff.update(self.vault, "", self.root / "no-such.jsonl"))
 

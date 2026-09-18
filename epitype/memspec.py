@@ -1014,6 +1014,8 @@ WRITE_GATE_FIXTURE_DIRECTORIES = frozenset(("tests", "test", "__tests__", "fixtu
 # 第三次才擋，因為那已經不是「忘了」，是在原地打轉。
 # 檔案有沒有變，用 (路徑, 修改時間, 大小, 起點, 行數) 一起認：改過就是另一份內容，
 # 讀不同段落也是另一件事。
+# 子代理結束是另一個時機，不是主線的回合結束。落檔要分得開：主線寫斷點，子代理寫它說過的話。
+SUBAGENT_STOP_EVENT = "SubagentStop"
 READ_WASTE_TOOLS = frozenset(("read", "read_file", "view", "notebookread"))
 READ_WASTE_FREE_REPEATS = 1
 READ_WASTE_STATE_MAX_ENTRIES = 400
