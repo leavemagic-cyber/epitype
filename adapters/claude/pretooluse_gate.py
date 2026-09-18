@@ -33,6 +33,7 @@ from _hook_common import (
     declared_frontmatter,
     emit,
     expired,
+    governance_vault,
     load_config,
     notice_marker_directory,
     read_event,
@@ -787,6 +788,74 @@ def _allow_context(event, notices=()):
     return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": "\n".join(lines)}}
 
 
+def _read_state_path(vault, session_id):
+    session = "".join(char for char in str(session_id or "") if char.isalnum() or char in "-_")
+    if not session:
+        return None
+    return Path(vault) / memspec.FTS_INDEX_DIRECTORY / "reads" / (session + ".json")
+
+
+def _waste_review(event, tool_name, tool_input, config, started_at):
+    """(擋下的值, 提醒行)——同一場重複讀同一份內容，或整檔拉一個大檔。
+
+    這道問的不是「這次呼叫做了什麼壞事」，而是「這次呼叫有沒有必要」。省 token 是
+    owner 2026-09-18 最在意的一條，而它只在動手那一刻看得出來：事後檢討只能數浪費，
+    擋不住浪費。"""
+    if tool_name.casefold() not in memspec.READ_WASTE_TOOLS:
+        return None, None
+    if not isinstance(tool_input, dict):
+        return None, None
+    raw = tool_input.get("file_path") or tool_input.get("path") or tool_input.get("notebook_path")
+    if not isinstance(raw, str) or not raw.strip():
+        return None, None
+    try:
+        target = Path(raw)
+        info = target.stat()
+    except OSError:
+        return None, None
+
+    offset = tool_input.get("offset")
+    limit = tool_input.get("limit")
+    if (info.st_size >= memspec.READ_WASTE_BIG_FILE_BYTES
+            and not str(limit or "").strip() and not str(offset or "").strip()):
+        return _deny_value(memspec.READ_WASTE_BIG_FILE_REASON.format(
+            path=raw, size=info.st_size)), None
+
+    digest = hashlib.sha256(
+        "|".join(str(part) for part in (
+            os.path.normcase(os.path.abspath(raw)), info.st_mtime_ns, info.st_size, offset, limit
+        )).encode("utf-8")
+    ).hexdigest()[:16]
+
+    vault = governance_vault(config, for_write=True)
+    state_path = _read_state_path(vault, event.get("session_id"))
+    if state_path is None:
+        return None, None
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        if not isinstance(state, dict):
+            state = {}
+    except (OSError, ValueError):
+        state = {}
+    count = int(state.get(digest, 0)) + 1
+    state[digest] = count
+    if len(state) > memspec.READ_WASTE_STATE_MAX_ENTRIES:
+        state = dict(list(state.items())[-memspec.READ_WASTE_STATE_MAX_ENTRIES:])
+    try:
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        staging = state_path.with_name("." + state_path.name + ".tmp-%d" % os.getpid())
+        staging.write_text(json.dumps(state), encoding="utf-8")
+        os.replace(staging, state_path)
+    except OSError:
+        pass
+
+    if count > 1 + memspec.READ_WASTE_FREE_REPEATS:
+        return _deny_value(memspec.READ_WASTE_REPEAT_REASON.format(count=count, path=raw)), None
+    if count > 1:
+        return None, memspec.READ_WASTE_REPEAT_NOTICE.format(count=count, path=raw)
+    return None, None
+
+
 def _handle(event, started_at, defects=None):
     """The gate's whole decision, in two parts.
 
@@ -818,6 +887,16 @@ def _handle(event, started_at, defects=None):
         write_value, notices = None, ()
     if write_value is not None:
         return write_value
+    try:
+        waste_value, waste_notice = _waste_review(
+            event, tool_name, event.get("tool_input"), config, started_at
+        )
+    except Exception:
+        waste_value, waste_notice = None, None
+    if waste_value is not None:
+        return waste_value
+    if waste_notice:
+        notices = tuple(notices) + (waste_notice,)
     return _allow_context(event, notices)
 
 

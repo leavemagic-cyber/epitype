@@ -420,6 +420,19 @@ def _event_cards_of(vault):
     return found
 
 
+def _event_card_spent(path):
+    """這張事件卡講的事情是不是已經結束了（一次性、或已到期）。"""
+    try:
+        fields, _problem = memspec.frontmatter_text(path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeError):
+        return False
+    if fields.get(memspec.SCOPE_FIELD, "").strip().casefold() == memspec.SCOPE_ONE_TIME:
+        return True
+    return memspec.card_expired(
+        fields.get(memspec.GRANT_EXPIRES_FIELD) or fields.get(memspec.VALID_UNTIL_FIELD)
+    )
+
+
 def _section_event_aging(vaults, today, since_date, config):
     results, errors = _bounded(vaults, _event_cards_of)
     counts_by_type = {card_type: 0 for card_type in _EVENT_TYPE_BY_DIR.values()}
@@ -428,6 +441,10 @@ def _section_event_aging(vaults, today, since_date, config):
     for vault, found in results:
         for relative, card_type, captured in found:
             counts_by_type[card_type] += 1
+            # 已經用完的事件卡不必複核是否歸檔：一次性授權（「跑這一次那個測試」）與
+            # 已到期的授權，內容本身就結束了，年齡再大也沒有東西要判（2026-09-19）。
+            if _event_card_spent(Path(vault) / relative):
+                continue
             captured_date = _iso_date_of(captured)
             if captured_date is not None and captured_date < since_date:
                 aging_by_type[card_type] += 1
@@ -755,6 +772,11 @@ def _body_heading_count(body):
             fenced = not fenced
             continue
         if not fenced and line.startswith("## "):
+            title = line[3:].strip()
+            # 結構性小節（來源、對應、可以直接跑的檢查）不是另一個主題，是同一件事的
+            # 佐證與出口。把它們算進去的話，寫得越清楚的卡越像「一卡兩事」。
+            if any(word in title for word in memspec.CARD_MIXED_STRUCTURAL_HEADINGS):
+                continue
             count += 1
     return count
 
@@ -803,7 +825,12 @@ def _mixed_cards_of(vault):
         reasons = []
         headings = _body_heading_count(body)
         body_bytes = len(body.encode("utf-8"))
-        if headings >= memspec.CARD_MIXED_HEADING_MIN:
+        # 2026-09-19：小標數這個訊號退役。收窄過兩輪（排除結構性小節、加上正文長度門檻）
+        # 之後，真庫 27 張裡仍有 25 張是誤判——一條規則寫成「裁定內容／擋什麼形狀／
+        # 為什麼武裝」三小節是寫得清楚，不是裝了三件事。分節是版面，不是主題數，而一個
+        # 永遠清不掉的清單會連同上面真的該拆的那幾張一起被忽略。
+        # 留下的兩個訊號講的是「真的塞太多」：正文超過上限、description 用連接詞串了好幾件事。
+        if headings >= memspec.CARD_MIXED_HEADING_MIN and body_bytes >= memspec.CARD_MIXED_HEADING_RETIRED:
             reasons.append(MIXED_REASON_HEADINGS.format(count=headings))
         if body_bytes > memspec.CARD_BODY_MIXED_BYTES:
             reasons.append(MIXED_REASON_BYTES.format(bytes=body_bytes, cap=memspec.CARD_BODY_MIXED_BYTES))
@@ -1084,6 +1111,23 @@ def _uncarried_quotes_of(vault, carriers):
             # 事件卡自報承接者：卡面上寫了 carried_by 就是有人指名接住它，不必再
             # 回頭確認那張決策卡在不在——卡在不在是 `epitype decisions` 的題目。
             if fields.get(memspec.CARRIED_BY_FIELD, "").strip():
+                continue
+            # 已經到期的一次性授權不需要有人承接：它講的事情已經結束，升成決策卡只會
+            # 把一句用畢的話變成常設規則。2026-09-19 通用庫第一張就是這種。
+            if memspec.card_expired(
+                fields.get(memspec.GRANT_EXPIRES_FIELD) or fields.get(memspec.VALID_UNTIL_FIELD)
+            ):
+                continue
+            # 一次性的話沒有東西可以往前帶。把當下那一句產品意見升成常設規則，等於讓
+            # 一句「這頁不用寫」永遠管著以後每一頁（2026-09-19 抽查 daipai 三張都是這種）。
+            if fields.get(memspec.SCOPE_FIELD, "").strip().casefold() == memspec.SCOPE_ONE_TIME:
+                continue
+            # 已核可又有別名的事件卡自己就找得到：這一節要防的是「沒有任何到達路徑」，
+            # 而別名就是到達路徑（2026-09-19 實查：授權卡用別名一搜就命中）。沒有別名的
+            # 才是真的只能等人翻檔案。
+            if verified == memspec.VERIFIED_TRUE and memspec.sequence_items(
+                memspec.split_frontmatter(text)[0] or [], memspec.ALIASES_FIELD
+            ):
                 continue
             body = _body_of(text)
             if _quoted_verbatim(body, quote_fragments):
@@ -2562,12 +2606,12 @@ def _selftest():
             _write_card(
                 mixed_vault / "two_headings.md",
                 "---\nname: two_headings\ndescription: 2026-06-01 synthetic\naliases:\n- a\n---\n"
-                "## 第一件事\nbody\n\n## 第二件事\nbody\n",
+                "## 第一件事\n" + ("內容一。" * 100) + "\n\n## 第二件事\n" + ("內容二。" * 100) + "\n",
             )
             _write_card(
                 mixed_vault / "fenced_example.md",
                 "---\nname: fenced_example\ndescription: 2026-06-01 synthetic\naliases:\n- b\n---\n"
-                "```markdown\n## 範例一\n## 範例二\n```\n說明一件事而已\n",
+                "```markdown\n## 範例一\n## 範例二\n```\n" + ("說明一件事而已。" * 70) + "\n",
             )
             _write_card(
                 mixed_vault / "too_big.md",
@@ -2585,7 +2629,7 @@ def _selftest():
                 mixed_vault / "reviewed_two_headings.md",
                 "---\nname: reviewed_two_headings\ndescription: 2026-06-01 synthetic\n"
                 "mixed_reviewed: 2026-09-09-keep\naliases:\n- e\n---\n"
-                "## 第一件事\nbody\n\n## 第二件事\nbody\n",
+                + "x" * (memspec.CARD_BODY_MIXED_BYTES + 1) + "\n",
             )
             _write_card(
                 mixed_vault / "superseded_big.md",
@@ -2601,7 +2645,9 @@ def _selftest():
                 mixed_vault / "split_two_headings.md",
                 "---\nname: split_two_headings\ndescription: 2026-06-01 synthetic\n"
                 "split_from: origin.md\naliases:\n- h\n---\n"
-                "## 第一件事\nbody\n\n## 第二件事\nbody\n",
+                # 2026-09-19：小標訊號退役，這個樣本改用還在的訊號（正文超上限），
+                # 因為它要驗的是「剛拆出來的豁免只赦免 description 那一條」。
+                + "x" * (memspec.CARD_BODY_MIXED_BYTES + 1) + "\n",
             )
             _write_card(
                 mixed_vault / "unmarked_twin.md",
@@ -2610,13 +2656,14 @@ def _selftest():
             )
             mixed_by_id = {s["id"]: s for s in build_report([mixed_vault], today=today)["sections"]}
             mixed_paths = {item["path"] for item in mixed_by_id[10]["examples"]}
-            checks.append(("section 10 flags the three mixed shapes and leaves a fenced markdown example alone", (
-                mixed_by_id[10]["counts"]["mixed_cards"] == 5
-                and mixed_paths == {"two_headings.md", "too_big.md", "packed_description.md",
+            # 2026-09-19：小標數不再是訊號。一條規則分成三小節是寫得清楚，不是裝了三件事——
+            # 真庫 27 張裡 25 張是這種誤判。剩下的兩個訊號講的是真的塞太多。
+            checks.append(("section 10 flags bulk and packing, and a well-sectioned short card is left alone", (
+                mixed_by_id[10]["counts"]["mixed_cards"] == 4
+                and mixed_paths == {"too_big.md", "packed_description.md",
                                     "split_two_headings.md", "unmarked_twin.md"}
                 and "fenced_example.md" not in mixed_paths
-                and any("## " in reason for item in mixed_by_id[10]["examples"]
-                        for reason in item["reasons"] if item["path"] == "two_headings.md")
+                and "two_headings.md" not in mixed_paths
             )))
             checks.append(("section 10 skips the card a human already marked mixed_reviewed", (
                 "reviewed_two_headings.md" not in mixed_paths

@@ -378,6 +378,83 @@ class ActionGuardRegression(unittest.TestCase):
         self.assertEqual([hit for hit in hits if hit.kind == "guard"], [])
 
 
+class ReadWaste(unittest.TestCase):
+    """省 token：重複讀同一份沒變的內容、整檔拉大檔，在動手那一刻就看得出來。"""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="epitype-waste-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+        self.vault = self.root / "vault"
+        self.vault.mkdir()
+        self.config = self.root / "config.json"
+        common.write_config(self.config, [self.vault])
+        environment = patch.dict(os.environ, {
+            memspec.EPITYPE_CONFIG_ENV: str(self.config),
+            memspec.DREAM_MODE_ENV: memspec.DREAM_MODE_OFF,
+            "HOME": str(self.root / "home"), "USERPROFILE": str(self.root / "home"),
+        })
+        environment.start()
+        self.addCleanup(environment.stop)
+        self.target = self.root / "note.md"
+        self.target.write_text("內容", encoding="utf-8")
+
+    def read(self, **extra):
+        payload = {"file_path": str(self.target)}
+        payload.update(extra)
+        return pretool._handle(
+            {"tool_name": "Read", "tool_input": payload, "session_id": "waste-test"},
+            time.monotonic(), [],
+        )
+
+    def denial(self, value):
+        return (value or {}).get("hookSpecificOutput", {}).get("permissionDecisionReason")
+
+    def test_the_first_read_passes_and_the_second_only_gets_a_note(self):
+        # 壓縮之後重讀一次是正當的——那時模型手上真的沒有那份內容了。
+        self.assertIsNone(self.denial(self.read()))
+        second = self.read()
+        self.assertIsNone(self.denial(second))
+
+    def test_the_third_identical_read_is_denied(self):
+        for _ in range(2):
+            self.read()
+        reason = self.denial(self.read())
+        self.assertIsNotNone(reason)
+        self.assertIn("省 token", reason)
+
+    def test_a_changed_file_is_a_different_read(self):
+        for _ in range(3):
+            self.read()
+        self.target.write_text("改過了", encoding="utf-8")
+        os.utime(self.target, (time.time() + 5, time.time() + 5))
+        self.assertIsNone(self.denial(self.read()))
+
+    def test_a_different_slice_is_a_different_read(self):
+        for _ in range(3):
+            self.read()
+        self.assertIsNone(self.denial(self.read(offset=200, limit=50)))
+
+    def test_a_large_file_read_whole_is_denied_but_a_slice_passes(self):
+        big = self.root / "big.md"
+        big.write_text("x" * (memspec.READ_WASTE_BIG_FILE_BYTES + 10), encoding="utf-8")
+        whole = pretool._handle(
+            {"tool_name": "Read", "tool_input": {"file_path": str(big)}, "session_id": "waste-big"},
+            time.monotonic(), [])
+        self.assertIsNotNone(self.denial(whole))
+        sliced = pretool._handle(
+            {"tool_name": "Read", "tool_input": {"file_path": str(big), "offset": 1, "limit": 40},
+             "session_id": "waste-big"},
+            time.monotonic(), [])
+        self.assertIsNone(self.denial(sliced))
+
+    def test_other_tools_are_untouched(self):
+        value = pretool._handle(
+            {"tool_name": "Bash", "tool_input": {"command": "git status"}, "session_id": "waste-test"},
+            time.monotonic(), [])
+        self.assertIsNone(self.denial(value))
+
+
 class RepeatGuardNotice(unittest.TestCase):
     """擋得對但一直擋，代表這道守衛在我伸手之前沒有抵達。開場先說最近一直擋人的那幾張。"""
 

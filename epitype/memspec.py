@@ -61,6 +61,9 @@ ALIASES_FIELD = "aliases"
 # 2026-09-01 實測事故：角色卡與系統卡混放且歸屬只藏在檔名，導致跨域寫入無法
 # 機器攔截；規則：卡片必須有結構化 scope。
 SCOPE_FIELD = "scope"
+# 一次性的原話沒有東西可以往前帶：把當下那一句產品意見升成常設規則，等於讓「這一頁不用
+# 寫」永遠管著以後每一頁。標了這個值的事件卡不再被列為「沒有決策卡承接」。
+SCOPE_ONE_TIME = "one-time"
 
 # 機械地圖只讀 transcript 尾窗，所有上限集中在共用地基。
 COMPACT_MAP_DEFAULT_BUDGET_BYTES = 2048
@@ -660,6 +663,17 @@ CARD_DATE_MISSING_REASON = (
 # description 又長又用「＋」「；」把好幾件事串成一句。
 CARD_BODY_MIXED_BYTES = 4000
 CARD_MIXED_HEADING_MIN = 2
+# 標題數不等於主題數。一張 557 位元組、分成「這條在管什麼／來源／對應」三小節的規則卡
+# 是寫得清楚，不是塞了三件事（2026-09-19 實查：今天寫的每一張新規則卡都被這條誤判）。
+# 兩個修正：結構性小節不計入，而且正文要夠長，標題數才有意義。
+CARD_MIXED_HEADING_MIN_BYTES = 1500
+# 小標訊號退役（2026-09-19）：門檻設成一個正文永遠到不了的值，等於關掉這一條，但
+# 保留整段判斷與樣本，因為「為什麼關掉」比「關掉」重要——真庫 27 張裡 25 張是誤判。
+CARD_MIXED_HEADING_RETIRED = 1 << 40
+CARD_MIXED_STRUCTURAL_HEADINGS = (
+    "對應", "來源", "關聯", "參考", "驗證", "可以直接跑的檢查", "怎麼查", "出處",
+    "為什麼", "背景", "證據",
+)
 CARD_MIXED_DESCRIPTION_MAX_CHARS = 160
 CARD_MIXED_DESCRIPTION_JOINERS = ("＋", "；")
 # 2026-09-09 實測事故（U-K3）：三個機械訊號不認人的判斷，逐張審完標記過的卡下一次
@@ -994,6 +1008,26 @@ ACTION_GUARD_REQUIRES_REASON = "🛑 傷疤卡（{card}）：這次 {tool} 沒�
 # 測試目錄裡的禁語是樣本。一條規則的回歸測試本來就要寫得出那句被禁的話，不然這道閘
 # 擋掉的第一份東西，就是用來證明它有效的那份測試（2026-09-19 兩次）。
 WRITE_GATE_FIXTURE_DIRECTORIES = frozenset(("tests", "test", "__tests__", "fixtures"))
+# 省 token 的把關（owner 2026-09-18 最在意的一條）：同一場把同一份沒變過的內容讀第三次，
+# 以及整檔拉一個大檔，都是在動手那一刻就看得出來的浪費。
+# 第二次只提醒不擋——壓縮之後重讀一次是正當的，那時模型手上真的沒有那份內容了；
+# 第三次才擋，因為那已經不是「忘了」，是在原地打轉。
+# 檔案有沒有變，用 (路徑, 修改時間, 大小, 起點, 行數) 一起認：改過就是另一份內容，
+# 讀不同段落也是另一件事。
+READ_WASTE_TOOLS = frozenset(("read", "read_file", "view", "notebookread"))
+READ_WASTE_FREE_REPEATS = 1
+READ_WASTE_STATE_MAX_ENTRIES = 400
+READ_WASTE_REPEAT_NOTICE = "ℹ 這一場已經讀過這一段、而且內容沒變（第 {count} 次）：{path}"
+READ_WASTE_REPEAT_REASON = (
+    "🛑 省 token：這一場已經讀過這一段第 {count} 次，而且檔案沒有變過（{path}）。"
+    "手上那份就是最新的；真的需要重讀就先說明為什麼（例如壓縮後內容不在了），"
+    "或改讀不同段落／改用搜尋定位。"
+)
+READ_WASTE_BIG_FILE_BYTES = 400_000
+READ_WASTE_BIG_FILE_REASON = (
+    "🛑 省 token：{path} 有 {size} 位元組，整檔讀進來大半是用不到的。"
+    "先用搜尋定位，或帶 offset／limit 只讀要看的那一段。"
+)
 APPLIES_TO_FIELD = "applies_to"
 APPLIES_TO_SPEECH = "speech"
 APPLIES_TO_WRITE = "write"

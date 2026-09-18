@@ -140,7 +140,9 @@ def main():
     # 拆卡候選：規範型卡才列，紀錄型不列。
     with tempfile.TemporaryDirectory(prefix="epitype-review-mixed-") as temp_dir:
         vault = _vault(Path(temp_dir).resolve())
-        body = "## 第一段\n" + ("長" * 10) + "\n## 第二段\n" + ("長" * 10) + "\n"
+        # 2026-09-19：小標數不再是拆卡訊號（收窄兩輪後真庫 27 張仍有 25 張誤判），
+        # 樣本改用還在的訊號——正文超過上限。這一項要驗的「規範型才列、紀錄型不列」沒變。
+        body = "## 第一段\n" + ("長" * (memspec.CARD_BODY_MIXED_BYTES // 3 + 10)) + "\n"
         (vault / "feedback-mixed.md").write_text(
             "---\nname: feedback-mixed\ndescription: 兩件事的行為卡\nmetadata:\n"
             f"  type: {memspec.CARD_TYPE_FEEDBACK}\n---\n{body}", encoding="utf-8")
