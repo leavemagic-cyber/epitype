@@ -1518,8 +1518,13 @@ def main(argv=None, output=sys.stdout):
     parser.add_argument("--fix-dates", action="store_true", help="write derived dates back as last_verified_at")
     parser.add_argument("--dry-run", action="store_true", help="with --fix-dates: name the writes, change nothing")
     parsed = parser.parse_args(arguments)
+    target = parsed.vault.expanduser()
+    if not target.is_dir():
+        # 同一族的老病：不存在的來源被回報成乾淨。打錯一個字就讀成「沒問題」。
+        print(memspec.VAULT_MISSING_REASON.format(vault=target), file=sys.stderr)
+        return 2
     try:
-        report = scan_vault(parsed.vault.expanduser(), parsed.today, deep=parsed.deep)
+        report = scan_vault(target, parsed.today, deep=parsed.deep)
     except Exception as exc:
         print(f"ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2

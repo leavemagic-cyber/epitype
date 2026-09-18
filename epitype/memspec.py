@@ -405,11 +405,42 @@ NOTICE_MARKER_TTL_SECONDS = 24 * 3600
 # 重新端出來；待辦有入口沒出口。規則：待辦標記行必須帶可跑的 verify: 或已收尾，
 # 逾期者由 `epitype pending` 與每晚的夢點名（2026-09-09 §35：開場不再注入那一行）。
 PENDING_MARKER_PATTERN = r"(?:未辦|待辦|⏳|\bTODO\b|待\s*owner|owner\s*自行|待處理|待決)"
-PENDING_CLOSED_PATTERN = r"(?:^\s*[-*]?\s*~~|作廢|已完成|已辦|已處理|已收案|✅|superseded)"
+# 收尾字樣少了「結案」那一族，於是「本卡的待辦在此結案」「三個未辦已結案」整排被算成
+# 殭屍待辦——2026-09-19 通用庫 7 行全是這種誤報，夜間每晚照這個數字派工，派的是假工作。
+PENDING_CLOSED_PATTERN = (
+    r"(?:^\s*[-*]?\s*~~|作廢|已完成|已辦|已處理|已收案|✅|superseded"
+    r"|結案|已結|已裁決|已裁定|已決定|不再列入|已排除|歷史"
+    # 「常設待辦」是設計上永遠存在的那一種（例如更版等 owner 觸發），它不會變舊，
+    # 也沒有出口可寫。把它算成殭屍，等於每晚要求人去關一件本來就不該關的事。
+    r"|常設)"
+)
+# 引用不是條目：規則卡在講「待辦清單要帶出口」、指路頁寫「現況與待辦看某某檔」、
+# 卡片連結 [[常設待辦-某某]]——這些句子裡的待辦字眼是被引述的對象，不是一條沒做完的事。
+PENDING_REFERENCE_SPANS = (
+    r"\[\[[^\]]*\]\]",      # 卡片連結
+    r"「[^」]*」",           # 引述
+    r"`[^`]*`",             # 程式碼片段
+    r"\[[^\]]*\]\([^)]*\)",  # markdown 連結
+)
 PENDING_VERIFY_MARKER = "verify:"
 PENDING_MAX_AGE_DAYS = 14
 PENDING_MARKER_REGEX = re.compile(PENDING_MARKER_PATTERN, re.IGNORECASE)
 PENDING_CLOSED_REGEX = re.compile(PENDING_CLOSED_PATTERN, re.IGNORECASE)
+PENDING_REFERENCE_REGEX = re.compile("|".join(PENDING_REFERENCE_SPANS))
+# 待辦條目住在清單或標題裡。卡片正文敘述往事的句子（「**Why:** 某場照抄交接本的待辦清單
+# 回報未決」）帶著同樣的字眼，卻不是一條沒做完的事——2026-09-19 通用庫剩下的 4 行全是這種。
+# 把位置也算進條件，敘述句就不再被點名，而真正的清單條目一條都不會漏。
+VAULT_MISSING_REASON = (
+    "找不到這個記憶庫：{vault}\n"
+    "（掃不存在的資料夾會回 0 個問題，跟「很乾淨」長得一樣；所以這裡直接報錯，不回 0。）"
+)
+PENDING_ENTRY_LINE_PATTERN = r"^\s*(?:[-*+]\s|\d+[.)]\s|#{1,6}\s|\[[ xX]\])"
+PENDING_ENTRY_LINE_REGEX = re.compile(PENDING_ENTRY_LINE_PATTERN)
+
+
+def pending_line_body(line):
+    """把引用、連結、程式碼片段挖掉之後剩下的那一行——待辦標記要在這裡面才算數。"""
+    return PENDING_REFERENCE_REGEX.sub(" ", str(line or ""))
 PENDING_DATE_REGEX = re.compile(r"(20\d\d)-(\d\d)-(\d\d)")
 
 # 2026-09-06 owner 裁定：卡片要像表單——分種類、各有必填欄位、缺了不收。實測缺口：

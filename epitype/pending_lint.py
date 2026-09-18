@@ -37,8 +37,11 @@ def _line_age_days(line, mtime, today):
 
 
 def _is_pending(line):
+    # 引用、卡片連結與程式碼片段裡的待辦字眼是被談論的對象，不是一條沒做完的事。
+    body = memspec.pending_line_body(line)
     return (
-        memspec.PENDING_MARKER_REGEX.search(line) is not None
+        memspec.PENDING_ENTRY_LINE_REGEX.match(line) is not None
+        and memspec.PENDING_MARKER_REGEX.search(body) is not None
         and memspec.PENDING_CLOSED_REGEX.search(line) is None
         and memspec.PENDING_VERIFY_MARKER not in line.casefold()
     )
@@ -127,12 +130,12 @@ def _selftest():
             )
             old_mtime = datetime(2026, 8, 1, tzinfo=timezone.utc).timestamp()
             (vault / "undated.md").write_text(
-                "---\nname: undated\ndescription: synthetic\n---\nTODO 沒日期的待辦\n",
+                "---\nname: undated\ndescription: synthetic\n---\n- TODO 沒日期的待辦\n",
                 encoding="utf-8",
             )
             os.utime(vault / "undated.md", (old_mtime, old_mtime))
-            (vault / "_views.md").write_text("---\nname: v\ndescription: v\n---\n未辦 私有視圖\n", encoding="utf-8")
-            (vault / memspec.MEMORY_INDEX_FILENAME).write_text("# index\n未辦 索引行\n", encoding="utf-8")
+            (vault / "_views.md").write_text("---\nname: v\ndescription: v\n---\n- 未辦 私有視圖\n", encoding="utf-8")
+            (vault / memspec.MEMORY_INDEX_FILENAME).write_text("# index\n- 未辦 索引行\n", encoding="utf-8")
 
             report = scan_vault(vault, today=today)
             plan = next((card for card in report["cards"] if card["path"] == "plan.md"), None)
@@ -192,8 +195,14 @@ def main(argv=None, output=sys.stdout):
     parser.add_argument("--strict", action="store_true", help="exit 1 when any zombie line exists")
     parser.add_argument("--json", action="store_true")
     parsed = parser.parse_args(arguments)
+    target = parsed.vault.expanduser()
+    if not target.is_dir():
+        # 掃不存在的資料夾回「0 個問題、結束碼 0」，跟「這個庫很乾淨」長得一模一樣。
+        # 打錯一個字就會讀成沒問題，而沒問題正是沒有人會再去查的那個答案。
+        print(memspec.VAULT_MISSING_REASON.format(vault=target), file=sys.stderr)
+        return 2
     try:
-        report = scan_vault(parsed.vault.expanduser(), parsed.max_age_days, parsed.today)
+        report = scan_vault(target, parsed.max_age_days, parsed.today)
     except Exception as exc:
         print(f"ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2

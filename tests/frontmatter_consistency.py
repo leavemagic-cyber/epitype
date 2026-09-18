@@ -20,7 +20,7 @@ from epitype import card_lint, decision_lint, memsearch, memspec, pending_lint, 
 
 CARDS = {
     "bom-crlf.md": "﻿---\r\nname: bom card\r\ndescription: 2026-06-01 待辦 written in frontmatter\r\nstatus: active\r\n---\r\nbody line\r\n",
-    "document-end.md": "---\nname: dots card\ndescription: closes with dots\nstatus: active\n...\n2026-06-01 待辦 body zombie\n",
+    "document-end.md": "---\nname: dots card\ndescription: closes with dots\nstatus: active\n...\n- 2026-06-01 待辦 body zombie\n",
     "duplicate-key.md": "---\nname: dup card\ndescription: first wins\nstatus: active\nstatus: superseded\n---\nbody\n",
     "block-scalar.md": "---\nname: block card\ndescription: |-\n  first line\n  second line\nstatus: active\n---\nbody\n",
     "quoted-hash.md": '---\nname: hash card\ndescription: "keeps # inside quotes"\nstatus: active\n---\nbody\n',
