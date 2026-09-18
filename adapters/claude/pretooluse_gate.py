@@ -513,14 +513,20 @@ def _guards(vault, started_at, defects, cap=None):
 
 
 def _action_text(tool_input):
-    """Every string the call carries, joined — the literal haystack a guard reads.
+    """Every acting string the call carries, joined — the haystack a guard reads.
 
-    No field is singled out and nothing is parsed: a guard asks whether its fragments
-    all appear in what this call actually says, which is the one question a string
-    check can answer honestly about a shell command."""
+    Nothing is parsed: a guard asks whether its fragments all appear in what this
+    call actually does, which is the one question a string check can answer honestly
+    about a shell command. The only fields left out are the ones that cannot act —
+    `description` is prose written for the owner's permission card, and its words
+    were enough to fake a hit (see ACTION_GUARD_IGNORED_FIELDS)."""
     if not isinstance(tool_input, dict):
         return ""
-    parts = [value for value in tool_input.values() if isinstance(value, str)]
+    parts = [
+        value
+        for key, value in tool_input.items()
+        if isinstance(value, str) and key not in memspec.ACTION_GUARD_IGNORED_FIELDS
+    ]
     return "\n".join(parts)[: memspec.ACTION_GUARD_HAYSTACK_MAX_CHARS]
 
 

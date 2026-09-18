@@ -928,6 +928,11 @@ ACTION_GUARD_MAX_SUBSTRINGS = 8
 # `<<` 加一個反斜線）。真正危險的是只有一個又很短的片段——那等於把整類工具停用，而
 # 停用整類工具是宿主原生規則的職責，不是傷疤卡的。
 ACTION_GUARD_LONE_FRAGMENT_MIN_CHARS = 4
+# 寫給人看的欄位不進比對池。`description` 是 Bash 呼叫附的一句白話說明，給 owner 在
+# 權限卡上讀的，不會被執行；但它的字照樣會湊出片段。2026-09-18 真的發生：描述寫
+# "Confirm ..."，裡面的 "rm " 加上指令裡的 ".jsonl"，一個唯讀的 `ls` 被「診斷觀測檔
+# 不得刪」擋下兩次。守衛要問的是「這次呼叫會做什麼」，不是「這次呼叫怎麼自我介紹」。
+ACTION_GUARD_IGNORED_FIELDS = frozenset(("description",))
 ACTION_GUARD_HAYSTACK_MAX_CHARS = 20000
 ACTION_GUARD_MAX_CARDS_PER_VAULT = STOP_GATE_MAX_CARDS_PER_VAULT
 ACTION_GUARD_FRAGMENT_MAX_CHARS = STOP_GATE_FRAGMENT_MAX_CHARS

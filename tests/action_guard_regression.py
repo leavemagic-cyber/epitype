@@ -130,10 +130,48 @@ class ActionGuardRegression(unittest.TestCase):
         for _ in range(3):
             self.assertIsNotNone(self.denial(self.call("Bash", {"command": HEREDOC_WITH_BACKSLASH})))
 
-    def test_fragments_are_sought_in_every_string_the_call_carries(self):
-        self.heredoc_card()
-        value = self.call("Bash", {"description": "寫檔", "command": HEREDOC_WITH_BACKSLASH})
+    def test_fragments_are_sought_across_the_fields_that_act(self):
+        # One fragment in the path, one in the content: no acting field is privileged
+        # and the call is read whole. The case this replaced put both fragments in
+        # `command` alone, so it never actually exercised a second field.
+        self.write_card(
+            "scar-write.md",
+            name="金鑰不要寫進設定檔",
+            description="設定檔裡出現長期金鑰",
+            guard_tool="Write",
+            guard_all_of=['"settings.json"', '"sk-live-"'],
+            guard_advice="金鑰放環境變數，不要寫進設定檔",
+        )
+        value = self.call(
+            "Write", {"file_path": "/tmp/settings.json", "content": "key = sk-live-123"}
+        )
         self.assertIsNotNone(self.denial(value))
+
+    def test_the_owner_facing_description_cannot_fake_a_hit(self):
+        # 2026-09-18: a read-only `ls ... .jsonl` was denied twice by the "diagnostic
+        # jsonl must survive" scar because the call's description read "Confirm ..."
+        # and "Confirm " carries "rm ". The description is prose for the owner's
+        # permission card; it never executes, so it is not evidence of an action.
+        self.write_card(
+            "scar-jsonl.md",
+            name="診斷觀測檔在問題結案前不得刪",
+            description="觀測用的 jsonl 在問題結案前刪掉，證據就沒了",
+            guard_tool="Bash",
+            guard_all_of=['"rm "', '".jsonl"'],
+            guard_advice="觀測紀錄在問題結案前不要刪",
+        )
+        innocent = self.call("Bash", {
+            "description": "Confirm both transcripts are still on disk",
+            "command": "ls ./projects/vault/observations.jsonl",
+        })
+        self.assertIsNone(self.denial(innocent))
+        # The real deletion is still denied, whatever the description says.
+        for description in ("clean up", "Confirm the sweep"):
+            guilty = self.call("Bash", {
+                "description": description,
+                "command": "rm /tmp/shimtest_log.jsonl",
+            })
+            self.assertIsNotNone(self.denial(guilty), description)
 
     def test_a_lone_short_fragment_is_refused_and_named_rather_than_enforced(self):
         # ["\\"] alone would deny almost every Windows command; disabling a whole
