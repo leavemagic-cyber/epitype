@@ -612,6 +612,23 @@ def _turn_check_gap(decision, message, turn, opened_names, defects):
     return _cited_unread_gap(decision, message, turn, opened_names)
 
 
+def _require_reason(decision, trigger):
+    """配對要求被擋下來時要講的那一句：短、看得懂、不印樣式原文。
+
+    這段字 owner 也看得到，而且每擋一次就進一次上下文。列得出字面選項就只列選項；
+    列不出來（樣式全是符號）才退回附上卡片描述。"""
+    items, more = memspec.readable_alternatives(decision.require_text)
+    if items:
+        expected = memspec.REQUIRE_HINT_TEMPLATE.format(
+            items="、".join(items) + (memspec.REQUIRE_HINT_MORE if more else ""))
+        advice = ""
+    else:
+        expected = "這張卡要求的內容"
+        advice = decision.advice[: memspec.STOP_GATE_REASON_QUOTE_MAX_CHARS]
+    return memspec.STOP_GATE_REQUIRE_REASON.format(
+        trigger=trigger, expected=expected, decision=decision.key, advice=advice)
+
+
 def _is_question(sentence):
     text = sentence.strip()
     return text.endswith(memspec.STOP_GATE_QUESTION_ENDINGS) or any(
@@ -922,7 +939,9 @@ def _verdict(event, message, config, started_at, defects, turn=None):
                     _FORBIDDEN_RULE,
                     memspec.STOP_GATE_FORBIDDEN_REASON.format(
                         decision=_named(decision),
-                        quote=decision.advice or decision.quote,
+                        # 描述只取開頭：這段字 owner 也看得到、每擋一次進一次上下文。
+                        quote=(decision.advice or decision.quote)[
+                            : memspec.STOP_GATE_REASON_QUOTE_MAX_CHARS],
                         fragment=fragment[: memspec.STOP_GATE_FRAGMENT_MAX_CHARS],
                     ),
                 )
@@ -958,12 +977,7 @@ def _verdict(event, message, config, started_at, defects, turn=None):
                 (
                     decision,
                     _REQUIRE_RULE,
-                    memspec.STOP_GATE_REQUIRE_REASON.format(
-                        decision=_named(decision),
-                        trigger=trigger,
-                        expected=f"「{decision.require_text}」所指的內容",
-                        advice=decision.advice,
-                    ),
+                    _require_reason(decision, trigger),
                 )
             )
             break

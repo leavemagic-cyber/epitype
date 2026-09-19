@@ -923,7 +923,7 @@ STOP_GATE_QUESTION_ENDINGS = ("？", "?")
 # 「可以嗎」已被「嗎」涵蓋，不重複列。
 STOP_GATE_QUESTION_MARKERS = ("嗎", "呢", "要不要", "是否")
 STOP_GATE_FORBIDDEN_REASON = (
-    "⚖ 已裁定（{decision}）：{quote}。請依裁定改寫，不得再提「{fragment}」"
+    "⚖ 不要說「{fragment}」，請改寫。（{decision}：{quote}）"
 )
 STOP_GATE_QUESTION_REASON = "此事 owner 已於 {decided_at} 裁定：{quote}。不得再問，直接照裁定做"
 STOP_GATE_QUESTION_REASON_UNDATED = "此事 owner 已裁定：{quote}。不得再問，直接照裁定做"
@@ -1077,9 +1077,43 @@ GUARD_REPEAT_NOTICE = "⚠ 這道守衛最近一天擋了 {count} 次（{card}�
 REQUIRE_WHEN_FIELD = "require_when"
 REQUIRE_TEXT_FIELD = "require_text"
 STOP_GATE_REQUIRE_REASON = (
-    "📌 這回合命中「{decision}」的條件（{trigger}），依裁定必須同時寫出{expected}。"
-    "{advice}"
+    "📌 說了「{trigger}」，同一則要一起寫出{expected}。（{decision}）{advice}"
 )
+# 擋下來的理由 owner 也看得到（宿主把它顯示成一則回饋），而且每擋一次這段字就進一次
+# 上下文。2026-09-20 owner 貼圖問「為什麼有這種東西，看不懂也感覺無意義，並且應該很浪費
+# token」——當時那一則把整條正規表示式原樣印出來，後面再接一百多字的卡片描述。
+#
+# 改成：把樣式裡的字面選項列幾個出來給人看；列得出來就不再附描述（那是同一句話講兩次）。
+REQUIRE_HINT_MAX_ITEMS = 5
+REQUIRE_HINT_TEMPLATE = "其中一種：{items}"
+REQUIRE_HINT_MORE = "…"
+STOP_GATE_REASON_QUOTE_MAX_CHARS = 60
+
+
+def readable_alternatives(pattern, limit=REQUIRE_HINT_MAX_ITEMS):
+    """樣式裡看得懂的那幾個字面選項；一個都列不出來就回空清單。
+
+    只給人看，不拿來判斷——所以寧可少列，不必列全。"""
+    source = str(pattern or "").strip()
+    if source.startswith("(") and source.endswith(")"):
+        source = source[1:-1]
+    pieces, depth, current = [], 0, []
+    for char in source:
+        if char in "([":
+            depth += 1
+        elif char in ")]":
+            depth -= 1
+        if char == "|" and depth == 0:
+            pieces.append("".join(current))
+            current = []
+        else:
+            current.append(char)
+    pieces.append("".join(current))
+    # 只有標點的選項（例如一個上引號）列出來沒人看得懂，當成列不出來。
+    plain = [piece for piece in pieces
+             if piece and not any(char in _PREFILTER_META for char in piece)
+             and any(char.isalnum() for char in piece)]
+    return plain[:limit], len(plain) > limit or len(plain) < len(pieces)
 # 有一類毛病連 require_when 都抓不到，因為它不在「說了什麼字」裡，而在「這一回合的事實」
 # 裡：報告有多長、引的檔這一場到底有沒有打開過。字面比對永遠看不到這兩件事。
 #
