@@ -21,7 +21,7 @@ from epitype import memspec, opened
 
 import stop_gate
 
-_Turn = stop_gate._Turn
+_Turn = stop_gate._turn
 
 
 def decision(**overrides):
@@ -140,6 +140,61 @@ class CitedButNeverOpened(unittest.TestCase):
             self.card, "我查過 CLAUDE.md 的規則塊了。", _Turn([], "對不對"), self.opened))
 
 
+class DelegatedWorkStillHasAnOwner(unittest.TestCase):
+    """派出去的工，責任沒有跟著派出去。
+
+    最常發生的實況：派工、子代理回報、我把那份回報端出去說好了——中間沒有人驗過。
+    這一件字面比對抓不到（我可以完全不提子代理就轉述），但它是這一回合的事實：
+    收到派工結果之後，我自己有沒有動過任何一次手。"""
+
+    def setUp(self):
+        self.card = decision(turn_check=memspec.TURN_CHECK_UNVERIFIED_DELEGATION,
+                             advice="親自驗一項再說")
+
+    def gap(self, message, dispatch="Task", calls_after=0, prompt="做完了嗎"):
+        return stop_gate._unverified_delegation_gap(
+            self.card, message, _Turn([], prompt, dispatch, calls_after))
+
+    def test_relaying_a_finished_claim_without_lifting_a_finger_is_blocked(self):
+        reason = self.gap("子代理回報三項都做完了，已完成。")
+        self.assertIsNotNone(reason)
+        # 訊息裡第一個命中的宣稱就是要被指出來的那一個。
+        self.assertIn("做完了", reason)
+        self.assertIn("Task", reason)
+
+    def test_it_does_not_need_the_word_subagent_to_fire(self):
+        # 完全不提子代理的轉述是這道檢查存在的理由：靠字面的那一張卡看不到它。
+        self.assertIsNotNone(self.gap("三項都修好了，測試也過了。"))
+
+    def test_one_check_of_my_own_clears_it(self):
+        self.assertIsNone(self.gap("已完成，我自己跑了測試 62/62。", calls_after=1))
+
+    def test_saying_it_is_an_unverified_relay_clears_it(self):
+        self.assertIsNone(self.gap("子代理說已完成——這是未驗證的轉述，我還沒驗。"))
+
+    def test_naming_what_i_checked_clears_it(self):
+        self.assertIsNone(self.gap("已完成。本回合讀了 stop_gate.py 的那一段。"))
+
+    def test_a_turn_without_delegation_is_not_touched(self):
+        # 自己一路做完的回合不歸這道檢查管。
+        self.assertIsNone(self.gap("已完成。", dispatch=""))
+
+    def test_dispatching_without_claiming_completion_is_fine(self):
+        # 派工當下那一回合會說「完成後回報」，那不是宣稱完成。
+        for text in ("派出去了，完成後回報。", "還沒完成，等它跑。", "尚未完成。",
+                     "派了三個，跑完我再驗。"):
+            self.assertIsNone(self.gap(text), msg=text)
+
+    def test_a_background_result_arriving_as_a_notice_counts_as_delegation(self):
+        reason = self.gap("都好了。", dispatch=memspec.TURN_DISPATCH_NOTICE_MARKER,
+                          prompt="<task-notification>completed</task-notification>")
+        self.assertIsNotNone(reason)
+
+    def test_reading_the_agents_output_counts_as_lifting_a_finger(self):
+        self.assertIsNone(self.gap(
+            "都好了。", dispatch=memspec.TURN_DISPATCH_NOTICE_MARKER, calls_after=2))
+
+
 class WiringIntoTheGate(unittest.TestCase):
     def test_an_unknown_check_name_is_reported_not_swallowed(self):
         defects = []
@@ -215,7 +270,8 @@ def _selftest():
     loader = unittest.TestLoader()
     suite = unittest.TestSuite(
         loader.loadTestsFromTestCase(case)
-        for case in (ReportLength, CitedButNeverOpened, WiringIntoTheGate, TheOpenedRecord)
+        for case in (ReportLength, CitedButNeverOpened, DelegatedWorkStillHasAnOwner,
+                     WiringIntoTheGate, TheOpenedRecord)
     )
     result = unittest.TextTestRunner(verbosity=1).run(suite)
     total = result.testsRun

@@ -426,6 +426,24 @@ PENDING_REFERENCE_SPANS = (
     r"\[[^\]]*\]\([^)]*\)",  # markdown 連結
 )
 PENDING_VERIFY_MARKER = "verify:"
+# 沒有人掛名的待辦＝孤兒。owner 2026-09-19：「不能有孤兒！有孤兒很容易放到忘記」。
+# 掛名有兩種寫法：卡片 frontmatter 的 owner 欄位，或條目自己指名負責的那一方。年齡
+# 不進入判斷——一條沒人負責的待辦從寫下那一刻就是孤兒，等它變老才報等於等它被忘記。
+PENDING_OWNER_INLINE_PATTERN = (
+    r"owner|Owner|OWNER|Claude|claude|Codex|codex|主責|負責|我來|我去|我會|我自己|本場|這場"
+)
+PENDING_OWNER_INLINE_REGEX = re.compile(PENDING_OWNER_INLINE_PATTERN)
+# 孤兒只認「條目」，不認標題也不認敘述。判準是待辦標記出現在條目的最前面——它是這一條的
+# 狀態，不是句子裡提到的一個詞。2026-09-19 在通用庫實測：只要「行內某處有待辦字眼」就報
+# 的話，11 行裡只有 3 行真的是沒做完的事（其餘是指標數字、規則標題、連結說明、已結案
+# 的敘述）；改成「標記在最前面的條目」之後是 3/3。標題不算：標題不是一件事，它底下的
+# 條目才是。
+PENDING_LIST_ENTRY_PATTERN = r"^\s*(?:[-*+]\s|\d+[.)]\s|\[[ xX]\]\s?)"
+PENDING_LIST_ENTRY_REGEX = re.compile(PENDING_LIST_ENTRY_PATTERN)
+PENDING_LEADING_MARKER_PATTERN = (
+    r"^[\s*_`~>]*(?:\[[ xX]\]\s*)?[\s*_`~>]*(?:⏳|TODO|未辦|待辦|待決|待處理|待修|待驗|待\s*owner)"
+)
+PENDING_LEADING_MARKER_REGEX = re.compile(PENDING_LEADING_MARKER_PATTERN, re.IGNORECASE)
 PENDING_MAX_AGE_DAYS = 14
 PENDING_MARKER_REGEX = re.compile(PENDING_MARKER_PATTERN, re.IGNORECASE)
 PENDING_CLOSED_REGEX = re.compile(PENDING_CLOSED_PATTERN, re.IGNORECASE)
@@ -1072,7 +1090,9 @@ TURN_CHECK_FIELD = "turn_check"
 TURN_CHECK_LIMIT_FIELD = "turn_check_limit"
 TURN_CHECK_LENGTH = "length"
 TURN_CHECK_CITED_UNREAD = "cited_unread"
-TURN_CHECK_NAMES = (TURN_CHECK_LENGTH, TURN_CHECK_CITED_UNREAD)
+TURN_CHECK_UNVERIFIED_DELEGATION = "unverified_delegation"
+TURN_CHECK_NAMES = (
+    TURN_CHECK_LENGTH, TURN_CHECK_CITED_UNREAD, TURN_CHECK_UNVERIFIED_DELEGATION)
 TURN_CHECK_UNKNOWN_DEFECT = (
     "⚠ Epitype 回合閘：裁定 {decision} 的 turn_check「{name}」不是內建檢查"
     "（可用的是 {known}），這一項暫不生效。"
@@ -1119,6 +1139,32 @@ OPENED_TARGET_FIELDS = (
 TURN_CITED_UNREAD_REASON = (
     "📌 這回合說了「{claim}」，卻沒有任何一次工具往來打開過 {path}。"
     "依「{decision}」：先把它讀出來，或把那句宣稱改成沒讀。{advice}"
+)
+# 「一件事沒人負責」的可查版本。最常發生的實況：派工出去、子代理回報、我把那份回報端出去
+# 說好了——中間沒有人驗過。這一件字面比對抓不到（我可以完全不提子代理就轉述），但它是
+# 這一回合的事實：收到子代理的東西之後，我自己有沒有動過任何一次手。
+#
+# 宣稱完成的寫法要收窄：單一個「完成」兩字到處都有（「完成後回報」「還沒完成」都是），
+# 拿它當條件會擋掉派工當下那一回合。
+TURN_DONE_CLAIM_PATTERN = (
+    r"(?<!未)(?<!沒)(?<!還沒)(?<!尚未)(?<!不算)"
+    r"(?:已完成|已經完成|都完成了|做完了|已做完|已修好|修好了|已上線|上線了"
+    r"|搞定|沒問題了|可以用了|驗收通過|全部通過|都好了|完成了)"
+)
+TURN_DONE_CLAIM_REGEX = re.compile(TURN_DONE_CLAIM_PATTERN)
+# 我自己驗過什麼，或明講這是沒驗過的轉述。兩種都寫得出來就過得去；什麼都不寫才擋。
+TURN_OWNERSHIP_TEXT_PATTERN = (
+    r"我自己(?:驗|跑|讀|查|核)|我實跑|我實查|本回合讀了|我讀了|我跑了|我核對"
+    r"|未驗證的轉述|沒有驗過|未經我驗|我沒有驗"
+)
+TURN_OWNERSHIP_TEXT_REGEX = re.compile(TURN_OWNERSHIP_TEXT_PATTERN)
+TURN_DISPATCH_TOOLS = frozenset({"task", "agent"})
+# 背景子代理跑完時，宿主把結果當成一則新的提問送進來；那一則裡有這個標記。
+TURN_DISPATCH_NOTICE_MARKER = "task-notification"
+TURN_UNVERIFIED_DELEGATION_REASON = (
+    "📌 這回合收到派工的結果（{source}），我自己一次手都沒動就說了「{claim}」。"
+    "依「{decision}」：要嘛親自驗一項再說，要嘛明講這是未驗證的轉述——"
+    "派出去的工，責任沒有跟著派出去。{advice}"
 )
 # 閘門一律只讀頂層欄位。這幾個欄位一旦被包進下一層，卡片看起來武裝、實際什麼都不擋。
 CARD_GATE_FIELDS = (

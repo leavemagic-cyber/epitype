@@ -66,7 +66,13 @@ _ADVICE = "advice"
 _EXPIRES = "expires"
 _TURN_CHECK_RULE = "turn_check"
 
-_Turn = namedtuple("_Turn", "texts prompt")
+_Turn = namedtuple("_Turn", "texts prompt dispatch calls_after_dispatch")
+
+
+def _turn(texts=(), prompt="", dispatch="", calls_after_dispatch=0):
+    """`_Turn` 的預設建構子：測試與退路都只在意前兩個欄位。"""
+    return _Turn(list(texts), prompt, dispatch, calls_after_dispatch)
+
 
 _Decision = namedtuple(
     "_Decision",
@@ -535,6 +541,24 @@ def _cited_unread_gap(decision, message, turn, opened_names):
     return None
 
 
+def _unverified_delegation_gap(decision, message, turn):
+    """收到派工結果、自己一次手都沒動就宣稱完成，就回一句理由。
+
+    責任不會跟著派工一起派出去：子代理只回傳界線內的結果，驗證、整合、交付還是主責的。
+    子代理說話那一側沒有閘門（2026-09-19 實測），所以這一條擋在我這一側。"""
+    if not turn.dispatch or turn.calls_after_dispatch:
+        return None
+    body = _turn_body(message)
+    claim = memspec.TURN_DONE_CLAIM_REGEX.search(body)
+    if claim is None:
+        return None
+    if memspec.TURN_OWNERSHIP_TEXT_REGEX.search(body):
+        return None
+    return memspec.TURN_UNVERIFIED_DELEGATION_REASON.format(
+        source=turn.dispatch, claim=claim.group(0), decision=_named(decision),
+        advice=decision.advice)
+
+
 def _turn_check_gap(decision, message, turn, opened_names, defects):
     """卡片指名的內建檢查。字面比對看不到的事實，由這裡判。"""
     name = decision.turn_check
@@ -546,6 +570,8 @@ def _turn_check_gap(decision, message, turn, opened_names, defects):
         return None
     if name == memspec.TURN_CHECK_LENGTH:
         return _length_gap(decision, message, turn)
+    if name == memspec.TURN_CHECK_UNVERIFIED_DELEGATION:
+        return _unverified_delegation_gap(decision, message, turn)
     return _cited_unread_gap(decision, message, turn, opened_names)
 
 
@@ -677,9 +703,12 @@ def _turn_context(transcript_path):
             stream.seek(max(0, size - memspec.STOP_GATE_TURN_TAIL_BYTES))
             lines = stream.read().decode("utf-8", "replace").splitlines()
     except (OSError, ValueError, TypeError):
-        return _Turn([], "")
+        return _turn()
     texts = []
     prompt = ""
+    # 派工的結果進來之後，我自己還動過幾次手。倒著走，遇到派工那一次呼叫就凍結計數。
+    dispatch = ""
+    calls_after = 0
     for line in reversed(lines):
         try:
             row = json.loads(line)
@@ -704,10 +733,23 @@ def _turn_context(transcript_path):
         if row.get("type") != "assistant" or not isinstance(content, list):
             continue
         for block in reversed(content):
-            if isinstance(block, dict) and block.get("type") == "text" and str(block.get("text") or "").strip():
+            if not isinstance(block, dict):
+                continue
+            kind = block.get("type")
+            if kind == "text" and str(block.get("text") or "").strip():
                 texts.append(block["text"])
+            elif kind == "tool_use" and not dispatch:
+                name = str(block.get("name") or "")
+                if name.casefold() in memspec.TURN_DISPATCH_TOOLS:
+                    dispatch = name
+                else:
+                    calls_after += 1
     texts.reverse()
-    return _Turn(texts, prompt[: memspec.STOP_GATE_MESSAGE_MAX_CHARS])
+    prompt = prompt[: memspec.STOP_GATE_MESSAGE_MAX_CHARS]
+    if not dispatch and memspec.TURN_DISPATCH_NOTICE_MARKER in prompt:
+        # 背景子代理跑完是以一則新提問的形式回來的，這一回合裡沒有派工那一次呼叫。
+        dispatch = memspec.TURN_DISPATCH_NOTICE_MARKER
+    return _Turn(texts, prompt, dispatch, calls_after)
 
 
 def _handle(event, started_at, defects):
@@ -719,7 +761,7 @@ def _handle(event, started_at, defects):
         return None
     # Mid-turn text reaches the owner too; reading only the last message let every card
     # miss whatever was said before a tool call.
-    turn = _turn_context(event.get("transcript_path")) if event.get("transcript_path") else _Turn([], "")
+    turn = _turn_context(event.get("transcript_path")) if event.get("transcript_path") else _turn()
     texts = list(turn.texts)
     if message.strip() not in memspec.join_turn_text(texts):
         texts.append(message)
@@ -796,7 +838,7 @@ def _verdict(event, message, config, started_at, defects, turn=None):
     if not verdicts:
         # 字面比對看不到的那兩件事：這回合的話有多長、引的檔這一場有沒有被打開過。
         # 只有卡片指名了內建檢查才跑，而且附記讀得到才比對。
-        turn = turn if turn is not None else _Turn([], "")
+        turn = turn if turn is not None else _turn()
         opened_names = frozenset()
         if any(decision.turn_check == memspec.TURN_CHECK_CITED_UNREAD for decision in decisions):
             try:

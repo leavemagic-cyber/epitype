@@ -36,6 +36,28 @@ def _line_age_days(line, mtime, today):
     return (today - modified).days, "mtime"
 
 
+def _declared_owner(text):
+    """卡片 frontmatter 有沒有寫 owner。寫了就代表這張卡上的待辦有人掛名。"""
+    fields, _problem = memspec.frontmatter_text(text)
+    return bool(str(fields.get(memspec.PENDING_OWNER_FIELD) or "").strip())
+
+
+def _is_orphan_candidate(line):
+    """這一行是不是一條「條目」而不是敘述或標題。
+
+    孤兒的判準比殭屍嚴：待辦標記必須在條目最前面，因為孤兒不看年齡，誤報會直接變成
+    每晚都在報的假帳。"""
+    if memspec.PENDING_LIST_ENTRY_REGEX.match(line) is None:
+        return False
+    body = memspec.pending_line_body(line)
+    body = memspec.PENDING_LIST_ENTRY_REGEX.sub("", body, count=1)
+    return (
+        memspec.PENDING_LEADING_MARKER_REGEX.match(body) is not None
+        and memspec.PENDING_CLOSED_REGEX.search(line) is None
+        and memspec.PENDING_VERIFY_MARKER not in line.casefold()
+    )
+
+
 def _is_pending(line):
     # 引用、卡片連結與程式碼片段裡的待辦字眼是被談論的對象，不是一條沒做完的事。
     body = memspec.pending_line_body(line)
@@ -56,6 +78,7 @@ def scan_vault(vault, max_age_days=memspec.PENDING_MAX_AGE_DAYS, today=None, dea
     vault = Path(vault).resolve()
     today = today or datetime.now(timezone.utc).date()
     cards = []
+    orphans = []
     oversized = 0
     timed_out = False
     for path in memsearch.card_files(vault):
@@ -71,11 +94,21 @@ def scan_vault(vault, max_age_days=memspec.PENDING_MAX_AGE_DAYS, today=None, dea
         except OSError:
             continue
         zombies = []
+        strays = []
         lines = text.splitlines()
         # Frontmatter describes the card; only body lines can be to-do items.
         frontmatter, closing = memspec.split_frontmatter(text)
         body_start = 0 if frontmatter is None else (len(lines) if closing is None else closing + 1)
+        card_owner = _declared_owner(text)
         for number, line in enumerate(lines[body_start:], body_start + 1):
+            if (
+                not card_owner
+                and _is_orphan_candidate(line)
+                and not memspec.PENDING_OWNER_INLINE_REGEX.search(
+                    memspec.pending_line_body(line))
+            ):
+                # 孤兒不看年齡：一條沒人負責的待辦從寫下那一刻就是孤兒。
+                strays.append({"line": number, "text": line.strip()[:160]})
             if not _is_pending(line):
                 continue
             age, source = _line_age_days(line, stat.st_mtime, today)
@@ -87,16 +120,25 @@ def scan_vault(vault, max_age_days=memspec.PENDING_MAX_AGE_DAYS, today=None, dea
                 "oldest_days": max(item["age_days"] for item in zombies),
                 "lines": zombies,
             })
+        if strays:
+            orphans.append({
+                "path": path.relative_to(vault).as_posix(),
+                "lines": strays,
+            })
     cards.sort(key=lambda item: (-item["oldest_days"], item["path"]))
+    orphans.sort(key=lambda item: (-len(item["lines"]), item["path"]))
     return {
         "vault": str(vault),
         "max_age_days": max_age_days,
         "zombie_cards": len(cards),
         "zombie_lines": sum(len(item["lines"]) for item in cards),
         "oldest_days": max((item["oldest_days"] for item in cards), default=0),
+        "orphan_cards": len(orphans),
+        "orphan_lines": sum(len(item["lines"]) for item in orphans),
         "oversized_skipped": oversized,
         "timed_out": timed_out,
         "cards": cards,
+        "orphans": orphans,
     }
 
 
@@ -105,9 +147,14 @@ def _print_report(report, output):
         print(f"{card['path']} oldest={card['oldest_days']}d", file=output)
         for item in card["lines"]:
             print(f"  L{item['line']} {item['age_days']}d({item['date_source']}) {item['text']}", file=output)
+    for card in report.get("orphans", ()):
+        print(f"{card['path']} 沒有人掛名（缺 owner 欄位）", file=output)
+        for item in card["lines"]:
+            print(f"  L{item['line']} {item['text']}", file=output)
     print(
         f"PENDING zombies={report['zombie_lines']} cards={report['zombie_cards']} "
-        f"oldest={report['oldest_days']}d max_age={report['max_age_days']}d",
+        f"oldest={report['oldest_days']}d max_age={report['max_age_days']}d "
+        f"orphans={report.get('orphan_lines', 0)} orphan_cards={report.get('orphan_cards', 0)}",
         file=output,
     )
 
