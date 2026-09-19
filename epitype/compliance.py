@@ -81,11 +81,17 @@ def armed_rules(vault):
             text = _one_line(ruling.get("require_text"))
             if when and text:
                 rules.append(Rule(name, "require", path, mtime, [], when, text, "", ()))
+            # 內建檢查（報告長度、引了沒打開過的檔）也算武裝。不算的話，夜間報表會把
+            # 它們數成「沒武裝」，而它們每一回合都在擋。
+            if _one_line(ruling.get(memspec.TURN_CHECK_FIELD)) in memspec.TURN_CHECK_NAMES:
+                rules.append(Rule(name, "turn_check", path, mtime, [], "", "", "", ()))
         try:
             guard = pretooluse_gate._read_guard(path)
         except Exception:
             guard = None
-        if isinstance(guard, dict) and (guard.get("substrings") or guard.get("requires")):
+        if isinstance(guard, dict) and (
+            guard.get("substrings") or guard.get("requires") or guard.get("when")
+        ):
             rules.append(
                 Rule(
                     _one_line(guard.get("card")) or path.stem,
@@ -248,6 +254,11 @@ def replay(rules, transcripts, epoch=None, since=None):
                         if all(fragment in payload for fragment in rule.fragments):
                             hits.append(Hit(rule.card, "guard", session, stamp,
                                             "＋".join(rule.fragments), _digest(payload), True, payload))
+                    continue
+                if rule.kind == "turn_check":
+                    # 內建檢查重放不了：長度要看 owner 那一次有沒有要求完整，引用要看
+                    # 那一場的工具往來附記，兩樣都不在這裡的文字裡。夜間要知道它們擋了
+                    # 幾次，讀閘門紀錄，不要從文字重猜——猜出來的數字比沒有數字更糟。
                     continue
                 text = final_text  # 閘看的是整個回合，重放也是
                 if not text:

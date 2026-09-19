@@ -21,7 +21,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "adapters" / "claude")]
-from epitype import memspec
+from epitype import compliance, memspec
 import _hook_common as common
 import pretooluse_gate as pretool
 
@@ -773,6 +773,128 @@ class RequireWhenThen(unittest.TestCase):
 
     def test_a_claim_inside_a_quotation_is_a_citation_not_a_claim(self):
         self.assertIsNone(self.block("規則擋的是「這批已完成」這種沒有證據的講法。"))
+
+
+class FieldCombination(unittest.TestCase):
+    """欄位帶了、但帶的組合本身就是錯的——派工給唯讀偵察兵卻指名最貴的模型。
+
+    2026-09-19 實測近三天 294 次派工，scout 配 opus 有 47 次（16%）。字面片段做不到這
+    件事：型別名與模型名都可能只是出現在派工單正文裡，比對字串會擋到只是提到的呼叫。"""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="epitype-when-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+        self.vault = self.root / "vault"
+        self.vault.mkdir()
+        self.config = self.root / "config.json"
+        common.write_config(self.config, [self.vault])
+        environment = patch.dict(os.environ, {
+            memspec.EPITYPE_CONFIG_ENV: str(self.config),
+            memspec.DREAM_MODE_ENV: memspec.DREAM_MODE_OFF,
+            "HOME": str(self.root / "home"), "USERPROFILE": str(self.root / "home"),
+        })
+        environment.start()
+        self.addCleanup(environment.stop)
+        self.mismatch_card()
+
+    def mismatch_card(self, **overrides):
+        fields = {
+            "name": "偵察兵不要配貴模型",
+            "description": "唯讀偵察派給最貴的模型是白花錢",
+            "guard_tool": "Task",
+            "guard_when": ["subagent_type=scout|Explore", "model=opus|claude-opus-5"],
+            "guard_advice": "偵察改指 haiku 或 sonnet",
+        }
+        fields.update(overrides)
+        (self.vault / "scar-mismatch.md").write_text(card(**fields), encoding="utf-8")
+        cache = pretool._guard_cache(self.vault)
+        if cache.exists():
+            cache.unlink()
+
+    def call(self, tool_input, defects=None):
+        return pretool._handle(
+            {"tool_name": "Task", "tool_input": tool_input, "session_id": "when-test"},
+            time.monotonic(),
+            [] if defects is None else defects,
+        )
+
+    def denial(self, value):
+        return (value or {}).get("hookSpecificOutput", {}).get("permissionDecisionReason")
+
+    def test_the_bad_pair_is_denied_and_the_reason_names_both_fields(self):
+        reason = self.denial(self.call(
+            {"subagent_type": "scout", "model": "opus", "prompt": "去找那個檔在哪"}))
+        self.assertIsNotNone(reason)
+        self.assertIn("subagent_type=scout", reason)
+        self.assertIn("model=opus", reason)
+        self.assertIn("haiku", reason)
+
+    def test_an_alternative_spelling_on_either_side_still_hits(self):
+        for kind, model in (("Explore", "opus"), ("scout", "claude-opus-5"),
+                            ("EXPLORE", "OPUS")):
+            self.assertIsNotNone(
+                self.denial(self.call({"subagent_type": kind, "model": model})),
+                msg=f"{kind}+{model}")
+
+    def test_the_right_pairing_passes(self):
+        for kind, model in (("scout", "haiku"), ("scout", "sonnet"),
+                            ("coder", "opus"), ("auditor", "opus"),
+                            ("general-purpose", "opus")):
+            self.assertIsNone(
+                self.denial(self.call({"subagent_type": kind, "model": model})),
+                msg=f"{kind}+{model}")
+
+    def test_one_condition_alone_is_not_a_hit(self):
+        # 條件要全部成立才算命中。半數成立就擋的話，這張卡等於禁掉整個 opus 或整個 scout。
+        self.assertIsNone(self.denial(self.call({"subagent_type": "scout"})))
+        self.assertIsNone(self.denial(self.call({"model": "opus"})))
+        self.assertIsNone(self.denial(self.call({})))
+
+    def test_the_model_name_inside_the_prompt_text_is_not_a_field_value(self):
+        # 字面比對法在這裡會誤擋：派工單正文提到 opus 不等於這次派給 opus。
+        self.assertIsNone(self.denial(self.call({
+            "subagent_type": "scout", "model": "haiku",
+            "prompt": "去查一下哪幾次派工用了 opus"})))
+
+    def test_it_only_judges_its_own_tool(self):
+        self.assertIsNone(self.denial(pretool._handle(
+            {"tool_name": "Bash", "tool_input": {"subagent_type": "scout", "model": "opus"},
+             "session_id": "when-test"}, time.monotonic(), [])))
+
+    def test_a_malformed_condition_disarms_the_card_and_says_so(self):
+        # 條件寫壞就整張卡不生效，而且要出聲。忽略壞掉的那一條會讓守衛擋得比作者寫的更多。
+        self.mismatch_card(guard_when=["subagent_type", "model=opus"])
+        defects = []
+        self.assertIsNone(self.denial(self.call(
+            {"subagent_type": "scout", "model": "opus"}, defects)))
+        self.assertTrue(defects)
+        self.assertIn("guard_when", defects[0])
+
+    def test_too_many_conditions_disarms_the_card_and_says_so(self):
+        self.mismatch_card(guard_when=[f"field{index}=value" for index in range(
+            memspec.ACTION_GUARD_MAX_WHEN + 1)])
+        defects = []
+        self.assertIsNone(self.denial(self.call({"field0": "value"}, defects)))
+        self.assertTrue(defects)
+
+    def test_the_escape_hatch_is_to_match_the_type_to_the_work(self):
+        # 沒有魔法字可以繞過：真的需要貴模型，就派一個名副其實的型別。一道改不過去的閘
+        # 會被繞過，所以逃生口必須存在——這裡的逃生口是換型別，而不是加一句咒語。
+        self.assertIsNone(self.denial(self.call(
+            {"subagent_type": "general-purpose", "model": "opus",
+             "prompt": "這件事需要判斷，不只是找檔"})))
+
+    def test_an_expired_field_guard_stops_blocking(self):
+        # 欄位型守衛的到期日以前被靜靜忽略：卡片寫了期限、閘永遠不會停（2026-09-19 修）。
+        self.mismatch_card(valid_until="2020-01-01")
+        self.assertIsNone(self.denial(self.call(
+            {"subagent_type": "scout", "model": "opus"})))
+
+    def test_a_when_only_card_counts_as_armed(self):
+        # 夜間報表若不認這種武裝，會叫人去「補武裝」一張已經在擋的卡。
+        rules = compliance.armed_rules(self.vault)
+        self.assertTrue([rule for rule in rules if rule.kind == "guard"])
 
 
 class GuardCardLint(unittest.TestCase):

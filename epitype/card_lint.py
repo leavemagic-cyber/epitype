@@ -245,14 +245,24 @@ def _guard_findings(fields, front_lines):
             f"{memspec.ACTION_GUARD_REQUIRES_FIELD} {len(requires)} 個，"
             f"超過上限 {memspec.ACTION_GUARD_MAX_REQUIRES}",
         ))
-    if not items and not requires:
-        # 兩種守衛各自成立：比對字面片段的，和問「呼叫少了哪個欄位」的。只認前者會讓
-        # 照規範寫的後者被判不合格——而那正是 2026-09-19 修掉的那種互斥規範。
+    when = memspec.sequence_items(front_lines, memspec.ACTION_GUARD_WHEN_FIELD)
+    if len(when) > memspec.ACTION_GUARD_MAX_WHEN:
+        findings.append((
+            FAIL,
+            "guard",
+            f"{memspec.ACTION_GUARD_WHEN_FIELD} {len(when)} 組，"
+            f"超過上限 {memspec.ACTION_GUARD_MAX_WHEN}",
+        ))
+    if not items and not requires and not when:
+        # 三種守衛各自成立：比對字面片段的、問「呼叫少了哪個欄位」的、問「哪兩個欄位
+        # 配在一起」的。只認第一種會讓照規範寫的後兩種被判不合格——而那正是 2026-09-19
+        # 修掉的那種互斥規範。
         findings.append((
             FAIL,
             "guard",
             f"缺 {memspec.ACTION_GUARD_ALL_OF_FIELD} 的字面片段，"
-            f"也缺 {memspec.ACTION_GUARD_REQUIRES_FIELD} 的必填欄位：守衛卡至少要有一種條件",
+            f"也缺 {memspec.ACTION_GUARD_REQUIRES_FIELD} 的必填欄位"
+            f"或 {memspec.ACTION_GUARD_WHEN_FIELD} 的欄位組合：守衛卡至少要有一種條件",
         ))
     elif not items:
         pass

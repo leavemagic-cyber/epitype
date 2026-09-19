@@ -54,7 +54,7 @@ _DECISION_CACHE_FILENAME = "stop_decisions.json"
 # The cached entry is discovery only — whether this card declares a ruling at all.
 # Every authority the gate acts on is re-read from this turn's bytes below, so a
 # ruling that gained fields (require_when/require_text/advice) needs no version bump.
-_DECISION_CACHE_VERSION = 4
+_DECISION_CACHE_VERSION = 5
 _KEY = "key"
 _DECIDED_AT = "decided_at"
 _QUOTE = "quote"
@@ -64,11 +64,14 @@ _REQUIRE_WHEN = "require_when"
 _REQUIRE_TEXT = "require_text"
 _ADVICE = "advice"
 _EXPIRES = "expires"
+_TURN_CHECK_RULE = "turn_check"
+
+_Turn = namedtuple("_Turn", "texts prompt")
 
 _Decision = namedtuple(
     "_Decision",
     "key decided_at quote forbidden aliases path decided_by require_when require_text advice"
-    " applies_to",
+    " applies_to turn_check turn_check_limit",
 )
 
 
@@ -152,6 +155,8 @@ def _read_decision(path):
         _EXPIRES: _one_line(fields.get(memspec.VALID_UNTIL_FIELD))
         or _one_line(fields.get(memspec.GRANT_EXPIRES_FIELD)),
         memspec.APPLIES_TO_FIELD: _one_line(fields.get(memspec.APPLIES_TO_FIELD)).casefold(),
+        memspec.TURN_CHECK_FIELD: _one_line(fields.get(memspec.TURN_CHECK_FIELD)).casefold(),
+        memspec.TURN_CHECK_LIMIT_FIELD: _one_line(fields.get(memspec.TURN_CHECK_LIMIT_FIELD)),
     }
 
 
@@ -160,7 +165,9 @@ def _read_cache(cache_path):
         loaded = json.loads(cache_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}, {}, ""
-    if not isinstance(loaded, dict) or loaded.get("version") not in (2, _DECISION_CACHE_VERSION):
+    # 只認當前版本。以前連舊版也收，於是每次加新欄位（到期、只管寫檔、內建檢查），
+    # 舊快取裡那些卡就少了那個欄位、新規則對它們默默不生效——而且完全沒有訊號。
+    if not isinstance(loaded, dict) or loaded.get("version") != _DECISION_CACHE_VERSION:
         return {}, {}, ""
     manifest = loaded.get("manifest")
     rulings = loaded.get("decisions")
@@ -293,6 +300,8 @@ def _decisions(vault, started_at, defects=None):
                 _one_line(ruling.get(_REQUIRE_TEXT)),
                 _one_line(ruling.get(_ADVICE)),
                 _one_line(ruling.get(memspec.APPLIES_TO_FIELD)).casefold(),
+                _one_line(ruling.get(memspec.TURN_CHECK_FIELD)).casefold(),
+                _one_line(ruling.get(memspec.TURN_CHECK_LIMIT_FIELD)),
             )
         )
     if verified != old_manifest or rulings != cached or cursor != old_cursor:
@@ -478,6 +487,68 @@ def _requirement_gap(decision, message, defects):
     return _one_line(triggered.group(0))[: memspec.STOP_GATE_FRAGMENT_MAX_CHARS]
 
 
+def _turn_body(message):
+    """去掉圍籬程式碼區塊的訊息本文。
+
+    貼給 owner 的指令與程式不算「話多」，也不算「宣稱查過某個檔」——那是他要的東西。"""
+    return memspec.TURN_LENGTH_FENCE_REGEX.sub(" ", message)
+
+
+def _length_gap(decision, message, turn):
+    """回合太長就回一句理由，否則 None。owner 這次要完整或詳細就不擋。"""
+    limit = memspec.TURN_LENGTH_DEFAULT_LIMIT
+    raw = str(decision.turn_check_limit or "").strip()
+    if raw.isdigit() and int(raw) > 0:
+        limit = int(raw)
+    chars = len(_turn_body(message).strip())
+    if chars <= limit:
+        return None
+    if memspec.TURN_LENGTH_EXEMPT_REGEX.search(turn.prompt or ""):
+        return None
+    return memspec.TURN_LENGTH_REASON.format(
+        chars=chars, decision=_named(decision), limit=limit, advice=decision.advice)
+
+
+def _cited_unread_gap(decision, message, turn, opened_names):
+    """宣稱查過某個檔、而這一場沒有任何工具呼叫碰過它，就回一句理由。
+
+    附記是空的時候一律不擋：那可能是動手閘沒註冊、或這一場真的還沒動過任何工具，跟
+    「沒讀就答」長得一模一樣。分不出來的時候不擋人。"""
+    if not opened_names:
+        return None
+    body = _turn_body(message)
+    claim = memspec.TURN_CITED_CLAIM_REGEX.search(body)
+    if claim is None:
+        return None
+    seen = set()
+    for match in memspec.TURN_CITED_PATH_REGEX.finditer(body):
+        name = match.group(0).replace("\\", "/").rsplit("/", 1)[-1].casefold()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        if len(seen) > memspec.TURN_CITED_MAX_PATHS:
+            break
+        if name in memspec.TURN_CITED_GENERIC_NAMES or name in opened_names:
+            continue
+        return memspec.TURN_CITED_UNREAD_REASON.format(
+            claim=claim.group(0), path=name, decision=_named(decision), advice=decision.advice)
+    return None
+
+
+def _turn_check_gap(decision, message, turn, opened_names, defects):
+    """卡片指名的內建檢查。字面比對看不到的事實，由這裡判。"""
+    name = decision.turn_check
+    if not name:
+        return None
+    if name not in memspec.TURN_CHECK_NAMES:
+        defects.append(memspec.TURN_CHECK_UNKNOWN_DEFECT.format(
+            decision=decision.key, name=name, known="、".join(memspec.TURN_CHECK_NAMES)))
+        return None
+    if name == memspec.TURN_CHECK_LENGTH:
+        return _length_gap(decision, message, turn)
+    return _cited_unread_gap(decision, message, turn, opened_names)
+
+
 def _is_question(sentence):
     text = sentence.strip()
     return text.endswith(memspec.STOP_GATE_QUESTION_ENDINGS) or any(
@@ -587,7 +658,15 @@ def _vaults(config, event):
 
 
 def _turn_texts(transcript_path):
-    """Assistant text blocks since the last real user prompt, in order; [] if unreadable.
+    """Assistant text blocks since the last real user prompt, in order; [] if unreadable."""
+    return _turn_context(transcript_path).texts
+
+
+def _turn_context(transcript_path):
+    """這一回合說了什麼，以及 owner 這次問的是什麼。
+
+    要 owner 的原話，是因為有些檢查只在「他沒要求這樣」的時候才成立：報告長度上限就是
+    一例——他自己點了完整或詳細，長就是他要的。
 
     Tool results are logged as user rows but do not end a turn (same rule as the
     nightly replay's `compliance._turns`)."""
@@ -598,8 +677,9 @@ def _turn_texts(transcript_path):
             stream.seek(max(0, size - memspec.STOP_GATE_TURN_TAIL_BYTES))
             lines = stream.read().decode("utf-8", "replace").splitlines()
     except (OSError, ValueError, TypeError):
-        return []
+        return _Turn([], "")
     texts = []
+    prompt = ""
     for line in reversed(lines):
         try:
             row = json.loads(line)
@@ -613,6 +693,13 @@ def _turn_texts(transcript_path):
                 isinstance(block, dict) and block.get("type") == "tool_result" for block in content
             ):
                 continue
+            if isinstance(content, str):
+                prompt = content
+            elif isinstance(content, list):
+                prompt = " ".join(
+                    str(block.get("text") or "") for block in content
+                    if isinstance(block, dict) and block.get("type") == "text"
+                )
             break
         if row.get("type") != "assistant" or not isinstance(content, list):
             continue
@@ -620,7 +707,7 @@ def _turn_texts(transcript_path):
             if isinstance(block, dict) and block.get("type") == "text" and str(block.get("text") or "").strip():
                 texts.append(block["text"])
     texts.reverse()
-    return texts
+    return _Turn(texts, prompt[: memspec.STOP_GATE_MESSAGE_MAX_CHARS])
 
 
 def _handle(event, started_at, defects):
@@ -632,17 +719,18 @@ def _handle(event, started_at, defects):
         return None
     # Mid-turn text reaches the owner too; reading only the last message let every card
     # miss whatever was said before a tool call.
-    texts = _turn_texts(event.get("transcript_path")) if event.get("transcript_path") else []
+    turn = _turn_context(event.get("transcript_path")) if event.get("transcript_path") else _Turn([], "")
+    texts = list(turn.texts)
     if message.strip() not in memspec.join_turn_text(texts):
         texts.append(message)
     message = memspec.join_turn_text(texts)
     config = load_config(started_at)
     if config is None:
         return None
-    return _verdict(event, message, config, started_at, defects)
+    return _verdict(event, message, config, started_at, defects, turn)
 
 
-def _verdict(event, message, config, started_at, defects):
+def _verdict(event, message, config, started_at, defects, turn=None):
     decisions = []
     vaults = _vaults(config, event)
     for index, vault in enumerate(vaults):
@@ -704,6 +792,27 @@ def _verdict(event, message, config, started_at, defects):
                     ),
                 )
             )
+            break
+    if not verdicts:
+        # 字面比對看不到的那兩件事：這回合的話有多長、引的檔這一場有沒有被打開過。
+        # 只有卡片指名了內建檢查才跑，而且附記讀得到才比對。
+        turn = turn if turn is not None else _Turn([], "")
+        opened_names = frozenset()
+        if any(decision.turn_check == memspec.TURN_CHECK_CITED_UNREAD for decision in decisions):
+            try:
+                from epitype import opened as opened_module
+
+                opened_names = opened_module.names(
+                    governance_vault(config),
+                    event.get("session_id", event.get("sessionId")),
+                )
+            except Exception:
+                opened_names = frozenset()
+        for decision in decisions:
+            reason = _turn_check_gap(decision, message, turn, opened_names, defects)
+            if reason is None:
+                continue
+            verdicts.append((decision, _TURN_CHECK_RULE, reason))
             break
     if not verdicts:
         for decision in decisions:

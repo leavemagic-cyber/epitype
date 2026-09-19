@@ -996,6 +996,16 @@ ACTION_GUARD_UNLESS_FIELD = "guard_unless"
 ACTION_GUARD_MAX_REQUIRES = 4
 ACTION_GUARD_FIELD_NAME_PATTERN = r"[A-Za-z0-9_]{1,40}"
 ACTION_GUARD_REQUIRES_REASON = "🛑 傷疤卡（{card}）：這次 {tool} 沒有帶 {fields}——{advice}"
+# 第三類：欄位帶了，但帶的組合本身就是錯的。派工給唯讀偵察兵卻指名最貴的模型是實例——
+# 2026-09-19 近三天 294 次派工裡，scout 配 opus 有 47 次（16%）。字面片段比對做不到這件
+# 事：模型名與型別名都可能出現在派工單的正文裡，比對字串會擋到只是「提到」的呼叫。
+# 所以條件寫成欄位＝值，全部成立才擋；值可以用 | 列幾個同義的寫法。
+ACTION_GUARD_WHEN_FIELD = "guard_when"
+ACTION_GUARD_MAX_WHEN = 4
+ACTION_GUARD_WHEN_ALTERNATIVE = "|"
+ACTION_GUARD_WHEN_REASON = (
+    "🛑 傷疤卡（{card}）：這次 {tool} 的 {pairs} 是不該配在一起的組合——{advice}"
+)
 # 一道守衛短時間內一直擋同一件事，代表我在動手之前根本不知道它在那裡：擋下來是對的，
 # 但每一次都要先撞牆才想起來，一次一輪。2026-09-18 一天之內同一張卡擋了 20 次、跨四個
 # 視窗，而宿主的自動模式指示本來就叫人用 shell 改檔——兩邊互相打，擋的那一方只能一直贏
@@ -1051,6 +1061,64 @@ REQUIRE_TEXT_FIELD = "require_text"
 STOP_GATE_REQUIRE_REASON = (
     "📌 這回合命中「{decision}」的條件（{trigger}），依裁定必須同時寫出{expected}。"
     "{advice}"
+)
+# 有一類毛病連 require_when 都抓不到，因為它不在「說了什麼字」裡，而在「這一回合的事實」
+# 裡：報告有多長、引的檔這一場到底有沒有打開過。字面比對永遠看不到這兩件事。
+#
+# 做法：卡片仍然是政策正本（要不要管、上限多少、為什麼），但判斷由閘門內建的檢查做。
+# 卡片用 turn_check 指名要用哪一個內建檢查，turn_check_limit 給它一個數字。
+# 這樣 owner 看得到、調得動、退得掉，而邏輯不必硬塞進正規表示式。
+TURN_CHECK_FIELD = "turn_check"
+TURN_CHECK_LIMIT_FIELD = "turn_check_limit"
+TURN_CHECK_LENGTH = "length"
+TURN_CHECK_CITED_UNREAD = "cited_unread"
+TURN_CHECK_NAMES = (TURN_CHECK_LENGTH, TURN_CHECK_CITED_UNREAD)
+TURN_CHECK_UNKNOWN_DEFECT = (
+    "⚠ Epitype 回合閘：裁定 {decision} 的 turn_check「{name}」不是內建檢查"
+    "（可用的是 {known}），這一項暫不生效。"
+)
+# 圍籬程式碼區塊不算「報告太長」：貼給 owner 的指令與程式是他要的東西，不是話多。
+TURN_LENGTH_FENCE_PATTERN = r"```.*?(?:```|\Z)"
+TURN_LENGTH_FENCE_REGEX = re.compile(TURN_LENGTH_FENCE_PATTERN, re.S)
+# 2026-09-19 實測 3,952 個回合：中位數 817 字、p90 2,769 字。門檻設在 3,000。
+TURN_LENGTH_DEFAULT_LIMIT = 3000
+# owner 自己要完整／詳細／清單／教學的時候，長是他點的，不擋。
+TURN_LENGTH_EXEMPT_PATTERN = (
+    r"完整|詳細|全部|都列|列出|清單|報告|寫清楚|說明|教我|怎麼用|步驟|計畫|對照|逐條"
+    r"|prompt|PROMPT|plan|full|detail"
+)
+TURN_LENGTH_EXEMPT_REGEX = re.compile(TURN_LENGTH_EXEMPT_PATTERN)
+TURN_LENGTH_REASON = (
+    "📌 這回合的話 {chars} 字，超過「{decision}」的 {limit} 字上限，而 owner 這次沒有要完整或詳細。"
+    "把細節寫進檔案，回覆只留結論、數字與檔案連結。{advice}"
+)
+# 「沒讀正本就答」的可查版本：訊息裡宣稱查過某個檔，那個檔名就必須出現在這一場的
+# 工具往來裡（讀、寫、搜尋、shell 指令、工具回傳都算）。比對用檔名不用完整路徑：
+# 路徑寫法有很多種，比對完整路徑會製造誤擋，而誤擋比漏擋貴。
+TURN_CITED_CLAIM_PATTERN = r"查過|實查|實際查|核對過|確認過|讀了|讀過|看過|檢查過|驗證過|對照過"
+TURN_CITED_CLAIM_REGEX = re.compile(TURN_CITED_CLAIM_PATTERN)
+TURN_CITED_PATH_PATTERN = (
+    r"[A-Za-z0-9_.\\/~-]*[A-Za-z0-9_-]+"
+    r"\.(?:py|md|json|jsonl|txt|ps1|sh|sqlite3|toml|yaml|yml|cfg|ini|csv)\b"
+)
+TURN_CITED_PATH_REGEX = re.compile(TURN_CITED_PATH_PATTERN)
+# 這幾個檔名到處都有，講的通常是「那一類檔」而不是某一個檔，拿來比對只會誤擋。
+TURN_CITED_GENERIC_NAMES = frozenset({
+    "__init__.py", "setup.py", "readme.md", "claude.md", "agents.md", "memory.md",
+})
+TURN_CITED_MAX_PATHS = 40
+# 動手閘附記「這一場碰過哪些檔」的地方，回合閘結束時來讀。
+OPENED_DIRECTORY = "opened"
+OPENED_MAX_BYTES = 256 * 1024
+OPENED_PAYLOAD_MAX_CHARS = 8000
+# 只認「這次呼叫指向哪個檔」的欄位，不認 content／new_string 那類內容欄位。寫一個檔案
+# 時它的內容裡提到的檔名，並沒有被打開——把那些也算進來，等於自己替自己背書。
+OPENED_TARGET_FIELDS = (
+    "file_path", "path", "notebook_path", "file_paths", "paths", "command", "glob", "pattern",
+)
+TURN_CITED_UNREAD_REASON = (
+    "📌 這回合說了「{claim}」，卻沒有任何一次工具往來打開過 {path}。"
+    "依「{decision}」：先把它讀出來，或把那句宣稱改成沒讀。{advice}"
 )
 # 閘門一律只讀頂層欄位。這幾個欄位一旦被包進下一層，卡片看起來武裝、實際什麼都不擋。
 CARD_GATE_FIELDS = (
@@ -1136,7 +1204,8 @@ UNENFORCEABLE_FIELD = "unenforceable"
 # （規則卡走生成核心那條路，本來就會到達代理面前）。
 CARD_ARMING_TYPES = ("feedback", "correction", "scar", "habit")
 CARD_ARMING_REQUIRED_FROM = "2026-09-16"
-CARD_ARMING_FIELDS = (FORBIDDEN_FIELD, ACTION_GUARD_TOOL_FIELD, REQUIRE_WHEN_FIELD)
+CARD_ARMING_FIELDS = (
+    FORBIDDEN_FIELD, ACTION_GUARD_TOOL_FIELD, REQUIRE_WHEN_FIELD, TURN_CHECK_FIELD)
 CARD_UNARMED_REASON = (
     "這是一張記錄 owner 行為糾正的卡，卻沒有任何擋得住的欄位（{armed}），"
     "也沒有寫 {unenforceable}: <理由>。只被讀到的規則 2026-09-16 已實測無效——"

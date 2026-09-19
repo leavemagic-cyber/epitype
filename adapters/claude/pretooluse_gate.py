@@ -347,7 +347,7 @@ def _append_write_block(vault, rule, subject, target, started_at, session_id=Non
     )
 
 
-_Guard = namedtuple("_Guard", "card tool substrings advice path requires unless")
+_Guard = namedtuple("_Guard", "card tool substrings advice path requires unless when")
 
 
 def _read_guard(path):
@@ -379,11 +379,13 @@ def _read_guard(path):
             memspec.ACTION_GUARD_ALL_OF_FIELD,
             memspec.ACTION_GUARD_REQUIRES_FIELD,
             memspec.ACTION_GUARD_UNLESS_FIELD,
+            memspec.ACTION_GUARD_WHEN_FIELD,
         ),
     )
     substrings = declared[memspec.ACTION_GUARD_ALL_OF_FIELD]
     requires = declared[memspec.ACTION_GUARD_REQUIRES_FIELD]
     unless_items = declared[memspec.ACTION_GUARD_UNLESS_FIELD]
+    when_items = declared[memspec.ACTION_GUARD_WHEN_FIELD]
     problem = None
     field_name = re.compile(memspec.ACTION_GUARD_FIELD_NAME_PATTERN + r"\Z")
     unless = []
@@ -401,6 +403,31 @@ def _read_guard(path):
         return memspec.ACTION_GUARD_DEFECT.format(
             card=name, field=memspec.ACTION_GUARD_UNLESS_FIELD, reason=problem
         )
+    when = []
+    for item in when_items:
+        name_part, _, value_part = str(item).partition("=")
+        if not field_name.match(name_part.strip()) or not value_part.strip():
+            problem = f"{memspec.ACTION_GUARD_WHEN_FIELD} 的「{item}」不是 欄位=值 的寫法"
+            break
+        values = tuple(
+            piece.strip().casefold()
+            for piece in value_part.split(memspec.ACTION_GUARD_WHEN_ALTERNATIVE)
+            if piece.strip()
+        )
+        if not values:
+            problem = f"{memspec.ACTION_GUARD_WHEN_FIELD} 的「{item}」沒有值"
+            break
+        when.append((name_part.strip(), values))
+    if problem:
+        return memspec.ACTION_GUARD_DEFECT.format(
+            card=name, field=memspec.ACTION_GUARD_WHEN_FIELD, reason=problem
+        )
+    if len(when) > memspec.ACTION_GUARD_MAX_WHEN:
+        return memspec.ACTION_GUARD_DEFECT.format(
+            card=name,
+            field=memspec.ACTION_GUARD_WHEN_FIELD,
+            reason=f"條件 {len(when)} 組，超過上限 {memspec.ACTION_GUARD_MAX_WHEN}",
+        )
     for item in requires:
         if not field_name.match(str(item).strip()):
             return memspec.ACTION_GUARD_DEFECT.format(
@@ -414,8 +441,9 @@ def _read_guard(path):
             field=memspec.ACTION_GUARD_REQUIRES_FIELD,
             reason=f"必填欄位 {len(requires)} 個，超過上限 {memspec.ACTION_GUARD_MAX_REQUIRES}",
         )
-    if not substrings and requires:
-        # 必填欄位型的守衛不需要字面片段：它問的是「少了什麼」，而少掉的東西沒有字面。
+    if not substrings and (requires or when):
+        # 欄位型的守衛不需要字面片段：它問的是「少了什麼」或「哪兩個欄位配在一起」，
+        # 兩者都沒有字面可以比對。
         return {
             "card": name,
             "tool": tool,
@@ -426,11 +454,18 @@ def _read_guard(path):
             ),
             "requires": [str(item).strip() for item in requires],
             "unless": [list(pair) for pair in unless],
+            "when": [[pair[0], list(pair[1])] for pair in when],
+            # 到期日只存不判（同下）。漏了這一行的話，欄位型守衛的 valid_until 會被
+            # 靜靜忽略——卡片寫了期限、閘永遠不會停。
+            "expires": one_line(
+                fields.get(memspec.VALID_UNTIL_FIELD) or fields.get(memspec.GRANT_EXPIRES_FIELD)
+            ),
         }
     if not substrings:
         problem = (
             f"既沒有 {memspec.ACTION_GUARD_ALL_OF_FIELD} 的字面片段，"
             f"也沒有 {memspec.ACTION_GUARD_REQUIRES_FIELD} 的必填欄位"
+            f"或 {memspec.ACTION_GUARD_WHEN_FIELD} 的欄位組合"
         )
     elif len(substrings) > memspec.ACTION_GUARD_MAX_SUBSTRINGS:
         problem = f"片段超過 {memspec.ACTION_GUARD_MAX_SUBSTRINGS} 個"
@@ -487,7 +522,7 @@ def warm_guard_cache(vaults, started_at):
 
 _WARM_CAP = 1 << 30
 # 2：守衛的項目多了必填欄位、逃生口與到期日；版本不對就整份重讀。
-_GUARD_CACHE_VERSION = 2
+_GUARD_CACHE_VERSION = 3
 
 
 def _guards(vault, started_at, defects, cap=None):
@@ -578,7 +613,9 @@ def _guards(vault, started_at, defects, cap=None):
         entry = known[card_path]
         if isinstance(entry, str):
             defects.append(entry)
-        elif isinstance(entry, dict) and (entry.get("substrings") or entry.get("requires")):
+        elif isinstance(entry, dict) and (
+            entry.get("substrings") or entry.get("requires") or entry.get("when")
+        ):
             if memspec.card_expired(entry.get("expires")):
                 # 過期的守衛不再攔人；時限型的規則要自己停下來，不能靠人記得去拔。
                 continue
@@ -594,6 +631,12 @@ def _guards(vault, started_at, defects, cap=None):
                         (pair[0], pair[1])
                         for pair in (entry.get("unless") or ())
                         if isinstance(pair, (list, tuple)) and len(pair) == 2
+                    ),
+                    tuple(
+                        (pair[0], tuple(str(value).casefold() for value in pair[1]))
+                        for pair in (entry.get("when") or ())
+                        if isinstance(pair, (list, tuple)) and len(pair) == 2
+                        and isinstance(pair[1], (list, tuple)) and pair[1]
                     ),
                 )
             )
@@ -657,6 +700,12 @@ def _guard_review(event, tool_name, tool_input, config, started_at, defects):
                 str(fields.get(name, "")).strip() == value for name, value in guard.unless
             ):
                 continue
+            # 欄位組合型的條件：全部成立才算命中。一組不成立就整張卡跳過，不是「部分命中」。
+            if guard.when and not all(
+                str(fields.get(name, "") or "").strip().casefold() in values
+                for name, values in guard.when
+            ):
+                continue
             missing = [
                 name for name in guard.requires if not str(fields.get(name, "") or "").strip()
             ]
@@ -667,6 +716,16 @@ def _guard_review(event, tool_name, tool_input, config, started_at, defects):
                     card=guard.card,
                     tool=tool_name,
                     fields="、".join(f"「{name}」" for name in missing),
+                    advice=guard.advice,
+                )
+            elif not guard.substrings and guard.when:
+                reason = memspec.ACTION_GUARD_WHEN_REASON.format(
+                    card=guard.card,
+                    tool=tool_name,
+                    pairs="＋".join(
+                        f"{name}={str(fields.get(name, '') or '').strip()}"
+                        for name, _values in guard.when
+                    ),
                     advice=guard.advice,
                 )
             else:
@@ -1504,6 +1563,32 @@ def _selftest():
     return 0 if status == "PASS" else 1
 
 
+def _best_effort_record(event):
+    """附記這次呼叫碰到的檔名。壞了就算了：這是紀錄，不是關卡，不能讓它擋住工作。"""
+    try:
+        from epitype import opened
+
+        config = load_config(_STARTED_AT)
+        if config is None:
+            return
+        tool_input = event.get("tool_input")
+        if not isinstance(tool_input, dict):
+            return
+        payload = " ".join(
+            str(value)
+            for name, value in tool_input.items()
+            if name in memspec.OPENED_TARGET_FIELDS
+            and isinstance(value, (str, int, float, list, tuple))
+        )
+        opened.record(
+            governance_vault(config, for_write=True),
+            event.get("session_id", event.get("sessionId")),
+            payload,
+        )
+    except Exception:
+        pass
+
+
 def main():
     if "--selftest" in sys.argv[1:]:
         return _selftest()
@@ -1511,6 +1596,11 @@ def main():
     try:
         event = read_event(sys.stdin)
         value = _handle(event, _STARTED_AT, defects)
+        # 這一次呼叫碰到哪些檔，附記給回合閘用：說「我查過某個檔」的時候，那個檔名
+        # 必須在這裡出現過。擋下的呼叫不記——那個檔根本沒被打開。
+        if value is None or value.get("hookSpecificOutput", {}).get(
+                "permissionDecision") != "deny":
+            _best_effort_record(event)
         # A guard card that stopped being enforced is the silent failure §34 warned
         # about, so it is named on stderr rather than swallowed.
         for line in defects[: memspec.GATE_DEFECT_MAX_LINES]:

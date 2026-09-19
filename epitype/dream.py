@@ -378,6 +378,10 @@ def _section_decisions(vaults, today, since_date, config):
                     has_forbidden_reader(card.path)
                     or bool(card.fields.get(memspec.REQUIRE_WHEN_FIELD, "").strip()
                             and card.fields.get(memspec.REQUIRE_TEXT_FIELD, "").strip())
+                    # 內建檢查也是武裝的一種：報告長度、引了沒打開過的檔，這兩件事字面
+                    # 比對永遠看不到，但閘擋得下來（2026-09-19）。
+                    or card.fields.get(memspec.TURN_CHECK_FIELD, "").strip()
+                    in memspec.TURN_CHECK_NAMES
                     or bool(card.fields.get(memspec.UNENFORCEABLE_FIELD, "").strip())
                 )
                 has_forbidden = armed
