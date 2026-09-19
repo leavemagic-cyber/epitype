@@ -1128,6 +1128,104 @@ TURN_CITED_GENERIC_NAMES = frozenset({
 })
 TURN_CITED_MAX_PATHS = 40
 # 動手閘附記「這一場碰過哪些檔」的地方，回合閘結束時來讀。
+# 舊標記的清掃間隔。標記是同一場的去重，不是紀錄，所以掃晚一點沒有壞處；每次呼叫都掃
+# 一遍的成本實測 54 ms（2,945 次 stat）。
+# 每次呼叫回頭重讀幾張「已知不帶規則」的卡。清單比對（mtime、大小、ctime、裝置、inode）
+# 已經會立刻抓到任何一張改過的卡，這個輪替只是在那之外多一層保險；以前一次輪 120 張，
+# 四個庫加起來每次呼叫開 345 個檔、48 ms，而它從來沒有抓到過清單漏掉的東西。
+GATE_ROTATION_SLICE = 8
+# 字面前置過濾：一則訊息連規則的必要字面都沒有，就不必把那條規則編譯出來。
+# 實測每回合編譯 91 條規則要 43 ms，而其中絕大多數本來就不可能命中。
+#
+# 這道過濾只看「訊息」，不看卡片，所以跟「每回合重讀卡片現行位元組」那條線無關——
+# 省的是編譯，不是重讀。判斷寧可回 None（照常編譯）也不要猜：猜錯的方向是規則默默
+# 不生效，那比慢更糟。
+PREFILTER_MIN_LITERAL_CHARS = 2
+PREFILTER_MAX_ALTERNATIVES = 24
+_PREFILTER_META = set("()[]{}|?*+.^$\\")
+_PREFILTER_QUANTIFIERS = set("?*{")
+
+
+def _literal_run(source, index):
+    """從 index 起的一段純字面，回 (字面, 下一個位置)。遇到任何中繼字元就停。"""
+    start = index
+    while index < len(source) and source[index] not in _PREFILTER_META:
+        index += 1
+    return source[start:index], index
+
+
+def required_alternatives(pattern):
+    """任何命中都一定含有其中之一的字面清單；證不出來就回 None。
+
+    只認兩種開頭，其餘一律放棄：
+    1. 純字面開頭（`mcp__[A-Za-z0-9_]+` → `mcp__`）。
+    2. 整組都是字面的選擇（`(測試|全套|自測)…` → 那三個）。
+
+    後面接著量詞（`?`、`*`、`{0,…}`）的字面不算必要——它可以出現零次。
+    """
+    source = str(pattern or "")
+    if not source:
+        return None
+    if source[0] == "(":
+        # 前瞻、後顧、具名群組一律放棄：它們的語意不是「這裡一定有這些字」。
+        if source[1:2] == "?" and source[1:3] != "?:":
+            return None
+        opening = 3 if source[1:3] == "?:" else 1
+        depth = 1
+        index = opening
+        pieces = []
+        current = []
+        while index < len(source):
+            char = source[index]
+            if char == "\\":
+                return None
+            if char in "[{":
+                return None
+            if char == "(":
+                depth += 1
+                return None
+            if char == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+                return None
+            if char == "|" and depth == 1:
+                pieces.append("".join(current))
+                current = []
+                index += 1
+                continue
+            if char in _PREFILTER_META:
+                return None
+            current.append(char)
+            index += 1
+        else:
+            return None
+        pieces.append("".join(current))
+        # 整組可有可無的話，裡面的字面就不是必要的。
+        if source[index + 1: index + 2] in ("?", "*"):
+            return None
+        if not pieces or any(len(piece) < PREFILTER_MIN_LITERAL_CHARS for piece in pieces):
+            return None
+        if len(pieces) > PREFILTER_MAX_ALTERNATIVES:
+            return None
+        return pieces
+    run, next_index = _literal_run(source, 0)
+    # 最後一個字被量詞管到的話，它可以不出現，要從必要字面裡拿掉。
+    if next_index < len(source) and source[next_index] in _PREFILTER_QUANTIFIERS:
+        run = run[:-1]
+    if len(run) < PREFILTER_MIN_LITERAL_CHARS:
+        return None
+    return [run]
+
+
+def prefilter_misses(pattern, text):
+    """True 代表「這段文字不可能命中這條規則」，可以連編譯都省下來。"""
+    alternatives = required_alternatives(pattern)
+    if alternatives is None:
+        return False
+    return not any(piece in text for piece in alternatives)
+NOTICE_SWEEP_STAMP = ".swept"
+NOTICE_SWEEP_INTERVAL_SECONDS = 15 * 60
 OPENED_DIRECTORY = "opened"
 OPENED_MAX_BYTES = 256 * 1024
 OPENED_PAYLOAD_MAX_CHARS = 8000

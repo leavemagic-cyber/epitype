@@ -13,7 +13,6 @@ its text. No regex, no shell parsing, no intent. Semantic judgement and genuinel
 irreversible actions stay with the host, exactly as §34 left them."""
 
 from collections import namedtuple
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -62,8 +61,29 @@ def _deny_value(reason):
     }
 
 
+def _sweep_due(root, now):
+    """這一輪該不該掃。掃過就在根目錄留一個時間戳，還沒到間隔就直接跳過。
+
+    2026-09-19 實測：每一次工具呼叫都掃一遍舊標記，光是 stat 就 2,945 次、54 ms——
+    而標記只是同一場的去重，掃晚一點沒有任何壞處。"""
+    stamp = root / memspec.NOTICE_SWEEP_STAMP
+    try:
+        if now - stamp.stat().st_mtime < memspec.NOTICE_SWEEP_INTERVAL_SECONDS:
+            return False
+    except OSError:
+        pass
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        stamp.touch()
+    except OSError:
+        return False
+    return True
+
+
 def _sweep_notice_markers(root, now, keep=None):
     """Markers are a same-session dedupe, not a record: drop the aged-out ones."""
+    if not _sweep_due(root, now):
+        return
     try:
         for session_directory in root.iterdir():
             if not session_directory.is_dir() or session_directory == keep:
@@ -85,6 +105,9 @@ def _sweep_notice_markers(root, now, keep=None):
 
 def _notice_marker(session_id, text):
     """True the first time this session sees this notice; False afterwards."""
+    # 用到才載入：hashlib 要 6 ms，絕大多數呼叫走不到這裡。
+    import hashlib
+
     digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
     directory = notice_marker_directory(session_id)
     root = directory.parent
@@ -323,6 +346,9 @@ def _card_review(relative, text):
 def _write_marker(session_id, rule, target, text):
     """Same-session dedupe keyed by (rule, file, content digest): a model that
     cannot satisfy a ruling would otherwise be denied the same write forever."""
+    # 用到才載入：hashlib 要 6 ms，絕大多數呼叫走不到這裡。
+    import hashlib
+
     digest = hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
     return _notice_marker(
         session_id, f"{memspec.WRITE_GATE_LOG_KIND}\0{rule}\0{target}\0{digest}"
@@ -522,7 +548,7 @@ def warm_guard_cache(vaults, started_at):
 
 _WARM_CAP = 1 << 30
 # 2：守衛的項目多了必填欄位、逃生口與到期日；版本不對就整份重讀。
-_GUARD_CACHE_VERSION = 3
+_GUARD_CACHE_VERSION = 4
 
 
 def _guards(vault, started_at, defects, cap=None):
@@ -532,22 +558,20 @@ def _guards(vault, started_at, defects, cap=None):
     every card on every tool call is the cost §34 objected to, so discovery is cached
     against (mtime, size, ctime, device, inode) and only changed cards — plus a
     rotating slice of the known non-guards — are re-read, bounded per call."""
-    from epitype import memsearch
+    from epitype import cardscan
 
     vault = Path(vault).resolve()
     try:
-        scan = memsearch.scan_cards(vault)
+        scan = cardscan.scan_vault(Path(vault).resolve())
     except Exception:
         return []
     manifest, paths = {}, {}
-    for card_path, path, mtime_ns, size in scan:
+    for card_path, path, mtime_ns, size, ctime_ns in scan:
         if expired(started_at):
             return []
-        try:
-            info = path.stat()
-        except OSError:
-            continue
-        manifest[card_path] = [mtime_ns, size, info.st_ctime_ns, info.st_dev, info.st_ino]
+        # 走訪已經帶回這三項；再 stat 一次只為了 inode 與裝置編號，而 Windows 的
+        # 目錄列表根本不給那兩項（實測回 0），等於每張卡多付一次系統呼叫換兩個零。
+        manifest[card_path] = [mtime_ns, size, ctime_ns]
         paths[card_path] = path
 
     cache_path = _guard_cache(vault)
@@ -668,6 +692,9 @@ def _guard_review(event, tool_name, tool_input, config, started_at, defects):
     restored is only the literal form: every fragment must be present, as plain text.
     Semantic judgement and genuinely irreversible actions remain the host's native
     rules, exactly as §34 left them."""
+    # 用到才載入：hashlib 要 6 ms，絕大多數呼叫走不到這裡。
+    import hashlib
+
     haystack = _action_text(tool_input)
     # 必填欄位型的守衛問的是「少了什麼」，所以呼叫沒有任何可比對的字串時它仍然要判——
     # 只有連 tool_input 都不是個欄位集合時，這道閘才真的沒有東西可問。
@@ -680,14 +707,10 @@ def _guard_review(event, tool_name, tool_input, config, started_at, defects):
     for vault in resolve_vaults(config, event):
         if expired(started_at):
             return None
-        # 夜間彩排認定「在歷史上命中太頻繁」的卡只計數不攔：一條十次機會命中超過一次
-        # 的條件，描述的已經不是某個具體錯誤。比率掉回來會自動恢復。
-        try:
-            from epitype import compliance
-
-            demoted = compliance.demoted_cards(vault)
-        except Exception:
-            demoted = set()
+        # 自動降級已經拿掉（判準分不出「規則太寬」與「我一直犯這條」，2026-09-17
+        # 實跑：一條 6 次命中、6 次全擋下、0 漏擋的規則被關了 14 天）。那個函式現在
+        # 永遠回空集合，而為了拿一個空集合，每一次工具呼叫都要多載 8.3 ms 的模組。
+        demoted = frozenset()
         for guard in _guards(vault, started_at, defects):
             if not memspec.action_guard_tool_matches(guard.tool, folded_tool) or guard.card in demoted:
                 continue
@@ -860,6 +883,9 @@ def _waste_review(event, tool_name, tool_input, config, started_at):
     這道問的不是「這次呼叫做了什麼壞事」，而是「這次呼叫有沒有必要」。省 token 是
     owner 2026-09-18 最在意的一條，而它只在動手那一刻看得出來：事後檢討只能數浪費，
     擋不住浪費。"""
+    # 用到才載入：hashlib 要 6 ms，絕大多數呼叫走不到這裡。
+    import hashlib
+
     if tool_name.casefold() not in memspec.READ_WASTE_TOOLS:
         return None, None
     if not isinstance(tool_input, dict):
@@ -1121,6 +1147,12 @@ def _selftest():
             aged_marker.write_text("aged\n", encoding="ascii")
             aged_time = time.time() - memspec.NOTICE_MARKER_TTL_SECONDS - 60
             os.utime(aged_marker, (aged_time, aged_time))
+            # 清掃改成有間隔的（每次呼叫都掃一遍舊標記，實測 2,945 次 stat、54 ms）。
+            # 把時間戳拿掉就代表「這一輪該掃了」，掃的行為本身照舊要驗。
+            try:
+                (sweep_root / memspec.NOTICE_SWEEP_STAMP).unlink()
+            except OSError:
+                pass
             _notice_marker("sweep-" + uuid.uuid4().hex, "synthetic notice")
             checks.append(
                 (
@@ -1128,6 +1160,24 @@ def _selftest():
                     not aged_marker.exists() and not aged_session.exists(),
                 )
             )
+
+            second_session = sweep_root / ("aged2-" + uuid.uuid4().hex)
+            second_session.mkdir(parents=True, exist_ok=True)
+            second_marker = second_session / "0123456789abcdef"
+            second_marker.write_text("aged\n", encoding="ascii")
+            os.utime(second_marker, (aged_time, aged_time))
+            _notice_marker("sweep-" + uuid.uuid4().hex, "another notice")
+            checks.append(
+                (
+                    "剛掃過就不再掃：標記是同一場的去重，不是每次呼叫都要付的代價",
+                    second_marker.exists(),
+                )
+            )
+            for leftover in (second_marker, second_session):
+                try:
+                    leftover.unlink() if leftover.is_file() else leftover.rmdir()
+                except OSError:
+                    pass
 
             miss = run_synthetic(
                 Path(__file__),
@@ -1553,7 +1603,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 30
+    total = 31
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

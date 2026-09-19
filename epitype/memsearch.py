@@ -11,8 +11,9 @@ import stat
 import time
 
 try:
-    from . import memspec
+    from . import cardscan, memspec
 except ImportError:  # Direct script execution keeps the U1 CLI contract.
+    import cardscan
     import memspec
 
 
@@ -288,7 +289,7 @@ def _read_card(path):
 
 def card_files(vault):
     """Public view of the card scan so other lints share one privacy filter."""
-    return _markdown_files(Path(vault).resolve())
+    return cardscan.card_files(vault)
 
 
 _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
@@ -356,7 +357,7 @@ def mark_stale(vault):
 def scan_cards(vault):
     """Public view of the card scan with its stats, for callers that keep their own
     manifest cache (the action gate)."""
-    return _scan_vault(Path(vault).resolve())
+    return cardscan.scan_cards(vault)
 
 
 def indexed_card_paths(vault):

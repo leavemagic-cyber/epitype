@@ -9,7 +9,6 @@ from pathlib import Path
 import re
 from re import _constants as _re_constants
 from re import _parser as _re_parser
-import tempfile
 import time
 
 from epitype import capture_route, memspec
@@ -26,12 +25,26 @@ def session_component(session_id, limit=128):
     return re.sub(r"[^A-Za-z0-9._-]", "_", text).strip("._-")[:limit] or "nosession"
 
 
+def temp_root():
+    """暫存目錄，不載入 tempfile。
+
+    `tempfile.gettempdir()` 會連帶把 shutil 一起拉進來，實測 10.7 ms——而每一次工具呼叫
+    都要付這一份，只為了取一個路徑。環境變數查不到時才退回 tempfile，讓它仍然正確。"""
+    for name in ("TMPDIR", "TEMP", "TMP"):
+        value = os.environ.get(name)
+        if value and os.path.isdir(value):
+            return Path(value)
+    import tempfile as _tempfile
+
+    return Path(_tempfile.gettempdir())
+
+
 def recall_marker_directory(session_id):
-    return Path(tempfile.gettempdir()) / memspec.RECALL_MARKER_DIRECTORY / session_component(session_id)
+    return temp_root() / memspec.RECALL_MARKER_DIRECTORY / session_component(session_id)
 
 
 def notice_marker_directory(session_id):
-    return Path(tempfile.gettempdir()) / memspec.NOTICE_MARKER_DIRECTORY / session_component(session_id)
+    return temp_root() / memspec.NOTICE_MARKER_DIRECTORY / session_component(session_id)
 
 
 def _clear_marker_directory(directory):

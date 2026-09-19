@@ -14,7 +14,6 @@ error it guards against.
 
 from collections import namedtuple
 import codecs
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -54,7 +53,7 @@ _DECISION_CACHE_FILENAME = "stop_decisions.json"
 # The cached entry is discovery only — whether this card declares a ruling at all.
 # Every authority the gate acts on is re-read from this turn's bytes below, so a
 # ruling that gained fields (require_when/require_text/advice) needs no version bump.
-_DECISION_CACHE_VERSION = 5
+_DECISION_CACHE_VERSION = 6
 _KEY = "key"
 _DECIDED_AT = "decided_at"
 _QUOTE = "quote"
@@ -166,6 +165,31 @@ def _read_decision(path):
     }
 
 
+def _decision_from_ruling(vault, card_path, ruling):
+    """一份裁定資料變成閘門用的結構；不該生效的回 None。"""
+    if not isinstance(ruling, dict) or not ruling.get(_KEY):
+        return None
+    if memspec.card_expired(ruling.get(_EXPIRES)):
+        # 過期的卡不再擋人。時限型的規則（試行一週、某日之前不要做某事）本來就該
+        # 自己停下來，靠人記得去拔掉的話，它會一直擋到有人被擋為止。
+        return None
+    return _Decision(
+        _one_line(ruling.get(_KEY)),
+        _one_line(ruling.get(_DECIDED_AT)),
+        _one_line(ruling.get(_QUOTE))[: memspec.STOP_GATE_QUOTE_MAX_CHARS],
+        tuple(_strings(ruling.get(memspec.FORBIDDEN_FIELD))),
+        tuple(_strings(ruling.get(memspec.ALIASES_FIELD))),
+        vault / card_path,
+        _one_line(ruling.get(memspec.DECIDED_BY_FIELD)),
+        _one_line(ruling.get(_REQUIRE_WHEN)),
+        _one_line(ruling.get(_REQUIRE_TEXT)),
+        _one_line(ruling.get(_ADVICE)),
+        _one_line(ruling.get(memspec.APPLIES_TO_FIELD)).casefold(),
+        _one_line(ruling.get(memspec.TURN_CHECK_FIELD)).casefold(),
+        _one_line(ruling.get(memspec.TURN_CHECK_LIMIT_FIELD)),
+    )
+
+
 def _read_cache(cache_path):
     try:
         loaded = json.loads(cache_path.read_text(encoding="utf-8"))
@@ -207,27 +231,25 @@ def _decisions(vault, started_at, defects=None):
     Negative entries rotate, because timestamps/size/identity cannot prove that a
     non-decision's contents never changed. Unread work retains its old signature.
     """
-    from epitype import memsearch
+    from epitype import cardscan
 
     defects = [] if defects is None else defects
     vault = Path(vault).resolve()
     try:
-        scan = memsearch.scan_cards(vault)
+        scan = cardscan.scan_vault(Path(vault).resolve())
     except Exception:
         return []
     manifest, paths = {}, {}
-    for card_path, path, mtime_ns, size in scan:
+    for card_path, path, mtime_ns, size, ctime_ns in scan:
         if expired(started_at):
             # 逾時在盤點階段：這個庫這一輪一條都沒生效。靜靜回空的話，「這回合沒擋」
             # 與「這回合根本沒檢查」長得一模一樣。
             defects.append(memspec.STOP_GATE_INCOMPLETE_DEFECT.format(
                 checked=0, total="?", vault=vault.name))
             return []
-        try:
-            info = path.stat()
-        except OSError:
-            continue
-        manifest[card_path] = [mtime_ns, size, info.st_ctime_ns, info.st_dev, info.st_ino]
+        # 走訪已經帶回這三項；再 stat 一次只為了 inode 與裝置編號，而 Windows 的
+        # 目錄列表根本不給那兩項（實測回 0），等於每張卡多付一次系統呼叫換兩個零。
+        manifest[card_path] = [mtime_ns, size, ctime_ns]
         paths[card_path] = path
     cache_path = vault / memspec.FTS_INDEX_DIRECTORY / _DECISION_CACHE_FILENAME
     old_manifest, cached, cursor = _read_cache(cache_path)
@@ -273,6 +295,9 @@ def _decisions(vault, started_at, defects=None):
             defects.append(memspec.STOP_GATE_INCOMPLETE_DEFECT.format(
                 checked=index, total=len(candidates), vault=vault.name))
             break
+        # 每一回合重讀：時間戳與大小證明不了內容沒變（把日期 01-02 改成 01-03，大小
+        # 一模一樣）。這一段是 tests/stop_freshness_regression.py 釘住的線，省時間不
+        # 能從這裡省——2026-09-19 試過信清單，那份測試當場擋下來。
         if card_path not in refreshed:
             try:
                 rulings[card_path] = _read_decision(paths[card_path])
@@ -287,29 +312,9 @@ def _decisions(vault, started_at, defects=None):
             defects.append(memspec.STOP_GATE_INCOMPLETE_DEFECT.format(
                 checked=index, total=len(candidates), vault=vault.name))
             break
-        if not isinstance(ruling, dict) or not ruling.get(_KEY):
-            continue
-        if memspec.card_expired(ruling.get(_EXPIRES)):
-            # 過期的卡不再擋人。時限型的規則（試行一週、某日之前不要做某事）本來就該
-            # 自己停下來，靠人記得去拔掉的話，它會一直擋到有人被擋為止。
-            continue
-        found.append(
-            _Decision(
-                _one_line(ruling.get(_KEY)),
-                _one_line(ruling.get(_DECIDED_AT)),
-                _one_line(ruling.get(_QUOTE))[: memspec.STOP_GATE_QUOTE_MAX_CHARS],
-                tuple(_strings(ruling.get(memspec.FORBIDDEN_FIELD))),
-                tuple(_strings(ruling.get(memspec.ALIASES_FIELD))),
-                vault / card_path,
-                _one_line(ruling.get(memspec.DECIDED_BY_FIELD)),
-                _one_line(ruling.get(_REQUIRE_WHEN)),
-                _one_line(ruling.get(_REQUIRE_TEXT)),
-                _one_line(ruling.get(_ADVICE)),
-                _one_line(ruling.get(memspec.APPLIES_TO_FIELD)).casefold(),
-                _one_line(ruling.get(memspec.TURN_CHECK_FIELD)).casefold(),
-                _one_line(ruling.get(memspec.TURN_CHECK_LIMIT_FIELD)),
-            )
-        )
+        decision = _decision_from_ruling(vault, card_path, ruling)
+        if decision is not None:
+            found.append(decision)
     if verified != old_manifest or rulings != cached or cursor != old_cursor:
         _write_cache(cache_path, verified, rulings, cursor)
     # 逾時要回「已經讀到的那些」，不是整批丟掉。以前逾時一律回空，整個庫零條生效，而
@@ -390,17 +395,12 @@ def _exceptions(vault):
 
 
 def _demoted(vault):
-    """Cards the nightly rehearsal found fire too often across history to block.
+    """自動降級已經拿掉，這裡永遠是空的。
 
-    A rule that matches more than one turn in ten is not describing a mistake any
-    more, it is describing how the model writes. Counting continues; blocking stops
-    until the rate comes back down, so the demotion undoes itself."""
-    try:
-        from epitype import compliance
-
-        return compliance.demoted_cards(vault)
-    except Exception:
-        return set()
+    判準分不出「規則太寬」與「我一直犯這條」：2026-09-17 實跑，一條 6 次命中、6 次
+    全部擋下、0 漏擋的規則被關了 14 天。留著這個函式是讓呼叫端不必分岔；不再匯入
+    彩排模組，因為為了拿一個空集合，每一回合都要多載 8.3 ms。"""
+    return frozenset()
 
 
 def _forbidden_fragment(decision, message, defects, masked=None):
@@ -415,6 +415,10 @@ def _forbidden_fragment(decision, message, defects, masked=None):
     masked = [] if masked is None else masked
     quoted = _quoted_spans(message)
     for pattern in decision.forbidden:
+        # 這則訊息連這條規則的必要字面都沒有，命不了中，不必編譯它（省 43 ms／回合）。
+        # 代價講明白：壞掉的樣式那一則缺陷行會延到「字面真的出現」的那一回合才報出來。
+        if memspec.prefilter_misses(pattern, message):
+            continue
         # A pattern that will not compile used to be dropped, which left the card
         # looking armed and enforcing nothing. It now falls back to matching the text
         # literally — narrower than any working pattern, so it cannot over-block —
@@ -454,6 +458,9 @@ def _requirement_gap(decision, message, defects):
     A pattern the shared validator rejects is dropped and named on stderr: a
     requirement nobody can fix must not block every turn forever."""
     if not decision.require_when or not decision.require_text:
+        return None
+    # 觸發條件的必要字面都不在這則訊息裡，就不可能命中——連編譯都省下來。
+    if memspec.prefilter_misses(decision.require_when, message):
         return None
     patterns = {}
     for field, pattern in (
@@ -624,6 +631,9 @@ def _best_effort_audit(callback, *arguments):
 
 def _message_digest(message):
     """Short digest of a turn's text — the same value the nightly replay computes."""
+    # 用到才載入：hashlib 要 6 ms，絕大多數呼叫走不到這裡。
+    import hashlib
+
     return hashlib.sha256(str(message).encode("utf-8", errors="replace")).hexdigest()[:16]
 
 
@@ -633,6 +643,9 @@ def _claim_marker(session_id, decision_key, message):
 
     A marker that cannot be written must not silence the ruling, so a filesystem
     error claims the block rather than swallowing it."""
+    # 用到才載入：hashlib 要 6 ms，絕大多數呼叫走不到這裡。
+    import hashlib
+
     if not session_id:
         return True
     digest = hashlib.sha256(
