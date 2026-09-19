@@ -726,6 +726,23 @@ class RequireWhenThen(unittest.TestCase):
         )
         self.assertIsNotNone(self.block("這裡出現壞日期禁語。"))
 
+    def test_evidence_inside_a_quotation_still_counts_as_evidence(self):
+        # 2026-09-19：「owner 原話要附引號原文」的證據就是引號本身。證據也走引號外比對
+        # 的話，一則有三處引號的正常回報會因為遮罩把每個「…」連括號一起遮掉而被擋，
+        # 而同一句單獨送反而過（引用佔比超過上限、遮罩整則失效）。
+        (self.vault / "decision-verbatim.md").write_text(
+            "---\nname: 原話要附引文\ndescription: 說明\n"
+            "require_when: (owner|你)(的)?(原話|逐字)\nrequire_text: 「\n---\nbody\n",
+            encoding="utf-8",
+        )
+        long_report = (
+            "設好了。偏好「新開的 session 自動接上遠端遙控」已改成 On。"
+            "這條定規寫成記憶卡，附你的原話「設定規則，session預設可以遠端遙控」。"
+            "要改回去在「設定」關掉即可。本回合讀了：偏好設定兩次。"
+        )
+        self.assertIsNone(self.block(long_report))
+        self.assertIsNotNone(self.block("這是你的原話，我照做了。"))
+
     def test_a_speech_only_ruling_still_blocks_what_i_say(self):
         (self.vault / "decision-speech.md").write_text(
             "---\nname: 只管說話\ndescription: 說明\napplies_to: speech\n"

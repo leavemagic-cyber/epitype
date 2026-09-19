@@ -468,7 +468,12 @@ def _requirement_gap(decision, message, defects):
     triggered = outside_quotes(patterns[memspec.REQUIRE_WHEN_FIELD])
     if triggered is None:
         return None
-    if outside_quotes(patterns[memspec.REQUIRE_TEXT_FIELD]) is not None:
+    # 觸發條件要在引號外面找（引述別人的話不是我在主張），但**證據要在整則裡找**。
+    # 證據常常就是一段引文——「owner 原話要附引號原文」這條的證據根本就是引號本身。
+    # 2026-09-19 真的發生：一則正常長度、有三處引號的回報，附了原話仍被擋，因為遮罩
+    # 把每個「…」連同括號一起遮掉，證據就消失了；同一句單獨送反而過（引用佔比超過
+    # 上限、遮罩整則失效）。證據被引號遮掉的閘，會在訊息越規矩的時候越擋人。
+    if patterns[memspec.REQUIRE_TEXT_FIELD].search(message) is not None:
         return None
     return _one_line(triggered.group(0))[: memspec.STOP_GATE_FRAGMENT_MAX_CHARS]
 
