@@ -107,6 +107,12 @@ HOOK_MAX_OUTPUT_BYTES = 10 * 1024
 # 路徑，現在只服務 forbidden。）
 FORBIDDEN_REGEX_MAX_CHARS = 1024
 GATE_DEFECT_MAX_LINES = 3
+# 出錯就安靜放行，是這個專案最不能容忍的那一種壞掉：沒有人會來報案，因為外面看起來
+# 跟「沒有東西要擋」一模一樣。2026-09-19 盤點兩道閘加共用模組共 25 處吞掉錯誤，其中
+# 最要命的是 main() 最外層那一圈——設定檔壞了、記憶庫讀不到、程式有 bug，全都走它，
+# 而它只是 `pass`。規則層沒生效就要講出來，講不出判斷至少要講「這次沒檢查」。
+GATE_DEGRADED_NOTICE = "⚠ Epitype {gate}：規則層這次沒有生效（{reason}）——這一次沒有被任何規則檢查過。"
+GATE_VAULT_UNREADABLE_NOTICE = "⚠ Epitype {gate}：記憶庫 {vault} 這次讀不到（{reason}），它的規則這一次全部沒生效。"
 EPITYPE_CONFIG_ENV = "EPITYPE_CONFIG"
 CONFIG_VAULTS_FIELD = "vaults"
 CONFIG_BUDGET_BYTES_FIELD = "budget_bytes"

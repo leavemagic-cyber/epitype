@@ -563,7 +563,11 @@ def _guards(vault, started_at, defects, cap=None):
     vault = Path(vault).resolve()
     try:
         scan = cardscan.scan_vault(Path(vault).resolve())
-    except Exception:
+    except Exception as exc:
+        # 這個庫的規則這一次一條都沒生效。安靜回空的話，外面看起來就像「這裡沒有
+        # 規則」——而那正是沒有人會去查的那個答案。
+        defects.append(memspec.GATE_VAULT_UNREADABLE_NOTICE.format(
+            gate="動作閘", vault=Path(vault).name, reason=type(exc).__name__))
         return []
     manifest, paths = {}, {}
     for card_path, path, mtime_ns, size, ctime_ns in scan:
@@ -1660,8 +1664,17 @@ def main():
             is_deny = output.get("permissionDecision") == "deny"
             if is_deny or not expired(_STARTED_AT):
                 emit(value)
-    except Exception:
-        pass
+    except Exception as exc:
+        # 這裡是最後一道：設定檔壞了、記憶庫讀不到、程式本身有 bug，全都走這一圈。
+        # 仍然 fail-open（不擋住工作），但裝了卻用不了的時候一定要講一句——安靜退場
+        # 跟「沒有東西要擋」在外面看起來一模一樣，而這正是本專案最不能容忍的那種壞掉。
+        # 沒有設定檔則照舊安靜：那代表這個專案根本沒在用 Epitype，不是壞掉。
+        try:
+            if config_path().exists():
+                print(memspec.GATE_DEGRADED_NOTICE.format(
+                    gate="動作閘", reason=type(exc).__name__), file=sys.stderr)
+        except Exception:
+            pass
     return 0
 
 

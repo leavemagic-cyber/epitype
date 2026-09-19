@@ -123,15 +123,21 @@ def _normalised_event(value):
     return value
 
 
-def load_config(started_at):
-    if expired(started_at):
-        return None
+def config_path():
+    """設定檔該在哪。用來分辨「沒裝 Epitype」與「裝了但壞了」——前者安靜是對的，
+    後者安靜就是本專案最不能容忍的那種壞掉。"""
     configured = os.environ.get(memspec.EPITYPE_CONFIG_ENV)
-    path = (
+    return (
         Path(configured).expanduser()
         if configured
         else Path.home() / ".epitype" / "config.json"
     )
+
+
+def load_config(started_at):
+    if expired(started_at):
+        return None
+    path = config_path()
     raw = path.read_text(encoding="utf-8")
     value = json.loads(raw)
     if not isinstance(value, dict):

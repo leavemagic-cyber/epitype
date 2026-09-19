@@ -33,6 +33,7 @@ from _hook_common import (
     emit,
     expired,
     governance_vault,
+    config_path,
     load_config,
     native_cwd_vaults,
     read_event,
@@ -237,7 +238,11 @@ def _decisions(vault, started_at, defects=None):
     vault = Path(vault).resolve()
     try:
         scan = cardscan.scan_vault(Path(vault).resolve())
-    except Exception:
+    except Exception as exc:
+        # 這個庫的規則這一次一條都沒生效。安靜回空的話，外面看起來就像「這裡沒有
+        # 規則」——而那正是沒有人會去查的那個答案。
+        defects.append(memspec.GATE_VAULT_UNREADABLE_NOTICE.format(
+            gate="回合閘", vault=Path(vault).name, reason=type(exc).__name__))
         return []
     manifest, paths = {}, {}
     for card_path, path, mtime_ns, size, ctime_ns in scan:
@@ -1231,10 +1236,13 @@ def _selftest():
                 bad_config,
             )
             checks.append((
-                "bad config fails open silently",
+                # 壞掉的設定檔照舊 fail-open（不擋住工作），但不再安靜：裝了卻用不了
+                # 的時候，「這一回合沒有被任何規則檢查過」必須講出來。沒有設定檔才安靜，
+                # 那代表這個專案沒在用 Epitype，不是壞掉——動作閘那一題釘的就是那一邊。
+                "bad config fails open, and says the rule layer did not load",
                 bad_result.returncode == 0
                 and not bad_result.stdout
-                and not bad_result.stderr,
+                and "規則層這次沒有生效" in bad_result.stderr,
             ))
 
             evil_vault = root / "evil-vault"
@@ -1358,8 +1366,17 @@ def main():
             print(line, file=sys.stderr)
         if _emits(value, _STARTED_AT):
             emit(value)
-    except Exception:
-        pass
+    except Exception as exc:
+        # 這裡是最後一道：設定檔壞了、記憶庫讀不到、程式本身有 bug，全都走這一圈。
+        # 仍然 fail-open（不擋住工作），但裝了卻用不了的時候一定要講一句——安靜退場
+        # 跟「沒有東西要擋」在外面看起來一模一樣，而這正是本專案最不能容忍的那種壞掉。
+        # 沒有設定檔則照舊安靜：那代表這個專案根本沒在用 Epitype，不是壞掉。
+        try:
+            if config_path().exists():
+                print(memspec.GATE_DEGRADED_NOTICE.format(
+                    gate="回合閘", reason=type(exc).__name__), file=sys.stderr)
+        except Exception:
+            pass
     return 0
 
 
