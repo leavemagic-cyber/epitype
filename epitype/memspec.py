@@ -717,6 +717,26 @@ MIXED_CARD_TYPES = (
 # 照留當紀錄（歸位不刪）。只有 hold 仍在等——那是「今天還判不了」。
 DRAFT_TRIAGED_FIELD = "triaged"
 DRAFT_TRIAGED_PENDING_VALUES = ("hold",)
+DRAFT_TRIAGED_AT_FIELD = "triaged_at"
+DRAFT_TRIAGED_BY_FIELD = "triaged_by"
+DRAFT_TRIAGE_NOTE_FIELD = "triage_note"
+# 草稿有時限：放著沒人用就自己過期，不必有人去審。
+#
+# 自動捕捉每天都在產草稿，而「等人審」的隊伍只會長不會短——2026-09-19 盤點時 45 份放超過
+# 七天，而那個數字每天都在往上。一個永遠審不完的隊伍，實際效果等於沒有人在審；差別只在
+# 它每天還要佔掉報表一行與一個人的注意力。owner 2026-09-19 要求根本性解決這件事。
+#
+# 檔案不刪、只標過期（協定允許歸檔、不允許刪除），而且可逆：把 triaged 清掉就回到待審。
+DRAFT_TRIAGED_EXPIRED = "expired"
+DRAFT_TTL_DAYS = 7
+DRAFT_TTL_ACTOR = "auto-ttl"
+DRAFT_TTL_NOTE = "放超過 {days} 天沒有被用到，自動過期；檔案照留，要撈回來把 triaged 清掉即可"
+DRAFT_TTL_EXAMPLE_LIMIT = 5
+DRAFT_FIND_LIMIT = 20
+# 年齡看這幾個欄位，都沒有才退回檔案時間。
+DRAFT_AGE_FIELDS = ("captured_at", "harvested_at", LAST_VERIFIED_AT_FIELD)
+# 只有自動捕捉來的才會被時間吃掉；人手寫的提案是有人刻意放進來的。
+DRAFT_AUTO_PROVENANCE = ("auto-captured", "auto-harvested")
 # 這些欄位必須是至少一項的序列，空清單等於沒有欄位。
 CARD_LIST_FIELDS = (ALIASES_FIELD, FORBIDDEN_FIELD, RULE_INCIDENTS_FIELD, RULE_HOSTS_FIELD)
 CARD_EVENT_REQUIRED_FIELDS = (NAME_FIELD, DESCRIPTION_FIELD, CAPTURED_AT_FIELD, SESSION_FIELD)

@@ -69,6 +69,7 @@ DRAFT_AGING_STALE_DAYS = 30
 DRAFT_OLDEST_ROWS = 5
 DRAFT_ROOT_GROUP = "(root)"
 DRAFT_AGING_COMMAND = "人工審閱最舊的那幾份 _drafts/**：轉正、歸檔或留著都行，但要有人看過"
+DRAFT_TTL_ERROR = "草稿到期在 {vault} 出錯（{detail}），這個庫今晚沒有自動過期"
 MIXED_MAX_PER_VAULT = 50
 MIXED_REASON_HEADINGS = "正文有 {count} 個 `## ` 小標"
 MIXED_REASON_BYTES = "正文 {bytes} 位元組 > {cap}"
@@ -722,13 +723,35 @@ def _draft_aging_of(vault, today):
     return entries
 
 
-def _section_draft_aging(vaults, today, since_date, config):
+def _expire_stale_drafts(vaults, today, context=None):
+    """先讓放太久沒人用的自動草稿自己過期，再數年齡。
+
+    2026-09-19 改：以前這一節的結論是「人工審閱最舊的那幾份」，而那個隊伍只會長不會短
+    ——當天四個庫加起來 133 份放超過七天。一個永遠審不完的隊伍等於沒有人在審，只是每天
+    還要佔掉報表一行。檔案不刪、只標過期，要撈回來把 triaged 清掉即可。
+    """
+    dry_run = bool((context or {}).get("dry_run"))
+    expired = 0
+    errors = []
+    for vault in vaults:
+        try:
+            report = _draft_ttl_module().expire_stale(vault, today=today, apply=not dry_run)
+            expired += report.get("expired", 0)
+        except Exception as exc:
+            errors.append(DRAFT_TTL_ERROR.format(
+                vault=Path(vault).name, detail=f"{type(exc).__name__}: {exc}"))
+    return expired, errors
+
+
+def _section_draft_aging(vaults, today, since_date, config, context=None):
     """草稿的年齡分布。第 4 節數的是「有幾份待審」，這一節數的是「積了多久」。
 
     2026-09-09 實測治理庫積了 370 份草稿沒人管；份數本身不會告訴你那是昨天的一批還是
     半年前就躺在那裡，而後者才是「沒經過確認的東西回不到該在的層」的樣子。
     """
+    expired, ttl_errors = _expire_stale_drafts(vaults, today, context)
     results, errors = _bounded(vaults, lambda vault: _draft_aging_of(vault, today))
+    errors = [*ttl_errors, *errors]
     entries = []
     by_subdir = {}
     for _vault, found in results:
@@ -748,9 +771,12 @@ def _section_draft_aging(vaults, today, since_date, config):
             "total_drafts": len(entries),
             "over_7_days": over_7,
             "over_30_days": over_30,
+            "expired_tonight": expired,
             "by_subdir": by_subdir,
         },
         "examples": entries[:DRAFT_OLDEST_ROWS],
+        # 剩下來還超齡的，都是人手寫的提案（自動捕捉的已經自己過期了）——那一種才值得
+        # 叫人去看，因為是有人刻意放進來的。
         "commands": [DRAFT_AGING_COMMAND] if over_7 else [],
         "errors": errors,
     }
@@ -1458,6 +1484,15 @@ def _harvest_module():
     return harvest
 
 
+def _draft_ttl_module():
+    """lazy import：只有第 9 節讓草稿自己過期時用得到。"""
+    try:
+        from . import draft_ttl
+    except ImportError:  # Direct script execution keeps the CLI contract.
+        import draft_ttl
+    return draft_ttl
+
+
 def _views_module():
     """lazy import：夢的盤點路徑不為生成器付錢，整形與順路重生共用這一處。"""
     try:
@@ -1871,7 +1906,7 @@ def _section_host_sync(vaults, today, since_date, config, context=None):
 
 
 # 吃 context 的節：第 4 節要家目錄（harvest），第 14 節要知道可不可以寫宿主檔。
-_CONTEXT_SECTIONS = (_section_drafts, _section_host_sync)
+_CONTEXT_SECTIONS = (_section_drafts, _section_host_sync, _section_draft_aging)
 
 _SECTIONS = (
     (1, "缺別名卡", _section_missing_aliases),
