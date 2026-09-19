@@ -20,7 +20,6 @@ CITATION_PATTERN = (
 )
 # 2026-09-01 實測事故：各端自寫 regex 會再次分叉；規則：所有抄寫端與驗證端
 # 必須 import 這個編譯物件。
-CITATION_REGEX = re.compile(CITATION_PATTERN)
 
 # 2026-09-01 實測事故：決策曾在不同時點並存且表決門檻被擅自增加，導致現行
 # 裁定遭改寫；規則：決策卡欄名必須同源。
@@ -188,11 +187,6 @@ GRANT_QUOTED_TEXT_PATTERN = (
 )
 GRANT_SENTENCE_SPLIT_PATTERN = r"[。.\r\n]+"
 GRANT_NEWLINE_PATTERN = r"\r\n|\r|\n"
-GRANT_TRIGGER_REGEX = re.compile(GRANT_TRIGGER_PATTERN, re.IGNORECASE)
-GRANT_LEADING_TAG_REGEX = re.compile(GRANT_LEADING_TAG_PATTERN, re.IGNORECASE)
-GRANT_QUOTED_TEXT_REGEX = re.compile(GRANT_QUOTED_TEXT_PATTERN)
-GRANT_SENTENCE_SPLIT_REGEX = re.compile(GRANT_SENTENCE_SPLIT_PATTERN)
-GRANT_NEWLINE_REGEX = re.compile(GRANT_NEWLINE_PATTERN)
 
 # 2026-09-02 事故：owner 的糾正（「我不是說過…不要亂處理」）只在 agent 記得寫卡時才
 # 留下，下一場同題重犯。糾正句與授權句走同一條捕捉路徑；這裡是 runtime 用的窄集，
@@ -214,7 +208,6 @@ CORRECTION_TRIGGER_PATTERN = (
     r"|明明|又犯"
     r"|\bI\s+(?:already\s+)?told\s+you\b|\bI\s+said\b|\bstop\s+doing\b|\bdon'?t\s+do\s+that\b|\bnot\s+like\s+that\b)"
 )
-CORRECTION_TRIGGER_REGEX = re.compile(CORRECTION_TRIGGER_PATTERN, re.IGNORECASE)
 
 # 2026-09-02 事故:agent 明說「要你裁決」,owner 答了,答案能否留下全看 agent 記不記得寫卡。
 # 規則:上一則助理訊息含裁決請求時,owner 的回覆逐字入 rulings/,連同被問的題目。題目只取
@@ -227,14 +220,12 @@ RULING_QUESTION_PATTERN = (
     r"(?:要你裁決|請你裁決|請裁決|請你裁示|要你裁示|請你定|請定一下|由你決定|要你決定|你定了我才|等你決定"
     r"|請你確認|需要你決定|\bplease\s+decide\b|\byour\s+call\b|\bneed\s+your\s+decision\b|\bwhich\s+do\s+you\s+want\b)"
 )
-RULING_QUESTION_REGEX = re.compile(RULING_QUESTION_PATTERN, re.IGNORECASE)
 # 2026-09-03 對抗審查 #5：U31 只排除 GRANT_QUOTED_TEXT_PATTERN 的引號，報告裡用
 # Markdown 反引號寫的 `請你裁決` 仍被當成提問。裁決專用的引號集加上反引號；
 # ASCII 單引號不納入（英文縮寫 don't 會製造假引號區間）。
 RULING_QUOTED_TEXT_PATTERN = (
     GRANT_QUOTED_TEXT_PATTERN + r"|```[^`]*```|`[^`\r\n]*`"
 )
-RULING_QUOTED_TEXT_REGEX = re.compile(RULING_QUOTED_TEXT_PATTERN)
 
 # 2026-09-06 精準度實測（254 張真實事件卡逐張人工標記：kind 正確 110／值得長期
 # 記住 100）：八類誤抓的共同根因是「整句命中就收」——觸發詞落在附和空殼、疑問句、
@@ -297,14 +288,6 @@ CAPTURE_STANDING_PATTERN = (
     r"|我(?:不是)?說過|說過(?:幾|很多|好多)次|維持|禁止|不准"
     r"|\b(?:always|never|from\s+now\s+on|by\s+default|policy)\b)"
 )
-CAPTURE_CLAUSE_SPLIT_REGEX = re.compile(CAPTURE_CLAUSE_SPLIT_PATTERN)
-CAPTURE_SUBCLAUSE_SPLIT_REGEX = re.compile(CAPTURE_SUBCLAUSE_SPLIT_PATTERN)
-CAPTURE_REPLY_MARKER_REGEX = re.compile(CAPTURE_REPLY_MARKER_PATTERN)
-CAPTURE_CLAUSE_QUESTION_REGEX = re.compile(CAPTURE_CLAUSE_QUESTION_PATTERN)
-CAPTURE_QUESTION_WORD_REGEX = re.compile(CAPTURE_QUESTION_WORD_PATTERN)
-CAPTURE_VETO_REGEX = re.compile(CAPTURE_VETO_PATTERN)
-CAPTURE_DECISIVE_REGEX = re.compile(CAPTURE_DECISIVE_PATTERN, re.IGNORECASE)
-CAPTURE_STANDING_REGEX = re.compile(CAPTURE_STANDING_PATTERN, re.IGNORECASE)
 # 一詞式無範圍應答（「我同意」「核准了」）喚回時佔置頂卻沒有可執行內容；四字是實測
 # 分水嶺——短過它的真裁定都靠常規性語留下（「那就不做」保得住，「我同意」保不住）。
 CAPTURE_ACK_MIN_CHARS = 4
@@ -330,7 +313,6 @@ CAPTURE_REJECT_PATTERN = (
     r"|\b[A-Za-z0-9_\-]{24,}\.[A-Za-z0-9_\-]{16,}\.[A-Za-z0-9_\-]{16,}\b"
     r"|\b[A-Za-z][A-Za-z0-9+.\-]*://[^\s:@/]+:[^\s@/]+@)"
 )
-CAPTURE_REJECT_REGEX = re.compile(CAPTURE_REJECT_PATTERN, re.IGNORECASE)
 
 # 2026-09-09 owner 裁定 Q5「C」：觸發詞命中只證明「這句話長得像裁定」，不證明它已經
 # 被核過。捕捉分兩條路——形狀明確的三個模板自動入庫（仍標未核），其餘照樣判定但只寫
@@ -361,9 +343,6 @@ CAPTURE_ADMIT_GRANT_PATTERN = (
     r"|\byou\s+(?:may|are\s+allowed\s+to|have\s+my\s+permission)\b"
     r"|\bpermission\s+granted\b)"
 )
-CAPTURE_ADMIT_ARROW_REGEX = re.compile(CAPTURE_ADMIT_ARROW_PATTERN, re.IGNORECASE)
-CAPTURE_ADMIT_CORRECTION_REGEX = re.compile(CAPTURE_ADMIT_CORRECTION_PATTERN, re.IGNORECASE)
-CAPTURE_ADMIT_GRANT_REGEX = re.compile(CAPTURE_ADMIT_GRANT_PATTERN, re.IGNORECASE)
 CAPTURE_ADMIT_ARROW = "arrow-answer"
 CAPTURE_ADMIT_CORRECTION = "leading-correction"
 CAPTURE_ADMIT_GRANT = "explicit-grant"
@@ -381,7 +360,6 @@ RULING_QUESTION_WINDOW_CHARS = 150   # kept on each side of the request phrase
 RULING_QUESTION_TAIL_CHARS = 400     # the request must sit near the end of the assistant turn
 RULING_MIN_ANSWER_CHARS = 4
 CAPTURE_SUMMARY_CHARS = 80           # captured cards carry the owner's words in description
-NEVER_MATCH_REGEX = re.compile(r"(?!x)x")
 
 # 2026-09-03 owner「整體深度檢視分析epitype，能夠節省token就不應該浪費」：40 句真 prompt
 # 實測每句注入 3.6KB／11 行，其中絕對路徑佔 32%、描述佔 54%，且每庫固定 5 條不論相關。
@@ -438,22 +416,16 @@ PENDING_VERIFY_MARKER = "verify:"
 PENDING_OWNER_INLINE_PATTERN = (
     r"owner|Owner|OWNER|Claude|claude|Codex|codex|主責|負責|我來|我去|我會|我自己|本場|這場"
 )
-PENDING_OWNER_INLINE_REGEX = re.compile(PENDING_OWNER_INLINE_PATTERN)
 # 孤兒只認「條目」，不認標題也不認敘述。判準是待辦標記出現在條目的最前面——它是這一條的
 # 狀態，不是句子裡提到的一個詞。2026-09-19 在通用庫實測：只要「行內某處有待辦字眼」就報
 # 的話，11 行裡只有 3 行真的是沒做完的事（其餘是指標數字、規則標題、連結說明、已結案
 # 的敘述）；改成「標記在最前面的條目」之後是 3/3。標題不算：標題不是一件事，它底下的
 # 條目才是。
 PENDING_LIST_ENTRY_PATTERN = r"^\s*(?:[-*+]\s|\d+[.)]\s|\[[ xX]\]\s?)"
-PENDING_LIST_ENTRY_REGEX = re.compile(PENDING_LIST_ENTRY_PATTERN)
 PENDING_LEADING_MARKER_PATTERN = (
     r"^[\s*_`~>]*(?:\[[ xX]\]\s*)?[\s*_`~>]*(?:⏳|TODO|未辦|待辦|待決|待處理|待修|待驗|待\s*owner)"
 )
-PENDING_LEADING_MARKER_REGEX = re.compile(PENDING_LEADING_MARKER_PATTERN, re.IGNORECASE)
 PENDING_MAX_AGE_DAYS = 14
-PENDING_MARKER_REGEX = re.compile(PENDING_MARKER_PATTERN, re.IGNORECASE)
-PENDING_CLOSED_REGEX = re.compile(PENDING_CLOSED_PATTERN, re.IGNORECASE)
-PENDING_REFERENCE_REGEX = re.compile("|".join(PENDING_REFERENCE_SPANS))
 # 待辦條目住在清單或標題裡。卡片正文敘述往事的句子（「**Why:** 某場照抄交接本的待辦清單
 # 回報未決」）帶著同樣的字眼，卻不是一條沒做完的事——2026-09-19 通用庫剩下的 4 行全是這種。
 # 把位置也算進條件，敘述句就不再被點名，而真正的清單條目一條都不會漏。
@@ -462,13 +434,11 @@ VAULT_MISSING_REASON = (
     "（掃不存在的資料夾會回 0 個問題，跟「很乾淨」長得一樣；所以這裡直接報錯，不回 0。）"
 )
 PENDING_ENTRY_LINE_PATTERN = r"^\s*(?:[-*+]\s|\d+[.)]\s|#{1,6}\s|\[[ xX]\])"
-PENDING_ENTRY_LINE_REGEX = re.compile(PENDING_ENTRY_LINE_PATTERN)
 
 
 def pending_line_body(line):
     """把引用、連結、程式碼片段挖掉之後剩下的那一行——待辦標記要在這裡面才算數。"""
-    return PENDING_REFERENCE_REGEX.sub(" ", str(line or ""))
-PENDING_DATE_REGEX = re.compile(r"(20\d\d)-(\d\d)-(\d\d)")
+    return _rx("PENDING_REFERENCE_REGEX").sub(" ", str(line or ""))
 
 # 2026-09-06 owner 裁定：卡片要像表單——分種類、各有必填欄位、缺了不收。實測缺口：
 # titan 298/299 張無別名、113 張無日期、通用庫 73 張事件卡沒有升級流程。規則：型別名
@@ -663,8 +633,6 @@ CARD_DATE_FIELDS = (LAST_VERIFIED_AT_FIELD, METADATA_MODIFIED_FIELD)
 # 2026-09-06 owner 裁定「盡量找清楚」：欄位沒寫日期不等於這張卡沒有日期。再找三處
 # ——正文第一個 YYYY-MM-DD／YYYY/MM/DD、name 或檔名裡的 YYYYMMDD、vault 是 git repo
 # 時的首次提交日；任一推得就降為 WARN 並可寫回，四處都沒有才 FAIL。
-CARD_DATE_BODY_REGEX = re.compile(r"(20\d\d)[-/](\d\d)[-/](\d\d)")
-CARD_DATE_COMPACT_REGEX = re.compile(r"(?<!\d)(20\d\d)(\d\d)(\d\d)(?!\d)")
 CARD_DATE_BODY_SCAN_CHARS = 4000
 # 一次 git log 的上限；逐檔 --follow 是 300 個行程，那才是預算殺手。
 CARD_DATE_GIT_BUDGET_SECONDS = 3.0
@@ -855,7 +823,6 @@ INDEX_PRUNED_TITLE = "# index_pruned — 夢從 MEMORY.md 移出的卡片連結�
 INDEX_PRUNED_ENTRY_NOTE = "<!-- moved {stamp} | from: {source} 「{section}」 | reason: {reason} -->"
 INDEX_PRUNED_SECTION_NONE = "(no section)"
 INDEX_PRUNED_REASON = "listed-in-views"
-INDEX_CARD_LINK_REGEX = re.compile(r"\]\(([^)\s]+\.md)\)")
 INDEX_SHAPING_HEADING = "## 13. 主記憶整形 / index shaping"
 INDEX_SHAPING_LINE = "{vault} — {status}｜搬出 {moved} 行｜留下 {kept} 行（視圖未列）｜{detail}"
 INDEX_SHAPING_NO_INDEX = "沒有 MEMORY.md，這一庫不整形"
@@ -1125,7 +1092,6 @@ TURN_CHECK_UNKNOWN_DEFECT = (
 )
 # 圍籬程式碼區塊不算「報告太長」：貼給 owner 的指令與程式是他要的東西，不是話多。
 TURN_LENGTH_FENCE_PATTERN = r"```.*?(?:```|\Z)"
-TURN_LENGTH_FENCE_REGEX = re.compile(TURN_LENGTH_FENCE_PATTERN, re.S)
 # 2026-09-19 實測 3,952 個回合：中位數 817 字、p90 2,769 字。門檻設在 3,000。
 TURN_LENGTH_DEFAULT_LIMIT = 3000
 # owner 自己要完整／詳細／清單／教學的時候，長是他點的，不擋。
@@ -1133,7 +1099,6 @@ TURN_LENGTH_EXEMPT_PATTERN = (
     r"完整|詳細|全部|都列|列出|清單|報告|寫清楚|說明|教我|怎麼用|步驟|計畫|對照|逐條"
     r"|prompt|PROMPT|plan|full|detail"
 )
-TURN_LENGTH_EXEMPT_REGEX = re.compile(TURN_LENGTH_EXEMPT_PATTERN)
 TURN_LENGTH_REASON = (
     "📌 這回合的話 {chars} 字，超過「{decision}」的 {limit} 字上限，而 owner 這次沒有要完整或詳細。"
     "把細節寫進檔案，回覆只留結論、數字與檔案連結。{advice}"
@@ -1142,12 +1107,10 @@ TURN_LENGTH_REASON = (
 # 工具往來裡（讀、寫、搜尋、shell 指令、工具回傳都算）。比對用檔名不用完整路徑：
 # 路徑寫法有很多種，比對完整路徑會製造誤擋，而誤擋比漏擋貴。
 TURN_CITED_CLAIM_PATTERN = r"查過|實查|實際查|核對過|確認過|讀了|讀過|看過|檢查過|驗證過|對照過"
-TURN_CITED_CLAIM_REGEX = re.compile(TURN_CITED_CLAIM_PATTERN)
 TURN_CITED_PATH_PATTERN = (
     r"[A-Za-z0-9_.\\/~-]*[A-Za-z0-9_-]+"
     r"\.(?:py|md|json|jsonl|txt|ps1|sh|sqlite3|toml|yaml|yml|cfg|ini|csv)\b"
 )
-TURN_CITED_PATH_REGEX = re.compile(TURN_CITED_PATH_PATTERN)
 # 這幾個檔名到處都有，講的通常是「那一類檔」而不是某一個檔，拿來比對只會誤擋。
 TURN_CITED_GENERIC_NAMES = frozenset({
     "__init__.py", "setup.py", "readme.md", "claude.md", "agents.md", "memory.md",
@@ -1275,13 +1238,11 @@ TURN_DONE_CLAIM_PATTERN = (
     r"(?:已完成|已經完成|都完成了|做完了|已做完|已修好|修好了|已上線|上線了"
     r"|搞定|沒問題了|可以用了|驗收通過|全部通過|都好了|完成了)"
 )
-TURN_DONE_CLAIM_REGEX = re.compile(TURN_DONE_CLAIM_PATTERN)
 # 我自己驗過什麼，或明講這是沒驗過的轉述。兩種都寫得出來就過得去；什麼都不寫才擋。
 TURN_OWNERSHIP_TEXT_PATTERN = (
     r"我自己(?:驗|跑|讀|查|核)|我實跑|我實查|本回合讀了|我讀了|我跑了|我核對"
     r"|未驗證的轉述|沒有驗過|未經我驗|我沒有驗"
 )
-TURN_OWNERSHIP_TEXT_REGEX = re.compile(TURN_OWNERSHIP_TEXT_PATTERN)
 TURN_DISPATCH_TOOLS = frozenset({"task", "agent"})
 # 背景子代理跑完時，宿主把結果當成一則新的提問送進來；那一則裡有這個標記。
 TURN_DISPATCH_NOTICE_MARKER = "task-notification"
@@ -2035,8 +1996,8 @@ def _selftest():
             )
             checks.append(("20-thread append without tears", append_ok))
 
-            zh = CITATION_REGEX.search("- 「這是中文逐字引文」L12")
-            en = CITATION_REGEX.search('- "This is an English quote" (L34)')
+            zh = _rx("CITATION_REGEX").search("- 「這是中文逐字引文」L12")
+            en = _rx("CITATION_REGEX").search('- "This is an English quote" (L34)')
             citation_ok = (
                 zh is not None
                 and zh.group("quote_zh") == "這是中文逐字引文"
@@ -2063,13 +2024,13 @@ def _selftest():
             ))
             checks.append((
                 "authorization bearer credentials are rejected from capture",
-                bool(CAPTURE_REJECT_REGEX.search(
+                bool(_rx("CAPTURE_REJECT_REGEX").search(
                     "Authorization: Bearer abcdefghijklmnopqrstuvwxyz012345"
                 )),
             ))
             checks.append((
                 "bare bearer credentials are rejected from capture",
-                bool(CAPTURE_REJECT_REGEX.search(
+                bool(_rx("CAPTURE_REJECT_REGEX").search(
                     "Bearer abcdefghijklmnopqrstuvwxyz012345"
                 )),
             ))
@@ -2098,6 +2059,76 @@ def _selftest():
                 print(f"FAILED: {name}", file=sys.stderr)
     return 0 if status == "PASS" else 1
 
+
+# 用到才編譯：載入時編譯全部 43 個樣式要 18.4 ms，而任何一條路都只用得到其中幾個。
+# 名字與用法都不變（PEP 562 的模組層 __getattr__），只是第一次被取用時才編譯並記住。
+_LAZY_REGEX = {
+    "CAPTURE_ADMIT_ARROW_REGEX": lambda: re.compile(CAPTURE_ADMIT_ARROW_PATTERN, re.IGNORECASE),
+    "CAPTURE_ADMIT_CORRECTION_REGEX": lambda: re.compile(CAPTURE_ADMIT_CORRECTION_PATTERN, re.IGNORECASE),
+    "CAPTURE_ADMIT_GRANT_REGEX": lambda: re.compile(CAPTURE_ADMIT_GRANT_PATTERN, re.IGNORECASE),
+    "CAPTURE_CLAUSE_QUESTION_REGEX": lambda: re.compile(CAPTURE_CLAUSE_QUESTION_PATTERN),
+    "CAPTURE_CLAUSE_SPLIT_REGEX": lambda: re.compile(CAPTURE_CLAUSE_SPLIT_PATTERN),
+    "CAPTURE_DECISIVE_REGEX": lambda: re.compile(CAPTURE_DECISIVE_PATTERN, re.IGNORECASE),
+    "CAPTURE_QUESTION_WORD_REGEX": lambda: re.compile(CAPTURE_QUESTION_WORD_PATTERN),
+    "CAPTURE_REJECT_REGEX": lambda: re.compile(CAPTURE_REJECT_PATTERN, re.IGNORECASE),
+    "CAPTURE_REPLY_MARKER_REGEX": lambda: re.compile(CAPTURE_REPLY_MARKER_PATTERN),
+    "CAPTURE_STANDING_REGEX": lambda: re.compile(CAPTURE_STANDING_PATTERN, re.IGNORECASE),
+    "CAPTURE_SUBCLAUSE_SPLIT_REGEX": lambda: re.compile(CAPTURE_SUBCLAUSE_SPLIT_PATTERN),
+    "CAPTURE_VETO_REGEX": lambda: re.compile(CAPTURE_VETO_PATTERN),
+    "CARD_DATE_BODY_REGEX": lambda: re.compile('(20\\d\\d)[-/](\\d\\d)[-/](\\d\\d)'),
+    "CARD_DATE_COMPACT_REGEX": lambda: re.compile('(?<!\\d)(20\\d\\d)(\\d\\d)(\\d\\d)(?!\\d)'),
+    "CITATION_REGEX": lambda: re.compile(CITATION_PATTERN),
+    "CORRECTION_TRIGGER_REGEX": lambda: re.compile(CORRECTION_TRIGGER_PATTERN, re.IGNORECASE),
+    "DREAM_AT_REGEX": lambda: re.compile(DREAM_AT_PATTERN),
+    "GRANT_LEADING_TAG_REGEX": lambda: re.compile(GRANT_LEADING_TAG_PATTERN, re.IGNORECASE),
+    "GRANT_NEWLINE_REGEX": lambda: re.compile(GRANT_NEWLINE_PATTERN),
+    "GRANT_QUOTED_TEXT_REGEX": lambda: re.compile(GRANT_QUOTED_TEXT_PATTERN),
+    "GRANT_SENTENCE_SPLIT_REGEX": lambda: re.compile(GRANT_SENTENCE_SPLIT_PATTERN),
+    "GRANT_TRIGGER_REGEX": lambda: re.compile(GRANT_TRIGGER_PATTERN, re.IGNORECASE),
+    "INDEX_CARD_LINK_REGEX": lambda: re.compile('\\]\\(([^)\\s]+\\.md)\\)'),
+    "NEVER_MATCH_REGEX": lambda: re.compile('(?!x)x'),
+    "PENDING_CLOSED_REGEX": lambda: re.compile(PENDING_CLOSED_PATTERN, re.IGNORECASE),
+    "PENDING_DATE_REGEX": lambda: re.compile('(20\\d\\d)-(\\d\\d)-(\\d\\d)'),
+    "PENDING_ENTRY_LINE_REGEX": lambda: re.compile(PENDING_ENTRY_LINE_PATTERN),
+    "PENDING_LEADING_MARKER_REGEX": lambda: re.compile(PENDING_LEADING_MARKER_PATTERN, re.IGNORECASE),
+    "PENDING_LIST_ENTRY_REGEX": lambda: re.compile(PENDING_LIST_ENTRY_PATTERN),
+    "PENDING_MARKER_REGEX": lambda: re.compile(PENDING_MARKER_PATTERN, re.IGNORECASE),
+    "PENDING_OWNER_INLINE_REGEX": lambda: re.compile(PENDING_OWNER_INLINE_PATTERN),
+    "PENDING_REFERENCE_REGEX": lambda: re.compile('|'.join(PENDING_REFERENCE_SPANS)),
+    "RULING_QUESTION_REGEX": lambda: re.compile(RULING_QUESTION_PATTERN, re.IGNORECASE),
+    "RULING_QUOTED_TEXT_REGEX": lambda: re.compile(RULING_QUOTED_TEXT_PATTERN),
+    "STOP_GATE_BLOCKQUOTE_LINE_REGEX": lambda: re.compile(STOP_GATE_BLOCKQUOTE_LINE_PATTERN, re.MULTILINE),
+    "STOP_GATE_QUOTE_TEXT_REGEX": lambda: re.compile(STOP_GATE_QUOTE_TEXT_PATTERN),
+    "TURN_CITED_CLAIM_REGEX": lambda: re.compile(TURN_CITED_CLAIM_PATTERN),
+    "TURN_CITED_PATH_REGEX": lambda: re.compile(TURN_CITED_PATH_PATTERN),
+    "TURN_DONE_CLAIM_REGEX": lambda: re.compile(TURN_DONE_CLAIM_PATTERN),
+    "TURN_LENGTH_EXEMPT_REGEX": lambda: re.compile(TURN_LENGTH_EXEMPT_PATTERN),
+    "TURN_LENGTH_FENCE_REGEX": lambda: re.compile(TURN_LENGTH_FENCE_PATTERN, re.S),
+    "TURN_OWNERSHIP_TEXT_REGEX": lambda: re.compile(TURN_OWNERSHIP_TEXT_PATTERN),
+}
+
+
+def _rx(name):
+    """模組自己要用某個延後編譯的樣式時走這裡。
+
+    模組層 __getattr__ 只服務「從外面取屬性」，模組內部的名字查找不經過它。"""
+    value = globals().get(name)
+    if value is None:
+        value = __getattr__(name)
+    return value
+
+
+def __getattr__(name):
+    build = _LAZY_REGEX.get(name)
+    if build is None:
+        raise AttributeError(name)
+    value = build()
+    globals()[name] = value      # 編一次就好，之後走一般屬性查找
+    return value
+
+
+def __dir__():
+    return sorted(set(globals()) | set(_LAZY_REGEX))
 
 if __name__ == "__main__":
     raise SystemExit(_selftest() if "--selftest" in sys.argv[1:] else 0)
@@ -2136,7 +2167,6 @@ DREAM_AT_FIELD = "at"
 DREAM_DEFAULT_INTERVAL_HOURS = 24
 DREAM_DEFAULT_AT = "03:30"
 DREAM_AT_PATTERN = r"(?:[01]\d|2[0-3]):[0-5]\d"
-DREAM_AT_REGEX = re.compile(DREAM_AT_PATTERN)
 # 一次只准一個夢：lock 檔帶 pid 與起跑時間，逾時視為死鎖可覆蓋（背景程序被 kill
 # 時不會永久堵住後續的夢）。
 DREAM_LOCK_STALE_SECONDS = 30 * 60
@@ -2251,9 +2281,7 @@ RECALL_GENERIC_TERMS = frozenset(
 # 記錄原因：英文縮寫 don't 的單一撇號會配對出假引號區間，這條規則本身就是同一個地雷
 # 的前車之鑑。啟用旗標留給 owner 一鍵關閉，不必改程式碼。
 STOP_GATE_QUOTE_TEXT_PATTERN = RULING_QUOTED_TEXT_PATTERN
-STOP_GATE_QUOTE_TEXT_REGEX = re.compile(STOP_GATE_QUOTE_TEXT_PATTERN)
 STOP_GATE_BLOCKQUOTE_LINE_PATTERN = r"^[ \t]*>.*$"
-STOP_GATE_BLOCKQUOTE_LINE_REGEX = re.compile(STOP_GATE_BLOCKQUOTE_LINE_PATTERN, re.MULTILINE)
 STOP_GATE_QUOTE_MASK_ENABLED = True
 # 遮罩的兩道上限。比例那一道不夠：分母是模型自己寫的，多打二十個字就能把佔比壓下去，
 # 2026-09-17 第三輪審查實測「違規句＋20 字」即繞過。所以再加一道**絕對長度**——引用是

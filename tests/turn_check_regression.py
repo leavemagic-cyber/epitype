@@ -195,6 +195,40 @@ class DelegatedWorkStillHasAnOwner(unittest.TestCase):
             "都好了。", dispatch=memspec.TURN_DISPATCH_NOTICE_MARKER, calls_after=2))
 
 
+class FencedCodeIsADeliverable(unittest.TestCase):
+    """圍籬程式碼區塊是交付物，不是對 owner 說的話。
+
+    2026-09-19 這一類誤擋一天出現八次：英文提交訊息、貼給另一個工具的提示詞、要 owner
+    直接貼去跑的指令，全被「跟 owner 說話要白話」那張卡擋下。長度那道檢查本來就整塊
+    不算，這裡用同一個判準。
+
+    代價誠實寫著：規則在圍籬裡看不見東西。接受的理由是 owner 看到的仍然是一塊程式碼。"""
+
+    def card(self):
+        return decision(forbidden=("內部代號XYZ",))
+
+    def test_the_same_words_in_prose_still_block(self):
+        self.assertIsNotNone(stop_gate._forbidden_fragment(
+            self.card(), "我在 內部代號XYZ 那一層加了東西。", []))
+
+    def test_inside_a_fence_it_passes(self):
+        fence = "```"
+        body = "貼這段：\n" + fence + "text\n請看 內部代號XYZ 的行為\n" + fence + "\n"
+        self.assertIsNone(stop_gate._forbidden_fragment(self.card(), body, []))
+
+    def test_a_fence_does_not_cover_prose_around_it(self):
+        fence = "```"
+        body = "我改了 內部代號XYZ。\n" + fence + "text\n貼這段\n" + fence + "\n"
+        self.assertIsNotNone(stop_gate._forbidden_fragment(self.card(), body, []))
+
+    def test_a_long_fence_is_not_subject_to_the_quote_share_cap(self):
+        # 引用有比例上限（整段包進引號＝偽裝）；交付物沒有，因為一份提示詞本來就幾乎
+        # 整則都是圍籬。
+        fence = "```"
+        body = "貼這段：\n" + fence + "text\n" + ("說明一行 內部代號XYZ\n" * 80) + fence + "\n"
+        self.assertIsNone(stop_gate._forbidden_fragment(self.card(), body, []))
+
+
 class WiringIntoTheGate(unittest.TestCase):
     def test_an_unknown_check_name_is_reported_not_swallowed(self):
         defects = []
@@ -271,7 +305,7 @@ def _selftest():
     suite = unittest.TestSuite(
         loader.loadTestsFromTestCase(case)
         for case in (ReportLength, CitedButNeverOpened, DelegatedWorkStillHasAnOwner,
-                     WiringIntoTheGate, TheOpenedRecord)
+                     FencedCodeIsADeliverable, WiringIntoTheGate, TheOpenedRecord)
     )
     result = unittest.TextTestRunner(verbosity=1).run(suite)
     total = result.testsRun

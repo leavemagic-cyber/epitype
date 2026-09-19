@@ -382,8 +382,24 @@ def _quoted_spans(message):
     # 不是偽裝）。2026-09-17 對抗審查四種寫法全部繞過，這道比例上限是它的答案。
     body = len(message.strip())
     if body and sum(end - start for start, end in merged) / body > memspec.STOP_GATE_QUOTE_MASK_MAX_SHARE:
-        return []
-    return merged
+        merged = []
+    # 圍籬程式碼區塊不受上面兩道上限管：它不是「把主張包進引號」，是交付物——要 owner
+    # 貼到別處去跑的指令、要給另一個工具讀的提示詞、一份檔案的內容。長度上限那一道
+    # 本來就整塊不算（memspec.TURN_LENGTH_FENCE_REGEX），這裡同一個判準。
+    #
+    # 誠實講代價：規則因此在圍籬裡看不見東西。接受它，是因為這一類誤擋 2026-09-19 一天
+    # 出現八次，而「把話藏進程式碼區塊來規避」這件事，owner 看到的仍然是一塊程式碼。
+    fences = [match.span() for match in memspec.TURN_LENGTH_FENCE_REGEX.finditer(message)]
+    if not fences:
+        return merged
+    combined = sorted(merged + fences)
+    result = []
+    for start, end in combined:
+        if result and start <= result[-1][1]:
+            result[-1] = (result[-1][0], max(result[-1][1], end))
+        else:
+            result.append((start, end))
+    return result
 
 
 def _exceptions(vault):
