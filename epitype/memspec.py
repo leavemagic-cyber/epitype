@@ -1106,7 +1106,13 @@ TURN_LENGTH_REASON = (
 # 「沒讀正本就答」的可查版本：訊息裡宣稱查過某個檔，那個檔名就必須出現在這一場的
 # 工具往來裡（讀、寫、搜尋、shell 指令、工具回傳都算）。比對用檔名不用完整路徑：
 # 路徑寫法有很多種，比對完整路徑會製造誤擋，而誤擋比漏擋貴。
-TURN_CITED_CLAIM_PATTERN = r"查過|實查|實際查|核對過|確認過|讀了|讀過|看過|檢查過|驗證過|對照過"
+# 否定的宣稱不是宣稱。2026-09-20 Codex 審查抓到：「我還沒讀過 beta.py」被當成宣稱讀過
+# 而擋下——而那句話正是被擋訊息要求代理改寫成的誠實說法。擋掉誠實的那一句，規則就是在
+# 教人說謊。
+TURN_CITED_CLAIM_PATTERN = (
+    r"(?<!沒)(?<!未)(?<!還沒)(?<!沒有)(?<!尚未)(?<!未曾)(?<!不曾)(?<!還未)"
+    r"(查過|實查|實際查|核對過|確認過|讀了|讀過|看過|檢查過|驗證過|對照過)"
+)
 TURN_CITED_PATH_PATTERN = (
     r"[A-Za-z0-9_.\\/~-]*[A-Za-z0-9_-]+"
     r"\.(?:py|md|json|jsonl|txt|ps1|sh|sqlite3|toml|yaml|yml|cfg|ini|csv)\b"
@@ -1143,6 +1149,47 @@ def _literal_run(source, index):
     return source[start:index], index
 
 
+def _has_top_level_alternation(source):
+    """樣式最外層有沒有 `|`。有的話，開頭那一段就不是「一定會出現」。
+
+    2026-09-20 Codex 審查抓到：`apple|banana` 對 banana 真的命中，前置過濾卻說不可能，
+    於是那條規則安靜失效。這是效能改動改壞既有合法規則的語意，不是少支援一種寫法。
+    """
+    depth = 0
+    index = 0
+    while index < len(source):
+        char = source[index]
+        if char == "\\":
+            index += 2
+            continue
+        if char == "[":
+            index += 1
+            while index < len(source) and source[index] != "]":
+                index += 2 if source[index] == "\\" else 1
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        elif char == "|" and depth == 0:
+            return True
+        index += 1
+    return False
+
+
+def _is_optional_at(source, index):
+    """`source[index]` 起是不是「可以出現零次」的量詞：`?`、`*`、`{0,…}`、`{0}`。"""
+    char = source[index: index + 1]
+    if char in ("?", "*"):
+        return True
+    if char != "{":
+        return False
+    close = source.find("}", index)
+    if close < 0:
+        return False
+    inner = source[index + 1: close].strip()
+    return inner.startswith("0")
+
+
 def required_alternatives(pattern):
     """任何命中都一定含有其中之一的字面清單；證不出來就回 None。
 
@@ -1150,10 +1197,13 @@ def required_alternatives(pattern):
     1. 純字面開頭（`mcp__[A-Za-z0-9_]+` → `mcp__`）。
     2. 整組都是字面的選擇（`(測試|全套|自測)…` → 那三個）。
 
-    後面接著量詞（`?`、`*`、`{0,…}`）的字面不算必要——它可以出現零次。
+    三種情況一律放棄，因為開頭那一段證明不了「一定出現」：最外層還有 `|`、後面接著
+    可以出現零次的量詞（`?`、`*`、`{0,…}`）、或樣式本身要求忽略大小寫。
     """
     source = str(pattern or "")
     if not source:
+        return None
+    if _has_top_level_alternation(source):
         return None
     if source[0] == "(":
         # 前瞻、後顧、具名群組一律放棄：它們的語意不是「這裡一定有這些字」。
@@ -1191,7 +1241,9 @@ def required_alternatives(pattern):
             return None
         pieces.append("".join(current))
         # 整組可有可無的話，裡面的字面就不是必要的。
-        if source[index + 1: index + 2] in ("?", "*"):
+        # 整組可有可無的話，裡面的字面就不是必要的。`{0,1}` 也算——Codex 2026-09-20
+        # 抓到的 `(apple|pear){0,1}banana` 就是漏掉這一種。
+        if _is_optional_at(source, index + 1):
             return None
         if not pieces or any(len(piece) < PREFILTER_MIN_LITERAL_CHARS for piece in pieces):
             return None
@@ -1199,8 +1251,9 @@ def required_alternatives(pattern):
             return None
         return pieces
     run, next_index = _literal_run(source, 0)
-    # 最後一個字被量詞管到的話，它可以不出現，要從必要字面裡拿掉。
-    if next_index < len(source) and source[next_index] in _PREFILTER_QUANTIFIERS:
+    # 最後一個字被「可以零次」的量詞管到，它就可以不出現，要從必要字面裡拿掉；`+` 與
+    # `{2,3}` 保證至少一次，不必拿掉。
+    if next_index < len(source) and _is_optional_at(source, next_index):
         run = run[:-1]
     if len(run) < PREFILTER_MIN_LITERAL_CHARS:
         return None

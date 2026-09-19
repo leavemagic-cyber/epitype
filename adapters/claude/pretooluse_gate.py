@@ -29,6 +29,7 @@ from _hook_common import (
     GATE_LOG_MAX_BYTES,
     append_gate_log,
     compile_bounded_regex,
+    config_path,
     declared_frontmatter,
     emit,
     expired,
@@ -518,6 +519,10 @@ def _read_guard(path):
         "advice": advice,
         "requires": [str(item).strip() for item in requires],
         "unless": [list(pair) for pair in unless],
+        # 欄位組合條件在這一支也要帶上。2026-09-20 Codex 審查抓到：只有「沒有字面片段」
+        # 那一支序列化了 when，於是一張同時寫了字面與欄位條件的卡，欄位那半在讀卡時就
+        # 消失，結果變成「只要文字命中就擋」——比作者寫的寬。
+        "when": [[pair[0], list(pair[1])] for pair in when],
         # 到期日只存不判：卡片不動也會過期，而這裡的結果會進快取。
         "expires": one_line(
             fields.get(memspec.VALID_UNTIL_FIELD) or fields.get(memspec.GRANT_EXPIRES_FIELD)
@@ -908,15 +913,16 @@ def _waste_review(event, tool_name, tool_input, config, started_at):
     # 「整檔拉進來」，而那次呼叫本來就只要六頁。
     bounds = [tool_input.get(field) for field in memspec.READ_WASTE_BOUND_FIELDS]
     bounded = any(str(value or "").strip() for value in bounds)
-    offset = tool_input.get("offset")
-    limit = tool_input.get("limit")
     if info.st_size >= memspec.READ_WASTE_BIG_FILE_BYTES and not bounded:
         return _deny_value(memspec.READ_WASTE_BIG_FILE_REASON.format(
             path=raw, size=info.st_size)), None
 
+    # 「同一段」的身分要含全部的範圍欄位，不能只有 offset／limit。2026-09-20 Codex
+    # 審查抓到：同一份 PDF 連續讀 1-3、4-6、7-9 頁，第三次會被擋，理由還錯稱這一段
+    # 已經讀過——那三次讀的根本是不同頁。
     digest = hashlib.sha256(
         "|".join(str(part) for part in (
-            os.path.normcase(os.path.abspath(raw)), info.st_mtime_ns, info.st_size, offset, limit
+            [os.path.normcase(os.path.abspath(raw)), info.st_mtime_ns, info.st_size] + bounds
         )).encode("utf-8")
     ).hexdigest()[:16]
 

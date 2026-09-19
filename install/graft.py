@@ -23,7 +23,10 @@ import xml.etree.ElementTree as ET
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MARKER_VALUE = "epitype"
 MARKER_FIELDS = ("id", "comment")
-EVENTS = ("SessionStart", "UserPromptSubmit", "PreCompact", "PreToolUse", "Stop")
+# SubagentStop 用的是同一支 stop.py：回合閘看 hook_event_name 分流，子代理結束時
+# 只落檔、不判擋。2026-09-20 Codex 審查抓到這裡漏了它——程式寫好了、標準安裝沒接上。
+EVENTS = ("SessionStart", "UserPromptSubmit", "PreCompact", "PreToolUse", "Stop",
+          "SubagentStop")
 STATE_VERSION = 1
 CONFIG_DIRECTORY = ".epitype"
 CONFIG_FILENAME = "config.json"
@@ -62,8 +65,9 @@ HOOK_SPECS = {
     "PreCompact": ("precompact.py", "precompact_hook.py"),
     "PreToolUse": ("pretooluse.py", "pretooluse_gate.py"),
     "Stop": ("stop.py", "stop_gate.py"),
+    "SubagentStop": ("stop.py", "stop_gate.py"),
 }
-SHIM_NAMES = tuple(shim_name for shim_name, _ in HOOK_SPECS.values())
+SHIM_NAMES = tuple(dict.fromkeys(shim_name for shim_name, _ in HOOK_SPECS.values()))
 # Re-pinned when the Stop shim joined the set: the template's own SHIM_NAMES tuple is
 # what lets one shim preserve another's fail-open breadcrumb, so adding stop.py there
 # changed every rendered shim's bytes. Any other drift is still a selftest failure.
@@ -1107,6 +1111,11 @@ def _synthetic_health(home, repo_root, output):
         # A Stop probe must never look like a real turn: an empty message reaches the
         # gate, exercises the adapter, and cannot match a card.
         ("Stop", "stop.py", {"stop_hook_active": False, "last_assistant_message": ""}, ()),
+        # 子代理結束走同一支，只是事件名不同：探針也要有它，不然體檢會說五個時機都健康，
+        # 而第六個從來沒被碰過。
+        ("SubagentStop", "stop.py",
+         {"hook_event_name": "SubagentStop", "stop_hook_active": False,
+          "last_assistant_message": ""}, ()),
     )
     passed = 0
     hooks_root = home / CONFIG_DIRECTORY / HOOK_DIRECTORY

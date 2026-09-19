@@ -102,10 +102,14 @@ def _decision_frontmatter(path):
     disarming this gate exists to prevent, arriving through the lint's own advice
     (2026-09-16: six freshly armed behaviour cards were inert for exactly this
     reason)."""
+    # 這張清單就是「哪些欄位會讓一張卡被這道閘看見」。新增武裝欄位卻忘了加進來，卡片
+    # 檢查器會說它合格、閘門卻整張讀不到——2026-09-20 Codex 審查抓到 turn_check 正是
+    # 這樣漏接的：只寫 turn_check 的卡，載入數是 0，而且沒有任何缺陷通知。
     for field in (
         memspec.DECISION_KEY_FIELD,
         memspec.FORBIDDEN_FIELD,
         memspec.REQUIRE_WHEN_FIELD,
+        memspec.TURN_CHECK_FIELD,
     ):
         lines = declared_frontmatter(
             path, field, memspec.STOP_GATE_FRONTMATTER_MAX_BYTES
@@ -551,21 +555,26 @@ def _cited_unread_gap(decision, message, turn, opened_names):
     if not opened_names:
         return None
     body = _turn_body(message)
-    claim = memspec.TURN_CITED_CLAIM_REGEX.search(body)
-    if claim is None:
-        return None
     seen = set()
-    for match in memspec.TURN_CITED_PATH_REGEX.finditer(body):
-        name = match.group(0).replace("\\", "/").rsplit("/", 1)[-1].casefold()
-        if not name or name in seen:
+    # 宣稱要跟檔名綁在同一句。2026-09-20 Codex 審查抓到：整段只要有一個「查過」，同一段
+    # 裡任何檔名都會被拿來判——「我查過 alpha.py。接下來要讀 beta.py，還沒讀。」因此
+    # 被擋，而那句話本身是對的。
+    for sentence in _SENTENCE_REGEX.findall(body):
+        claim = memspec.TURN_CITED_CLAIM_REGEX.search(sentence)
+        if claim is None:
             continue
-        seen.add(name)
-        if len(seen) > memspec.TURN_CITED_MAX_PATHS:
-            break
-        if name in memspec.TURN_CITED_GENERIC_NAMES or name in opened_names:
-            continue
-        return memspec.TURN_CITED_UNREAD_REASON.format(
-            claim=claim.group(0), path=name, decision=_named(decision), advice=decision.advice)
+        for match in memspec.TURN_CITED_PATH_REGEX.finditer(sentence):
+            name = match.group(0).replace("\\", "/").rsplit("/", 1)[-1].casefold()
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            if len(seen) > memspec.TURN_CITED_MAX_PATHS:
+                return None
+            if name in memspec.TURN_CITED_GENERIC_NAMES or name in opened_names:
+                continue
+            return memspec.TURN_CITED_UNREAD_REASON.format(
+                claim=claim.group(0), path=name, decision=_named(decision),
+                advice=decision.advice)
     return None
 
 
@@ -738,6 +747,8 @@ def _turn_context(transcript_path):
             lines = stream.read().decode("utf-8", "replace").splitlines()
     except (OSError, ValueError, TypeError):
         return _turn()
+    from epitype import transcript as transcript_reader
+
     texts = []
     prompt = ""
     # 派工的結果進來之後，我自己還動過幾次手。倒著走，遇到派工那一次呼叫就凍結計數。
@@ -748,36 +759,26 @@ def _turn_context(transcript_path):
             row = json.loads(line)
         except ValueError:
             continue
-        if not isinstance(row, dict):
+        parts = transcript_reader.turn_parts(row)
+        if parts is None:
             continue
-        content = (row.get("message") or {}).get("content") if isinstance(row.get("message"), dict) else None
-        if row.get("type") == "user":
-            if isinstance(content, list) and any(
-                isinstance(block, dict) and block.get("type") == "tool_result" for block in content
-            ):
-                continue
-            if isinstance(content, str):
-                prompt = content
-            elif isinstance(content, list):
-                prompt = " ".join(
-                    str(block.get("text") or "") for block in content
-                    if isinstance(block, dict) and block.get("type") == "text"
-                )
+        kind, row_texts, tools = parts
+        if kind == transcript_reader.TOOL_RESULT:
+            # 工具回傳記在真人那一側，但它不結束一個回合。
+            continue
+        if kind == transcript_reader.USER:
+            prompt = " ".join(piece for piece in row_texts if piece)
             break
-        if row.get("type") != "assistant" or not isinstance(content, list):
-            continue
-        for block in reversed(content):
-            if not isinstance(block, dict):
-                continue
-            kind = block.get("type")
-            if kind == "text" and str(block.get("text") or "").strip():
-                texts.append(block["text"])
-            elif kind == "tool_use" and not dispatch:
-                name = str(block.get("name") or "")
-                if name.casefold() in memspec.TURN_DISPATCH_TOOLS:
-                    dispatch = name
-                else:
-                    calls_after += 1
+        for name, _payload in reversed(tools):
+            if dispatch:
+                break
+            if name.casefold() in memspec.TURN_DISPATCH_TOOLS:
+                dispatch = name
+            else:
+                calls_after += 1
+        for piece in reversed(row_texts):
+            if str(piece or "").strip():
+                texts.append(piece)
     texts.reverse()
     prompt = prompt[: memspec.STOP_GATE_MESSAGE_MAX_CHARS]
     if not dispatch and memspec.TURN_DISPATCH_NOTICE_MARKER in prompt:

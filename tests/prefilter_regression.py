@@ -60,6 +60,15 @@ class ItNeverRejectsARealMatch(unittest.TestCase):
         ("第三(次|輪)[^。]{0,10}(同樣|一樣)", "第三次用同樣的參數"),
         (r"(?<!不)(所以|因此)[^。]{0,8}上線", "所以已經上線了"),
         ("(亂碼|mojibake)[^。]{0,14}(檔案|檔)(壞|損毀)", "畫面亂碼，檔案壞了"),
+        # 2026-09-20 Codex 審查抓到的三種漏擋：最外層還有分支、群組可以出現零次。
+        # 這些是既有合法寫法，效能改動把它們的語意改壞了，不是少支援一種新寫法。
+        ("apple|banana", "banana"),
+        ("(apple|pear)|banana", "banana"),
+        ("(apple|pear){0,1}banana", "banana"),
+        ("(甲|乙){0,2}丙", "丙"),
+        # 量詞只管前一個字元：`abc{0}d` 要的是 abd，`前綴{0,3}後面` 仍然要有「前」。
+        ("abc{0}d", "abd"),
+        ("前綴{0,3}後面", "前後面"),
     )
 
     def test_every_real_match_survives_the_prefilter(self):
@@ -74,8 +83,60 @@ class ItNeverRejectsARealMatch(unittest.TestCase):
         self.assertTrue(memspec.prefilter_misses(r"mcp__[A-Za-z0-9_]+", "沒有工具名的一句話"))
 
 
+class AgainstFixtureCards(unittest.TestCase):
+    """帶在專案裡的樣本卡：乾淨機器上也必跑，不靠任何人的私人記憶庫。
+
+    2026-09-20 Codex 審查抓到：原本這一題只讀作者本機的四個庫，找不到就跳過，最後卻
+    又要求「至少檢查過一組」——在乾淨的 checkout 上必定失敗，本機的 67/67 搬不過去。
+    """
+
+    FIXTURES = (
+        ("(測試|全套|自測)[^。]{0,20}(過|通過)[^。]{0,12}(所以|因此)[^。不沒未]{0,14}上線",
+         "全套測試過了所以已經上線"),
+        (r"mcp__[A-Za-z0-9_]+", "我用了 mcp__browser"),
+        ("(實查|查過|我讀了|確認過)", "我查過了"),
+        ("第三(次|輪|遍)[^。\n]{0,10}(同樣|一樣)", "第三次用同樣的參數"),
+        ("(亂碼|mojibake)[^。\n]{0,14}(檔案|檔)(壞|損毀)", "輸出是亂碼，檔案壞了"),
+        ("apple|banana", "banana"),
+    )
+
+    def test_every_fixture_pattern_survives(self):
+        for pattern, sentence in self.FIXTURES:
+            with self.subTest(pattern=pattern):
+                self.assertIsNotNone(re.search(pattern, sentence), "樣本本身要真的命中")
+                self.assertFalse(memspec.prefilter_misses(pattern, sentence))
+
+    def test_a_synthetic_vault_card_is_covered_end_to_end(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="epitype-prefilter-") as temporary:
+            vault = Path(temporary)
+            (vault / "card.md").write_text(
+                "---\nname: 樣本\ndescription: 說明\ndecision_key: sample\nstatus: active\n"
+                "current_decision_at: 2026-09-20\ndecided_by: owner-explicit\nowner_quote: x\n"
+                "forbidden:\n  - (甲式|乙式)一定會出現\n"
+                'example_blocks:\n  - "乙式一定會出現"\n'
+                'example_allows:\n  - "今天天氣不錯"\n---\nbody\n',
+                encoding="utf-8")
+            checked = 0
+            for _relative, path, _m, _s, _c in cardscan.scan_vault(vault.resolve()):
+                front_lines, _closing = memspec.split_frontmatter(
+                    path.read_text(encoding="utf-8"))
+                for pattern in memspec.sequence_items(front_lines, memspec.FORBIDDEN_FIELD):
+                    for sentence in memspec.sequence_items(
+                            front_lines, memspec.EXAMPLE_BLOCKS_FIELD):
+                        if re.search(pattern, sentence) is None:
+                            continue
+                        checked += 1
+                        self.assertFalse(memspec.prefilter_misses(pattern, sentence))
+            self.assertGreater(checked, 0, "合成庫裡一組規則加例句都沒掃到")
+
+
 class AgainstTheRealVaults(unittest.TestCase):
-    """真規則、真例句：每一張卡自己的必擋例句，過濾都不准擋掉。"""
+    """作者本機四個庫的真規則、真例句。**找不到就整題跳過**，不當成失敗。
+
+    這一題是額外的稽核，不是必跑覆蓋——必跑那一份在上面用專案自帶的樣本。
+    """
 
     VAULTS = (
         Path.home() / ".claude" / "projects" / "C--" / "memory",
@@ -85,8 +146,11 @@ class AgainstTheRealVaults(unittest.TestCase):
     )
 
     def test_no_card_example_is_filtered_away(self):
+        present = [vault for vault in self.VAULTS if vault.is_dir()]
+        if not present:
+            self.skipTest("這台機器上沒有那幾個私人記憶庫；必跑覆蓋在合成樣本那一題")
         checked = 0
-        for vault in self.VAULTS:
+        for vault in present:
             if not vault.is_dir():
                 continue
             for _relative, path, _mtime, _size, _ctime in cardscan.scan_vault(vault.resolve()):
@@ -124,7 +188,8 @@ def _selftest():
     loader = unittest.TestLoader()
     suite = unittest.TestSuite(
         loader.loadTestsFromTestCase(case)
-        for case in (WhatItCanProve, ItNeverRejectsARealMatch, AgainstTheRealVaults)
+        for case in (WhatItCanProve, ItNeverRejectsARealMatch, AgainstFixtureCards,
+                     AgainstTheRealVaults)
     )
     result = unittest.TextTestRunner(verbosity=1).run(suite)
     total = result.testsRun

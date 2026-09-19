@@ -196,18 +196,33 @@ def _section_card_lint(vaults, today, since_date, config):
 def _section_pending(vaults, today, since_date, config):
     results, errors = _bounded(vaults, lambda v: pending_lint.scan_vault(v, today=today))
     zombie_cards = zombie_lines = oldest = 0
+    orphan_cards = orphan_lines = 0
     entries = []
+    orphan_entries = []
     for vault, report in results:
         zombie_cards += report["zombie_cards"]
         zombie_lines += report["zombie_lines"]
         oldest = max(oldest, report["oldest_days"])
+        # 孤兒也要進夜間報告。2026-09-20 Codex 審查抓到：檢查器算得出來，夜間這一節只
+        # 彙整殭屍，於是「沒人負責的待辦」只有人工下指令才看得到——而那種待辦的病就是
+        # 沒有人會主動去看。
+        orphan_cards += report.get("orphan_cards", 0)
+        orphan_lines += report.get("orphan_lines", 0)
         for card in report["cards"]:
             entries.append({"vault": str(vault), "path": card["path"], "oldest_days": card["oldest_days"]})
+        for card in report.get("orphans", ()):
+            orphan_entries.append({
+                "vault": str(vault), "path": card["path"], "lines": len(card["lines"])})
     entries.sort(key=lambda item: -item["oldest_days"])
-    commands = [f'epitype pending "{vault}"' for vault in vaults] if zombie_lines else []
+    orphan_entries.sort(key=lambda item: -item["lines"])
+    commands = [f'epitype pending "{vault}"' for vault in vaults] if (
+        zombie_lines or orphan_lines) else []
     return {
-        "counts": {"zombie_cards": zombie_cards, "zombie_lines": zombie_lines, "oldest_days": oldest},
+        "counts": {"zombie_cards": zombie_cards, "zombie_lines": zombie_lines,
+                   "oldest_days": oldest, "orphan_cards": orphan_cards,
+                   "orphan_lines": orphan_lines},
         "examples": entries[:EXAMPLE_LIMIT],
+        "orphans": orphan_entries[:EXAMPLE_LIMIT],
         "commands": commands,
         "errors": errors,
     }

@@ -183,12 +183,21 @@ def _example_findings(path, fields, front_lines, counts, today):
         # 連 frontmatter 都沒有的卡宣告不了例句，也宣告不了武裝。
         return []
     findings = list(rule_examples.check_card(path, front_lines=front_lines))
-    has_examples = bool(
-        counts.get(memspec.EXAMPLE_BLOCKS_FIELD) or counts.get(memspec.EXAMPLE_ALLOWS_FIELD)
-        or memspec.sequence_items(front_lines, memspec.EXAMPLE_BLOCKS_FIELD)
-        or memspec.sequence_items(front_lines, memspec.EXAMPLE_ALLOWS_FIELD)
-    )
-    if has_examples:
+    # 兩向都要有。2026-09-20 Codex 審查抓到這裡用的是「任一側有值就算數」，於是一張
+    # 只附「一定要擋」的新卡照樣過關——那正是這條規定要防的：證明了會擋，沒有證明不誤擋。
+    # 而「不誤擋」那一側才是貴的那一側。
+    blocks = memspec.sequence_items(front_lines, memspec.EXAMPLE_BLOCKS_FIELD)
+    allows = memspec.sequence_items(front_lines, memspec.EXAMPLE_ALLOWS_FIELD)
+    if blocks and allows:
+        return findings
+    if blocks or allows:
+        missing = (memspec.EXAMPLE_ALLOWS_FIELD if blocks else memspec.EXAMPLE_BLOCKS_FIELD)
+        findings.append((
+            FAIL, "example",
+            f"只附了一向例句，缺 {missing}。"
+            + ("「一定不能擋」那一側才是貴的那一側：規則太鬆只是漏擋，太寬是每天擋錯人。"
+               if blocks else "沒有「一定要擋」的例句，等於沒有證明這條規則真的會擋。"),
+        ))
         return findings
     # 例句測得到的武裝只有這三種：禁語、配對要求、字面片段守衛。欄位型守衛與內建檢查
     # 沒有「一句話」可以拿來試，它們的兩向實測寫在回歸測試裡。

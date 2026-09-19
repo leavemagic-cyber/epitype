@@ -22,6 +22,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import tempfile
 
@@ -282,18 +283,42 @@ def plan_for(host, vaults, home=None):
             inner, text, host, name, home, legacy=_legacy
         )
         regions.append(Region(name, text, found is not None, inner, unrecognised))
-    problems.extend(_budget_problems(host, path, raw, regions))
+    problems.extend(_budget_problems(host, path, raw, regions, home))
     return Plan(host, path, regions, problems, damaged)
 
 
-def _budget_problems(host, path, raw, regions):
-    """整個檔同步後會不會超過宿主的上限。
+def _codex_configured_budget(home=None):
+    """Codex 使用者自己設的載入上限（`project_doc_max_bytes`），沒設就回 None。
+
+    2026-09-20 Codex 審查抓到：32 KiB 是那個設定的**預設值**，不是硬上限，官方文件還
+    示範改成 65536。把預設當硬上限的話，調高的人會被我們無故拒絕、調低的人則不受保護。
+    """
+    path = (Path(home) if home else Path.home()) / ".codex" / "config.toml"
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    match = re.search(r"^\s*project_doc_max_bytes\s*=\s*(\d+)", raw, re.MULTILINE)
+    if match is None:
+        return None
+    try:
+        value = int(match.group(1))
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+def _budget_problems(host, path, raw, regions, home=None):
+    """整個檔同步後會不會超過宿主的載入上限。
 
     只守自己那兩塊是不夠的：宿主載入的是整個檔，使用者自己的內容加上去之後超過上限，
-    被安靜丟掉的那一段可能正是規則塊——而代理看起來還是「讀了整份」。只擋查得到出處的
-    上限（Codex 的指示鏈 32 KiB 是官方文件寫的）；沒有公告上限的宿主不編一個出來。
+    被安靜丟掉的那一段可能正是規則塊——而代理看起來還是「讀了整份」。
+
+    上限優先讀使用者自己設的值，讀不到才用官方預設；沒有公告上限的宿主不編一個出來。
     """
     budget = memspec.HOST_BUDGET_BYTES.get(host)
+    if host == "codex":
+        budget = _codex_configured_budget(home) or budget
     if not budget:
         return []
     updated = raw

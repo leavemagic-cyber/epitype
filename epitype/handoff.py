@@ -50,28 +50,33 @@ def _tail_rows(transcript_path, tail_bytes=TAIL_BYTES):
 
 
 def _harvest(rows):
-    """(改過的檔, 跑過的指令, 最後一則使用者訊息)——只從這一段紀錄看得到的東西。"""
+    """(改過的檔, 跑過的指令, 最後一則使用者訊息)——只從這一段紀錄看得到的東西。
+
+    兩個宿主的紀錄格式不同，判斷交給 epitype.transcript 那一支共用的正規化：2026-09-20
+    Codex 審查抓到這裡自己寫了一份只認 Claude 的解析，餵 Codex 的紀錄進去，檔案、指令、
+    提問全是空的——而空的斷點檔看起來就像「這一回合沒做什麼」。
+    """
+    try:
+        from . import transcript as transcript_reader
+    except ImportError:  # 直接當腳本跑
+        import transcript as transcript_reader
+
     files, commands, prompt = [], [], ""
     for row in rows:
-        message = row.get("message")
-        content = message.get("content") if isinstance(message, dict) else None
-        if row.get("type") == "user" and not row.get("isSidechain"):
-            text = content if isinstance(content, str) else " ".join(
-                part.get("text", "") for part in (content or [])
-                if isinstance(part, dict) and part.get("type") == "text")
-            text = " ".join(str(text).split())
-            # 工具結果也記成 user 列，但那不是使用者說的話。
-            if text and "tool_use_id" not in json.dumps(content, ensure_ascii=False)[:200]:
-                prompt = text[:PROMPT_MAX_CHARS]
-        if not isinstance(content, list):
+        if row.get("isSidechain"):
             continue
-        for part in content:
-            if not isinstance(part, dict) or part.get("type") != "tool_use":
-                continue
-            payload = part.get("input") or {}
+        parts = transcript_reader.turn_parts(row)
+        if parts is None:
+            continue
+        kind, texts, tools = parts
+        if kind == transcript_reader.USER:
+            text = " ".join(" ".join(str(piece).split()) for piece in texts if piece)
+            if text:
+                prompt = text[:PROMPT_MAX_CHARS]
+            continue
+        for name, payload in tools:
             if not isinstance(payload, dict):
                 continue
-            name = str(part.get("name") or "")
             for field in PATH_FIELDS:
                 value = payload.get(field)
                 if isinstance(value, str) and value.strip() and name not in ("Read", "Glob", "Grep"):

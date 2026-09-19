@@ -110,6 +110,15 @@ class AStrangerInstall(unittest.TestCase):
         hooks = json.dumps(after.get("hooks", {}), ensure_ascii=False)
         self.assertNotIn("epitype", hooks.lower(), "移除之後宿主設定裡不該還留著掛鉤")
 
+    def test_the_subagent_event_is_registered(self):
+        # 2026-09-20 Codex 審查抓到：子代理落檔的程式寫好了，安裝器卻沒註冊那個事件。
+        # owner 的機器是當天手動補的，所以本機看起來正常——陌生人裝完永遠收不到。
+        self.assertEqual(self.epitype("install", "--home", str(self.home)).returncode, 0)
+        settings = json.loads(
+            (self.home / ".claude" / "settings.json").read_text(encoding="utf-8"))
+        self.assertIn("SubagentStop", settings.get("hooks", {}),
+                      "標準安裝沒有接上子代理結束，落檔功能等於沒有")
+
     def test_the_doctor_runs_on_a_fresh_install(self):
         self.assertEqual(self.epitype("install", "--home", str(self.home)).returncode, 0)
         done = self.epitype("doctor")
