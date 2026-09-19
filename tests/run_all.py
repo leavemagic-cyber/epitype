@@ -10,6 +10,7 @@ SELFTESTS = (
     Path("epitype") / "memspec.py",
     Path("epitype") / "memsearch.py",
     Path("epitype") / "card_lint.py",
+    Path("epitype") / "rule_examples.py",
     Path("epitype") / "views.py",
     Path("epitype") / "core_gen.py",
     Path("epitype") / "host_sync.py",

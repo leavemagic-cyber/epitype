@@ -169,6 +169,54 @@ def _arming_findings(fields, counts, card_type, today):
     )]
 
 
+def _example_findings(path, fields, front_lines, counts, today):
+    """兩向例句：有寫就當場跑，沒寫而這張卡擋得住東西就點名。
+
+    跑的是閘門自己的判斷式，不是另外複製一份比對法——複製出來的那一份會讓測試通過、
+    真機照樣誤擋，那是最貴的一種綠燈。"""
+    try:
+        from . import rule_examples
+    except ImportError:  # 直接當腳本跑時沒有套件脈絡，跟本檔頂端的匯入同一套退路
+        import rule_examples
+
+    if front_lines is None:
+        # 連 frontmatter 都沒有的卡宣告不了例句，也宣告不了武裝。
+        return []
+    findings = list(rule_examples.check_card(path, front_lines=front_lines))
+    has_examples = bool(
+        counts.get(memspec.EXAMPLE_BLOCKS_FIELD) or counts.get(memspec.EXAMPLE_ALLOWS_FIELD)
+        or memspec.sequence_items(front_lines, memspec.EXAMPLE_BLOCKS_FIELD)
+        or memspec.sequence_items(front_lines, memspec.EXAMPLE_ALLOWS_FIELD)
+    )
+    if has_examples:
+        return findings
+    # 例句測得到的武裝只有這三種：禁語、配對要求、字面片段守衛。欄位型守衛與內建檢查
+    # 沒有「一句話」可以拿來試，它們的兩向實測寫在回歸測試裡。
+    testable = bool(
+        fields.get(memspec.FORBIDDEN_FIELD, "").strip()
+        or counts.get(memspec.FORBIDDEN_FIELD)
+        or (fields.get(memspec.REQUIRE_WHEN_FIELD, "").strip()
+            and fields.get(memspec.REQUIRE_TEXT_FIELD, "").strip())
+        or counts.get(memspec.ACTION_GUARD_ALL_OF_FIELD)
+    )
+    if not testable:
+        return findings
+    stamps = [
+        _as_date(fields.get(field, "").strip()[:10])
+        for field in memspec.CARD_DATE_FIELDS
+        if fields.get(field, "").strip()
+    ]
+    stamps = [stamp for stamp in stamps if stamp is not None]
+    cutoff = _as_date(memspec.EXAMPLE_REQUIRED_FROM)
+    level = FAIL if stamps and max(stamps) >= cutoff else WARN
+    findings.append((
+        level, "example",
+        memspec.CARD_MISSING_EXAMPLES_REASON.format(
+            blocks=memspec.EXAMPLE_BLOCKS_FIELD, allows=memspec.EXAMPLE_ALLOWS_FIELD),
+    ))
+    return findings
+
+
 def _require_findings(fields):
     """`require_when` 與 `require_text` 成對才有意義。
 
@@ -612,6 +660,7 @@ def _check_card(path, relative, today):
     findings.extend(_pattern_findings(fields, front_lines))
     findings.extend(_require_findings(fields))
     findings.extend(_arming_findings(fields, counts, card_type, today))
+    findings.extend(_example_findings(path, fields, front_lines, counts, today))
 
     for field in memspec.DEPRECATED_CARD_FIELDS:
         if _declares_field(field, fields, nested, counts):
@@ -1291,14 +1340,18 @@ def _selftest():
             checks.append((
                 "forbidden 寫成裸名詞＝WARN forbidden-bare-term，理由給再提議的句形範例",
                 card is not None
-                and rules == {(WARN, "forbidden-bare-term")}
+                # 這張樣本卡本來就沒附兩向例句（它的 forbidden 是故意寫壞的裸名詞，
+                # 附得出必擋句、附不出必放句），所以那一則 example WARN 不列入比對。
+                and rules - {(WARN, "example")} == {(WARN, "forbidden-bare-term")}
                 and "兩套參數" in _reason_of(report, "decision-bare.md", "forbidden-bare-term")
                 and "(建議|要不要|是否|應該).{0,12}(納入|採用|改成)兩套參數"
                 in _reason_of(report, "decision-bare.md", "forbidden-bare-term"),
             ))
             checks.append((
                 "同一張卡的句形、帶動詞、過長三項都不算裸名詞：只報那一條",
-                card is not None and card["warn"] == 1,
+                card is not None
+                and sum(1 for item in card["findings"]
+                        if item["rule"] == "forbidden-bare-term") == 1,
             ))
 
             # 沒中文的卡不是 owner 的決定題，是本場的順手任務；每場輪替換人。

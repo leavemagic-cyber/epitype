@@ -1252,6 +1252,22 @@ CARD_ARMING_TYPES = ("feedback", "correction", "scar", "habit")
 CARD_ARMING_REQUIRED_FROM = "2026-09-16"
 CARD_ARMING_FIELDS = (
     FORBIDDEN_FIELD, ACTION_GUARD_TOOL_FIELD, REQUIRE_WHEN_FIELD, TURN_CHECK_FIELD)
+# 規則直接上線（owner 2026-09-19：「直接上線給我用，我就是試用品」），所以誤擋的保護
+# 只剩兩道，這是第一道：寫卡當下就用閘門自己的程式碼跑兩向例句。
+#
+# 「一定不能擋」那一側比「一定要擋」重要得多：規則太鬆只是漏擋，太寬是每天擋錯人，而
+# 被擋的人不會來報案，只會換個寫法繞過去。這幾句要取自真實說過的話，不要現編。
+EXAMPLE_BLOCKS_FIELD = "example_blocks"
+EXAMPLE_ALLOWS_FIELD = "example_allows"
+EXAMPLE_MAX_ITEMS = 12
+EXAMPLE_LEVEL_FAIL = "FAIL"
+EXAMPLE_LEVEL_WARN = "WARN"
+# 這一天之後建立的武裝卡，沒附例句就 FAIL；既有的先 WARN，讓數字看得見而不是一次判掉。
+EXAMPLE_REQUIRED_FROM = "2026-09-19"
+CARD_MISSING_EXAMPLES_REASON = (
+    "這張卡擋得住東西，卻沒有附兩向例句（{blocks}／{allows}）。規則寫好就上線，"
+    "誤擋只能靠寫卡當下試跑攔下來——「一定不能擋」那幾句請取自真實說過的話，不要現編"
+)
 CARD_UNARMED_REASON = (
     "這是一張記錄 owner 行為糾正的卡，卻沒有任何擋得住的欄位（{armed}），"
     "也沒有寫 {unenforceable}: <理由>。只被讀到的規則 2026-09-16 已實測無效——"
