@@ -1029,6 +1029,13 @@ ACTION_GUARD_WHEN_REASON = (
 # 測試目錄裡的禁語是樣本。一條規則的回歸測試本來就要寫得出那句被禁的話，不然這道閘
 # 擋掉的第一份東西，就是用來證明它有效的那份測試（2026-09-19 兩次）。
 WRITE_GATE_FIXTURE_DIRECTORIES = frozenset(("tests", "test", "__tests__", "fixtures"))
+# 「一定要擋」的例句，本來就必須長得跟禁語一模一樣——不然它測不到任何東西。所以寫進
+# 檔案時不能被當成「再說一次那句被禁的話」：2026-09-20 實際卡住的，正是「替 37 張規則
+# 補上證明它有效的例句」這件事本身。
+#
+# 條件收窄成「這一行附近有 example_blocks 這個宣告」：跟測試目錄那道豁免同一種取捨——
+# 它確實也是個洞，但要鑽這個洞得先寫下 example_blocks 四個字，而那是看得見的。
+WRITE_GATE_EXAMPLE_MARKERS = ('example_blocks:', '"example_blocks"', "'example_blocks'")
 # 省 token 的把關（owner 2026-09-18 最在意的一條）：同一場把同一份沒變過的內容讀第三次，
 # 以及整檔拉一個大檔，都是在動手那一刻就看得出來的浪費。
 # 第二次只提醒不擋——壓縮之後重讀一次是正當的，那時模型手上真的沒有那份內容了；
@@ -1295,6 +1302,21 @@ TURN_DONE_CLAIM_PATTERN = (
 TURN_OWNERSHIP_TEXT_PATTERN = (
     r"我自己(?:驗|跑|讀|查|核)|我實跑|我實查|本回合讀了|我讀了|我跑了|我核對"
     r"|未驗證的轉述|沒有驗過|未經我驗|我沒有驗"
+)
+# 被擋下來的那一段，owner 其實已經看到了——宿主是先把字送出去、才跑回合閘。所以「擋下
+# 再重寫」對他來說是同一段話出現兩次。2026-09-20 owner 當場問「為什麼回復要重複兩次一模
+# 一樣文字？根本性處理」。
+#
+# 根本處理不是少擋一點（那是把規則關掉），是改掉重送的方式：被擋之後只講改掉的部分，
+# 不整段重貼。這件事機器看得見——把被擋那一段留著，跟重寫的那一段比對重疊度。
+BLOCKED_ECHO_STATE_DIRECTORY = "blocked"
+BLOCKED_ECHO_MAX_CHARS = 8000
+BLOCKED_ECHO_SHINGLE = 12
+BLOCKED_ECHO_MIN_SHINGLES = 4
+BLOCKED_ECHO_MAX_OVERLAP = 0.6
+BLOCKED_ECHO_REASON = (
+    "📌 剛才那一段已經送到 owner 眼前了（宿主先顯示、再跑這道閘），你現在這一段跟它有"
+    "{overlap:.0%} 一樣——他會看到同一段話兩次。只講改掉的那部分，不要整段重貼。"
 )
 TURN_DISPATCH_TOOLS = frozenset({"task", "agent"})
 # 背景子代理跑完時，宿主把結果當成一則新的提問送進來；那一則裡有這個標記。

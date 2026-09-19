@@ -190,6 +190,11 @@ def _prospective_write(tool_name, tool_input, target):
     return additions, text
 
 
+# 這幾個欄位裡出現禁語是它們的本分，不是再說一次那句話：`forbidden` 是規則本身，
+# `example_blocks` 是「這句一定要擋」的證明——兩者都必須寫得出那句被禁的話。
+_EXEMPT_CARD_FIELDS = (memspec.FORBIDDEN_FIELD, memspec.EXAMPLE_BLOCKS_FIELD)
+
+
 def _forbidden_rule_edit(decision, target, fragment, texts):
     """True when this write is the ruling itself being edited, not a re-statement.
 
@@ -214,6 +219,17 @@ def _forbidden_rule_edit(decision, target, fragment, texts):
             return True
     except (AttributeError, OSError):
         pass
+    # 例句的宣告不限卡片格式：替一批卡補例句的那支腳本，資料也是一樣的句子。認的是
+    # 「這一行附近宣告了 example_blocks」，而不是檔案長什麼樣。
+    # 宣告了例句清單的內容，整份都算樣本——卡片是這樣，替一批卡補例句的那支腳本也是，
+    # 而它的資料離宣告很遠。範圍跟「測試目錄整個豁免」同一種取捨：它確實是個洞，但要
+    # 鑽這個洞得先在檔案裡寫下 example_blocks 的宣告，而那是看得見、查得到的。
+    for text_value in texts:
+        if not isinstance(text_value, str) or not fragment:
+            continue
+        if any(token in text_value for token in memspec.WRITE_GATE_EXAMPLE_MARKERS):
+            return True
+
     for text_value in texts:
         if not isinstance(text_value, str) or not text_value:
             continue
@@ -229,10 +245,10 @@ def _forbidden_rule_edit(decision, target, fragment, texts):
                 key, raw_value = match.groups()
                 value = memspec.strip_inline_comment(raw_value).strip()
                 parent = key
-                if key == memspec.FORBIDDEN_FIELD:
+                if key in _EXEMPT_CARD_FIELDS:
                     block.append(value)
                 continue
-            if indented and parent == memspec.FORBIDDEN_FIELD:
+            if indented and parent in _EXEMPT_CARD_FIELDS:
                 block.append(raw_line)
         if fragment and any(fragment in line for line in block):
             return True

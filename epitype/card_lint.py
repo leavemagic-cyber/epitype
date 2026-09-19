@@ -182,6 +182,9 @@ def _example_findings(path, fields, front_lines, counts, today):
     if front_lines is None:
         # 連 frontmatter 都沒有的卡宣告不了例句，也宣告不了武裝。
         return []
+    # 已被取代／結案／退役的卡本來就不生效，對它要求例句或判它的例句都是噪音。
+    if fields.get(memspec.DECISION_STATUS_FIELD, "").strip() in memspec.STOP_GATE_SILENT_STATUSES:
+        return []
     findings = list(rule_examples.check_card(path, front_lines=front_lines))
     # 兩向都要有。2026-09-20 Codex 審查抓到這裡用的是「任一側有值就算數」，於是一張
     # 只附「一定要擋」的新卡照樣過關——那正是這條規定要防的：證明了會擋，沒有證明不誤擋。
