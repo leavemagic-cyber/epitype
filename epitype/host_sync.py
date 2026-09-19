@@ -282,7 +282,28 @@ def plan_for(host, vaults, home=None):
             inner, text, host, name, home, legacy=_legacy
         )
         regions.append(Region(name, text, found is not None, inner, unrecognised))
+    problems.extend(_budget_problems(host, path, raw, regions))
     return Plan(host, path, regions, problems, damaged)
+
+
+def _budget_problems(host, path, raw, regions):
+    """整個檔同步後會不會超過宿主的上限。
+
+    只守自己那兩塊是不夠的：宿主載入的是整個檔，使用者自己的內容加上去之後超過上限，
+    被安靜丟掉的那一段可能正是規則塊——而代理看起來還是「讀了整份」。只擋查得到出處的
+    上限（Codex 的指示鏈 32 KiB 是官方文件寫的）；沒有公告上限的宿主不編一個出來。
+    """
+    budget = memspec.HOST_BUDGET_BYTES.get(host)
+    if not budget:
+        return []
+    updated = raw
+    for region in regions:
+        updated = render(updated, region.name, region.text)
+    size = len(updated.encode("utf-8"))
+    if size <= budget:
+        return []
+    return [memspec.HOST_BUDGET_NOTICE.format(
+        path=path, size=size, host=host, budget=budget)]
 
 
 def _state_path(home=None):

@@ -1337,6 +1337,18 @@ HOST_SYNC_INDEX_FILENAME = "MEMORY.md"
 HOST_SYNC_BACKUP_SUFFIX = ".epitype-bak"
 # 宿主檔每一場都整份載入，所以這兩塊是每一場的固定成本。超過就拒絕寫，讓使用者先瘦身。
 HOST_SYNC_REGION_CAP_BYTES = 24576
+# 宿主對「每場都載入的那個檔」有自己的上限，超過的部分是**安靜**被丟掉的——代理看起來
+# 讀了整份，實際上後半段從來沒到它面前。我們只守自己那兩塊沒有用：使用者自己的內容加上
+# 去之後超過，被丟掉的可能正是我們的規則。
+#
+# 只寫查得到出處的數字：Codex 的指示鏈 32 KiB 是官方文件寫的硬上限。Claude 的 CLAUDE.md
+# 沒有公告過硬上限，所以不編一個——那一欄留 None，只報大小不判定。
+HOST_BUDGET_BYTES = {"codex": 32 * 1024, "claude": None}
+HOST_BUDGET_NOTICE = (
+    "⚠ {path} 同步後會有 {size} 位元組，超過 {host} 的 {budget} 上限——超出的部分會被"
+    "安靜丟掉，而被丟掉的可能正是規則塊。先讓這個檔瘦身。"
+)
+HOST_SIZE_NOTICE = "ℹ {path} 同步後 {size} 位元組（每一場都要載入這麼多）。"
 HOST_SYNC_MISSING_MARKER_REASON = (
     "{path} 的 {region} 區塊標記不成對（BEGIN={begin} END={end}，各要剛好一個）"
 )

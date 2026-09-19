@@ -381,6 +381,39 @@ def run_selftest():
     return 0 if status == "PASS" else 1
 
 
+def never_fired_lines(vault, rows):
+    """武裝了卻從來沒擋過任何東西的規則。**只報不動。**
+
+    為什麼不自動退役：判準分不出「這條規則太窄／情境還沒發生」與「這條規則寫壞了」，
+    而 2026-09-17 實跑過自動降級，一條 6 次命中、6 次全擋下、0 漏擋的規則被關了 14 天。
+    沒有可靠的成效訊號之前，用數字自動關掉規則就是在重犯同一個錯——所以這裡只列名單，
+    讓人自己判。
+
+    從來沒擋過不等於沒用：有些規則存在就是為了讓那件事不要發生。名單是線索，不是判決。
+    """
+    try:
+        from . import compliance
+    except ImportError:  # 直接當腳本跑
+        import compliance
+
+    fired = {str(getattr(row, "label", "") or "").strip() for row in rows}
+    fired.discard("")
+    lines = []
+    try:
+        rules = compliance.armed_rules(vault)
+    except Exception as exc:
+        return ["讀不到這個庫的武裝規則：%s: %s" % (type(exc).__name__, exc)]
+    seen = {}
+    for rule in rules:
+        seen.setdefault(rule.card, set()).add(rule.kind)
+    quiet = sorted(name for name in seen if name not in fired)
+    lines.append("武裝規則 %d 條，其中 %d 條從來沒擋過任何東西：" % (len(seen), len(quiet)))
+    for name in quiet:
+        lines.append("  %s（%s）" % (name, "、".join(sorted(seen[name]))))
+    lines.append("只報不動：從來沒擋過不等於沒用，有些規則存在就是為了讓那件事不要發生。")
+    return lines
+
+
 def main(argv=None, output=sys.stdout):
     arguments = list(sys.argv[1:] if argv is None else argv)
     if arguments == ["--selftest"]:
@@ -391,6 +424,8 @@ def main(argv=None, output=sys.stdout):
     parser.add_argument("--since", default=None, help="Nd（例：2d）或 YYYY-MM-DD")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--by", choices=BY_CHOICES, default="kind")
+    parser.add_argument("--never-fired", action="store_true",
+                        help="列出武裝了卻從來沒擋過任何東西的規則（退役候選，只報不動）")
     parser.add_argument("--selftest", action="store_true")
     parsed = parser.parse_args(arguments)
 
@@ -410,6 +445,12 @@ def main(argv=None, output=sys.stdout):
     rows, bad = load_rows(log_path)
     report = build_report(rows, since=since)
     report["bad_line_count"] = bad
+
+    if parsed.never_fired:
+        vault = log_path.parent if log_path.suffix == ".jsonl" else target
+        for line in never_fired_lines(vault, rows):
+            print(line, file=output)
+        return 0
 
     if parsed.json:
         print(json.dumps(report, ensure_ascii=False, indent=1), file=output)
