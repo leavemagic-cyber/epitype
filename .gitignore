@@ -7,3 +7,5 @@ build/
 *.egg-info/
 node_modules/
 .hook-trust-*/
+# 代理用的隔離副本（worktree）由 harness 建在這裡，不是產品的一部分。
+.claude/
