@@ -1,6 +1,7 @@
 import sys, time; sys.dont_write_bytecode = True; _STARTED_AT = time.monotonic(); [getattr(stream, "reconfigure", lambda **_: None)(encoding="utf-8", errors="replace") for stream in (sys.stdin, sys.stdout, sys.stderr)]  # cp950 consoles must not break hook entrypoints.
 """Claude UserPromptSubmit adapter for bounded, deduplicated local recall."""
 
+from datetime import date
 import hashlib
 import heapq
 import json
@@ -83,6 +84,36 @@ def _claim_marker(session_id, block_digest):
     except FileExistsError:
         return False
     return True
+
+
+def _stale_state_mark(path, today=None):
+    """這張卡若是專案類、而且太久沒驗證，回一段要放在那一行最前面的標記；否則回空字串。
+
+    只讀檔頭幾 KB、用兩個樣式找型別與驗證日，不載入卡片檢查器——這是每則提問都會走的路。
+    讀不到、沒寫日期、日期壞掉，一律當作不標：標錯比不標糟，會讓人學會忽略它。"""
+    try:
+        with open(path, "rb") as stream:
+            head = stream.read(memspec.RECALL_STALE_STATE_HEAD_BYTES).decode("utf-8", "replace")
+    except OSError:
+        return ""
+    if not head.startswith("---"):
+        return ""
+    end = head.find("\n---", 3)
+    front = head if end < 0 else head[:end]
+    declared = re.search(memspec.RECALL_STALE_TYPE_PATTERN, front, re.MULTILINE)
+    if declared is None or declared.group(1).casefold() not in memspec.RECALL_STALE_STATE_TYPES:
+        return ""
+    verified = re.search(memspec.RECALL_STALE_VERIFIED_PATTERN, front, re.MULTILINE)
+    if verified is None:
+        return ""
+    try:
+        when = date(*(int(part) for part in verified.groups()))
+    except ValueError:
+        return ""
+    days = ((today or date.today()) - when).days
+    if days < memspec.RECALL_STALE_STATE_DAYS:
+        return ""
+    return memspec.RECALL_STALE_STATE_MARK.format(days=days)
 
 
 def _frontmatter_fields(path):
@@ -308,6 +339,9 @@ def _recall(event, started_at, config, delivery_markers=None):
             else:
                 # Say each fact once: a name the path already spells is not repeated.
                 parts = (description, located) if located.endswith(f"/{name}.md") else (name, description, located)
+                mark = _stale_state_mark(path)
+                if mark:
+                    parts = (mark + parts[0], *parts[1:])
             prefix = memspec.DECISION_PREFIX if decision is not None else ""
             line = "- " + prefix + " | ".join(part for part in parts if part)
             if decision is not None:
