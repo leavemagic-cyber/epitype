@@ -114,7 +114,10 @@ REVIEW_PACK_NEXT_STEP = (
     "檢討包達門檻（{count}/{trigger}）→ 由 AI 逐列處理卡片層的修正（別名、武裝、誤擋）；"
     "改層（升常駐、降層）才交 owner 核定；夢只給候選，不判型別、不改卡、不動層"
 )
-REVIEW_PACK_COMMAND = "人工逐列判來源、原因與最小修法；沒有對應的自動 CLI 指令"
+REVIEW_PACK_COMMAND = (
+    "python -m epitype.compliance --samples <記憶庫> --card <卡名>"
+    "（列出這條規則在真實對話裡命中的句子，逐句判它擋得對不對，再決定收窄或保留）"
+)
 HOST_SYNC_READ_ONLY_NOTE = "這一趟只比對：呼叫端沒有要求寫入宿主檔"
 REVIEW_PACK_BACKGROUND_NOTE = (
     "另有 {count} 張卡只被原話關聯到、或只擋下過一次：列在下面當背景，不算待判"

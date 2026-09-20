@@ -129,6 +129,13 @@ def _blocks_outside_quotes(pattern, text, cache):
     return None
 
 
+def _present_anywhere(pattern, text, cache):
+    """樣式在整則文字裡有沒有出現（引號內也算）。編譯不了的樣式當作沒出現。"""
+    _blocks_outside_quotes(pattern, "", cache)  # 只為了用同一份快取與同一個編譯器
+    regex = cache.get(pattern)
+    return regex is not None and regex.search(text) is not None
+
+
 def _turns(path, max_bytes=MAX_TRANSCRIPT_BYTES):
     """(session, 時間, 閘看到的整回合文字, 這一輪逐段文字, 這一輪的工具呼叫)。
 
@@ -272,7 +279,11 @@ def replay(rules, transcripts, epoch=None, since=None):
                             break
                 elif rule.kind == "require":
                     trigger = _blocks_outside_quotes(rule.require_when, text, cache)
-                    if trigger is not None and _blocks_outside_quotes(rule.require_text, text, cache) is None:
+                    # 觸發要在引號外找，**證據要在整則裡找**——跟閘一模一樣（stop_gate.
+                    # _requirement_gap，2026-09-19 改的）。這裡當時沒跟著改，於是「原話要附
+                    # 引號原文」這種證據本身就是引文的規則，閘放行、重放卻算成漏擋：
+                    # 2026-09-20 實測三天 10 次命中，多數句子明明附了引文。
+                    if trigger is not None and not _present_anywhere(rule.require_text, text, cache):
                         hits.append(Hit(rule.card, "require", session, stamp,
                                         _one_line(trigger.group(0))[:80], _digest(text), True, text))
     return hits
@@ -1142,11 +1153,93 @@ def _selftest():
     return 0 if status == "PASS" else 1
 
 
+SAMPLE_DAYS = 7
+SAMPLE_LIMIT = 5
+SAMPLE_MAX_CHARS = 160
+
+
+def samples(vault, roots, card=None, days=SAMPLE_DAYS, limit=SAMPLE_LIMIT, now=None):
+    """每條說話類的武裝規則，在真實對話裡到底命中了哪些句子。
+
+    寫卡當下跑的例句是作者自己想的，只測得到作者想得到的情況。2026-09-20 第一次拿真實
+    被擋的句子回頭看：一條「提到待辦清單就要帶出口」的規則 8 次裡 7 次只是提到那四個字；
+    「說做完要附證據」8 次裡 4 次其實附了提交編號。這種毛病只有真實語料照得出來。
+
+    只印、不存：閘門紀錄刻意不留對話內容，這支也不另外留一份。
+
+    卡片的修改時間在這裡不算數。夜間重放只算「卡片存在之後」的事（不然會憑空長出漏擋）；
+    這裡要問的正好相反——剛改好的樣式，拿過去幾天的真實對話跑一遍會擋到什麼。
+    """
+    import time as _time
+
+    since = (now if now is not None else _time.time()) - days * 86400
+    rules = [
+        rule._replace(mtime=0) for rule in armed_rules(vault)
+        if rule.kind in ("forbidden", "require") and (not card or card in rule.card)
+    ]
+    transcripts, available = transcripts_for(roots, since_stamp=since)
+    grouped = {}
+    for hit in replay(rules, transcripts, since=since):
+        grouped.setdefault(hit.card, []).append(hit)
+    report = []
+    for name in sorted(grouped, key=lambda key: -len(grouped[key])):
+        hits = grouped[name]
+        seen, sentences = set(), []
+        for hit in hits:
+            sentence = _one_line(_sentence_around(hit.text, hit.fragment))[:SAMPLE_MAX_CHARS]
+            if sentence in seen:
+                continue
+            seen.add(sentence)
+            sentences.append((hit.fragment, sentence))
+        report.append({
+            "card": name,
+            "hits": len(hits),
+            "sessions": len({hit.session for hit in hits}),
+            "sentences": sentences[:limit],
+        })
+    return {"rules": len(rules), "transcripts": len(transcripts),
+            "transcripts_skipped": max(0, available - len(transcripts)), "cards": report}
+
+
+def _sample_roots():
+    home = Path.home().resolve()
+    root = home / memspec.HOST_STATE_DIRECTORY / memspec.HOST_PROJECTS_DIRECTORY
+    return [root] if root.is_dir() else []
+
+
+def _print_samples(argv):
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="python -m epitype.compliance --samples",
+        description="拿最近幾天的真實對話，看每條說話類規則實際會擋到哪些句子")
+    parser.add_argument("--samples", action="store_true")
+    parser.add_argument("vault", help="記憶庫路徑")
+    parser.add_argument("--card", default="", help="只看名稱含這段字的規則")
+    parser.add_argument("--days", type=int, default=SAMPLE_DAYS)
+    parser.add_argument("--limit", type=int, default=SAMPLE_LIMIT, help="每條規則最多列幾句")
+    options = parser.parse_args(argv)
+    result = samples(options.vault, _sample_roots(), options.card, options.days, options.limit)
+    print("說話類武裝規則 %d 條｜重放對話檔 %d 個（另有 %d 個超過上限沒讀）｜最近 %d 天"
+          % (result["rules"], result["transcripts"], result["transcripts_skipped"], options.days))
+    if not result["cards"]:
+        print("這段期間沒有任何一條會命中。")
+    for entry in result["cards"]:
+        print("\n== %s：%d 次，分布在 %d 場" % (entry["card"], entry["hits"], entry["sessions"]))
+        for fragment, sentence in entry["sentences"]:
+            print("   [%s] %s" % (fragment, sentence))
+    print("\n逐句判斷：這一句真的是規則要管的事嗎？多數不是，就該收窄觸發條件或補認得的寫法。")
+    return 0
+
+
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     if "--selftest" in argv:
         return _selftest()
-    print("用法：python -m epitype.compliance --selftest（本模組由夢的第 13 節呼叫）")
+    if "--samples" in argv:
+        return _print_samples(argv)
+    print("用法：python -m epitype.compliance --selftest（本模組由夢的第 13 節呼叫）\n"
+          "      python -m epitype.compliance --samples <記憶庫> [--card 名稱] [--days 7]")
     return 0
 
 
