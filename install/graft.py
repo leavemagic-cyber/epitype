@@ -8,6 +8,7 @@ import difflib
 import hashlib
 import io
 import json
+import locale
 import os
 from pathlib import Path
 import re
@@ -40,6 +41,11 @@ WORK_LEDGER_FILENAME = "_WORK_LEDGER.md"
 # 夢的排程常數在這裡再寫一份：安裝器必須在 epitype 套件還不能 import 的機器上跑，
 # 所以它不 import memspec（既有的 budget_bytes 也是同樣理由）。漂移由 selftest 逐項
 # 比對 memspec 擋下。
+# 顯示語言也在這裡再寫一份（同樣不 import memspec）。安裝器是唯一會替新使用者決定
+# 預設值的地方：掛鉤路徑上只讀設定檔，永遠不去問作業系統語系。
+CONFIG_LANGUAGE_FIELD = "language"
+LANGUAGE_ZH = "zh-TW"
+LANGUAGE_EN = "en"
 DREAM_CONFIG_FIELD = "dream"
 DREAM_MODE_FIELD = "mode"
 DREAM_INTERVAL_HOURS_FIELD = "interval_hours"
@@ -685,6 +691,25 @@ def _existing_config_vaults(path):
     return valid, stale
 
 
+def _default_language():
+    """全新安裝要寫哪一種語言。中文語系的機器維持 zh-TW，其餘一律 en。
+
+    只在建立設定檔時呼叫一次。既有設定檔沒有這個欄位＝使用者已經在用的那一種，
+    補寫進去等於替他改行為，所以不補。
+    """
+    try:
+        current = locale.getlocale()[0] or ""
+    except (TypeError, ValueError):
+        current = ""
+    candidates = [current] + [
+        os.environ.get(name, "") for name in ("LC_ALL", "LC_MESSAGES", "LANG", "LANGUAGE")
+    ]
+    for value in candidates:
+        if str(value or "").strip().lower().replace("_", "-").startswith(("zh", "chinese")):
+            return LANGUAGE_ZH
+    return LANGUAGE_EN
+
+
 def _config_bytes(path, vaults, repo_root, preserve_vault_bytes=False, dream=None):
     if path.is_file():
         raw = path.read_bytes()
@@ -707,6 +732,7 @@ def _config_bytes(path, vaults, repo_root, preserve_vault_bytes=False, dream=Non
         value = {}
     value["vaults"] = [os.fspath(path) for path in vaults]
     value.setdefault("budget_bytes", 10 * 1024)
+    value.setdefault(CONFIG_LANGUAGE_FIELD, _default_language())
     if dream is not None:
         value[DREAM_CONFIG_FIELD] = dream
     value["repo_root"] = os.fspath(repo_root.resolve())
@@ -1466,6 +1492,12 @@ def _doctor(home, dry_run=False, output=sys.stdout, clear_shim_status=False, sch
         initial_records = _read_shim_status(home)
         _report_shim_status(initial_records, output)
         config = json.loads(config_path.read_text(encoding="utf-8"))
+        # 語言在這裡就印：後面每一項失敗都會跳出去，而「掛鉤現在用哪一種語言」正是
+        # 出了事才要查的那一件。
+        language = config.get(CONFIG_LANGUAGE_FIELD) if isinstance(config, dict) else None
+        language = language.strip() if isinstance(language, str) else ""
+        print("LANGUAGE: " + (language or f"{LANGUAGE_ZH} (default, field not set)"),
+              file=output)
         vaults = config.get("vaults") if isinstance(config, dict) else None
         if not isinstance(vaults, list) or not vaults or not all(Path(item).is_dir() for item in vaults):
             raise ValueError("config vaults must be existing directories")
@@ -1856,7 +1888,8 @@ def _uninstall(home, dry_run=False, output=sys.stdout, scheduler=None):
             # 「沒留下我們的東西」在 codex 這一路就是假的。使用者原本就有的檔永遠不刪。
             if target_state.get("created_file") and _is_empty_shell(updated):
                 print(f"{'DRY-RUN remove' if dry_run else 'REMOVE'} {path}"
-                      "：這個檔是安裝建出來的，拿掉區塊之後是空的", file=output)
+                      ": the installer created this file and removing our block leaves it empty",
+                      file=output)
                 if not dry_run:
                     transaction.remove(path)
                 continue
@@ -1890,8 +1923,8 @@ def _uninstall(home, dry_run=False, output=sys.stdout, scheduler=None):
         except Exception as exc:
             print(f"HOST BLOCK REMOVAL FAILED: {type(exc).__name__}: {exc}", file=output)
             print(
-                "  請自行跑：python -m epitype.host_sync --remove"
-                "（或手動刪掉 CLAUDE.md／AGENTS.md 裡 EPITYPE 標記之間的區塊）",
+                "  Run it yourself: python -m epitype.host_sync --remove"
+                " (or delete the block between the EPITYPE markers in CLAUDE.md/AGENTS.md by hand)",
                 file=output,
             )
         if config_dir.exists():
@@ -2628,6 +2661,15 @@ def _selftest():
                 and DREAM_AT_REGEX.pattern == _memspec.DREAM_AT_PATTERN,
             ))
 
+            checks.append((
+                "the installer's mirrored language constants still match memspec",
+                CONFIG_LANGUAGE_FIELD == _memspec.CONFIG_LANGUAGE_FIELD
+                and LANGUAGE_ZH == _memspec.LANGUAGE_ZH
+                and LANGUAGE_EN == _memspec.LANGUAGE_EN
+                and _memspec.DEFAULT_LANGUAGE == LANGUAGE_ZH
+                and _default_language() in (LANGUAGE_ZH, LANGUAGE_EN),
+            ))
+
             legacy_home = root / "legacy-home"
             (legacy_home / ".claude").mkdir(parents=True)
             legacy_settings = legacy_home / ".claude" / "settings.json"
@@ -2757,7 +2799,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 41
+    total = 42
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

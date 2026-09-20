@@ -246,7 +246,8 @@ def _with_notes(value, config, event):
     notes = take_notes(config, event.get("session_id", event.get("sessionId")))
     if not notes:
         return value
-    line = memspec.STOP_NOTE_DELIVERY.format(notes="；".join(notes))
+    line = memspec.STOP_NOTE_DELIVERY.format(
+        notes=memspec.PROBLEM_JOINER.join(notes))
     if value is None:
         return payload("UserPromptSubmit", line)
     context = value.get("hookSpecificOutput", {}).get("additionalContext", "")
@@ -335,7 +336,9 @@ def _recall(event, started_at, config, delivery_markers=None):
                 # context reads as nothing. The description goes in uncut: a ruling
                 # cut to 120 characters is what let 08-13 come back as an option.
                 full = _one_line(hit.get("description"))
-                parts = (key + (f"（{decided_at}）" if decided_at else ""), full or quote, located)
+                suffix = (memspec.RECALL_DECIDED_AT_SUFFIX.format(decided_at=decided_at)
+                          if decided_at else "")
+                parts = (key + suffix, full or quote, located)
             else:
                 # Say each fact once: a name the path already spells is not repeated.
                 parts = (description, located) if located.endswith(f"/{name}.md") else (name, description, located)

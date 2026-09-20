@@ -163,7 +163,7 @@ def _arming_findings(fields, counts, card_type, today):
         level,
         "unarmed",
         memspec.CARD_UNARMED_REASON.format(
-            armed="／".join(memspec.CARD_ARMING_FIELDS),
+            armed=memspec.SLASH_JOINER.join(memspec.CARD_ARMING_FIELDS),
             unenforceable=memspec.UNENFORCEABLE_FIELD,
         ),
     )]
@@ -197,9 +197,10 @@ def _example_findings(path, fields, front_lines, counts, today):
         missing = (memspec.EXAMPLE_ALLOWS_FIELD if blocks else memspec.EXAMPLE_BLOCKS_FIELD)
         findings.append((
             FAIL, "example",
-            f"只附了一向例句，缺 {missing}。"
-            + ("「一定不能擋」那一側才是貴的那一側：規則太鬆只是漏擋，太寬是每天擋錯人。"
-               if blocks else "沒有「一定要擋」的例句，等於沒有證明這條規則真的會擋。"),
+            memspec.CARD_LINT_ONE_SIDED_EXAMPLE_REASON.format(
+                field=missing,
+                note=(memspec.CARD_LINT_EXAMPLE_ALLOWS_NOTE if blocks
+                      else memspec.CARD_LINT_EXAMPLE_BLOCKS_NOTE)),
         ))
         return findings
     # 例句測得到的武裝只有這三種：禁語、配對要求、字面片段守衛。欄位型守衛與內建檢查
@@ -279,7 +280,8 @@ def _pattern_findings(fields, front_lines):
         findings.append((
             WARN, "guard-tool",
             memspec.CARD_GUARD_TOOL_UNKNOWN_REASON.format(
-                tool=tool, known="、".join(sorted(memspec.ACTION_GUARD_KNOWN_TOOLS))),
+                tool=tool,
+                known=memspec.LIST_JOINER.join(sorted(memspec.ACTION_GUARD_KNOWN_TOOLS))),
         ))
     return findings
 
@@ -294,7 +296,8 @@ def _guard_findings(fields, front_lines):
     findings = []
     if not fields.get(memspec.ACTION_GUARD_TOOL_FIELD, "").strip():
         findings.append((
-            FAIL, "guard", f"{memspec.ACTION_GUARD_TOOL_FIELD} 是空的，這一道守不到任何工具"
+            FAIL, "guard", memspec.CARD_LINT_GUARD_TOOL_EMPTY_REASON.format(
+                field=memspec.ACTION_GUARD_TOOL_FIELD)
         ))
     items = memspec.sequence_items(front_lines, memspec.ACTION_GUARD_ALL_OF_FIELD)
     requires = memspec.sequence_items(front_lines, memspec.ACTION_GUARD_REQUIRES_FIELD)
@@ -302,16 +305,18 @@ def _guard_findings(fields, front_lines):
         findings.append((
             FAIL,
             "guard",
-            f"{memspec.ACTION_GUARD_REQUIRES_FIELD} {len(requires)} 個，"
-            f"超過上限 {memspec.ACTION_GUARD_MAX_REQUIRES}",
+            memspec.CARD_LINT_GUARD_FRAGMENTS_REASON.format(
+                field=memspec.ACTION_GUARD_REQUIRES_FIELD, count=len(requires),
+                limit=memspec.ACTION_GUARD_MAX_REQUIRES),
         ))
     when = memspec.sequence_items(front_lines, memspec.ACTION_GUARD_WHEN_FIELD)
     if len(when) > memspec.ACTION_GUARD_MAX_WHEN:
         findings.append((
             FAIL,
             "guard",
-            f"{memspec.ACTION_GUARD_WHEN_FIELD} {len(when)} 組，"
-            f"超過上限 {memspec.ACTION_GUARD_MAX_WHEN}",
+            memspec.CARD_LINT_GUARD_WHEN_REASON.format(
+                field=memspec.ACTION_GUARD_WHEN_FIELD, count=len(when),
+                limit=memspec.ACTION_GUARD_MAX_WHEN),
         ))
     if not items and not requires and not when:
         # 三種守衛各自成立：比對字面片段的、問「呼叫少了哪個欄位」的、問「哪兩個欄位
@@ -320,22 +325,26 @@ def _guard_findings(fields, front_lines):
         findings.append((
             FAIL,
             "guard",
-            f"缺 {memspec.ACTION_GUARD_ALL_OF_FIELD} 的字面片段，"
-            f"也缺 {memspec.ACTION_GUARD_REQUIRES_FIELD} 的必填欄位"
-            f"或 {memspec.ACTION_GUARD_WHEN_FIELD} 的欄位組合：守衛卡至少要有一種條件",
+            memspec.CARD_LINT_GUARD_NO_CONDITION_REASON.format(
+                all_of=memspec.ACTION_GUARD_ALL_OF_FIELD,
+                requires=memspec.ACTION_GUARD_REQUIRES_FIELD,
+                when=memspec.ACTION_GUARD_WHEN_FIELD),
         ))
     elif not items:
         pass
     elif len(items) > memspec.ACTION_GUARD_MAX_SUBSTRINGS:
         findings.append((
-            FAIL, "guard", f"片段 {len(items)} 個，超過上限 {memspec.ACTION_GUARD_MAX_SUBSTRINGS}"
+            FAIL, "guard", memspec.CARD_LINT_GUARD_FRAGMENTS_REASON.format(
+                field=memspec.ACTION_GUARD_ALL_OF_FIELD, count=len(items),
+                limit=memspec.ACTION_GUARD_MAX_SUBSTRINGS)
         ))
     elif len(items) == 1 and len(items[0]) < memspec.ACTION_GUARD_LONE_FRAGMENT_MIN_CHARS:
         findings.append((
             FAIL,
             "guard",
-            f"只有一個片段「{items[0]}」且短於 {memspec.ACTION_GUARD_LONE_FRAGMENT_MIN_CHARS} 個字，"
-            "會擋掉整類工具；停用整類工具是宿主原生規則的事，請再加一個片段把條件收窄",
+            memspec.CARD_LINT_GUARD_LONE_FRAGMENT_REASON.format(
+                fragment=items[0],
+                limit=memspec.ACTION_GUARD_LONE_FRAGMENT_MIN_CHARS),
         ))
     return findings
 
@@ -351,7 +360,9 @@ def _decider_findings(fields, nested, counts):
         yield (
             FAIL,
             "decided-by",
-            f"{memspec.DECIDED_BY_FIELD}={decider} 不在 {'|'.join(memspec.DECIDED_BY_VALUES)}",
+            memspec.CARD_LINT_DECIDED_BY_REASON.format(
+                field=memspec.DECIDED_BY_FIELD, value=decider,
+                allowed="|".join(memspec.DECIDED_BY_VALUES)),
         )
     if decider == memspec.OWNER_EXPLICIT_DECIDER and not _has_value(
         memspec.OWNER_QUOTE_FIELD, fields, nested, counts
@@ -359,7 +370,8 @@ def _decider_findings(fields, nested, counts):
         yield (
             FAIL,
             "required",
-            f"{memspec.DECIDED_BY_FIELD}=owner-explicit 缺 {memspec.OWNER_QUOTE_FIELD}",
+            memspec.CARD_LINT_OWNER_QUOTE_REASON.format(
+                field=memspec.DECIDED_BY_FIELD, missing=memspec.OWNER_QUOTE_FIELD),
         )
 
 
@@ -375,7 +387,8 @@ def _rule_findings(fields, front_lines):
             field=memspec.RULE_LAYER_FIELD, value=layer, allowed="|".join(memspec.RULE_LAYERS)))
     approved_at = fields.get(memspec.RULE_APPROVED_AT_FIELD, "").strip()
     if approved_at and not memspec.is_iso_date(approved_at):
-        yield (FAIL, "date", f"{memspec.RULE_APPROVED_AT_FIELD}={approved_at} 不是 ISO 日期")
+        yield (FAIL, "date", memspec.CARD_LINT_NOT_ISO_DATE_REASON.format(
+            field=memspec.RULE_APPROVED_AT_FIELD, value=approved_at))
     order = fields.get(memspec.RULE_ORDER_FIELD, "").strip()
     if order and _as_int(order) is None:
         yield (FAIL, "field-shape", memspec.RULE_ORDER_NOT_INTEGER_REASON.format(
@@ -394,12 +407,12 @@ def _rule_findings(fields, front_lines):
     unknown = [host for host in hosts if host not in memspec.RULE_HOSTS]
     if unknown:
         yield (FAIL, "hosts", memspec.RULE_HOSTS_REASON.format(
-            field=memspec.RULE_HOSTS_FIELD, value="／".join(unknown),
+            field=memspec.RULE_HOSTS_FIELD, value=memspec.SLASH_JOINER.join(unknown),
             allowed="|".join(memspec.RULE_HOSTS)))
     if hosts and layer == memspec.RULE_LAYER_FLOOR:
         yield (FAIL, "hosts-layer", memspec.RULE_HOSTS_ON_FLOOR_REASON.format(
             layer=memspec.RULE_LAYER_FLOOR, field=memspec.RULE_HOSTS_FIELD,
-            value="／".join(hosts)))
+            value=memspec.SLASH_JOINER.join(hosts)))
 
 
 def _as_int(value):
@@ -503,7 +516,8 @@ def _expiry_warnings(fields, today):
             continue
         stamped = _as_date(raw)
         if stamped is not None and stamped < today:
-            yield WARN, "expired", f"{field}={raw} 已過期（讀取端應視為失效，仍不刪只歸檔）"
+            yield WARN, "expired", memspec.CARD_LINT_EXPIRED_REASON.format(
+                field=field, value=raw)
 
 
 def _as_date(value):
@@ -645,17 +659,17 @@ def _check_card(path, relative, today):
 
     findings = []
     if front_lines is None:
-        findings.append((FAIL, "frontmatter", "沒有 frontmatter，型別與必填欄位無法判定"))
+        findings.append((FAIL, "frontmatter", memspec.CARD_LINT_NO_FRONTMATTER_REASON))
         return memspec.DEFAULT_CARD_TYPE, findings, None
     if closing is None:
-        findings.append((FAIL, "frontmatter", "frontmatter 缺少結束界線"))
+        findings.append((FAIL, "frontmatter", memspec.CARD_LINT_NO_BOUNDARY_REASON))
         return memspec.DEFAULT_CARD_TYPE, findings, None
 
     nested, counts = _nested_and_lists(front_lines, path)
     card_type = _card_type(relative, fields, nested)
     derived = None
     if problem:
-        level = FAIL if "重複欄位" in problem else WARN
+        level = FAIL if memspec.CARD_LINT_DUPLICATE_FIELD_REASON in problem else WARN
         findings.append((level, "frontmatter", problem))
 
     allowed = memspec.card_status_values(card_type)
@@ -664,7 +678,9 @@ def _check_card(path, relative, today):
         findings.append((
             FAIL,
             "status",
-            f"status={status} 不在 {'|'.join(allowed)}（{card_type} 型）",
+            memspec.CARD_LINT_STATUS_REASON.format(
+                field=memspec.DECISION_STATUS_FIELD, value=status,
+                allowed="|".join(allowed), card_type=card_type),
         ))
 
     findings.extend(_disarmed_findings(fields, nested))
@@ -681,17 +697,20 @@ def _check_card(path, relative, today):
             ))
     for field in memspec.CARD_REQUIRED_FIELDS[card_type]:
         if not _has_value(field, fields, nested, counts):
-            findings.append((FAIL, "required", f"缺必填欄位 {field}"))
+            findings.append((FAIL, "required",
+                             memspec.CARD_LINT_MISSING_REQUIRED_REASON.format(fields=field)))
     for field in memspec.CARD_OPTIONAL_FIELDS[card_type]:
         if field in memspec.CARD_LIST_FIELDS and field in counts and counts[field] == 0:
-            findings.append((FAIL, "field-shape", f"{field} 是空序列；選填欄位寫了就要有內容"))
+            findings.append((FAIL, "field-shape",
+                             memspec.CARD_LINT_EMPTY_SEQUENCE_REASON.format(field=field)))
 
     if card_type in (memspec.CARD_TYPE_DECISION, memspec.CARD_TYPE_RULE):
         findings.extend(_decider_findings(fields, nested, counts))
     if card_type == memspec.CARD_TYPE_DECISION:
         stamp = fields.get(memspec.CURRENT_DECISION_AT_FIELD, "").strip()
         if stamp and not memspec.is_iso_date(stamp):
-            findings.append((FAIL, "date", f"{memspec.CURRENT_DECISION_AT_FIELD}={stamp} 不是 ISO 日期"))
+            findings.append((FAIL, "date", memspec.CARD_LINT_NOT_ISO_DATE_REASON.format(
+                field=memspec.CURRENT_DECISION_AT_FIELD, value=stamp)))
         for item in _forbidden_items(front_lines):
             if _is_bare_term(item):
                 findings.append((WARN, "forbidden-bare-term", memspec.FORBIDDEN_BARE_TERM_REASON.format(
@@ -703,7 +722,8 @@ def _check_card(path, relative, today):
             findings.append((
                 INFO,
                 "grant-permanent",
-                f"缺 {memspec.GRANT_EXPIRES_FIELD}＝永久授權；owner 可能就是要它永久有效",
+                memspec.CARD_LINT_GRANT_NO_EXPIRY_REASON.format(
+                    field=memspec.GRANT_EXPIRES_FIELD),
             ))
     elif card_type in memspec.GENERIC_CARD_TYPES:
         if not _has_value(memspec.ALIASES_FIELD, fields, nested, counts):
@@ -714,21 +734,21 @@ def _check_card(path, relative, today):
                 findings.append((
                     INFO,
                     "aliases-indented",
-                    f"{memspec.ALIASES_FIELD} 有 {indented} 個但被排在下一層（宿主寫入器會這樣重排）；"
-                    "搜尋讀得到，頂層仍是規範位置",
+                    memspec.CARD_LINT_NESTED_ALIASES_REASON.format(
+                        field=memspec.ALIASES_FIELD, count=indented),
                 ))
             else:
                 findings.append((
                     WARN,
                     "aliases",
-                    f"缺 {memspec.ALIASES_FIELD}（同義詞檢索空手）→ "
-                    "python epitype/alias_batch.py export <vault>，審核 suggested 後 apply",
+                    memspec.CARD_LINT_MISSING_ALIASES_REASON.format(
+                        field=memspec.ALIASES_FIELD),
                 ))
         if not _has_date(fields, nested):
             derived = _derived_date(fields, relative, _body_text(text, closing))
             if derived is None:
                 findings.append((FAIL, "date", memspec.CARD_DATE_MISSING_REASON.format(
-                    fields="／".join(memspec.CARD_DATE_FIELDS))))
+                    fields=memspec.SLASH_JOINER.join(memspec.CARD_DATE_FIELDS))))
             else:
                 findings.append((WARN, "date-derived", memspec.CARD_DATE_DERIVED_REASON.format(
                     field=memspec.LAST_VERIFIED_AT_FIELD, source=derived[0], date=derived[1])))
@@ -741,8 +761,7 @@ def _check_card(path, relative, today):
             findings.append((
                 INFO,
                 "no-chinese",
-                "description 與 aliases 都沒有中文字，中文提問喚不回；"
-                "本場 AI 自主補中文別名即可（owner 2026-09-06 裁定：不必問 owner）",
+                memspec.CARD_LINT_NO_CHINESE_REASON,
             ))
 
     findings.extend(_expiry_warnings(fields, today))
@@ -753,8 +772,10 @@ def _check_card(path, relative, today):
         findings.append((
             FAIL,
             "applies-to",
-            f"{memspec.APPLIES_TO_FIELD}=「{scope_value}」不是認得的值"
-            f"（只有 {'／'.join(memspec.APPLIES_TO_VALUES)}；不寫＝說話與寫檔都管）",
+            memspec.CARD_LINT_UNKNOWN_VALUE_REASON.format(
+                field=memspec.APPLIES_TO_FIELD, value=scope_value,
+                allowed=memspec.SLASH_JOINER.join(memspec.APPLIES_TO_VALUES),
+                note=memspec.CARD_LINT_APPLIES_TO_NOTE),
         ))
     on_hit = fields.get(memspec.ON_HIT_FIELD, "").strip().casefold()
     if on_hit and on_hit not in memspec.ON_HIT_VALUES:
@@ -762,8 +783,10 @@ def _check_card(path, relative, today):
         findings.append((
             WARN,
             "on-hit",
-            f"{memspec.ON_HIT_FIELD}=「{on_hit}」不是認得的值"
-            f"（只有 {'／'.join(memspec.ON_HIT_VALUES)}；不寫＝違反就擋下回合）",
+            memspec.CARD_LINT_UNKNOWN_VALUE_REASON.format(
+                field=memspec.ON_HIT_FIELD, value=on_hit,
+                allowed=memspec.SLASH_JOINER.join(memspec.ON_HIT_VALUES),
+                note=memspec.CARD_LINT_ON_HIT_NOTE),
         ))
     return card_type, findings, derived
 
@@ -808,14 +831,18 @@ def _vault_findings(vault, relatives):
     try:
         decisions = decision_lint.lint_vault(vault)
     except Exception as exc:
-        findings.append((WARN, "decisions", f"決策 lint 無法完成：{type(exc).__name__}: {exc}"))
+        findings.append((WARN, "decisions",
+                         memspec.CARD_LINT_DECISION_LINT_FAILED_REASON.format(
+                             error=f"{type(exc).__name__}: {exc}")))
     else:
         for level, items in ((FAIL, decisions.failures), (WARN, decisions.warnings)):
             for item in items:
                 findings.append((
                     level,
                     "decisions",
-                    f"規則{item.rule} {item.reason}｜{_shorten(item.path_text, vault)}",
+                    memspec.CARD_LINT_DECISION_FINDING.format(
+                        rule=item.rule, reason=item.reason,
+                        path=_shorten(item.path_text, vault)),
                 ))
 
     managed = set(relatives)
@@ -830,7 +857,8 @@ def _vault_findings(vault, relatives):
         missing = sorted(managed - listed)
         if missing:
             findings.append((WARN, "views", memspec.VIEWS_STALE_REASON.format(
-                count=len(missing), cards="／".join(missing[:3]), vault=vault)))
+                count=len(missing), cards=memspec.SLASH_JOINER.join(missing[:3]),
+                vault=vault)))
 
     try:
         indexed = memsearch.indexed_card_paths(vault)
@@ -842,7 +870,8 @@ def _vault_findings(vault, relatives):
         missing = sorted(managed - indexed)
         if missing:
             findings.append((WARN, "search-index", memspec.SEARCH_INDEX_STALE_REASON.format(
-                count=len(missing), cards="／".join(missing[:3]), vault=vault)))
+                count=len(missing), cards=memspec.SLASH_JOINER.join(missing[:3]),
+                vault=vault)))
     return findings
 
 
@@ -1016,7 +1045,8 @@ def no_chinese_line(reports, governance, limit=memspec.CARD_NO_CHINESE_PER_SESSI
     chosen = (keys[start:] + keys[:start])[:limit]
     _write_cursor(governance, chosen[-1])
     return memspec.CARD_NO_CHINESE_LINE.format(
-        limit=limit, cards="｜".join(key.split("\n", 1)[1] for key in chosen)
+        limit=limit,
+        cards=memspec.PIPE_JOINER.join(key.split("\n", 1)[1] for key in chosen)
     )
 
 
