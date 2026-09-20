@@ -116,7 +116,7 @@ class LanguageResolution(unittest.TestCase):
         self.root = Path(temporary.name).resolve()
         self.config = self.root / "config.json"
 
-    def resolve(self, config_text=None, language=None):
+    def resolve(self, config_text=None, language=None, argv=()):
         """用的是產品自己那一支解析函式——另寫一份判斷等於沒驗到。"""
         environment = {}
         if config_text is None:
@@ -133,7 +133,7 @@ class LanguageResolution(unittest.TestCase):
         with patch.dict(os.environ, environment):
             for name in removed:
                 os.environ.pop(name, None)
-            return memspec._resolve_language()
+            return memspec._resolve_language(argv=argv)
 
     def test_no_config_and_no_env_is_traditional_chinese(self):
         self.assertEqual(self.resolve(), memspec.LANGUAGE_ZH)
@@ -144,6 +144,13 @@ class LanguageResolution(unittest.TestCase):
     def test_the_config_field_is_honoured(self):
         self.assertEqual(self.resolve('{"language": "en"}'), memspec.LANGUAGE_EN)
         self.assertEqual(self.resolve('﻿{"language": "en"}'), memspec.LANGUAGE_EN)
+
+    def test_a_selftest_run_stays_on_the_default_wording(self):
+        # 各模組自測拿中文訊息比對。使用者把設定檔設成英文之後，那些自測不該整排變紅——
+        # 一台健康的機器不能看起來是壞的。明寫環境變數的人照他說的算。
+        self.assertEqual(self.resolve('{"language": "en"}', argv=["--selftest"]), memspec.LANGUAGE_ZH)
+        self.assertEqual(self.resolve('{"language": "en"}', language="en", argv=["--selftest"]),
+                         memspec.LANGUAGE_EN)
 
     def test_the_environment_variable_beats_the_config(self):
         self.assertEqual(self.resolve('{"language": "en"}', language="zh-TW"),
