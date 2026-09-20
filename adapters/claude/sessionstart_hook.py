@@ -103,7 +103,8 @@ def _repeat_guard_notices(vaults, started_at, now=None):
     lines = []
     for card, count in ranked[: _memspec.GUARD_REPEAT_NOTICE_MAX_CARDS]:
         lines.append(_memspec.GUARD_REPEAT_NOTICE.format(
-            count=count, card=card, advice=advice.get(card, "")).strip().rstrip("：").strip())
+            count=count, card=card, advice=advice.get(card, "")
+        ).strip().rstrip(_memspec.ADVICE_COLON).strip())
     return lines
 
 

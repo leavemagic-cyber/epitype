@@ -251,7 +251,8 @@ def _decisions(vault, started_at, defects=None):
         # 這個庫的規則這一次一條都沒生效。安靜回空的話，外面看起來就像「這裡沒有
         # 規則」——而那正是沒有人會去查的那個答案。
         defects.append(memspec.GATE_VAULT_UNREADABLE_NOTICE.format(
-            gate="回合閘", vault=Path(vault).name, reason=type(exc).__name__))
+            gate=memspec.GATE_NAME_STOP, vault=Path(vault).name,
+            reason=type(exc).__name__))
         return []
     manifest, paths = {}, {}
     for card_path, path, mtime_ns, size, ctime_ns in scan:
@@ -460,7 +461,8 @@ def _forbidden_fragment(decision, message, defects, masked=None):
                 memspec.STOP_GATE_PATTERN_DEFECT.format(
                     decision=decision.key,
                     pattern=_one_line(pattern)[: memspec.STOP_GATE_FRAGMENT_MAX_CHARS],
-                    reason="改用逐字比對" if repaired else "無法使用，這一條沒有生效",
+                    reason=(memspec.STOP_GATE_PATTERN_REPAIRED_REASON if repaired
+                            else memspec.STOP_GATE_PATTERN_UNUSABLE_REASON),
                 )
             )
         if regex is None:
@@ -608,7 +610,8 @@ def _turn_check_gap(decision, message, turn, opened_names, defects):
         return None
     if name not in memspec.TURN_CHECK_NAMES:
         defects.append(memspec.TURN_CHECK_UNKNOWN_DEFECT.format(
-            decision=decision.key, name=name, known="、".join(memspec.TURN_CHECK_NAMES)))
+            decision=decision.key, name=name,
+            known=memspec.LIST_JOINER.join(memspec.TURN_CHECK_NAMES)))
         return None
     if name == memspec.TURN_CHECK_LENGTH:
         return _length_gap(decision, message, turn)
@@ -625,10 +628,11 @@ def _require_reason(decision, trigger):
     items, more = memspec.readable_alternatives(decision.require_text)
     if items:
         expected = memspec.REQUIRE_HINT_TEMPLATE.format(
-            items="、".join(items) + (memspec.REQUIRE_HINT_MORE if more else ""))
+            items=memspec.LIST_JOINER.join(items)
+            + (memspec.REQUIRE_HINT_MORE if more else ""))
         advice = ""
     else:
-        expected = "這張卡要求的內容"
+        expected = memspec.REQUIRE_HINT_FALLBACK
         advice = decision.advice[: memspec.STOP_GATE_REASON_QUOTE_MAX_CHARS]
     return memspec.STOP_GATE_REQUIRE_REASON.format(
         trigger=trigger, expected=expected, decision=decision.key, advice=advice)
@@ -670,7 +674,8 @@ def _asks_again(decision, message):
 
 def _named(decision):
     if decision.decided_at:
-        return f"{decision.key}，{decision.decided_at}"
+        return memspec.STOP_GATE_DECISION_NAMED.format(
+            key=decision.key, decided_at=decision.decided_at)
     return decision.key
 
 
@@ -897,7 +902,7 @@ def _verdict(event, message, config, started_at, defects, turn=None):
     for index, vault in enumerate(vaults):
         if expired(started_at):
             defects.append(memspec.STOP_GATE_INCOMPLETE_DEFECT.format(
-                checked=index, total=len(vaults), vault="記憶庫"))
+                checked=index, total=len(vaults), vault=memspec.VAULT_WORD))
             break
         decisions.extend(_decisions(vault, started_at, defects))
     if not decisions:
@@ -938,7 +943,8 @@ def _verdict(event, message, config, started_at, defects, turn=None):
             _best_effort_audit(leave_note, config, session_id, (
                 memspec.STOP_NOTE_FORBIDDEN.format(fragment=noted[3], decision=noted[0].key)
                 # 其他類的理由取第一句就夠：提醒是要我下次照做，不是要我讀完整段說明。
-                if noted[3] else noted[2].split("。")[0] + "。"))
+                if noted[3]
+                else noted[2].split(memspec.SENTENCE_END)[0] + memspec.SENTENCE_END))
         return None
     decision, rule, reason, _fragment = verdict
     if not _claim_marker(session_id, decision.key, message):
@@ -1494,7 +1500,8 @@ def main():
         try:
             if config_path().exists():
                 print(memspec.GATE_DEGRADED_NOTICE.format(
-                    gate="回合閘", reason=type(exc).__name__), file=sys.stderr)
+                    gate=memspec.GATE_NAME_STOP,
+                    reason=type(exc).__name__), file=sys.stderr)
         except Exception:
             pass
     return 0

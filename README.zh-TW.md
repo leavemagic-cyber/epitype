@@ -131,6 +131,14 @@ epitype trust
 
 核准後再跑一次檢查。只有印出 `CODEX TRUST: PASS 5/5` 才表示 Codex 端可執行。`doctor` 驗證的是註冊與合成執行，不能取代這項信任檢查。
 
+### 顯示語言
+
+閘門給你看的每一句話有英文與繁體中文兩種。全新安裝會在 `~/.epitype/config.json` 寫入
+`"language": "en"`；作業系統語系是中文時寫 `"language": "zh-TW"`。改那個欄位就換語言，
+或用環境變數 `EPITYPE_LANG`（`en` 或 `zh-TW`）覆寫單次執行，它比設定檔優先。設定檔沒有
+這個欄位＝照舊 `zh-TW`。`epitype doctor` 會在 `LANGUAGE:` 那一行印出目前生效的值。這個開關
+只換顯示字：樣式、欄名、閘門拿去比對的東西兩種語言完全一樣，換語言不會改變擋或不擋。
+
 ### 選擇 vault 版型
 
 從 repo 內的版型開始：

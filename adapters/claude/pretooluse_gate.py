@@ -52,6 +52,11 @@ def _best_effort_audit(callback, *arguments):
         pass
 
 
+def _quoted(text):
+    """引號跟著顯示語言走：中文用「」，英文用 ASCII 雙引號。"""
+    return memspec.QUOTE_OPEN + str(text) + memspec.QUOTE_CLOSE
+
+
 def _deny_value(reason):
     return {
         "hookSpecificOutput": {
@@ -337,14 +342,15 @@ def _card_review(relative, text):
     warns = [reason for level, _rule, reason in findings if level == card_lint.WARN]
     advice = (
         memspec.WRITE_GATE_CARD_ADVICE.format(
-            card_type=card_type, path=relative, problems="；".join(warns)
+            card_type=card_type, path=relative,
+            problems=memspec.PROBLEM_JOINER.join(warns)
         )
         if warns
         else None
     )
     if not fails:
         return None, advice
-    problems = "；".join(fails)
+    problems = memspec.PROBLEM_JOINER.join(fails)
     examples = [
         example
         for field, example in memspec.WRITE_GATE_FIELD_EXAMPLES.items()
@@ -354,8 +360,8 @@ def _card_review(relative, text):
         card_type=card_type,
         path=relative,
         problems=problems,
-        example="；".join(examples[: memspec.GATE_DEFECT_MAX_LINES])
-        or "見 docs/ARCHITECTURE.md §Card types and required fields",
+        example=memspec.PROBLEM_JOINER.join(examples[: memspec.GATE_DEFECT_MAX_LINES])
+        or memspec.WRITE_GATE_CARD_EXAMPLE_FALLBACK,
     )
     return reason[: memspec.WRITE_GATE_REASON_MAX_CHARS], advice
 
@@ -414,7 +420,8 @@ def _read_guard(path):
     tool = one_line(fields.get(memspec.ACTION_GUARD_TOOL_FIELD))
     if not tool:
         return memspec.ACTION_GUARD_DEFECT.format(
-            card=name, field=memspec.ACTION_GUARD_TOOL_FIELD, reason="工具名是空的"
+            card=name, field=memspec.ACTION_GUARD_TOOL_FIELD,
+            reason=memspec.ACTION_GUARD_TOOL_EMPTY_REASON,
         )
     declared = sequence_fields(
         front,
@@ -437,8 +444,8 @@ def _read_guard(path):
         # 逃生口寫壞就整張卡不生效。反過來（忽略壞掉的那一條）會讓守衛擋得比作者寫的更多，
         # 而擋過頭的那一方沒有人會來報案——被擋的人只會換個寫法繞過去。
         if not field_name.match(name_part.strip()) or not value_part.strip():
-            problem = (
-                f"{memspec.ACTION_GUARD_UNLESS_FIELD} 的「{item}」不是 欄位=值 的寫法"
+            problem = memspec.ACTION_GUARD_PAIR_SYNTAX_REASON.format(
+                field=memspec.ACTION_GUARD_UNLESS_FIELD, item=item
             )
             break
         unless.append((name_part.strip(), value_part.strip()))
@@ -450,7 +457,9 @@ def _read_guard(path):
     for item in when_items:
         name_part, _, value_part = str(item).partition("=")
         if not field_name.match(name_part.strip()) or not value_part.strip():
-            problem = f"{memspec.ACTION_GUARD_WHEN_FIELD} 的「{item}」不是 欄位=值 的寫法"
+            problem = memspec.ACTION_GUARD_PAIR_SYNTAX_REASON.format(
+                field=memspec.ACTION_GUARD_WHEN_FIELD, item=item
+            )
             break
         values = tuple(
             piece.strip().casefold()
@@ -458,7 +467,9 @@ def _read_guard(path):
             if piece.strip()
         )
         if not values:
-            problem = f"{memspec.ACTION_GUARD_WHEN_FIELD} 的「{item}」沒有值"
+            problem = memspec.ACTION_GUARD_PAIR_NO_VALUE_REASON.format(
+                field=memspec.ACTION_GUARD_WHEN_FIELD, item=item
+            )
             break
         when.append((name_part.strip(), values))
     if problem:
@@ -469,20 +480,22 @@ def _read_guard(path):
         return memspec.ACTION_GUARD_DEFECT.format(
             card=name,
             field=memspec.ACTION_GUARD_WHEN_FIELD,
-            reason=f"條件 {len(when)} 組，超過上限 {memspec.ACTION_GUARD_MAX_WHEN}",
+            reason=memspec.ACTION_GUARD_WHEN_TOO_MANY_REASON.format(
+                count=len(when), limit=memspec.ACTION_GUARD_MAX_WHEN),
         )
     for item in requires:
         if not field_name.match(str(item).strip()):
             return memspec.ACTION_GUARD_DEFECT.format(
                 card=name,
                 field=memspec.ACTION_GUARD_REQUIRES_FIELD,
-                reason=f"「{item}」不是一個欄位名",
+                reason=memspec.ACTION_GUARD_NOT_A_FIELD_REASON.format(item=item),
             )
     if len(requires) > memspec.ACTION_GUARD_MAX_REQUIRES:
         return memspec.ACTION_GUARD_DEFECT.format(
             card=name,
             field=memspec.ACTION_GUARD_REQUIRES_FIELD,
-            reason=f"必填欄位 {len(requires)} 個，超過上限 {memspec.ACTION_GUARD_MAX_REQUIRES}",
+            reason=memspec.ACTION_GUARD_REQUIRES_TOO_MANY_REASON.format(
+                count=len(requires), limit=memspec.ACTION_GUARD_MAX_REQUIRES),
         )
     if not substrings and (requires or when):
         # 欄位型的守衛不需要字面片段：它問的是「少了什麼」或「哪兩個欄位配在一起」，
@@ -505,21 +518,20 @@ def _read_guard(path):
             ),
         }
     if not substrings:
-        problem = (
-            f"既沒有 {memspec.ACTION_GUARD_ALL_OF_FIELD} 的字面片段，"
-            f"也沒有 {memspec.ACTION_GUARD_REQUIRES_FIELD} 的必填欄位"
-            f"或 {memspec.ACTION_GUARD_WHEN_FIELD} 的欄位組合"
+        problem = memspec.ACTION_GUARD_NO_CONDITION_REASON.format(
+            all_of=memspec.ACTION_GUARD_ALL_OF_FIELD,
+            requires=memspec.ACTION_GUARD_REQUIRES_FIELD,
+            when=memspec.ACTION_GUARD_WHEN_FIELD,
         )
     elif len(substrings) > memspec.ACTION_GUARD_MAX_SUBSTRINGS:
-        problem = f"片段超過 {memspec.ACTION_GUARD_MAX_SUBSTRINGS} 個"
+        problem = memspec.ACTION_GUARD_TOO_MANY_FRAGMENTS_REASON.format(
+            limit=memspec.ACTION_GUARD_MAX_SUBSTRINGS)
     elif (
         len(substrings) == 1
         and len(substrings[0]) < memspec.ACTION_GUARD_LONE_FRAGMENT_MIN_CHARS
     ):
-        problem = (
-            f"只有一個片段而且短於 {memspec.ACTION_GUARD_LONE_FRAGMENT_MIN_CHARS} 個字，"
-            "會擋掉整類工具；請再加一個片段把條件收窄"
-        )
+        problem = memspec.ACTION_GUARD_LONE_FRAGMENT_REASON.format(
+            limit=memspec.ACTION_GUARD_LONE_FRAGMENT_MIN_CHARS)
     if problem:
         return memspec.ACTION_GUARD_DEFECT.format(
             card=name, field=memspec.ACTION_GUARD_ALL_OF_FIELD, reason=problem
@@ -588,7 +600,8 @@ def _guards(vault, started_at, defects, cap=None):
         # 這個庫的規則這一次一條都沒生效。安靜回空的話，外面看起來就像「這裡沒有
         # 規則」——而那正是沒有人會去查的那個答案。
         defects.append(memspec.GATE_VAULT_UNREADABLE_NOTICE.format(
-            gate="動作閘", vault=Path(vault).name, reason=type(exc).__name__))
+            gate=memspec.GATE_NAME_ACTION, vault=Path(vault).name,
+            reason=type(exc).__name__))
         return []
     manifest, paths = {}, {}
     for card_path, path, mtime_ns, size, ctime_ns in scan:
@@ -763,22 +776,22 @@ def _guard_review(event, tool_name, tool_input, config, started_at, defects):
                 reason = memspec.ACTION_GUARD_REQUIRES_REASON.format(
                     card=guard.card,
                     tool=tool_name,
-                    fields="、".join(f"「{name}」" for name in missing),
+                    fields=memspec.LIST_JOINER.join(_quoted(name) for name in missing),
                     advice=guard.advice,
                 )
             elif not guard.substrings and guard.when:
                 reason = memspec.ACTION_GUARD_WHEN_REASON.format(
                     card=guard.card,
                     tool=tool_name,
-                    pairs="＋".join(
+                    pairs=memspec.PAIR_JOINER.join(
                         f"{name}={str(fields.get(name, '') or '').strip()}"
                         for name, _values in guard.when
                     ),
                     advice=guard.advice,
                 )
             else:
-                fragments = "、".join(
-                    f"「{fragment[: memspec.ACTION_GUARD_FRAGMENT_MAX_CHARS]}」"
+                fragments = memspec.LIST_JOINER.join(
+                    _quoted(fragment[: memspec.ACTION_GUARD_FRAGMENT_MAX_CHARS])
                     for fragment in guard.substrings
                 )
                 reason = memspec.ACTION_GUARD_REASON.format(
@@ -1694,7 +1707,8 @@ def main():
         try:
             if config_path().exists():
                 print(memspec.GATE_DEGRADED_NOTICE.format(
-                    gate="動作閘", reason=type(exc).__name__), file=sys.stderr)
+                    gate=memspec.GATE_NAME_ACTION,
+                    reason=type(exc).__name__), file=sys.stderr)
         except Exception:
             pass
     return 0

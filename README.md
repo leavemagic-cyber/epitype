@@ -133,6 +133,16 @@ If an Epitype entry comes back `UNTRUSTED`, `DISABLED` or `MODIFIED`:
 
 Run the check again. Codex is ready when it prints `CODEX TRUST: PASS 5/5`. `doctor` checks registration and synthetic execution, and does not replace this.
 
+### Language
+
+Every message a gate shows you comes in English or Traditional Chinese. A fresh install
+writes `"language": "en"` into `~/.epitype/config.json`, unless your OS locale is Chinese,
+in which case it writes `"language": "zh-TW"`. Edit that field to switch, or override it
+for one run with the `EPITYPE_LANG` environment variable (`en` or `zh-TW`), which wins over
+the config file. A config without the field behaves as `zh-TW`. `epitype doctor` prints the
+active setting on its `LANGUAGE:` line. The switch changes displayed text only — patterns,
+field names and what the gates match on are the same in both languages.
+
 ### Choose a vault layout
 
 Start from one of the tracked templates:
