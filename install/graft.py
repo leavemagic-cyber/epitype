@@ -1413,6 +1413,36 @@ def _replace_nightly_command(expected, command, runner):
         raise InstallError("nightly schedule update failed")
 
 
+def registration_gaps(home, hosts=None, hooks_root=None, repo_root=None):
+    """每個宿主缺了或對不上的時機點：{宿主: [時機點…]}，全對得上就是空的。
+
+    程式與登記是兩半：程式改了立刻生效，登記要跑安裝才會更新。直接跑原始碼的機器
+    （開發機、貢獻者）永遠不經過「升級後重裝」那一步，新增一個時機點之後，登記落後
+    沒有任何徵兆——2026-09-20 實際發生：SubagentStop 加進範本隔天，Codex 那邊仍沒登記，
+    要手動跑健康檢查才看得到。健康檢查與夜間檢查共用這一個函式，判準只有一份。"""
+    home = Path(home)
+    hosts = _detect_hosts(home) if hosts is None else hosts
+    hooks_root = hooks_root or home / CONFIG_DIRECTORY / HOOK_DIRECTORY
+    repo_root = repo_root or REPO_ROOT
+    gaps = {}
+    for name in hosts:
+        hook_path = (
+            home / ".claude" / "settings.json"
+            if name == "claude"
+            else home / ".codex" / "hooks.json"
+        )
+        actual = _marked_entries(hook_path)
+        expected = _hook_template(name == "codex", hooks_root, repo_root)
+        mismatches = [
+            event
+            for event in EVENTS
+            if len(actual[event]) != 1 or not _entry_matches(actual[event][0], expected[event])
+        ]
+        if mismatches:
+            gaps[name] = mismatches
+    return gaps
+
+
 def _doctor(home, dry_run=False, output=sys.stdout, clear_shim_status=False, scheduler=None):
     hosts = _detect_hosts(home)
     print("HOSTS: " + (", ".join(hosts) if hosts else "none"), file=output)
@@ -1463,19 +1493,9 @@ def _doctor(home, dry_run=False, output=sys.stdout, clear_shim_status=False, sch
             )
         if not hosts:
             raise ValueError("no supported host detected")
+        gaps = registration_gaps(home, hosts, hooks_root, repo_root)
         for name in hosts:
-            hook_path = (
-                home / ".claude" / "settings.json"
-                if name == "claude"
-                else home / ".codex" / "hooks.json"
-            )
-            actual = _marked_entries(hook_path)
-            expected = _hook_template(name == "codex", hooks_root, repo_root)
-            mismatches = [
-                event
-                for event in EVENTS
-                if len(actual[event]) != 1 or not _entry_matches(actual[event][0], expected[event])
-            ]
+            mismatches = gaps.get(name, [])
             if mismatches:
                 raise ValueError(f"{name} shim registration mismatch: {', '.join(mismatches)}")
             print(f"REGISTRATION {name}: PASS {len(EVENTS)}/{len(EVENTS)}", file=output)

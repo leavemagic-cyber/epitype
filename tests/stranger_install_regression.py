@@ -125,6 +125,26 @@ class AStrangerInstall(unittest.TestCase):
         text = (done.stdout + done.stderr).decode("utf-8", "replace")
         self.assertIn("PASS", text, msg=text[-600:])
 
+    def test_a_registration_that_fell_behind_is_noticed_without_running_the_doctor(self):
+        # 程式與登記是兩半：直接跑原始碼的機器不會經過「升級後重裝」，多了一個時機點之後
+        # 登記落後沒有徵兆。2026-09-20 owner 的機器就是這樣缺了一筆，手動跑健康檢查才發現。
+        from install import graft
+        from epitype import dream
+
+        self.assertEqual(self.epitype("install", "--home", str(self.home)).returncode, 0)
+        self.assertEqual(graft.registration_gaps(self.home), {}, "剛裝完不該有任何落後")
+        self.assertEqual(dream._stale_registrations({"home": str(self.home)}), [])
+
+        path = self.home / ".claude" / "settings.json"
+        settings = json.loads(path.read_text(encoding="utf-8"))
+        del settings["hooks"]["SubagentStop"]
+        path.write_text(json.dumps(settings), encoding="utf-8")
+
+        self.assertEqual(graft.registration_gaps(self.home), {"claude": ["SubagentStop"]})
+        notes = dream._stale_registrations({"home": str(self.home)})
+        self.assertEqual(len(notes), 1)
+        self.assertIn("SubagentStop", notes[0])
+
 
 def _selftest():
     loader = unittest.TestLoader()

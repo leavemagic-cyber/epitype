@@ -1913,15 +1913,34 @@ def _section_host_sync(vaults, today, since_date, config, context=None):
     replaced = replaced_in(done)
     # 拒寫要人動手，放進 errors：開場那一行才會說這一晚不乾淨。
     refused = [line for line in done.splitlines() if line.startswith("REFUSE")]
+    stale = _stale_registrations(context)
     return {
         # 漂移只數 DRIFT 行。以前數的是「所有非空行」，連 NOTE 都算進去——只有一個區塊
         # 漂移卻報 2，而這一版的主張就是數字要對。
         "counts": {"drifted": len(drifted), "written": len(written),
                    "replaced": len(replaced), "refused": len(refused)},
-        "examples": (refused + replaced + written)[:EXAMPLE_LIMIT],
-        "commands": [] if code == host_sync.EXIT_OK else ["epitype sync <vault> --apply"],
-        "errors": refused,
+        "examples": (stale + refused + replaced + written)[:EXAMPLE_LIMIT],
+        "commands": ([] if code == host_sync.EXIT_OK else ["epitype sync <vault> --apply"])
+        + (["epitype install --dry-run", "epitype install"] if stale else []),
+        # 登記落後要人動手（改的是宿主的設定檔），放進 errors：開場那一行才會說。
+        "errors": refused + stale,
     }
+
+
+REGISTRATION_STALE_NOTE = "{host} 的掛鉤登記落後：缺 {events}（程式已經會用到，宿主還不會叫它）"
+
+
+def _stale_registrations(context):
+    """宿主設定檔裡的登記有沒有跟上程式。只在真的家目錄上查；查不了就當沒事，不讓夢報錯。"""
+    home = (context or {}).get("home") if isinstance(context, dict) else None
+    try:
+        from install import graft
+
+        gaps = graft.registration_gaps(Path(home) if home else Path.home())
+    except Exception:
+        return []
+    return [REGISTRATION_STALE_NOTE.format(host=host, events="、".join(events))
+            for host, events in sorted(gaps.items())]
 
 
 # 吃 context 的節：第 4 節要家目錄（harvest），第 14 節要知道可不可以寫宿主檔。
