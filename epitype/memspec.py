@@ -1496,6 +1496,16 @@ CARD_MISSING_EXAMPLES_REASON = (
     "這張卡擋得住東西，卻沒有附兩向例句（{blocks}／{allows}）。規則寫好就上線，"
     "誤擋只能靠寫卡當下試跑攔下來——「一定不能擋」那幾句請取自真實說過的話，不要現編"
 )
+# 陌生人裝完拿到的是一個空庫：沒有一張卡，也就沒有一次「規則真的擋下來」可以看。
+# starter 是隨輪子一起出貨的那幾張卡，`starter:` 是它們的身分證——機器只看這個鍵在不在，
+# 值是可讀的來源名。沒有這個記號，移除那條路徑就分不出「我們放的」與「使用者自己寫的」，
+# 而協定允許歸檔、永遠不允許刪掉使用者的卡。
+STARTER_FIELD = "starter"
+STARTER_MARK = "epitype"
+# 卡片住在套件裡（`epitype/starter_cards/`）而不是 repo 的 templates/：後者不進輪子，
+# 陌生人 pip 裝完根本拿不到。目錄名刻意不叫 starter——那會跟 `epitype/starter.py` 這個
+# 模組在同一個套件裡撞名，import 解析成哪一個要看實作細節，不該賭。
+STARTER_DIRECTORY = "starter_cards"
 CARD_UNARMED_REASON = (
     "這是一張記錄 owner 行為糾正的卡，卻沒有任何擋得住的欄位（{armed}），"
     "也沒有寫 {unenforceable}: <理由>。只被讀到的規則 2026-09-16 已實測無效——"

@@ -1501,6 +1501,35 @@ def _planned_backup(path):
     return path.with_name(path.name + BACKUP_INFIX + "<UTC>")
 
 
+STARTER_HINT = (
+    "NEXT: no armed cards in the configured vaults — run `epitype starter` to install "
+    "the shipped ones and see a gate say no"
+)
+
+
+def _starter_hint(vaults, repo_root, output):
+    """武裝卡一張都沒有的庫，裝完等於什麼都不會擋——那時候提一行。
+
+    走訪整個庫的成本只有安裝器付得起（每場一次），掛鉤那條路徑一次工具呼叫就要跑一遍，
+    絕不能把這個掃描搬過去。判準借用 compliance.armed_rules：閘門自己的讀法，所以
+    「這張卡算不算武裝」不會在安裝器與閘門之間長出第二種答案。"""
+    try:
+        if str(repo_root) not in sys.path:
+            sys.path.insert(0, str(repo_root))
+        adapters = repo_root / "adapters" / "claude"
+        if str(adapters) not in sys.path:
+            sys.path.insert(0, str(adapters))
+        from epitype import compliance
+
+        for vault in vaults:
+            if compliance.armed_rules(vault):
+                return
+    except Exception:
+        # 提示不是安裝的一部分：算不出來就不說，絕不讓它把一次成功的安裝變成失敗。
+        return
+    print(STARTER_HINT, file=output)
+
+
 def _install(
     home,
     dry_run=False,
@@ -1643,6 +1672,7 @@ def _install(
             f"REMOVE: {sys.executable} {REPO_ROOT / 'install' / 'graft.py'} uninstall --home {home}",
             file=output,
         )
+        _starter_hint(vaults, repo_root, output)
         return 0
     except Exception:
         if not dry_run:

@@ -26,6 +26,7 @@ _COMMANDS = {
     "capture-route": ("epitype.capture_route", "main", ()),
     "dream": ("epitype.dream", "main", ()),
     "aliases": ("epitype.alias_batch", "main", ()),
+    "starter": ("epitype.starter", "main", ()),
     "install": ("install.graft", "main", ("install",)),
     "uninstall": ("install.graft", "main", ("uninstall",)),
     "doctor": ("install.graft", "main", ("doctor",)),

@@ -38,6 +38,9 @@ include-package-data = false
 [tool.setuptools.package-data]
 "adapters.codex" = ["hooks_template.json"]
 exam = ["sample_corpus.json"]
+# Without this line a stranger's `pip install epitype` ships no cards at all, and the
+# installed vault stays empty — which is what `epitype starter` exists to fix.
+epitype = ["starter_cards/*.md"]
 
 [tool.setuptools.dynamic]
 version = {attr = "epitype.__version__"}
