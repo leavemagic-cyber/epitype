@@ -182,6 +182,13 @@ def _selftest():
             )
             os.utime(vault / "undated.md", (old_mtime, old_mtime))
             (vault / "_views.md").write_text("---\nname: v\ndescription: v\n---\n- 未辦 私有視圖\n", encoding="utf-8")
+            (vault / "discipline.md").write_text(
+                "---\nname: discipline\ndescription: synthetic\n---\n"
+                "1. 動任何東西前先讀這份（現況、版本定義、§9待決都在）。\n"
+                "- 狀態要標 §9-pending，並列 §9 待決。\n",
+                encoding="utf-8",
+            )
+            os.utime(vault / "discipline.md", (old_mtime, old_mtime))
             (vault / memspec.MEMORY_INDEX_FILENAME).write_text("# index\n- 未辦 索引行\n", encoding="utf-8")
 
             report = scan_vault(vault, today=today)
@@ -211,6 +218,10 @@ def _selftest():
                 and report["zombie_cards"] == 2
                 and report["zombie_lines"] == 2,
             ))
+            checks.append((
+                "a section reference (§9待決) names a heading, not an unfinished item",
+                all(card["path"] != "discipline.md" for card in report["cards"]),
+            ))
             out = io.StringIO()
             code = main(["--strict", "--today", "2026-09-02", os.fspath(vault)], output=out)
             checks.append((
@@ -221,7 +232,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 5
+    total = 6
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
