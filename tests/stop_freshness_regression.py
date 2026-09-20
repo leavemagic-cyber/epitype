@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "adapters" / "claude")]
-from epitype import memsearch, memspec
+from epitype import cardscan, memsearch, memspec
 import _hook_common as common
 import stop_gate as stop
 
@@ -108,9 +108,16 @@ class StopFreshnessRegression(unittest.TestCase):
         cache = self.vault / memspec.FTS_INDEX_DIRECTORY / stop._DECISION_CACHE_FILENAME
         _manifest, _rulings, cursor = stop._read_cache(cache)
         card = self.vault / cursor
-        old_info = self.replace_preserving_metadata(card, "decision_kex:", "decision_key:")
-        original = Path.stat
-        with patch.object(Path, "stat", lambda path, *a, **kw: old_info if path == card else original(path, *a, **kw)):
+        before = dict((row[0], row) for row in cardscan.scan_vault(self.vault))[cursor]
+        self.replace_preserving_metadata(card, "decision_kex:", "decision_key:")
+        # 掃描讀的是 os.scandir 的 stat，不是 Path.stat；而清單多比一欄建立時間，Linux
+        # 一寫入就會動。要問的是「三個數字都沒變的時候」，所以直接把那一列釘回原值。
+        original_scan = cardscan.scan_vault
+
+        def unchanged_signature(vault):
+            return [before if row[0] == cursor else row for row in original_scan(vault)]
+
+        with patch.object(cardscan, "scan_vault", unchanged_signature):
             self.assertEqual(self.decisions(), [])
             self.assertEqual([item.path for item in self.decisions()], [card])
 
