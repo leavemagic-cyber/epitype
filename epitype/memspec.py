@@ -1348,10 +1348,29 @@ BLOCKED_ECHO_MAX_CHARS = 8000
 BLOCKED_ECHO_SHINGLE = 12
 BLOCKED_ECHO_MIN_SHINGLES = 4
 BLOCKED_ECHO_MAX_OVERLAP = 0.6
+# 2026-09-20 改：這件事原本也是用「再擋一次」處理，但觸發的時候重複的那一段 owner 早就
+# 看到了，再擋只是第三輪。真正能避免重貼的時機是第一次擋下的那一刻，所以那句話改放進
+# 每一則擋下理由的尾巴；真的重貼了只記帳、下一則提醒，不再擋。
+BLOCKED_ECHO_DECISION = "blocked-echo"
 BLOCKED_ECHO_REASON = (
-    "📌 剛才那一段已經送到 owner 眼前了（宿主先顯示、再跑這道閘），你現在這一段跟它有"
-    "{overlap:.0%} 一樣——他會看到同一段話兩次。只講改掉的那部分，不要整段重貼。"
+    "被擋之後那一段跟原本的有 {overlap:.0%} 一樣，owner 等於同一段話看了兩次。"
+    "下次被擋只補缺的那部分。"
 )
+STOP_GATE_REWRITE_HINT = "（剛才那一段 owner 已經看到了：只補缺的部分，不要整段重貼。）"
+# 宿主是「先把我的話顯示給 owner、再跑回合閘」。所以擋下一則回覆收不回任何一個字，只會
+# 逼出第二輪。第二輪對「缺了東西」的規則有用（補上證據、補上查證）；對只管用詞與篇幅的
+# 規則沒有用——客套話已經被看到了、太長的那一段也已經被看完了，重寫只是再多一段。
+# 2026-09-20 實量：七天 105 次回合被擋，其中 19 次是這一類，每次白白多跑一輪。
+# 這種卡標 `on_hit: note`：照樣比對、照樣進帳，但不擋；下一則提問時附一行提醒。
+ON_HIT_FIELD = "on_hit"
+ON_HIT_NOTE = "note"
+ON_HIT_VALUES = (ON_HIT_NOTE,)
+STOP_NOTE_LOG_KIND = "stop_note"
+STOP_NOTE_STATE_DIRECTORY = "notes"
+STOP_NOTE_MAX_PENDING = 3
+STOP_NOTE_MAX_CHARS = 140
+STOP_NOTE_FORBIDDEN = "別說「{fragment}」（{decision}）"
+STOP_NOTE_DELIVERY = "上一則回覆的提醒（已經送出的不用重寫、不用道歉，接下來照做）：{notes}"
 TURN_DISPATCH_TOOLS = frozenset({"task", "agent"})
 # 背景子代理跑完時，宿主把結果當成一則新的提問送進來；那一則裡有這個標記。
 TURN_DISPATCH_NOTICE_MARKER = "task-notification"

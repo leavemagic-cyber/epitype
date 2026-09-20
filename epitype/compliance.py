@@ -319,6 +319,8 @@ def _read_gate_log(path, since, counts, stopped):
                 continue
             if row.get("kind") not in (
                 memspec.STOP_GATE_LOG_KIND,
+                # 只提醒不擋的那一種也是「這條規則被違反了一次」，照樣算命中。
+                memspec.STOP_NOTE_LOG_KIND,
                 memspec.ACTION_GUARD_LOG_KIND,
                 memspec.WRITE_GATE_LOG_KIND,
             ):

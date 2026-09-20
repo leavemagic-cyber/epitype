@@ -106,7 +106,8 @@ REVIEW_PACK_TITLE = "檢討包 / review pack"
 REVIEW_PACK_MAX_ROWS = 50
 # 獨立事故＝不同場次。同一場裡重試同一句話只是同一件事（門檻卡 2026-09-17）。
 REVIEW_PACK_INCIDENT_SESSIONS = 2
-REVIEW_PACK_BLOCK_KINDS = (memspec.STOP_GATE_LOG_KIND, memspec.WRITE_GATE_LOG_KIND)
+REVIEW_PACK_BLOCK_KINDS = (memspec.STOP_GATE_LOG_KIND, memspec.STOP_NOTE_LOG_KIND,
+                           memspec.WRITE_GATE_LOG_KIND)
 REVIEW_PACK_READY_NOTE = "檢討包達門檻（{count}/{trigger}）"
 REVIEW_PACK_BELOW_NOTE = "未達門檻（{count}/{trigger}）"
 REVIEW_PACK_NEXT_STEP = (

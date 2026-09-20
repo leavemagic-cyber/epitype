@@ -16,6 +16,8 @@ import re
 import tempfile
 
 GATE_LOG_FILENAME = "_GATE_LOG.jsonl"
+# stop_note（只提醒、沒擋）刻意不在這裡：它沒有擋下任何東西，算進來會把「擋了幾次」灌水。
+# 它照樣出現在「其他種類」那一段，而「從沒響過」看的是所有種類的列，不會因此誤報。
 BLOCKING_KINDS = ("deny", "stop_block", "write_block")
 BY_CHOICES = ("kind", "decision", "session", "day")
 _SECTION_FOR_BY = {"kind": "by_kind", "decision": "by_label", "session": "by_session", "day": "by_day"}

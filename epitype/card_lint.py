@@ -756,6 +756,15 @@ def _check_card(path, relative, today):
             f"{memspec.APPLIES_TO_FIELD}=「{scope_value}」不是認得的值"
             f"（只有 {'／'.join(memspec.APPLIES_TO_VALUES)}；不寫＝說話與寫檔都管）",
         ))
+    on_hit = fields.get(memspec.ON_HIT_FIELD, "").strip().casefold()
+    if on_hit and on_hit not in memspec.ON_HIT_VALUES:
+        # 認不得的值，閘門當作沒寫、照擋——作者想省的那一輪沒省到，所以要講。
+        findings.append((
+            WARN,
+            "on-hit",
+            f"{memspec.ON_HIT_FIELD}=「{on_hit}」不是認得的值"
+            f"（只有 {'／'.join(memspec.ON_HIT_VALUES)}；不寫＝違反就擋下回合）",
+        ))
     return card_type, findings, derived
 
 

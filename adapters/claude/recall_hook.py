@@ -31,6 +31,7 @@ from _hook_common import (
     expired,
     load_config,
     payload,
+    take_notes,
     payload_fits,
     read_event,
     recall_marker_directory,
@@ -203,7 +204,22 @@ def _handle(event, started_at, delivery_markers=None):
     value = _recall(event, started_at, config, delivery_markers)
     if expired(started_at):
         return None
-    return value
+    return _with_notes(value, config, event)
+
+
+def _with_notes(value, config, event):
+    """回合閘上一則留下的提醒，跟著這一則提問一起送。
+
+    提醒走這裡而不是用「擋下回合」送，是因為宿主先顯示、後跑回合閘：擋下來收不回
+    已經顯示的字，只會多跑一輪；附在下一則提問上是零成本的。"""
+    notes = take_notes(config, event.get("session_id", event.get("sessionId")))
+    if not notes:
+        return value
+    line = memspec.STOP_NOTE_DELIVERY.format(notes="；".join(notes))
+    if value is None:
+        return payload("UserPromptSubmit", line)
+    context = value.get("hookSpecificOutput", {}).get("additionalContext", "")
+    return payload("UserPromptSubmit", (context + "\n" + line) if context else line)
 
 
 def _recall(event, started_at, config, delivery_markers=None):

@@ -469,6 +469,40 @@ def append_gate_log(vault, row, started_at):
             os.fsync(stream.fileno())
 
 
+def _notes_path(config, session_id):
+    session = "".join(char for char in str(session_id or "") if char.isalnum() or char in "-_")
+    if not session:
+        return None
+    return (Path(governance_vault(config, for_write=True)) / memspec.FTS_INDEX_DIRECTORY
+            / memspec.STOP_NOTE_STATE_DIRECTORY / (session + ".txt"))
+
+
+def leave_note(config, session_id, text):
+    """回合閘留給下一則提問的一行提醒。超過上限就不再疊——提醒本身不能變成負擔。"""
+    path = _notes_path(config, session_id)
+    line = " ".join(str(text).split())[: memspec.STOP_NOTE_MAX_CHARS]
+    if path is None or not line:
+        return
+    existing = path.read_text(encoding="utf-8").splitlines() if path.is_file() else []
+    if line in existing or len(existing) >= memspec.STOP_NOTE_MAX_PENDING:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join([*existing, line]) + "\n", encoding="utf-8")
+
+
+def take_notes(config, session_id):
+    """取走並清掉這一場累積的提醒；沒有就回空串列。壞了當作沒有——這是提醒，不是關卡。"""
+    try:
+        path = _notes_path(config, session_id)
+        if path is None or not path.is_file():
+            return []
+        lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        path.unlink()
+        return lines[: memspec.STOP_NOTE_MAX_PENDING]
+    except (OSError, ValueError):
+        return []
+
+
 def payload(event_name, context):
     return {
         "hookSpecificOutput": {

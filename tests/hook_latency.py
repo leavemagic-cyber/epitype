@@ -10,11 +10,18 @@
 
 取**最小值**不取中位數：機器上同時有別的東西在跑時，中位數量到的是負載，不是程式。
 最小值是「這台機器在最好的情況下要花多久」，而優化前後比的就該是同一個條件。
+
+量的是**記憶庫的暫存副本**：閘門每擋一次就往庫裡的紀錄檔寫一列，直接對正式庫量，
+等於每跑一次就灌進十幾列假的「擋下」——2026-09-19 這支工具一天灌了 185 列，害
+「這道守衛最近一天擋了幾次」的提醒與夜間報告全部失真。卡片照抄，所以量到的工作量一樣。
 """
 import json
+import os
+import shutil
 import statistics
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -31,7 +38,7 @@ CASES = (
     }),
     ("pretooluse（擋下）", ADAPTERS / "pretooluse_gate.py", {
         "tool_name": "Bash",
-        "tool_input": {"command": "cat <<'EOF' > C:\\tmp\\x.txt"},
+        "tool_input": {"command": "python - <<'PY'  print('\\\\\\\\')"},
         "session_id": "latency-deny",
         "cwd": str(REPO),
     }),
@@ -61,10 +68,44 @@ _INNER = (
 )
 
 
+_ENV = dict(os.environ)
+
+
+def _keep_cards_only(directory, names):
+    return [name for name in names
+            if not name.endswith('.md') and not os.path.isdir(os.path.join(directory, name))]
+
+
+def _scratch_config(root):
+    """把設定裡每個記憶庫抄一份到暫存處（只抄卡片），回傳指向副本的設定檔路徑。"""
+    sys.path.insert(0, str(REPO))
+    from epitype import memspec
+    source = Path(os.environ.get(memspec.EPITYPE_CONFIG_ENV)
+                  or Path.home() / '.epitype' / 'config.json')
+    config = json.loads(source.read_text(encoding='utf-8'))
+    copies = []
+    for index, vault in enumerate(config.get(memspec.CONFIG_VAULTS_FIELD) or []):
+        target = Path(root) / ('vault%d' % index)
+        if Path(vault).is_dir():
+            shutil.copytree(vault, target, ignore=_keep_cards_only)
+        else:
+            target.mkdir(parents=True)
+        copies.append(str(target))
+    config[memspec.CONFIG_VAULTS_FIELD] = copies
+    path = Path(root) / 'config.json'
+    path.write_text(json.dumps(config, ensure_ascii=False), encoding='utf-8')
+    _ENV[memspec.EPITYPE_CONFIG_ENV] = str(path)
+    # 光換設定檔不夠：閘門還會從 cwd 往上找本機原生的記憶庫，C 槽任何路徑最後都會
+    # 找到正式治理庫，紀錄照樣寫進去。家目錄一起指到暫存處，它才找不到。
+    for name in ('USERPROFILE', 'HOME'):
+        _ENV[name] = str(root)
+    return path
+
+
 def _spawn_ms(script, event):
     payload = json.dumps(event, ensure_ascii=False).encode("utf-8")
     started = time.perf_counter()
-    subprocess.run([sys.executable, str(script)], input=payload,
+    subprocess.run([sys.executable, str(script)], input=payload, env=_ENV,
                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     return (time.perf_counter() - started) * 1000
 
@@ -72,7 +113,7 @@ def _spawn_ms(script, event):
 def _inner_ms(script, event):
     code = _INNER % {"event": json.dumps(event, ensure_ascii=False),
                      "script": str(script), "adapters": str(ADAPTERS)}
-    done = subprocess.run([sys.executable, "-c", code],
+    done = subprocess.run([sys.executable, "-c", code], env=_ENV,
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     text = done.stderr.decode("utf-8", "replace")
     marker = text.rfind("ELAPSED ")
@@ -95,6 +136,12 @@ def _baseline():
 
 
 def main(argv=None):
+    with tempfile.TemporaryDirectory(prefix='epitype-latency-') as root:
+        _scratch_config(root)
+        return _measure()
+
+
+def _measure():
     base = _baseline()
     print("空的 Python 行程（減不掉的底，取最小值）：%.0f ms" % base)
     print("%-18s %10s %10s %12s" % ("", "宿主等(最小)", "我們的碼", "中位數"))

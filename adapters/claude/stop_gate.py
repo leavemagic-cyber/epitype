@@ -33,6 +33,7 @@ from _hook_common import (
     emit,
     expired,
     governance_vault,
+    leave_note,
     config_path,
     load_config,
     native_cwd_vaults,
@@ -77,7 +78,9 @@ def _turn(texts=(), prompt="", dispatch="", calls_after_dispatch=0):
 _Decision = namedtuple(
     "_Decision",
     "key decided_at quote forbidden aliases path decided_by require_when require_text advice"
-    " applies_to turn_check turn_check_limit",
+    " applies_to turn_check turn_check_limit on_hit",
+    # 只有最後一欄有預設值：沒標處置的卡就是「照擋」，既有的建構處不必跟著改。
+    defaults=("",),
 )
 
 
@@ -167,6 +170,7 @@ def _read_decision(path):
         memspec.APPLIES_TO_FIELD: _one_line(fields.get(memspec.APPLIES_TO_FIELD)).casefold(),
         memspec.TURN_CHECK_FIELD: _one_line(fields.get(memspec.TURN_CHECK_FIELD)).casefold(),
         memspec.TURN_CHECK_LIMIT_FIELD: _one_line(fields.get(memspec.TURN_CHECK_LIMIT_FIELD)),
+        memspec.ON_HIT_FIELD: _one_line(fields.get(memspec.ON_HIT_FIELD)).casefold(),
     }
 
 
@@ -192,6 +196,7 @@ def _decision_from_ruling(vault, card_path, ruling):
         _one_line(ruling.get(memspec.APPLIES_TO_FIELD)).casefold(),
         _one_line(ruling.get(memspec.TURN_CHECK_FIELD)).casefold(),
         _one_line(ruling.get(memspec.TURN_CHECK_LIMIT_FIELD)),
+        _one_line(ruling.get(memspec.ON_HIT_FIELD)).casefold(),
     )
 
 
@@ -711,7 +716,8 @@ def _claim_marker(session_id, decision_key, message):
     return True
 
 
-def _audit(config, decision_key, rule, started_at, session_id=None, digest=""):
+def _audit(config, decision_key, rule, started_at, session_id=None, digest="",
+           kind=memspec.STOP_GATE_LOG_KIND):
     """The blocked message's digest goes on the row, never the message.
 
     The nightly replay has to tell "this ruling let something through" from "the turn
@@ -720,7 +726,7 @@ def _audit(config, decision_key, rule, started_at, session_id=None, digest=""):
     message reads as a miss."""
     try:
         row = {
-            "kind": memspec.STOP_GATE_LOG_KIND,
+            "kind": kind,
             "decision": decision_key,
             "rule": rule,
             "digest": digest,
@@ -852,7 +858,7 @@ def _handle(event, started_at, defects):
     if event.get("stop_hook_active"):
         # 這是被擋之後的重寫。規則不在這一輪重判（會無限迴圈），但有一件事只有這一輪
         # 看得到：重寫出來的東西跟剛才被擋那一段是不是幾乎一樣。owner 已經看過那一段，
-        # 整段重貼等於同一段話給他看兩次。只擋一次（同一段訊息認一次），不會迴圈。
+        # 整段重貼等於同一段話給他看兩次。
         if not isinstance(message, str) or not message.strip():
             return None
         config = load_config(started_at)
@@ -862,11 +868,14 @@ def _handle(event, started_at, defects):
         overlap = _echo_overlap(config, session_id, message)
         if overlap < memspec.BLOCKED_ECHO_MAX_OVERLAP:
             return None
-        if not _claim_marker(session_id, "blocked-echo", message):
+        if not _claim_marker(session_id, memspec.BLOCKED_ECHO_DECISION, message):
             return None
-        _remember_blocked(config, session_id, message)
-        return {"decision": "block",
-                "reason": memspec.BLOCKED_ECHO_REASON.format(overlap=overlap)}
+        # 不擋：重複的那一段已經在 owner 眼前，再擋一輪只會生出第三段。記帳＋下一則提醒。
+        _audit(config, memspec.BLOCKED_ECHO_DECISION, memspec.BLOCKED_ECHO_DECISION, started_at,
+               session_id, _message_digest(message), kind=memspec.STOP_NOTE_LOG_KIND)
+        _best_effort_audit(leave_note, config, session_id,
+                           memspec.BLOCKED_ECHO_REASON.format(overlap=overlap))
+        return None
     if not isinstance(message, str) or not message.strip():
         return None
     # Mid-turn text reaches the owner too; reading only the last message let every card
@@ -896,7 +905,6 @@ def _verdict(event, message, config, started_at, defects, turn=None):
 
     # A forbidden hit outranks a repeated question: the model already said the thing
     # the owner ruled out, which is the harder violation of the two.
-    verdicts = []
     excepted = {}
     demoted = set()
     for vault in _vaults(config, event):
@@ -916,6 +924,34 @@ def _verdict(event, message, config, started_at, defects, turn=None):
         decision for decision in decisions
         if digest not in excepted.get(decision.key, frozenset())
     ]
+    session_id = event.get("session_id", event.get("sessionId"))
+    blocking = [decision for decision in decisions if decision.on_hit != memspec.ON_HIT_NOTE]
+    verdict = _first_violation(blocking, event, message, config, started_at, defects, turn)
+    if verdict is None:
+        # 只提醒的卡排在後面：真的要擋的時候，那一輪重寫本來就會把用詞一起帶過。
+        noting = [decision for decision in decisions if decision.on_hit == memspec.ON_HIT_NOTE]
+        noted = _first_violation(noting, event, message, config, started_at, defects, turn)
+        if noted is not None and _claim_marker(session_id, noted[0].key, message):
+            _audit(config, noted[0].key, noted[1], started_at, session_id,
+                   _message_digest(message), kind=memspec.STOP_NOTE_LOG_KIND)
+            # 擋人用的那句話寫著「請改寫」；提醒要講的正好相反，所以字面規則另給一句短的。
+            _best_effort_audit(leave_note, config, session_id, (
+                memspec.STOP_NOTE_FORBIDDEN.format(fragment=noted[3], decision=noted[0].key)
+                # 其他類的理由取第一句就夠：提醒是要我下次照做，不是要我讀完整段說明。
+                if noted[3] else noted[2].split("。")[0] + "。"))
+        return None
+    decision, rule, reason, _fragment = verdict
+    if not _claim_marker(session_id, decision.key, message):
+        return None
+    _audit(config, decision.key, rule, started_at, session_id, _message_digest(message))
+    # 留著這一段，下一輪才比得出「重寫的東西跟 owner 已經看過的那一段一不一樣」。
+    _best_effort_audit(_remember_blocked, config, session_id, message)
+    return {"decision": "block", "reason": reason + memspec.STOP_GATE_REWRITE_HINT}
+
+
+def _first_violation(decisions, event, message, config, started_at, defects, turn=None):
+    """這批裁定裡第一個被違反的：(裁定, 哪一類, 要說的話, 命中的字)；都沒有回 None。"""
+    verdicts = []
     for decision in decisions:
         masked = []
         fragment = _forbidden_fragment(decision, message, defects, masked)
@@ -944,6 +980,7 @@ def _verdict(event, message, config, started_at, defects, turn=None):
                             : memspec.STOP_GATE_REASON_QUOTE_MAX_CHARS],
                         fragment=fragment[: memspec.STOP_GATE_FRAGMENT_MAX_CHARS],
                     ),
+                    fragment[: memspec.STOP_GATE_FRAGMENT_MAX_CHARS],
                 )
             )
             break
@@ -966,7 +1003,7 @@ def _verdict(event, message, config, started_at, defects, turn=None):
             reason = _turn_check_gap(decision, message, turn, opened_names, defects)
             if reason is None:
                 continue
-            verdicts.append((decision, _TURN_CHECK_RULE, reason))
+            verdicts.append((decision, _TURN_CHECK_RULE, reason, ""))
             break
     if not verdicts:
         for decision in decisions:
@@ -978,6 +1015,7 @@ def _verdict(event, message, config, started_at, defects, turn=None):
                     decision,
                     _REQUIRE_RULE,
                     _require_reason(decision, trigger),
+                    "",
                 )
             )
             break
@@ -995,20 +1033,11 @@ def _verdict(event, message, config, started_at, defects, turn=None):
                     decision,
                     _QUESTION_RULE,
                     template.format(decided_at=decision.decided_at, quote=decision.advice or decision.quote),
+                    "",
                 )
             )
             break
-    if not verdicts:
-        return None
-
-    decision, rule, reason = verdicts[0]
-    session_id = event.get("session_id", event.get("sessionId"))
-    if not _claim_marker(session_id, decision.key, message):
-        return None
-    _audit(config, decision.key, rule, started_at, session_id, _message_digest(message))
-    # 留著這一段，下一輪才比得出「重寫的東西跟 owner 已經看過的那一段一不一樣」。
-    _best_effort_audit(_remember_blocked, config, session_id, message)
-    return {"decision": "block", "reason": reason}
+    return verdicts[0] if verdicts else None
 
 
 def _selftest():
