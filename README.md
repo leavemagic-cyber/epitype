@@ -14,6 +14,34 @@ Epitype is the small layer I built for that. It runs on the hooks Claude Code an
 
 It is Python standard library only. No service to sign up for, no model calls of its own, nothing to pay for.
 
+## Thirty seconds to see it work
+
+Install, then put five general rules in your vault:
+
+```powershell
+pip install epitype
+epitype install
+epitype starter
+```
+
+Now ask your agent to run `git add -A`. The call is refused before git sees it:
+
+```text
+🛑 Scar card (Stage explicit paths, not the whole tree): this Bash call contains
+all of "git add -A" — Run git status first, then name each path you actually changed
+```
+
+Then have it end a turn with *that should fix it*. The turn comes back instead of reaching you:
+
+```text
+⚖ do not say "That should fix it"; rewrite it. (No hedged completion: should work
+now is a guess wearing the clothes of a result)
+```
+
+A turn that carries its evidence — "I ran the suite: 74/74. Pushing now." — passes untouched.
+Those five cards are ordinary Markdown in your vault: edit them, delete them, or run
+`epitype starter --remove` to drop the ones you never touched.
+
 ## Where you actually notice it
 
 You rejected an approach on Monday. On Thursday the agent proposes it again. The Stop gate holds that reply back and hands over the ruling that closed the question, with its date and who made it.
@@ -109,6 +137,24 @@ A run reads vaults and writes, within a ten-minute budget, in three places: `<go
 
 The last section is the feedback review pack: one row per card that owner events, gate blocks or exam failures keep pointing at, raised once enough rows pile up (`memspec.REVIEW_PACK_TRIGGER`, 5) that a review sitting is worth holding. It judges nothing and edits nothing. No model is called, so an installed Epitype never spends your model budget while you are not looking.
 
+### What a healthy install looks like
+
+`epitype doctor` feeds a synthetic event to every hook and reports what answered:
+
+```text
+HOSTS: claude, codex
+SHIM RESOLUTION: PASS 5/5 repo_root=C:\Epitype\repo
+REGISTRATION claude: PASS 6/6
+REGISTRATION codex: PASS 6/6
+HOOK SessionStart: PASS (515 ms)
+HOOK UserPromptSubmit: PASS (369 ms)
+HOOK PreCompact: PASS (297 ms)
+HOOK PreToolUse: PASS (301 ms)
+HOOK Stop: PASS (287 ms)
+HOOK SubagentStop: PASS (268 ms)
+HEALTH PASS 6/6
+```
+
 ### When something breaks, you can see it
 
 Missing indexes, stale indexes, shim failures, malformed cards and lock contention all end differently. Hooks fail open when they cannot finish safely, and the installer doctor reports recorded shim outages instead of reading silence as health.
@@ -141,7 +187,8 @@ in which case it writes `"language": "zh-TW"`. Edit that field to switch, or ove
 for one run with the `EPITYPE_LANG` environment variable (`en` or `zh-TW`), which wins over
 the config file. A config without the field behaves as `zh-TW`. `epitype doctor` prints the
 active setting on its `LANGUAGE:` line. The switch changes displayed text only — patterns,
-field names and what the gates match on are the same in both languages.
+field names and what the gates match on are the same in both languages. Your cards stay in
+whatever language you wrote them in.
 
 ### Choose a vault layout
 
@@ -231,6 +278,25 @@ epitype uninstall
 
 Read [Uninstall Epitype](docs/UNINSTALL.md) before restoring a backup by hand.
 
+## Where your data goes
+
+Nowhere. Epitype makes no network calls: there is no import of `urllib`, `http`, `socket` or
+any HTTP client anywhere in the package, and no telemetry, account or key. Your cards are
+Markdown files in your own vault directory; the search index is a local SQLite file that can be
+deleted and rebuilt. The gate log records rule names and timestamps — never message content.
+
+## How it compares
+
+- **[claude-mem](https://github.com/thedotmack/claude-mem)** summarises sessions so the agent
+  remembers more. Epitype does not summarise; it keeps rulings you wrote and refuses turns that
+  contradict them.
+- **[claudekit](https://github.com/carlrannaberg/claudekit)** and similar hook toolkits give you
+  building blocks to wire up. Epitype ships one opinionated layer: cards in, enforcement out.
+- A **`CLAUDE.md` / `AGENTS.md` kit** gives the agent more text to read. Epitype generates that
+  resident block from your rule cards, then checks at the end of the turn whether the rule held.
+
+They compose: nothing here stops you running a memory summariser alongside it.
+
 ## Limits
 
 - Hooks reach only the events and tools the host exposes. A direct file read stays outside the current-decision filter.
@@ -247,4 +313,4 @@ Read [Uninstall Epitype](docs/UNINSTALL.md) before restoring a backup by hand.
 
 ## Status
 
-v1.4.0. Development happens in bursts rather than on a fixed cadence, so a quiet week is not an abandoned project. Issues get read, and an issue is the fastest way to move a fix up the queue.
+v1.4.0, released 2026-09-17. Releases are cut when a batch of fixes is ready rather than on a fixed date. Issues get read, and an issue is the fastest way to move a fix up the queue.

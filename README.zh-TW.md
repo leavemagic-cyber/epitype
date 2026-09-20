@@ -14,6 +14,36 @@ Epitype 就是為了這件事做的一層小東西。它接 Claude Code 和 Code
 
 只用 Python 標準函式庫。不必註冊服務，自己不呼叫模型，也不用付錢。
 
+## 三十秒看到它動起來
+
+裝好之後，放五張通用規則進你的記憶庫：
+
+```powershell
+pip install epitype
+epitype install
+epitype starter
+```
+
+接著叫你的代理跑 `git add -A`。這次呼叫在 git 看到它之前就被擋掉：
+
+```text
+🛑 傷疤卡（Stage explicit paths, not the whole tree）：這次 Bash 同時含有
+「git add -A」——Run git status first, then name each path you actually changed
+```
+
+再讓它用 `That should fix it.` 收尾。這一則不會送到你面前，會被退回重寫：
+
+```text
+⚖ 不要說「That should fix it」，請改寫。（No hedged completion：should work now
+is a guess wearing the clothes of a result）
+```
+
+帶著證據的那一則——`I ran the suite: 74/74. Pushing now.`——原樣通過。
+
+這五張起手卡的內容是英文的（規則本身、要擋的字眼都是英文），外框的說明文字才跟著你的
+語言設定走，所以上面看到的是英文句子配中文外框。它們就是記憶庫裡的 Markdown：整張改成
+中文、刪掉、或用 `epitype starter --remove` 把你沒動過的那幾張收回去，都可以。
+
 ## 你實際會在哪裡看到它
 
 週一你否決掉的做法，週四它又提一次。Stop 閘把那段回覆攔下來，附上當初結掉這題的那條裁定，連同日期和是誰裁的。
@@ -106,6 +136,24 @@ UserPromptSubmit 只端卡片。細節與量測見 `docs/FAILURE_MODES.md` §32 
 ### 整理會自己跑（夢）
 
 離線整理批次不必等人想起來。預設 `dream.mode: piggyback`：開場時若距上次整理超過 `dream.interval_hours`（預設 24 小時），就起一個脫鉤的低優先權背景程序，開場本身不等它；lock 檔帶 pid 與時間，逾 30 分鐘視為死鎖可覆蓋，所以同一時間只會有一個。想用系統排程就 `graft install --dream nightly [--at HH:MM]` 註冊每日任務（`graft doctor` 顯示模式與上次完成時間，`graft uninstall` 反註冊），`--dream off` 則兩者都不做。背景那一趟自己抓十分鐘時限，會寫三個地方：`<治理 vault>/.epitype/` 底下的審核包、狀態、log 與閘門健康度；索引漂掉時的治理庫 `MEMORY.md`；以及——這一項值得知道，因為它是無人看著的時候發生的——`~/.claude/CLAUDE.md` 與 `~/.codex/AGENTS.md` 裡標記之間的區塊，所以你改了一張規則卡，隔天早上代理讀到的就是新的，不必記得跑任何指令。只動標記之間，寫之前先備份，`epitype sync --remove`（或 `graft uninstall`）可以整段拿回去。順路收割新素材成草稿，已經入庫的卡一張都不動，下一場開場用一行說明結果。最後一節是回饋檢討包：被 owner 事件、閘門擋下或考題失敗指到的卡各一列，列數滿門檻（`memspec.REVIEW_PACK_TRIGGER`，5）才提醒該開一場檢討；它不判斷、不改任何一張卡。全程不呼叫模型——整理的模型那半永遠手動，分享版不會偷跑你的模型額度。
+
+### 裝好的樣子長這樣
+
+`epitype doctor` 會餵一則合成事件給每個掛鉤，然後報誰回應了：
+
+```text
+HOSTS: claude, codex
+SHIM RESOLUTION: PASS 5/5 repo_root=C:\Epitype\repo
+REGISTRATION claude: PASS 6/6
+REGISTRATION codex: PASS 6/6
+HOOK SessionStart: PASS (515 ms)
+HOOK UserPromptSubmit: PASS (369 ms)
+HOOK PreCompact: PASS (297 ms)
+HOOK PreToolUse: PASS (301 ms)
+HOOK Stop: PASS (287 ms)
+HOOK SubagentStop: PASS (268 ms)
+HEALTH PASS 6/6
+```
 
 ### 失敗會留下證據
 
@@ -226,6 +274,23 @@ epitype uninstall
 
 手動還原備份前，先讀 [解除安裝說明](docs/UNINSTALL.md)。
 
+## 你的資料會去哪裡
+
+哪裡都不會去。Epitype 不連網：整個套件裡沒有匯入 `urllib`、`http`、`socket` 或任何
+HTTP 客戶端，也沒有任何回傳、帳號或金鑰。卡片是你自己目錄裡的 Markdown 檔；搜尋索引
+是一個本機 SQLite 檔，刪掉可以重建。擋下紀錄只記規則名與時間，不記訊息內容。
+
+## 跟別的工具怎麼分
+
+- **[claude-mem](https://github.com/thedotmack/claude-mem)** 把對話摘要起來，讓代理記得更多。
+  Epitype 不做摘要；它保管你寫下的裁定，並在代理說出違反它的話時把那一則退回。
+- **[claudekit](https://github.com/carlrannaberg/claudekit)** 這類掛鉤工具箱給你零件自己組。
+  Epitype 給的是一層做好的東西：卡片進去，擋下來出來。
+- **CLAUDE.md／AGENTS.md 範本包**是給代理更多字讀。Epitype 從你的規則卡生成那個常駐區塊，
+  然後在回合結束時去查那條規則有沒有真的守住。
+
+三者不衝突：你照樣可以同時跑一個摘要型的記憶工具。
+
 ## 限制
 
 - hook 只能治理 host 有提供的事件與工具；直接讀檔不會經過 Epitype 的現行決定過濾。
@@ -242,4 +307,4 @@ epitype uninstall
 
 ## 專案狀態
 
-目前 v1.4.0。開發是不定期集中進行，不是固定節奏，所以安靜一週不代表棄坑。Issue 都會看，開 issue 是讓修正往前排最快的方式。
+目前 v1.4.0，2026-09-17 發布。發布時機看一批修正什麼時候齊，不是固定日期。Issue 都會看，開 issue 是讓修正往前排最快的方式。
