@@ -91,11 +91,16 @@ class WarmGuardCacheRespectsItsDeadline(unittest.TestCase):
 
     def test_a_short_deadline_stops_partway_without_raising(self):
         # 截斷只影響「多快暖完」：暖到的寫回快取，沒暖到的仍由每次工具呼叫的逐次補讀
-        # 收斂，所以這裡要看到「有進展、但沒讀完」，而不是例外或零。
-        started = time.monotonic()
-        pretool.warm_guard_cache([self.vault], started, deadline=time.monotonic() + 0.1)
-        spent = time.monotonic() - started
-        self.assertLess(spent, 0.1 + SLACK_SECONDS)
+        # 收斂，所以這裡要看到「沒讀完」，而不是例外。
+        #
+        # 時鐘用假的。第一版用 0.1 s 的真期限去賭 300 張卡暖不完：本機綠，CI 的機器
+        # 快到全暖完，`cached < 300` 就紅了（2026-09-22，發布閘第二次擋下同一類毛病）。
+        # 「期限到了就停」與這台機器多快無關，斷言也就不該跟機器快慢有關。`started_at`
+        # 要跟假時鐘同一個時間軸，否則 `expired()` 會先判定宿主逾時而一張都不讀。
+        base = 99.0
+        deadline = base + 1.0
+        with unittest.mock.patch("time.monotonic", past_deadline(1.0, start=base, before=40)):
+            pretool.warm_guard_cache([self.vault], base, deadline=deadline)
         self.assertLess(self.cached_guards(), CARDS)
 
     def test_a_generous_deadline_still_warms_the_whole_vault(self):

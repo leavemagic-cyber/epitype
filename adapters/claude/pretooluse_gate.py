@@ -572,10 +572,13 @@ def warm_guard_cache(vaults, started_at, deadline=None):
     and every later call reads a warm cache.
 
     Warming is pure optimisation, so the deadline is a hard stop, checked between
-    vaults and between cards inside a vault: whatever was read is written back to the
-    cache, and whatever was not stays on the per-call slice the gate already rotates
-    through. Truncating here changes how fast the cache finishes warming, never
-    whether a guard is enforced — the gate itself reads no less and skips nothing.
+    vaults and between cards inside a vault. A truncated pass writes nothing at all —
+    the cache is all-or-nothing, so a vault that cannot be walked inside the deadline
+    starts cold again next session and this segment buys nothing there (measured
+    2026-09-22: the 463-card governance vault finishes in 1.02 s, so it does converge
+    on this machine). Truncating changes how fast the cache finishes warming, never
+    whether a guard is enforced — the gate itself reads no less and skips nothing,
+    because what it never wrote it also never claims to know.
     Without a deadline the segment takes its own default budget rather than running
     until the host's timeout: `started_at` bounds the host's patience, not this
     segment's share of it.
@@ -606,8 +609,10 @@ def _guards(vault, started_at, defects, cap=None, deadline=None):
 
     `deadline` (time.monotonic()) bounds the re-reading on top of `cap`: a caller
     that lifted the card cap must hand one over, or the segment is bounded only by
-    the host's timeout. Cards read before the deadline are still cached, so the next
-    call starts from there."""
+    the host's timeout. A pass cut short by the deadline writes no cache at all, so
+    the next call starts where the last complete pass left off, not where this one
+    stopped — partial progress is discarded rather than half-remembered, because a
+    manifest that lists a card it never read would let the gate call it a non-guard."""
     from epitype import cardscan
 
     vault = Path(vault).resolve()
