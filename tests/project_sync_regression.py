@@ -211,24 +211,50 @@ class ProjectSync(unittest.TestCase):
                          "沒有東西要改的時候不該重寫檔案")
         self.assertEqual(self._check([self.governance, vault])[0], host_sync.EXIT_OK)
 
-    # (h) remove 拿掉兩塊，其餘不變
+    # (h) remove 拿掉兩塊，其餘不變；我們從無到有建的檔才刪得掉
     def test_remove_takes_the_blocks_out_and_leaves_the_rest_alone(self):
         project, vault = self._project("money")
         own = "# 我的專案\n\n這幾行是我自己寫的。\n"
-        (project / "AGENTS.md").write_text(own, encoding="utf-8")
-        self._apply([self.governance, vault])
+        agents_path = project / "AGENTS.md"
+        agents_path.write_text(own, encoding="utf-8")
+        own_bytes = agents_path.read_bytes()
+        # 原本就有、但只有空白的檔：拿掉區塊之後剩空白，仍然是使用者的檔，不刪。
+        blank_project, blank_vault = self._project("blank")
+        blank_agents = blank_project / "AGENTS.md"
+        blank_agents.write_text("\n", encoding="utf-8")
+        self._apply([self.governance, vault, blank_vault])
         report = io.StringIO()
         with _fake_home(self.home):
-            host_sync.remove(home=self.home, output=report, vaults=[self.governance, vault])
-        agents = (project / "AGENTS.md").read_text(encoding="utf-8")
+            host_sync.remove(home=self.home, output=report,
+                             vaults=[self.governance, vault, blank_vault])
+        agents = agents_path.read_text(encoding="utf-8")
         for marker in (RULES_BEGIN, RULES_END, INDEX_BEGIN, INDEX_END, PROJECT_RULE_TEXT):
             self.assertNotIn(marker, agents)
-        self.assertEqual(agents, own)
-        # 區塊拿掉之後只剩空白的專案檔不刪：那個檔不是我們的目錄裡的東西。
+        self.assertEqual(agents_path.read_bytes(), own_bytes, "其餘內容要逐位元組留著")
+        # CLAUDE.md 是我們從無到有建的（使用者從沒有過這個檔）：拿掉區塊就沒東西了，刪掉。
         claude_path = project / "CLAUDE.md"
-        self.assertTrue(claude_path.is_file())
-        self.assertNotIn(RULES_BEGIN, claude_path.read_text(encoding="utf-8"))
+        self.assertFalse(claude_path.exists(), "我們自己建的孤兒檔不該留在別人的專案根")
+        self.assertTrue(blank_agents.is_file(), "使用者原本就有的檔，剩空白也不刪")
         self.assertIn("REMOVED project:money/AGENTS.md", report.getvalue())
+        self.assertIn("REMOVED project:money/CLAUDE.md", report.getvalue())
+
+    # 通案：專案根是另一個專案根的上層目錄就整個跳過（兩個宿主都會往上讀祖先目錄）
+    def test_a_project_root_above_another_one_is_skipped(self):
+        above, above_vault = self._project("work")
+        below, below_vault = self._project(os.path.join("work", "child"))
+        code, report = self._apply([self.governance, above_vault, below_vault])
+        self.assertEqual(code, host_sync.EXIT_OK, report)
+        self.assertIn(f"SKIP   project {above}: ", report)
+        self.assertIn("是其他專案根", report)
+        self.assertIn(os.fspath(below), report)
+        self.assertFalse((above / "AGENTS.md").exists(),
+                         "寫進上層會被底下每個專案一起載入")
+        self.assertFalse((above / "CLAUDE.md").exists())
+        self.assertIn(PROJECT_RULE_TEXT, (below / "AGENTS.md").read_text(encoding="utf-8"))
+        targets, skipped = host_sync.project_targets(
+            [self.governance, above_vault, below_vault], home=self.home)
+        self.assertEqual({os.fspath(item[1]) for item in targets}, {os.fspath(below)})
+        self.assertEqual([os.fspath(item[0]) for item in skipped], [os.fspath(above)])
 
     # (i) 要寫的內容自己含標記 → 拒寫，一個位元組都不動
     def test_content_carrying_a_marker_is_refused(self):

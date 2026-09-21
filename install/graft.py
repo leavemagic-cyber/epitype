@@ -1611,7 +1611,12 @@ def _project_sync_status(vaults, home):
         targets, skipped = host_sync.project_targets(vaults, home=home)
     except Exception as exc:
         return [f"PROJECT: status unavailable ({type(exc).__name__}: {exc})"]
-    lines = [f"PROJECT: {vault} root=unknown" for vault, _reason in skipped]
+    lines = [
+        f"PROJECT: {path} root=unknown"
+        if reason == host_sync.PROJECT_SKIP_NO_ROOT
+        else f"PROJECT: {path} skipped ({reason})"
+        for path, reason in skipped
+    ]
     grouped = {}
     for host, root, vault in targets:
         grouped.setdefault(os.fspath(root), []).append((host, root, vault))

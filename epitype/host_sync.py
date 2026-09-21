@@ -340,6 +340,16 @@ def _plan(host, label, key, path, wanted_of, home=None):
 
 
 PROJECT_SKIP_NO_ROOT = "找不到專案根（對話紀錄無 cwd 或目錄已不在）"
+PROJECT_SKIP_ANCESTOR = "是其他專案根（{child}）的上層目錄，寫進去會被底下每個專案一起載入"
+
+
+def _dir_key(path):
+    """比對目錄關係用的鍵：解析過、大小寫照平台規則、結尾不留分隔符。"""
+    try:
+        resolved = Path(path).resolve()
+    except OSError:
+        resolved = Path(path)
+    return os.path.normcase(os.fspath(resolved)).rstrip(os.sep)
 
 
 def _native_project_vault(vault):
@@ -354,12 +364,16 @@ def _native_project_vault(vault):
 def project_targets(vaults, hosts=None, home=None):
     """專案根要同步的檔，以及判不出專案根而跳過的庫。
 
-    回傳 ([(宿主, 專案根, 庫)], [(庫, 跳過的原因)])。治理庫不在內：它的規則走全域宿主檔，
-    在專案根再寫一份就是同一段字每場付兩次。專案根不靠名冊反查，靠宿主自己留下的對話
-    紀錄（owner 2026-09-21：不應該是登記制）。
+    回傳 ([(宿主, 專案根, 庫)], [(要報的路徑, 跳過的原因)])。治理庫不在內：它的規則走全域
+    宿主檔，在專案根再寫一份就是同一段字每場付兩次。專案根不靠名冊反查，靠宿主自己留下
+    的對話紀錄（owner 2026-09-21：不應該是登記制）。
+
+    另一個專案根的上層目錄也不在內：兩個宿主都沿路往上讀祖先目錄的 AGENTS.md／CLAUDE.md，
+    所以寫進上層等於把那一庫的卡塞進底下每一個專案的每一場。這是純祖先關係判斷，不是
+    對某個目錄的特例。
     """
     governance = {os.path.normcase(os.fspath(Path(item))) for item in contract_vaults(vaults)}
-    targets, skipped = [], []
+    found, skipped = [], []
     for item in vaults:
         vault = Path(item)
         if os.path.normcase(os.fspath(vault)) in governance:
@@ -371,6 +385,14 @@ def project_targets(vaults, hosts=None, home=None):
         root = capture_route.project_root_of(vault)
         if root is None:
             skipped.append((vault, PROJECT_SKIP_NO_ROOT))
+            continue
+        found.append((vault, root, _dir_key(root)))
+    targets = []
+    for vault, root, key in found:
+        below = next((other for _v, other, other_key in found
+                      if other_key != key and other_key.startswith(key + os.sep)), None)
+        if below is not None:
+            skipped.append((root, PROJECT_SKIP_ANCESTOR.format(child=below)))
             continue
         for host in (hosts or sorted(memspec.HOST_SYNC_PROJECT_FILES)):
             if host in memspec.HOST_SYNC_PROJECT_FILES:
@@ -681,17 +703,22 @@ def remove(hosts=None, home=None, output=sys.stdout, vaults=()):
         removed += _remove_regions(
             path, f"project:{Path(root).name}/{path.name}",
             list(memspec.HOST_SYNC_PROJECT_REGIONS[host]), output,
-            # 專案根的檔不是我們建的目錄裡的東西，而且使用者隨時可能自己往裡面寫；
-            # 拿掉區塊之後剩一個空檔，刪掉它就是替他決定那個檔該不該存在。
-            delete_when_empty=False,
+            # 專案根的檔不是我們的目錄裡的東西：只有「我們從無到有建的那一個」（動它之前
+            # 沒有備份＝原本根本沒有這個檔）剩空白時才刪，使用者原本就有的留著——刪掉它
+            # 就是替他決定那個檔該不該存在。
+            always_delete_empty=False,
         )
     if not removed:
         print("宿主檔裡沒有我們寫的區塊，沒有要拿掉的東西", file=output)
     return EXIT_OK
 
 
-def _remove_regions(path, label, names, output, delete_when_empty=True):
-    """把這些區塊（含舊標記那一版）整段拿掉；真的改了檔才回 1。"""
+def _remove_regions(path, label, names, output, always_delete_empty=True):
+    """把這些區塊（含舊標記那一版）整段拿掉；真的改了檔才回 1。
+
+    `always_delete_empty` False＝拿掉之後只剩空白時，只有動它之前沒有備份（＝這個檔是我們
+    從無到有建的）才刪。
+    """
     try:
         original, raw, newline = read_host(path)
     except ValueError as exc:
@@ -709,15 +736,18 @@ def _remove_regions(path, label, names, output, delete_when_empty=True):
     payload = (payload + "\n").encode("utf-8") if payload else b""
     payload = payload.replace(b"\n", (newline or "\n").encode("utf-8"))
     backup = path.with_name(path.name + memspec.HOST_SYNC_BACKUP_SUFFIX)
+    # 備份在動它之前就存在＝這個檔原本是使用者的，不是我們建的。這一件要在寫備份之前問，
+    # 問完才寫。
+    had_backup = backup.exists()
     wrote_backup = False
     try:
         # 只在還沒有備份時寫，跟 apply 同一條規矩。照寫的話，解除安裝會把安裝當初留
         # 下的原檔副本換成「含我們區塊的那一版」——使用者手上唯一一份「Epitype 動它
         # 之前長什麼樣」就這樣沒了，而且是在解除安裝這一步沒的。
-        if not backup.exists():
+        if not had_backup:
             atomic_write(backup, original)
             wrote_backup = True
-        if payload.strip() or not delete_when_empty:
+        if payload.strip() or not (always_delete_empty or not had_backup):
             atomic_write(path, payload)
         else:
             # 整個檔都是我們寫的，拿掉就沒東西了——那是產品自己建的孤兒檔。
