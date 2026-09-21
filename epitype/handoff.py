@@ -49,6 +49,21 @@ def _tail_rows(transcript_path, tail_bytes=TAIL_BYTES):
     return rows
 
 
+COMMAND_FIELDS = ("command", "cmd", "input")
+
+
+def _command_text(payload):
+    """這次呼叫跑的是什麼，或空字串。
+
+    欄位名不只一種：Claude 是 `command`，Codex 的 `exec` 是 `cmd`，而 `custom_tool_call`
+    的自由文字沒有欄位名，只有整段原文。原文照收、只截長度——猜比看不到糟。"""
+    for field in COMMAND_FIELDS:
+        value = payload.get(field)
+        if isinstance(value, str) and value.strip():
+            return " ".join(value.split())[:COMMAND_MAX_CHARS]
+    return ""
+
+
 def _harvest(rows):
     """(改過的檔, 跑過的指令, 最後一則使用者訊息)——只從這一段紀錄看得到的東西。
 
@@ -81,9 +96,9 @@ def _harvest(rows):
                 value = payload.get(field)
                 if isinstance(value, str) and value.strip() and name not in ("Read", "Glob", "Grep"):
                     files.append(value.strip())
-            command = payload.get("command")
-            if isinstance(command, str) and command.strip():
-                commands.append(" ".join(command.split())[:COMMAND_MAX_CHARS])
+            command = _command_text(payload)
+            if command:
+                commands.append(command)
     return files, commands, prompt
 
 

@@ -558,7 +558,10 @@ def _cited_unread_gap(decision, message, turn, opened_names):
     """宣稱查過某個檔、而這一場沒有任何工具呼叫碰過它，就回一句理由。
 
     附記是空的時候一律不擋：那可能是動手閘沒註冊、或這一場真的還沒動過任何工具，跟
-    「沒讀就答」長得一模一樣。分不出來的時候不擋人。"""
+    「沒讀就答」長得一模一樣。分不出來的時候不擋人。
+
+    `opened_names` 只收強證據（呼叫指名的目標）。弱證據——自由文字裡掃到的檔名——不能
+    證明讀過，所以拿它來放行等於自己替自己背書。"""
     if not opened_names:
         return None
     body = _turn_body(message)
@@ -999,7 +1002,8 @@ def _first_violation(decisions, event, message, config, started_at, defects, tur
             try:
                 from epitype import opened as opened_module
 
-                opened_names = opened_module.names(
+                # 只收強證據：自由文字裡提到一個檔名不是讀過它（epitype/opened.py）。
+                opened_names = opened_module.strong_names(
                     governance_vault(config),
                     event.get("session_id", event.get("sessionId")),
                 )

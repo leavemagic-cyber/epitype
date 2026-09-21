@@ -1346,6 +1346,10 @@ OPENED_PAYLOAD_MAX_CHARS = 8000
 OPENED_TARGET_FIELDS = (
     "file_path", "path", "notebook_path", "file_paths", "paths", "command", "glob", "pattern",
 )
+# 強證據只認結構化的路徑欄位：這次呼叫**指名**了這個目標。其餘欄位（command、glob、
+# pattern）是自由文字，裡面出現一個檔名不代表打開過它——`Write-Output 'ghost.py'` 會
+# 被當成讀過，2026-09-22 複驗過。弱證據照樣留存，只是不能拿來證明「我讀過 X」。
+OPENED_STRONG_FIELDS = ("file_path", "path", "filePath", "notebook_path", "file_paths", "paths")
 TURN_CITED_UNREAD_REASON = (
     "📌 這回合說了「{claim}」，卻沒有任何一次工具往來打開過 {path}。"
     "依「{decision}」：先把它讀出來，或把那句宣稱改成沒讀。{advice}"

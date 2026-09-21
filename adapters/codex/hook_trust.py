@@ -38,8 +38,15 @@ REVIEW_HINT = (
     "Codex skips untrusted hooks. In the Codex TUI run /hooks (Desktop app: "
     "the hooks review panel), approve the epitype entries, then rerun this check."
 )
-REQUIRED_EVENTS = ("SessionStart", "UserPromptSubmit", "PreToolUse", "PreCompact", "Stop")
 _REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+# 事件清單的正本在安裝器那一份：註冊是它做的，這裡只是查註冊有沒有被信任。兩邊各寫
+# 一份的下場 2026-09-22 已經發生過——安裝器加了 SubagentStop，這裡沒加，於是每一台正
+# 常安裝的機器都被這支報成 unexpected。安裝器不能 import memspec（它要在 epitype 套件
+# 還不能 import 的機器上跑），所以共用常數搬不進 memspec；由查核端去讀正本才是單一來源。
+from install.graft import EVENTS as REQUIRED_EVENTS
 
 
 def _snake(event):
@@ -179,29 +186,31 @@ def run_check(home, output=sys.stdout, seen_path=None):
     return 0
 
 
+FIXTURE_SECOND_GROUP_EVENT = "UserPromptSubmit"
+
+
+def _fixture_key(hooks_path, event):
+    group = 1 if event == FIXTURE_SECOND_GROUP_EVENT else 0
+    return "%s:%s:%d:0" % (hooks_path, _snake(event), group)
+
+
 def _fixture(root, states, hook_command="python x.py"):
     codex = root / ".codex"
     codex.mkdir(parents=True, exist_ok=True)
-    hooks = {
-        "hooks": {
-            "SessionStart": [
-                {"hooks": [{"type": "command", "command": hook_command + " --session"}], "id": MARKER_VALUE}
-            ],
-            "UserPromptSubmit": [
-                {"hooks": [{"type": "command", "command": "other.exe"}]},
-                {"hooks": [{"type": "command", "command": hook_command, "timeout": 10}], "id": MARKER_VALUE},
-            ],
-            "PreToolUse": [
-                {"hooks": [{"type": "command", "command": hook_command + " --gate"}], "id": MARKER_VALUE}
-            ],
-            "PreCompact": [
-                {"hooks": [{"type": "command", "command": hook_command + " --codex"}], "comment": MARKER_VALUE}
-            ],
-            "Stop": [
-                {"hooks": [{"type": "command", "command": hook_command + " --stop"}], "id": MARKER_VALUE}
-            ],
-        }
-    }
+    # 每個必備事件都註冊一次，清單跟著正本走：寫死五個事件的夾具，正是 SubagentStop
+    # 被漏掉那次沒有被任何測試抓到的原因。
+    registrations = {}
+    for event in REQUIRED_EVENTS:
+        entry = {"type": "command", "command": hook_command + " --" + _snake(event)}
+        # 兩種標記欄位都要驗得到，PreCompact 用 comment。
+        group = {"hooks": [entry], ("comment" if event == "PreCompact" else "id"): MARKER_VALUE}
+        if event == FIXTURE_SECOND_GROUP_EVENT:
+            # 前面先擺一個不是 epitype 的群組：位置索引得算對，不能假設永遠是 0。
+            entry["timeout"] = 10
+            registrations[event] = [{"hooks": [{"type": "command", "command": "other.exe"}]}, group]
+        else:
+            registrations[event] = [group]
+    hooks = {"hooks": registrations}
     (codex / "hooks.json").write_text(json.dumps(hooks), encoding="utf-8")
     hooks_path = (codex / "hooks.json").resolve()
     lines = ["model = \"synthetic\"", "", "[hooks.state]", ""]
@@ -231,11 +240,8 @@ def _selftest():
              patch(__name__ + "._native_hook_states", side_effect=fixture_native):
             root = Path(temp_dir).resolve()
             every_event = {
-                "session_start:0:0": {"trusted_hash": "sha256:ss"},
-                "user_prompt_submit:1:0": {"trusted_hash": "sha256:aa"},
-                "pre_tool_use:0:0": {"trusted_hash": "sha256:pp"},
-                "pre_compact:0:0": {"trusted_hash": "sha256:bb"},
-                "stop:0:0": {"trusted_hash": "sha256:tt"},
+                _fixture_key("", event).lstrip(":"): {"trusted_hash": "sha256:t%d" % number}
+                for number, event in enumerate(REQUIRED_EVENTS)
             }
             expected = len(REQUIRED_EVENTS)
 
@@ -254,13 +260,17 @@ def _selftest():
             checks.append((
                 "key follows codex <path>:<snake_event>:<group>:<index> layout",
                 {item[1] for item in _epitype_positions(hooks_path)}
-                == {
-                    f"{hooks_path}:session_start:0:0",
-                    f"{hooks_path}:user_prompt_submit:1:0",
-                    f"{hooks_path}:pre_tool_use:0:0",
-                    f"{hooks_path}:pre_compact:0:0",
-                    f"{hooks_path}:stop:0:0",
-                },
+                == {_fixture_key(hooks_path, event) for event in REQUIRED_EVENTS},
+            ))
+            from install import graft as _graft
+
+            checks.append((
+                "required events ARE the installer's own list, SubagentStop included",
+                REQUIRED_EVENTS is _graft.EVENTS and "SubagentStop" in REQUIRED_EVENTS,
+            ))
+            checks.append((
+                "a fully registered host reports no unexpected event",
+                "unexpected=" not in text,
             ))
 
             home = root / "trusted"
@@ -349,7 +359,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 12
+    total = 14
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

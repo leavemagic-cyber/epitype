@@ -25,6 +25,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from epitype import memspec
+from epitype import patch_envelope
 from _hook_common import (
     GATE_LOG_MAX_BYTES,
     append_gate_log,
@@ -129,19 +130,26 @@ def _notice_marker(session_id, text):
     return True
 
 
+def _resolve_target(raw, cwd):
+    """One declared path as an absolute path, or None when it cannot be resolved."""
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        path = Path(raw.strip())
+        if not path.is_absolute() and isinstance(cwd, str) and cwd.strip():
+            path = Path(cwd) / path
+        return path.resolve()
+    except (OSError, TypeError, ValueError):
+        return None
+
+
 def _write_target(tool_input, cwd):
     """Absolute path this call is about to write, or None when it names none."""
     for field in memspec.WRITE_GATE_PATH_FIELDS:
         raw = tool_input.get(field)
         if not isinstance(raw, str) or not raw.strip():
             continue
-        try:
-            path = Path(raw)
-            if not path.is_absolute() and isinstance(cwd, str) and cwd.strip():
-                path = Path(cwd) / path
-            return path.resolve()
-        except (OSError, TypeError, ValueError):
-            return None
+        return _resolve_target(raw, cwd)
     return None
 
 
@@ -841,24 +849,15 @@ def _guard_review(event, tool_name, tool_input, config, started_at, defects):
     return None
 
 
-def _write_review(event, tool_name, tool_input, config, started_at):
-    """(deny value, advice lines) for a call about to write file content.
+def _review_one_target(event, config, target, additions, prospective, started_at, session_id):
+    """(deny value, advice lines) for one file this call would change.
 
     Rule A: new content that re-states what the owner already ruled out is blocked
     against the Stop gate's decision cards. Rule B: a card written into a registered
     vault must satisfy card_lint's contract for its own type — FAIL blocks, WARN only
-    advises. Anything else proceeds untouched: a non-file tool, a re-entrant hook run,
-    a path outside every vault, content past the size cap, or a post-write text that
-    cannot be known exactly. Bash redirections never reach this gate at all
-    (docs/FAILURE_MODES.md §11)."""
-    if tool_name.casefold() not in memspec.WRITE_GATE_TOOL_NAMES:
-        return None, []
-    if not isinstance(tool_input, dict) or event.get("stop_hook_active"):
-        return None, []
-    target = _write_target(tool_input, event.get("cwd"))
-    if target is None or expired(started_at):
-        return None, []
-    additions, prospective = _prospective_write(tool_name, tool_input, target)
+    advises. `prospective` is None whenever the post-write text cannot be known
+    exactly, and then Rule B does not judge: a guessed result would block a card
+    nobody wrote."""
 
     def oversized(text):
         return len(text.encode("utf-8", errors="replace")) > memspec.WRITE_GATE_MAX_CONTENT_BYTES
@@ -869,7 +868,6 @@ def _write_review(event, tool_name, tool_input, config, started_at):
         prospective = None
 
     notices = []
-    session_id = event.get("session_id")
     found = _forbidden_write(
         event, config, target, additions, prospective, started_at, notices
     )
@@ -913,6 +911,79 @@ def _write_review(event, tool_name, tool_input, config, started_at):
         session_id,
     )
     return _deny_value(reason), []
+
+
+def _envelope_text(tool_input):
+    """這次呼叫輸入裡的自由文字，接成一段拿去找封套。
+
+    為什麼掃全部的字串欄位而不是某個指名的欄位：這台機器上的 Codex 沒有 `apply_patch`
+    工具，封套是夾在 `exec` 的程式文字裡送進來的，而那次呼叫進到這裡時工具名已經變成
+    `Bash`。欄位名不可靠，封套的邊界才可靠。"""
+    pieces = []
+    for value in tool_input.values():
+        if isinstance(value, str):
+            pieces.append(value)
+        elif isinstance(value, (list, tuple)):
+            pieces.extend(item for item in value if isinstance(item, str))
+    return "\n".join(pieces)
+
+
+def _envelope_review(event, tool_input, config, started_at):
+    """(deny value, advice lines) for the `*** Begin Patch` envelopes in this call.
+
+    docs/FAILURE_MODES.md §11 kept diff-shaped writes out of `WRITE_GATE_TOOL_NAMES`
+    because a diff's context and removed lines would match `forbidden` patterns the
+    write never adds. That reason stands, and the tool-name list is unchanged: what
+    is judged here is only the added lines, per target file, so the objection no
+    longer applies. Add File carries its whole content and is judged by both rules;
+    Update File cannot be reconstructed from a patch, so the card contract does not
+    judge it at all. A file that cannot be judged — unresolvable path, oversized
+    content, a malformed envelope — is left unknown while the rest are still judged,
+    because one undecidable file must neither pass nor block the others."""
+    text = _envelope_text(tool_input)
+    if patch_envelope.BEGIN_MARKER not in text:
+        return None, []
+    cwd = event.get("cwd")
+    session_id = event.get("session_id")
+    notices = []
+    for entry in patch_envelope.parse(text):
+        if expired(started_at):
+            break
+        target = _resolve_target(entry.path, cwd)
+        if target is None or not entry.additions:
+            continue
+        deny, advice = _review_one_target(
+            event, config, target, list(entry.additions),
+            patch_envelope.full_content(entry), started_at, session_id,
+        )
+        notices.extend(advice)
+        if deny is not None:
+            return deny, []
+    return None, notices
+
+
+def _write_review(event, tool_name, tool_input, config, started_at):
+    """(deny value, advice lines) for a call about to write file content.
+
+    Two shapes reach this gate. A named write tool declares its target and its new
+    text in structured fields. Anything else is scanned for a patch envelope, which
+    is the shape Codex writes files in here. A non-file tool with no envelope, a
+    re-entrant hook run, and a path outside every vault all proceed untouched; bash
+    redirections never reach this gate at all (docs/FAILURE_MODES.md §11)."""
+    if not isinstance(tool_input, dict) or event.get("stop_hook_active"):
+        return None, []
+    if tool_name.casefold() in memspec.WRITE_GATE_TOOL_NAMES:
+        target = _write_target(tool_input, event.get("cwd"))
+        if target is None or expired(started_at):
+            return None, []
+        additions, prospective = _prospective_write(tool_name, tool_input, target)
+        return _review_one_target(
+            event, config, target, additions, prospective,
+            started_at, event.get("session_id"),
+        )
+    if expired(started_at):
+        return None, []
+    return _envelope_review(event, tool_input, config, started_at)
 
 
 def _allow_context(event, notices=()):
@@ -1685,16 +1756,22 @@ def _best_effort_record(event):
         tool_input = event.get("tool_input")
         if not isinstance(tool_input, dict):
             return
-        payload = " ".join(
-            str(value)
-            for name, value in tool_input.items()
-            if name in memspec.OPENED_TARGET_FIELDS
-            and isinstance(value, (str, int, float, list, tuple))
+        def joined(fields):
+            return " ".join(
+                str(value)
+                for name, value in tool_input.items()
+                if name in fields and isinstance(value, (str, int, float, list, tuple))
+            )
+
+        weak_fields = tuple(
+            name for name in memspec.OPENED_TARGET_FIELDS
+            if name not in memspec.OPENED_STRONG_FIELDS
         )
         opened.record(
             governance_vault(config, for_write=True),
             event.get("session_id", event.get("sessionId")),
-            payload,
+            joined(weak_fields),
+            joined(memspec.OPENED_STRONG_FIELDS),
         )
     except Exception:
         pass

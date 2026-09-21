@@ -19,18 +19,31 @@ ASSISTANT = "assistant"
 TOOL_RESULT = "tool_result"
 
 
+FREEFORM_INPUT_FIELD = "input"
+
+
 def _call_input(payload):
-    """Codex 的呼叫參數：`arguments` 是一串 JSON 文字，shell 呼叫另外放在 action 裡。"""
+    """Codex 的呼叫參數：`arguments` 是一串 JSON 文字，shell 呼叫另外放在 action 裡。
+
+    `custom_tool_call` 的 `input` 是自由文字（這台機器上 Codex 的 `exec` 就是這種形狀，
+    程式整段塞在裡面）。解析得出字典就用字典，解析不出來就**原文保留**在
+    `FREEFORM_INPUT_FIELD` 底下——下游（回合閘、斷點、compact map、harvest）至少看得到
+    Codex 實際送出去的是什麼。不去解析那段程式的語法猜欄位值：要做到那件事得先有一個
+    直譯器，而猜錯的欄位值比看不到還糟。"""
     import json
 
-    raw = payload.get("arguments")
-    if isinstance(raw, str) and raw.strip():
+    for field in ("arguments", FREEFORM_INPUT_FIELD):
+        raw = payload.get(field)
+        if not isinstance(raw, str) or not raw.strip():
+            continue
         try:
             parsed = json.loads(raw)
         except ValueError:
             parsed = None
         if isinstance(parsed, dict):
             return parsed
+        if field == FREEFORM_INPUT_FIELD:
+            return {FREEFORM_INPUT_FIELD: raw}
     action = payload.get("action")
     if isinstance(action, dict):
         command = action.get("command")

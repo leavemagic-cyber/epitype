@@ -302,7 +302,7 @@ The action gate matched on the Bash command string, so a file written through `W
 
 ### Epitype countermeasure
 
-`PreToolUse` inspects the text a file-writing call is about to put on disk — `Write`'s `content`, `Edit`'s `new_string`, each `new_string` of a `MultiEdit`, and the equivalents of the Codex-shaped tool names.
+`PreToolUse` inspects the text a file-writing call is about to put on disk — `Write`'s `content`, `Edit`'s `new_string`, each `new_string` of a `MultiEdit`, and the equivalents of the Codex-shaped tool names. Since 2026-09-22 it also reads the `*** Begin Patch` envelopes carried in the text of any other call, per target file and added lines only (see "What it still does not catch" below for why the tool-name list stayed as it was).
 
 Rule A blocks new content matching any `forbidden` pattern of an active decision card in the cwd vault or the governance vault, quoting the owner and the matched fragment. The decision cards, the pattern validator, and the manifest cache are the Stop gate's own, so a ruling cannot be enforced at the end of a turn and ignored mid-turn. Editing the rule itself is exempt: a hit is ignored when the post-write text carries the same `decision_key` as the card that fired, or when the matched fragment sits inside that text's own frontmatter `forbidden:` block — otherwise the card defining a pattern is the one file that pattern makes unwritable (2026-09-06 incident; §10 covers how to write the pattern so this comes up less).
 
@@ -313,7 +313,8 @@ A block is audited to `_GATE_LOG.jsonl` as `write_block` with the rule and eithe
 ### What it still does not catch
 
 - **A shell redirection or heredoc** (`echo … > card.md`, `python - <<PY`) writes a file without any file-writing tool, so this gate never sees it. That path is covered by the `no-bare-redirect` scar card on the action gate's command matching, not here.
-- **Diff-shaped tools.** A tool that takes only a patch body (`apply_patch`) is not in `WRITE_GATE_TOOL_NAMES`: a diff's context and removed lines would match `forbidden` patterns the write never adds.
+- **Diff-shaped tools** remain out of `WRITE_GATE_TOOL_NAMES`, for the reason they were excluded on 2026-09-06: a diff's context and removed lines would match `forbidden` patterns the write never adds, and blocking those is a false block. What changed on 2026-09-22 is *what is read*, not the tool-name list. Any call whose input text carries a `*** Begin Patch` … `*** End Patch` envelope is parsed as text by `epitype/patch_envelope.py` — no execution, no language parsing — and each target file inside it is judged separately on **its added (`+`) lines only**, which is exactly the objection above answered: context and removed lines are never handed to Rule A. Rule B judges only an `Add File`, whose added lines are the whole file; an `Update File` cannot be reconstructed from a patch, so its post-write text stays unknown and the card contract does not judge it, the same way an `Edit` whose `old_string` is absent is not judged. This is what closed the Codex-shaped gap: this host's Codex has no `apply_patch` tool at all, it puts the envelope inside an `exec` call whose `tool_name` has already become `Bash` by the time `PreToolUse` sees it, which is why every `write_block` row in the real ledger came from Claude and none from Codex.
+- **A file inside an envelope that cannot be judged** — an unresolvable path, added lines past `WRITE_GATE_MAX_CONTENT_BYTES`, or a malformed envelope with no `*** End Patch` — is left unknown while the other files in the same envelope are still judged. One undecidable file neither passes nor blocks the rest.
 - **Content past `WRITE_GATE_MAX_CONTENT_BYTES` (256 KiB)**, an unreadable target file, and an oversized target all fail open rather than spend the hook's deadline.
 - **Rule B judges the text, not the intent**: content that already FAILs stays writable if the write does not change that (an `Edit` whose post-write text cannot be determined is not judged), and a card that was already malformed is not repaired by the gate.
 
@@ -321,6 +322,8 @@ A block is audited to `_GATE_LOG.jsonl` as `write_block` with the rule and eithe
 
 ```powershell
 python adapters/claude/pretooluse_gate.py --selftest
+python epitype/patch_envelope.py --selftest
+python tests/patch_envelope_gate_regression.py --selftest
 python epitype/card_lint.py "<vault>"
 ```
 

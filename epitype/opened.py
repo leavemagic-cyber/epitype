@@ -7,6 +7,22 @@
 
 只記檔名、不記路徑內容：這個檔的用途是比對「我說我查過的那個檔，這一場有沒有碰過」。
 路徑寫法有絕對、相對、正斜線、反斜線好幾種，比對完整路徑會製造誤擋，而誤擋比漏擋貴。
+
+證據分強弱（2026-09-22）：原本從工具輸入的**全文**抓檔名，於是
+`Write-Output 'ghost.py'` 這種單純提及也被當成讀過——已複驗。現在分兩種：
+
+- strong：來自結構化的路徑欄位（`file_path`／`path`／`file_paths` 那一類），也就是這
+  次呼叫**指名**的目標。
+- weak：從自由文字（命令列、glob、樣式）掃出來的檔名。兩種都留著，稽核價值沒變，但
+  「我讀過 X」只有 strong 算數。
+
+**誠實邊界**：動手閘看得到的是呼叫本身，看不到工具的**結果**。所以 strong 的語意是
+「確實對這個目標提出過讀取」，不是「讀取成功」——檔案不存在、權限不足、工具自己失敗，
+在這裡全都長得一樣。要確認成功得接 PostToolUse，那是後續、要 owner 重新給信任，這一
+批沒做，也不要當成做到了。
+
+舊格式相容：2026-09-22 之前寫下的附記檔每行只有檔名、沒有強弱標記，一律當 weak 讀。
+不當 strong 是因為那些行確實無從分辨，而把分不出來的算成強證據就是替自己背書。
 """
 
 import os
@@ -46,12 +62,28 @@ def basenames(payload):
     return found
 
 
-def record(vault, session_id, payload):
+STRONG_MARK = "strong"
+_FIELD_SEPARATOR = "\t"
+
+
+def _split(line):
+    """一列附記拆成 (檔名, 是否為強證據)。舊格式沒有欄位分隔，一律 weak。"""
+    name, separator, mark = line.partition(_FIELD_SEPARATOR)
+    return name.strip(), bool(separator) and mark.strip() == STRONG_MARK
+
+
+def record(vault, session_id, payload, strong_payload=None):
     """把這次呼叫碰到的檔名追加進附記檔。失敗就安靜跳過——這是紀錄，不是關卡。
 
+    `strong_payload` 是這次呼叫**指名**的目標（結構化路徑欄位）；`payload` 是自由
+    文字。同一個檔名兩邊都出現時只寫強的那一列。
+
     只追加、不先讀：讀一次再寫一次會讓每個工具呼叫都多付一次解析成本。重複的檔名由
-    讀的那一端用集合去掉。"""
-    names = basenames(payload)
+    讀的那一端用集合去掉。分隔用定位字元：檔名裡不可能有它，舊檔裡也沒有，所以舊行
+    拆出來就是 weak，不會被誤讀成強證據。"""
+    strong = basenames(strong_payload) if strong_payload else []
+    weak = [name for name in basenames(payload) if name not in set(strong)]
+    names = [name + _FIELD_SEPARATOR + STRONG_MARK for name in strong] + weak
     if not names:
         return False
     target = path_for(vault, session_id)
@@ -69,14 +101,10 @@ def record(vault, session_id, payload):
     return True
 
 
-def names(vault, session_id):
-    """這一場附記過的所有檔名。讀不到就回空集合——沒有資料不等於沒有讀過。
-
-    這個區別很重要：回合閘看到空集合時不准擋人，因為「動手閘沒註冊」與「真的沒讀過
-    任何檔」在這裡長得一模一樣。"""
+def _rows(vault, session_id):
     target = path_for(vault, session_id)
     if target is None:
-        return frozenset()
+        return ()
     try:
         with target.open("r", encoding="utf-8", errors="replace") as stream:
             stream.seek(0, os.SEEK_END)
@@ -84,5 +112,21 @@ def names(vault, session_id):
             stream.seek(max(0, size - memspec.OPENED_MAX_BYTES))
             body = stream.read()
     except OSError:
-        return frozenset()
-    return frozenset(line.strip() for line in body.splitlines() if line.strip())
+        return ()
+    return tuple(_split(line) for line in body.splitlines() if line.strip())
+
+
+def names(vault, session_id):
+    """這一場附記過的所有檔名，強弱不分。稽核與診斷用。
+
+    讀不到就回空集合——沒有資料不等於沒有讀過。這個區別很重要：回合閘看到空集合時
+    不准擋人，因為「動手閘沒註冊」與「真的沒讀過任何檔」在這裡長得一模一樣。"""
+    return frozenset(name for name, _strong in _rows(vault, session_id) if name)
+
+
+def strong_names(vault, session_id):
+    """這一場**指名**讀過的檔名（結構化路徑欄位來的）。
+
+    回合閘的「宣稱讀過」只認這一份：自由文字裡提到一個檔名，不是打開過它。舊格式的
+    附記檔一行都不會出現在這裡，因為它們分不出強弱。"""
+    return frozenset(name for name, strong in _rows(vault, session_id) if name and strong)
