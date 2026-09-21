@@ -1444,6 +1444,42 @@ HOST_SYNC_LEGACY_MARKERS = {
         "<!-- SHARED_INDEX END -->",
     ),
 }
+# 專案根的 AGENTS.md／CLAUDE.md。全域宿主檔只收治理庫（host_sync.contract_vaults），所以
+# Codex 進到某個專案目錄時，那個專案自己的規則卡沒有一條到得了它面前——2026-09-20 實測
+# 一場 Codex 在專案裡跑，讀不到那個專案的規則。Claude Code 沒出事只是因為宿主會自動載入
+# cwd 專案庫的 MEMORY.md，Codex 沒有這個機制。規則因此另外寫一份到專案根。
+HOST_SYNC_PROJECT_RULES_REGION = "project-rules"
+HOST_SYNC_PROJECT_INDEX_REGION = "project-index"
+HOST_SYNC_PROJECT_MARKERS = {
+    HOST_SYNC_PROJECT_RULES_REGION: (
+        "<!-- EPITYPE PROJECT RULES BEGIN - generated from this project's cards, do not edit here -->",
+        "<!-- EPITYPE PROJECT RULES END -->",
+    ),
+    HOST_SYNC_PROJECT_INDEX_REGION: (
+        "<!-- EPITYPE PROJECT INDEX BEGIN - generated from this project's MEMORY.md, do not edit here -->",
+        "<!-- EPITYPE PROJECT INDEX END -->",
+    ),
+}
+# 專案根本來是私人腳本在同步的（titan 專案）。認得它的標記，`--apply` 就會就地換成產品
+# 標記，不會在同一個檔裡長出第二塊一樣的內容。
+HOST_SYNC_PROJECT_LEGACY_MARKERS = {
+    HOST_SYNC_PROJECT_RULES_REGION: (
+        "<!-- TITAN_PROJECT_RULES BEGIN - generated, do not edit here -->",
+        "<!-- TITAN_PROJECT_RULES END -->",
+    ),
+    HOST_SYNC_PROJECT_INDEX_REGION: (
+        "<!-- TITAN_INDEX BEGIN - generated -->",
+        "<!-- TITAN_INDEX END -->",
+    ),
+}
+# 哪個宿主在專案根讀哪個檔，那個檔又該有哪幾塊。CLAUDE.md 不寫索引：Claude Code 自己會
+# 載入專案庫的 MEMORY.md，再寫一份等於同一段字每一場付兩次（owner 2026-09-09 裁定
+# epitype-skip-native-index-echo-on-claude）。
+HOST_SYNC_PROJECT_FILES = {"claude": "CLAUDE.md", "codex": "AGENTS.md"}
+HOST_SYNC_PROJECT_REGIONS = {
+    "claude": (HOST_SYNC_PROJECT_RULES_REGION,),
+    "codex": (HOST_SYNC_PROJECT_RULES_REGION, HOST_SYNC_PROJECT_INDEX_REGION),
+}
 HOST_SYNC_INDEX_FILENAME = "MEMORY.md"
 HOST_SYNC_BACKUP_SUFFIX = ".epitype-bak"
 # 宿主檔每一場都整份載入，所以這兩塊是每一場的固定成本。超過就拒絕寫，讓使用者先瘦身。

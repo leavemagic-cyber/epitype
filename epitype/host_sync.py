@@ -34,7 +34,9 @@ from epitype import capture_route, core_gen, memspec
 
 # unrecognised：這一塊現在有幾行認不出是 Epitype 上次寫的；取代前原文要先存起來。
 Region = namedtuple("Region", "name text present current unrecognised", defaults=(0,))
-Plan = namedtuple("Plan", "host path regions problems damaged")
+# key：狀態表的鍵。全域宿主檔一個宿主一個檔，用宿主名就分得開；專案根的檔案名兩個專案
+# 會一模一樣（都叫 AGENTS.md），所以那一種用絕對路徑。None＝這是全域宿主檔。
+Plan = namedtuple("Plan", "host path regions problems damaged key", defaults=(None,))
 
 STATE_FILENAME = "host_sync_state.json"
 
@@ -136,19 +138,47 @@ def rules_text(vaults, host):
     return _normalised(core_gen.host_view(assembled, host))
 
 
+def _index_of(vault):
+    """這個庫的 MEMORY.md 去掉第一行標題；讀不到回 None（與「讀得到但空的」不一樣）。"""
+    try:
+        with io.open(Path(vault) / memspec.HOST_SYNC_INDEX_FILENAME, encoding="utf-8") as stream:
+            raw = stream.read()
+    except OSError:
+        return None
+    lines = _normalised(raw).split("\n")
+    if lines and lines[0].startswith("#"):
+        lines = lines[1:]
+    return _normalised("\n".join(lines))
+
+
 def index_text(vaults):
     """短索引的本文：治理庫的 MEMORY.md，去掉它的第一行標題。"""
     for vault in contract_vaults(vaults):
-        path = Path(vault) / memspec.HOST_SYNC_INDEX_FILENAME
-        try:
-            raw = io.open(path, encoding="utf-8").read()
-        except OSError:
+        text = _index_of(vault)
+        if text is None:
             continue
-        lines = _normalised(raw).split("\n")
-        if lines and lines[0].startswith("#"):
-            lines = lines[1:]
-        return _normalised("\n".join(lines))
+        return text
     return ""
+
+
+def project_rules_text(vault, host):
+    """這個專案庫自己的規則塊；一張規則卡都沒有就回空字串（不建空塊）。
+
+    只收這一個庫：專案根的檔是那個專案的，寫進別庫的規則等於把專案規則互相污染。讀不到
+    卡片時丟例外——同 `rules_text` 的態度，殘缺的規則塊比沒有規則塊更危險，因為少的那幾
+    條不會有人發現。
+    """
+    rules, unreadable = core_gen.collect_rules([Path(vault)])
+    if unreadable:
+        raise ValueError("讀不到部分卡片：" + "；".join(unreadable[:3]))
+    if not rules:
+        return ""
+    return _normalised(core_gen.host_view(core_gen.assemble(rules), host))
+
+
+def project_index_text(vault):
+    """這個專案庫的短索引：它自己的 MEMORY.md，去掉第一行標題。"""
+    return _index_of(vault) or ""
 
 
 def split_region(raw, begin, end):
@@ -167,18 +197,29 @@ def split_region(raw, begin, end):
     return raw[:start], _normalised(inner), raw[finish + len(end):]
 
 
+def _marker_tables(name):
+    """這個區名用哪一組標記表：(產品, 舊版)。
+
+    全域宿主檔與專案根的檔各有自己的一組標記，兩者可能出現在同一個檔裡（家目錄本身就是
+    某場對話的 cwd 時）。查表寫死成全域那一組的話，專案區塊會被當成不存在而一直重建。
+    """
+    if name in memspec.HOST_SYNC_PROJECT_MARKERS:
+        return memspec.HOST_SYNC_PROJECT_MARKERS, memspec.HOST_SYNC_PROJECT_LEGACY_MARKERS
+    return memspec.HOST_SYNC_MARKERS, memspec.HOST_SYNC_LEGACY_MARKERS
+
+
 def _locate(raw, name):
     """這一塊目前在檔裡的位置：先找產品標記，再找舊的私人標記。
 
     回傳 (切好的三段, 用到的標記, 是不是舊標記)。兩套標記同時存在時以產品標記為準，
     舊的那一塊由 `render` 整段移除——留著的話代理會讀到兩份規則，而且兩份還會分岔。
     """
-    for legacy, markers in ((False, memspec.HOST_SYNC_MARKERS[name]),
-                            (True, memspec.HOST_SYNC_LEGACY_MARKERS[name])):
+    current, legacy_table = _marker_tables(name)
+    for legacy, markers in ((False, current[name]), (True, legacy_table[name])):
         found = split_region(raw, *markers)
         if found is not None:
             return found, markers, legacy
-    return None, memspec.HOST_SYNC_MARKERS[name], False
+    return None, current[name], False
 
 
 def _drop(raw, begin, end):
@@ -195,7 +236,8 @@ def _drop(raw, begin, end):
 
 def render(raw, name, wanted):
     """把這一塊換成 `wanted`，回傳整份新內容。區塊不存在就建在檔尾。"""
-    begin, end = memspec.HOST_SYNC_MARKERS[name]
+    current, legacy_table = _marker_tables(name)
+    begin, end = current[name]
     block = f"{begin}\n{wanted}\n{end}" if wanted else f"{begin}\n{end}"
     found, _markers, legacy = _locate(raw, name)
     if found is None:
@@ -205,27 +247,36 @@ def render(raw, name, wanted):
     updated = head.rstrip("\n") + ("\n\n" if head.strip() else "") + block + "\n" + tail.lstrip("\n")
     if not legacy:
         # 產品標記在手，舊標記那一塊就該消失，不是留在旁邊各說各話。
-        updated = _drop(updated, *memspec.HOST_SYNC_LEGACY_MARKERS[name])
+        updated = _drop(updated, *legacy_table[name])
     return updated
 
 
 def plan_for(host, vaults, home=None):
     """這個宿主檔要改什麼：每塊的現況與應有內容，以及擋住寫入的問題。"""
-    path = host_path(host, home)
+    return _plan(host, host, None, host_path(host, home), lambda: {
+        memspec.HOST_SYNC_RULES_REGION: rules_text(vaults, host),
+        memspec.HOST_SYNC_INDEX_REGION: index_text(vaults),
+    }, home)
+
+
+def _plan(host, label, key, path, wanted_of, home=None):
+    """一個目標檔要改什麼：每塊的現況與應有內容，以及擋住寫入的問題。
+
+    `host` 是真正的宿主（決定規則視圖與載入上限），`label` 是輸出裡的名字，`key` 是狀態
+    表的鍵（專案檔用絕對路徑，見 Plan）。`wanted_of` 晚一步才叫：檔案讀不動時要先報那一
+    件，不是先報組不出內容——先講的那一句會被當成原因。
+    """
     try:
         _raw_bytes, raw, _newline = read_host(path)
     except ValueError as exc:
-        return Plan(host, path, [], [f"讀不動這個檔：{exc}；請先自行處理編碼再同步"], True)
+        return Plan(label, path, [], [f"讀不動這個檔：{exc}；請先自行處理編碼再同步"], True, key)
     raw = raw or ""
     regions, problems, notices = [], [], []
     damaged = False
     try:
-        wanted = {
-            memspec.HOST_SYNC_RULES_REGION: rules_text(vaults, host),
-            memspec.HOST_SYNC_INDEX_REGION: index_text(vaults),
-        }
+        wanted = wanted_of()
     except Exception as exc:
-        return Plan(host, path, [], [f"組不出要寫的內容：{type(exc).__name__}: {exc}"], False)
+        return Plan(label, path, [], [f"組不出要寫的內容：{type(exc).__name__}: {exc}"], False, key)
 
     # 設了 core_cap_bytes 就是規則塊的上限：core-gen 超過會拒寫，而代理真正讀到的是這裡
     # 寫進去的字，這裡不守的話那個上限等於沒設。
@@ -250,7 +301,7 @@ def plan_for(host, vaults, home=None):
         # 檔弄成兩組標記。
         carried = [
             marker
-            for table in (memspec.HOST_SYNC_MARKERS, memspec.HOST_SYNC_LEGACY_MARKERS)
+            for table in _marker_tables(name)
             for markers in table.values()
             for marker in markers
             if marker in text
@@ -265,26 +316,102 @@ def plan_for(host, vaults, home=None):
             found, _markers, _legacy = _locate(raw, name)
         except ValueError as exc:
             # 數字要報「實際壞掉的那一組標記」，不然訊息會自相矛盾。
+            current, legacy_table = _marker_tables(name)
             counts = {
-                label: (raw.count(begin), raw.count(end))
-                for label, (begin, end) in (
-                    ("產品", memspec.HOST_SYNC_MARKERS[name]),
-                    ("舊版", memspec.HOST_SYNC_LEGACY_MARKERS[name]),
+                which: (raw.count(begin), raw.count(end))
+                for which, (begin, end) in (
+                    ("產品", current[name]),
+                    ("舊版", legacy_table[name]),
                 )
             }
-            label, (opens, closes) = max(counts.items(), key=lambda kv: sum(kv[1]))
+            which, (opens, closes) = max(counts.items(), key=lambda kv: sum(kv[1]))
             problems.append(memspec.HOST_SYNC_MISSING_MARKER_REASON.format(
-                path=path, region=f"{name}（{label}標記）", begin=opens, end=closes
+                path=path, region=f"{name}（{which}標記）", begin=opens, end=closes
             ) + f"：{exc}")
             damaged = True  # 檔案本身壞了：整個宿主一個位元組都不要動
             continue
         inner = found[1] if found else None
         unrecognised = 0 if inner is None else _unrecognised(
-            inner, text, host, name, home, legacy=_legacy
+            inner, text, key or host, name, home, legacy=_legacy
         )
         regions.append(Region(name, text, found is not None, inner, unrecognised))
     problems.extend(_budget_problems(host, path, raw, regions, home))
-    return Plan(host, path, regions, problems, damaged)
+    return Plan(label, path, regions, problems, damaged, key)
+
+
+PROJECT_SKIP_NO_ROOT = "找不到專案根（對話紀錄無 cwd 或目錄已不在）"
+
+
+def _native_project_vault(vault):
+    """路徑形狀是不是宿主替某個 cwd 開的專案庫：`<home>/.claude/projects/<slug>/memory`。"""
+    parts = [os.path.normcase(part) for part in Path(vault).parts]
+    if len(parts) < 4 or parts[-1] != os.path.normcase(capture_route.NATIVE_MEMORY_DIRNAME):
+        return False
+    expected = [os.path.normcase(part) for part in capture_route.NATIVE_PROJECTS_SUBPATH]
+    return parts[-4:-2] == expected
+
+
+def project_targets(vaults, hosts=None, home=None):
+    """專案根要同步的檔，以及判不出專案根而跳過的庫。
+
+    回傳 ([(宿主, 專案根, 庫)], [(庫, 跳過的原因)])。治理庫不在內：它的規則走全域宿主檔，
+    在專案根再寫一份就是同一段字每場付兩次。專案根不靠名冊反查，靠宿主自己留下的對話
+    紀錄（owner 2026-09-21：不應該是登記制）。
+    """
+    governance = {os.path.normcase(os.fspath(Path(item))) for item in contract_vaults(vaults)}
+    targets, skipped = [], []
+    for item in vaults:
+        vault = Path(item)
+        if os.path.normcase(os.fspath(vault)) in governance:
+            continue
+        if not _native_project_vault(vault):
+            # 路徑形狀推不出專案根的庫（自己開在別處的庫）不在這條路徑上；它的規則仍由
+            # 兩道閘讀設定裡的庫清單執行，只是沒有專案根可以寫。
+            continue
+        root = capture_route.project_root_of(vault)
+        if root is None:
+            skipped.append((vault, PROJECT_SKIP_NO_ROOT))
+            continue
+        for host in (hosts or sorted(memspec.HOST_SYNC_PROJECT_FILES)):
+            if host in memspec.HOST_SYNC_PROJECT_FILES:
+                targets.append((host, root, vault))
+    return targets, skipped
+
+
+def project_plan(host, root, vault, home=None):
+    """專案根那個檔要改什麼。規則只收這個庫的卡，索引只收它自己的 MEMORY.md。"""
+    path = Path(root) / memspec.HOST_SYNC_PROJECT_FILES[host]
+    label = f"project:{Path(root).name}/{path.name}"
+
+    def wanted_of():
+        builders = {
+            memspec.HOST_SYNC_PROJECT_RULES_REGION: lambda: project_rules_text(vault, host),
+            memspec.HOST_SYNC_PROJECT_INDEX_REGION: lambda: project_index_text(vault),
+        }
+        # 沒內容的那一塊整塊不要：這個庫沒有規則卡，就不該在別人的專案根長出一個空殼區
+        # 塊——空塊看起來像「規則是空的」，而實際上是「這裡沒有規則這回事」。
+        wanted = {}
+        for name in memspec.HOST_SYNC_PROJECT_REGIONS[host]:
+            text = builders[name]()
+            if text:
+                wanted[name] = text
+        return wanted
+
+    return _plan(host, label, os.fspath(path), path, wanted_of, home)
+
+
+def _plans(vaults, hosts=None, home=None):
+    """這一輪要處理的全部目標：兩個全域宿主檔，加上每個專案庫的專案根檔案。"""
+    selected = hosts or installed_hosts(home)
+    plans = [plan_for(host, vaults, home) for host in selected]
+    targets, skipped = project_targets(vaults, selected, home)
+    plans.extend(project_plan(host, root, vault, home) for host, root, vault in targets)
+    return plans, skipped
+
+
+def _report_skipped(skipped, output):
+    for vault, reason in skipped:
+        print(f"SKIP   project {vault}: {reason}", file=output)
 
 
 def _codex_configured_budget(home=None):
@@ -432,7 +559,8 @@ def _report_dropped(vaults, output):
 
 def check(vaults, hosts=None, home=None, output=sys.stdout):
     _report_dropped(vaults, output)
-    plans = [plan_for(host, vaults, home) for host in (hosts or installed_hosts(home))]
+    plans, skipped = _plans(vaults, hosts, home)
+    _report_skipped(skipped, output)
     drift = refused = 0
     for item in plans:
         # 整個宿主停手時不要先講一句沒發生的事：標記壞掉那一種是一個位元組都不動的。
@@ -456,13 +584,24 @@ def check(vaults, hosts=None, home=None, output=sys.stdout):
     if not plans:
         print("沒有偵測到任何宿主（家目錄底下沒有 .claude／.codex）", file=output)
     elif not drift and not refused:
-        print(f"OK 宿主檔與卡片一致（{'、'.join(item.host for item in plans)}）", file=output)
+        print(f"OK 宿主檔與卡片一致（{_targets_word(plans)}）", file=output)
     return EXIT_REFUSED if refused else (EXIT_DRIFT if drift else EXIT_OK)
+
+
+def _targets_word(plans):
+    """報告裡怎麼稱呼這一輪比對過的目標。專案檔只數個數：一台機器幾十個專案，逐一列出
+    的那一行會長到沒有人讀得完，而那一行要說的只是「都比對過、都一致」。"""
+    names = [item.host for item in plans if not item.key]
+    projects = sum(1 for item in plans if item.key)
+    if projects:
+        names.append(f"{projects} 個專案檔")
+    return "、".join(names)
 
 
 def apply(vaults, hosts=None, home=None, output=sys.stdout, actor=memspec.HOST_SYNC_ACTOR_MANUAL):
     _report_dropped(vaults, output)
-    plans = [plan_for(host, vaults, home) for host in (hosts or installed_hosts(home))]
+    plans, skipped = _plans(vaults, hosts, home)
+    _report_skipped(skipped, output)
     refused = written = 0
     for item in plans:
         for problem in item.problems:
@@ -512,7 +651,7 @@ def apply(vaults, hosts=None, home=None, output=sys.stdout, actor=memspec.HOST_S
             refused += 1
             continue
         for region in item.regions:
-            _remember(home, item.host, region.name, region.text)
+            _remember(home, item.key or item.host, region.name, region.text)
         for region in foreign:
             print(f"{memspec.HOST_SYNC_REPLACED_PREFIX} {item.host}: "
                   + memspec.HOST_SYNC_REPLACE_DONE.format(
@@ -525,76 +664,89 @@ def apply(vaults, hosts=None, home=None, output=sys.stdout, actor=memspec.HOST_S
     return EXIT_REFUSED if refused else EXIT_OK
 
 
-def remove(hosts=None, home=None, output=sys.stdout):
-    """把我們寫進宿主檔的區塊整段拿掉，其餘一個位元組都不動。
+def remove(hosts=None, home=None, output=sys.stdout, vaults=()):
+    """把我們寫進宿主檔與專案根的區塊整段拿掉，其餘一個位元組都不動。
 
-    沒有這條路徑的話，解除安裝之後那兩個檔會永遠留著一段「由卡片生成、勿手改」的文
+    沒有這條路徑的話，解除安裝之後那些檔會永遠留著一段「由卡片生成、勿手改」的文
     字，而生成它的東西已經不在了——每一場都載入一份沒有主人的規則。產品寫得進使用者
-    的全域指令檔，就必須拿得回來。
+    的全域指令檔與專案根，就必須拿得回來。
     """
     removed = 0
     for host in (hosts or installed_hosts(home)):
-        path = host_path(host, home)
-        try:
-            original, raw, newline = read_host(path)
-        except ValueError as exc:
-            print(f"REFUSE {host}: 讀不動這個檔：{exc}", file=output)
-            continue
-        if original is None:
-            continue
-        updated = raw
-        for name in memspec.HOST_SYNC_MARKERS:
-            for markers in (memspec.HOST_SYNC_MARKERS[name],
-                            memspec.HOST_SYNC_LEGACY_MARKERS[name]):
-                updated = _drop(updated, *markers)
-        if updated == raw:
-            continue
-        payload = updated.strip("\n")
-        payload = (payload + "\n").encode("utf-8") if payload else b""
-        payload = payload.replace(b"\n", (newline or "\n").encode("utf-8"))
-        backup = path.with_name(path.name + memspec.HOST_SYNC_BACKUP_SUFFIX)
-        wrote_backup = False
-        try:
-            # 只在還沒有備份時寫，跟 apply 同一條規矩。照寫的話，解除安裝會把安裝當初留
-            # 下的原檔副本換成「含我們區塊的那一版」——使用者手上唯一一份「Epitype 動它
-            # 之前長什麼樣」就這樣沒了，而且是在解除安裝這一步沒的。
-            if not backup.exists():
-                atomic_write(backup, original)
-                wrote_backup = True
-            if payload.strip():
-                atomic_write(path, payload)
-            else:
-                # 整個檔都是我們寫的，拿掉就沒東西了——那是產品自己建的孤兒檔。
-                # 連它的備份一起收掉：那份備份裡沒有半個字是使用者的，留著只會讓人
-                # 以為自己有東西被刪了。
-                path.unlink()
-                try:
-                    backup.unlink()
-                except OSError:
-                    pass
-                print(f"REMOVED {host}: 這個檔整份都是我們建的，已刪除 {path}", file=output)
-                removed += 1
-                continue
-        except OSError as exc:
-            print(f"REFUSE {host}: 寫入失敗 {type(exc).__name__}: {exc}", file=output)
-            continue
-        removed += 1
-        print(f"REMOVED {host}: 區塊已拿掉，其餘內容原樣保留 → {path}", file=output)
-        # 備份檔留在使用者的目錄裡，就要講。不講的話，解除安裝之後那裡多一個檔，而且
-        # 「這次剛寫的、裡面含我們的區塊」跟「安裝當初留的、是你自己的原文」是兩件很不
-        # 一樣的事——前者是我們留下的東西，後者是還給你的東西。
-        if wrote_backup:
-            print(f"        原檔副本留在 {backup}（這是拿掉區塊之前的樣子，"
-                  "裡面含我們寫的區塊；確認沒問題就可以刪）", file=output)
-        elif backup.exists():
-            print(f"        安裝當初的原檔副本仍在 {backup}"
-                  "（那是 Epitype 動它之前的樣子；確認沒問題就可以刪）", file=output)
-        if _replaced_path(path).exists():
-            print(f"        同步時被取代的原文存在 {_replaced_path(path)}"
-                  "（每筆寫明誰、何時換掉；確認不需要就可以刪）", file=output)
+        removed += _remove_regions(
+            host_path(host, home), host, list(memspec.HOST_SYNC_MARKERS), output)
+    targets, _skipped = project_targets(vaults or (), hosts, home)
+    for host, root, _vault in targets:
+        path = Path(root) / memspec.HOST_SYNC_PROJECT_FILES[host]
+        removed += _remove_regions(
+            path, f"project:{Path(root).name}/{path.name}",
+            list(memspec.HOST_SYNC_PROJECT_REGIONS[host]), output,
+            # 專案根的檔不是我們建的目錄裡的東西，而且使用者隨時可能自己往裡面寫；
+            # 拿掉區塊之後剩一個空檔，刪掉它就是替他決定那個檔該不該存在。
+            delete_when_empty=False,
+        )
     if not removed:
         print("宿主檔裡沒有我們寫的區塊，沒有要拿掉的東西", file=output)
     return EXIT_OK
+
+
+def _remove_regions(path, label, names, output, delete_when_empty=True):
+    """把這些區塊（含舊標記那一版）整段拿掉；真的改了檔才回 1。"""
+    try:
+        original, raw, newline = read_host(path)
+    except ValueError as exc:
+        print(f"REFUSE {label}: 讀不動這個檔：{exc}", file=output)
+        return 0
+    if original is None:
+        return 0
+    updated = raw
+    for name in names:
+        for table in _marker_tables(name):
+            updated = _drop(updated, *table[name])
+    if updated == raw:
+        return 0
+    payload = updated.strip("\n")
+    payload = (payload + "\n").encode("utf-8") if payload else b""
+    payload = payload.replace(b"\n", (newline or "\n").encode("utf-8"))
+    backup = path.with_name(path.name + memspec.HOST_SYNC_BACKUP_SUFFIX)
+    wrote_backup = False
+    try:
+        # 只在還沒有備份時寫，跟 apply 同一條規矩。照寫的話，解除安裝會把安裝當初留
+        # 下的原檔副本換成「含我們區塊的那一版」——使用者手上唯一一份「Epitype 動它
+        # 之前長什麼樣」就這樣沒了，而且是在解除安裝這一步沒的。
+        if not backup.exists():
+            atomic_write(backup, original)
+            wrote_backup = True
+        if payload.strip() or not delete_when_empty:
+            atomic_write(path, payload)
+        else:
+            # 整個檔都是我們寫的，拿掉就沒東西了——那是產品自己建的孤兒檔。
+            # 連它的備份一起收掉：那份備份裡沒有半個字是使用者的，留著只會讓人
+            # 以為自己有東西被刪了。
+            path.unlink()
+            try:
+                backup.unlink()
+            except OSError:
+                pass
+            print(f"REMOVED {label}: 這個檔整份都是我們建的，已刪除 {path}", file=output)
+            return 1
+    except OSError as exc:
+        print(f"REFUSE {label}: 寫入失敗 {type(exc).__name__}: {exc}", file=output)
+        return 0
+    print(f"REMOVED {label}: 區塊已拿掉，其餘內容原樣保留 → {path}", file=output)
+    # 備份檔留在使用者的目錄裡，就要講。不講的話，解除安裝之後那裡多一個檔，而且
+    # 「這次剛寫的、裡面含我們的區塊」跟「安裝當初留的、是你自己的原文」是兩件很不
+    # 一樣的事——前者是我們留下的東西，後者是還給你的東西。
+    if wrote_backup:
+        print(f"        原檔副本留在 {backup}（這是拿掉區塊之前的樣子，"
+              "裡面含我們寫的區塊；確認沒問題就可以刪）", file=output)
+    elif backup.exists():
+        print(f"        安裝當初的原檔副本仍在 {backup}"
+              "（那是 Epitype 動它之前的樣子；確認沒問題就可以刪）", file=output)
+    if _replaced_path(path).exists():
+        print(f"        同步時被取代的原文存在 {_replaced_path(path)}"
+              "（每筆寫明誰、何時換掉；確認不需要就可以刪）", file=output)
+    return 1
 
 
 def _selftest():
@@ -1024,7 +1176,10 @@ def main(argv=None, output=sys.stdout):
     parsed = parser.parse_args(arguments)
     try:
         if parsed.remove:
-            return remove(hosts=parsed.host, output=output)
+            # 專案根的檔要靠庫才找得回來（庫→專案根是從對話紀錄反查的），但沒給路徑不是
+            # 停手的理由：全域宿主檔那兩塊照樣拿得掉。
+            return remove(hosts=parsed.host, output=output,
+                          vaults=parsed.vaults or _managed_vaults())
         vaults = parsed.vaults
         if not vaults:
             # 沒給路徑＝「這台機器該同步的那些庫」：設定登記的加上掃描到裝著卡的原生庫

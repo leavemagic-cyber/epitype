@@ -1534,6 +1534,10 @@ def _doctor(home, dry_run=False, output=sys.stdout, clear_shim_status=False, sch
         )
         for item in discovered:
             print(f"VAULTS: discovered {item}", file=output)
+        # 專案庫的規則與索引另外寫進那個專案根的 AGENTS.md／CLAUDE.md：Codex 進到專案
+        # 目錄時只讀得到那兩個檔（全域 AGENTS.md 只收治理庫）。這裡只報現況，不寫。
+        for line in _project_sync_status(managed, home):
+            print(line, file=output)
         repo_root = _validate_repo_root(
             config.get("repo_root") if isinstance(config, dict) else None,
             require_adapters=False,
@@ -1580,6 +1584,48 @@ def _doctor(home, dry_run=False, output=sys.stdout, clear_shim_status=False, sch
     except Exception as exc:
         print(f"DOCTOR FAIL {type(exc).__name__}: {exc}", file=output)
         return 1
+
+
+def _project_file_state(plan):
+    """專案根那個檔現在的狀態。純讀，不碰檔。"""
+    if plan.problems:
+        return "blocked"
+    if not Path(plan.path).is_file():
+        return "missing"
+    if not plan.regions:
+        return "n/a"  # 這個庫沒有規則卡也沒有索引，本來就沒有東西要寫過去
+    if any(not region.present or region.current != region.text for region in plan.regions):
+        return "drift"
+    return "synced"
+
+
+def _project_sync_status(vaults, home):
+    """每個原生專案庫的專案根檔案同步到哪了；專案根反查不到的也要講。
+
+    反查不到就沒有人會發現那個專案的規則從來沒送達（2026-09-20 事故就是這樣過了一整
+    場）。doctor 是唯讀的，所以這裡只報 synced／drift／missing，不順手寫。
+    """
+    try:
+        from epitype import host_sync
+
+        targets, skipped = host_sync.project_targets(vaults, home=home)
+    except Exception as exc:
+        return [f"PROJECT: status unavailable ({type(exc).__name__}: {exc})"]
+    lines = [f"PROJECT: {vault} root=unknown" for vault, _reason in skipped]
+    grouped = {}
+    for host, root, vault in targets:
+        grouped.setdefault(os.fspath(root), []).append((host, root, vault))
+    for root, items in sorted(grouped.items()):
+        states = []
+        for host, root_path, vault in items:
+            name = host_sync.memspec.HOST_SYNC_PROJECT_FILES[host]
+            try:
+                state = _project_file_state(host_sync.project_plan(host, root_path, vault, home))
+            except Exception as exc:
+                state = f"unknown({type(exc).__name__})"
+            states.append(f"{name}={state}")
+        lines.append(f"PROJECT: {root} " + " ".join(sorted(states)))
+    return lines
 
 
 def _planned_backup(path):

@@ -151,6 +151,50 @@ def native_vaults(home=None):
     return sorted(found, key=lambda item: os.path.normcase(os.fspath(item)))
 
 
+# 專案目錄裡一份對話紀錄都沒有時的回覆值：那不是證據，只是沒有證據，所以由呼叫端自己
+# 決定要當成「判不出來」還是「不是孤兒」。
+PROJECT_ROOT_NO_TRANSCRIPT = "no-transcript"
+# 只看最新幾份紀錄的前幾行：cwd 每一行都有，讀整個目錄只是把時間花在同一個答案上。
+PROJECT_TRANSCRIPT_FILES = 3
+PROJECT_TRANSCRIPT_ROWS = 40
+
+
+def project_root_of(vault, *, no_transcript=None, max_rows=PROJECT_TRANSCRIPT_ROWS):
+    """這個原生專案庫屬於哪個專案根目錄；判不出來回 None。
+
+    slug 反推不回原路徑（非英數字元都變成 `-`），而專案不該為了被找到而去登記一份名冊
+    （owner 2026-09-21：不應該是登記制）。所以讀庫所在專案目錄（`<vault>/..`）裡最新幾份
+    對話紀錄的 `cwd`：宿主開專案目錄時一定留下紀錄，那就是宿主自己記下的專案根。
+
+    回 None 的三種情形：讀不到紀錄、紀錄裡找不到 cwd、cwd 指的目錄已經不在。一份紀錄都
+    沒有時回 `no_transcript`（預設 None）——「沒有紀錄」與「紀錄說那裡已經不在」是兩件事，
+    孤兒庫盤點要把前者當活的，同步專案檔要把前者當判不出來，預設值不能只有一個。
+    """
+    project_dir = Path(vault).parent
+    try:
+        transcripts = sorted(
+            project_dir.glob("*.jsonl"), key=lambda item: item.stat().st_mtime, reverse=True)
+    except OSError:
+        return None
+    if not transcripts:
+        return no_transcript
+    for transcript in transcripts[:PROJECT_TRANSCRIPT_FILES]:
+        try:
+            with transcript.open(encoding="utf-8", errors="replace") as stream:
+                for _index, line in zip(range(max_rows), stream):
+                    try:
+                        row = json.loads(line)
+                    except ValueError:
+                        continue
+                    cwd = row.get("cwd") if isinstance(row, dict) else None
+                    if isinstance(cwd, str) and cwd.strip():
+                        root = Path(cwd)
+                        return root if root.is_dir() else None
+        except OSError:
+            continue
+    return None
+
+
 def managed_vaults(configured, home=None):
     """實際受管的庫：設定檔登記的（原順序、只留存在的）在前，接上掃描到的原生庫。
 

@@ -633,30 +633,17 @@ def _project_dir_exists(project_dir, max_rows=40):
     """這個原生庫的專案資料夾還在不在：讀同目錄最新一份對話紀錄裡的 cwd。
 
     原生庫在自己的專案裡本來就會被喚回與閘找到，不需要登記；只有專案資料夾已經不在的
-    才是沒人管的庫。slug 反推不回原路徑（非英數字元都變成 `-`），所以看宿主記下的 cwd。
-    宿主開專案目錄時一定留下對話紀錄；一份都沒有＝有人手動放的（例如專案搬家後把庫
-    搬過來），不當成孤兒。
+    才是沒人管的庫。判定本身在 `capture_route.project_root_of`：專案檔同步要反查同一個
+    專案根，兩邊各寫一套的話，同一個庫會在這裡是活的、在那裡找不到家。宿主開專案目錄時
+    一定留下對話紀錄；一份都沒有＝有人手動放的（例如專案搬家後把庫搬過來），不當成孤兒。
     """
-    try:
-        transcripts = sorted(Path(project_dir).glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
-    except OSError:
-        return False
-    if not transcripts:
-        return True
-    for transcript in transcripts[:3]:
-        try:
-            with transcript.open(encoding="utf-8", errors="replace") as stream:
-                for _index, line in zip(range(max_rows), stream):
-                    try:
-                        row = json.loads(line)
-                    except ValueError:
-                        continue
-                    cwd = row.get("cwd") if isinstance(row, dict) else None
-                    if isinstance(cwd, str) and cwd.strip():
-                        return Path(cwd).is_dir()
-        except OSError:
-            continue
-    return False
+    capture_route = _capture_route_module()
+    found = capture_route.project_root_of(
+        Path(project_dir) / capture_route.NATIVE_MEMORY_DIRNAME,
+        no_transcript=capture_route.PROJECT_ROOT_NO_TRANSCRIPT,
+        max_rows=max_rows,
+    )
+    return found is not None
 
 
 def _section_pocket_vaults(vaults, today, since_date, config):

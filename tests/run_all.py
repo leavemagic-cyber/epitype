@@ -82,6 +82,7 @@ SELFTESTS = (
     Path("tests") / "starter_pack_regression.py",
     Path("tests") / "language_regression.py",
     Path("tests") / "managed_vaults_regression.py",
+    Path("tests") / "project_sync_regression.py",
     # 2026-09-09 U-J：git_gate_regression.py 只驗傷疤卡 trigger 的命令比對，那條路徑
     # 整條移除後一併退役（不可逆 git 動作改由宿主原生規則負責）。
 )
