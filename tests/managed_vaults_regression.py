@@ -177,8 +177,32 @@ def main():
             and "清單壞掉之後的段" in (rerecorded.get("sections") or ()),
         ))
 
+        # 設定檔位置推得的家目錄沒有任何宿主目錄＝掃不到原生庫，以前靜默少管；現在說一行。
+        stray_config = root / "stray" / "config.json"   # config_home → root，root 底下沒有 .claude/.codex
+        stray_config.parent.mkdir(parents=True)
+        stray_config.write_text(
+            json.dumps({memspec.CONFIG_VAULTS_FIELD: [os.fspath(configured)]}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        stray_stream = io.StringIO()
+        stray_vaults = capture_route.managed_vaults_for_config(
+            stray_config, [os.fspath(configured)], stream=stray_stream)
+        checks.append((
+            "推得的家沒有宿主目錄：明列的庫照收，且往 stream 說一行、不再靜默",
+            stray_vaults == [configured]
+            and "沒有 .claude" in stray_stream.getvalue()
+            and os.fspath(root) in stray_stream.getvalue(),
+        ))
+        quiet_stream = io.StringIO()
+        capture_route.managed_vaults_for_config(
+            config_path, [os.fspath(configured)], stream=quiet_stream)
+        checks.append((
+            "正常安裝（設定檔在 <home>/.epitype/）：家有 .claude，不出這行提醒",
+            quiet_stream.getvalue() == "",
+        ))
+
     passed = sum(bool(ok) for _, ok in checks)
-    total = 11
+    total = 13
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     for name, ok in checks:

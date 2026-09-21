@@ -692,7 +692,11 @@ def _selftest():
                         and "rule-live" not in text
                         and "只有 6s 是標準合約" not in text
                         and "decision index detail" not in text
-                        and "🧾" in text
+                        # §35 是「裁定絕不進開場」的否定斷言；🧾 錨只是讓「有輸出卻仍不含
+                        # 裁定」非空泛，所以只在有輸出時要求它。機器忙到開場預算被吃完、
+                        # 整段脈絡省略是設計允許的（空輸出宿主照收），那一場裁定同樣沒進去
+                        # ——否定斷言仍成立，不該被判失敗（2026-09-21）。
+                        and (text == "" or "🧾" in text)
                         for _code, text in decision_contexts
                     ),
                 )
@@ -877,11 +881,16 @@ def _selftest():
             checks.append(
                 (
                     "a finished dream is announced once, with its numbers and pack path, and never again",
+                    # 真正的不變量：跨兩場最多宣告一次、內容對、絕不退回原始索引回音。
+                    # 忙碌時 run1 的開場預算被吃完就整段省略、且沒把夢標記成已通知，於是
+                    # 下一場（run2）才補印——那不是「宣告兩次」，是設計上的盡力而為，所以
+                    # 用「至多一次」而非「一定在 run1」來釘（2026-09-21：舊的 repeat==""
+                    # 在忙碌機器上會假敗）。
                     notice_result.returncode == 0
-                    and expected_notice in notice_context
-                    and notice_context == expected_notice
+                    and repeat_result.returncode == 0
+                    and [c for c in (notice_context, repeat_context) if c] in ([], [expected_notice])
                     and "dream index detail" not in notice_context
-                    and repeat_context == "",
+                    and "dream index detail" not in repeat_context,
                 )
             )
 
@@ -1113,18 +1122,37 @@ def _selftest():
                              memspec.DREAM_MODE_ENV: memspec.DREAM_MODE_NIGHTLY},
             )
             bulk_elapsed = time.monotonic() - bulk_started
-            bulk_value = json.loads(bulk_result.stdout) if bulk_result.stdout.strip() else {}
+            # 壞掉的 JSON 是這一案要抓的迴歸，所以解析失敗記成 None（＝敗），不讓自測
+            # 自己爆掉；空 stdout＝{}（宿主接受的「沒有附加脈絡」）。
+            try:
+                bulk_value = json.loads(bulk_result.stdout) if bulk_result.stdout.strip() else {}
+            except json.JSONDecodeError:
+                bulk_value = None
             bulk_inner = bulk_value.get("hookSpecificOutput") if isinstance(bulk_value, dict) else None
-            checks.append(
-                (
-                    "the Codex-shaped event answers with exactly the two keys the host accepts",
-                    bulk_result.returncode == 0
-                    and set(bulk_value) == {"hookSpecificOutput"}
+            # 宿主砍 hook 只有兩個理由：逾時、stdout 不是它認得的 JSON。所以要釘死的是
+            # 「輸出的形狀」——空的（沒有附加脈絡）或恰好這兩個鍵，兩者宿主都收；壞掉的
+            # JSON 或退回原始索引回音才是敗。機器忙時開場預算被 300 卡的型別檢查吃完、
+            # 整段脈絡被省略是設計允許的（_handle 在預算用盡時回 None＝空輸出，已實測），
+            # 那條會隨機器快慢出現或消失的 🌙 夢通知不能當成硬斷言，否則慢機器上這一案
+            # 會假敗（2026-09-21：master 上 18 跑 6 敗，全在慢輪）。有脈絡時它仍必須是
+            # 夢通知那一行、且絕不是原始索引回音。
+            if bulk_value == {}:
+                bulk_shape_ok = True
+            elif isinstance(bulk_value, dict):
+                bulk_shape_ok = (
+                    set(bulk_value) == {"hookSpecificOutput"}
                     and isinstance(bulk_inner, dict)
                     and set(bulk_inner) == {"hookEventName", "additionalContext"}
                     and bulk_inner["hookEventName"] == "SessionStart"
                     and "🌙" in bulk_inner["additionalContext"]
-                    and "bulk index detail" not in bulk_inner["additionalContext"],
+                    and "bulk index detail" not in bulk_inner["additionalContext"]
+                )
+            else:
+                bulk_shape_ok = False  # 非空 stdout 卻不是合法 JSON＝宿主會砍的那種
+            checks.append(
+                (
+                    "the Codex-shaped event answers with empty output or exactly the two keys the host accepts",
+                    bulk_result.returncode == 0 and bulk_shape_ok,
                 )
             )
             # 上限＝開場自用預算＋子程序啟動與 import 的固定成本，仍遠低於宿主的 10 s。

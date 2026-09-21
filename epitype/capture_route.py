@@ -202,6 +202,36 @@ def config_home(config_path):
     return parents[0] if parents else path
 
 
+# 宿主開在家目錄下的目錄；兩個都不在＝這個家推錯了，原生庫掃描必然一無所獲。
+NATIVE_HOST_DIRNAMES = (".claude", ".codex")
+CONFIG_HOME_NO_HOST_NOTICE = (
+    "Epitype 提醒：由設定檔位置推得的家目錄 {home} 底下沒有 .claude 也沒有 .codex，"
+    "掃不到任何原生記憶庫，只有設定檔明列的庫會受管。多半是 EPITYPE_CONFIG 指到了家"
+    "目錄以外的地方。"
+)
+
+
+def home_has_host(home):
+    """這個家目錄底下有沒有宿主目錄（.claude／.codex）。兩個都沒有＝掃不到原生庫。"""
+    base = Path(home)
+    return any((base / name).is_dir() for name in NATIVE_HOST_DIRNAMES)
+
+
+def managed_vaults_for_config(config_path, configured, *, stream=None):
+    """CLI 與夜間解析受管庫的唯一入口：由設定檔位置推家目錄、掃原生庫。
+
+    推得的家目錄底下一個宿主目錄都沒有時，原生庫掃描必然空手而回——以前這種情形
+    靜默少管，怎麼少了一個庫查不出來（owner 2026-09-21）。現在往 stderr 說一行，
+    正常安裝（設定檔在 `<home>/.epitype/` 底下）不會觸發。喚回與各 hook 不走這裡：
+    它們以 cwd 解析庫，每則提問付不起全域掃描。
+    """
+    home = config_home(config_path)
+    vaults = managed_vaults(configured, home=home)
+    if not home_has_host(home):
+        print(CONFIG_HOME_NO_HOST_NOTICE.format(home=home), file=stream or sys.stderr)
+    return vaults
+
+
 def event_cards(vault):
     """庫裡的事件卡（grants/ corrections/ rulings/），路徑排序固定。"""
     vault = Path(vault)

@@ -1001,9 +1001,9 @@ def _managed_vaults(config_path=None):
     path = Path(config_path or memspec.config_path())
     options = memspec.config_options(path)
     configured = options.get(memspec.CONFIG_VAULTS_FIELD)
-    return capture_route.managed_vaults(
+    return capture_route.managed_vaults_for_config(
+        path,
         configured if isinstance(configured, list) else (),
-        home=capture_route.config_home(path),
     )
 
 

@@ -2541,9 +2541,9 @@ def configured_vaults(config_path=None):
         raise ValueError("config root must be an object")
     raw = value.get(memspec.CONFIG_VAULTS_FIELD)
     capture_route = _capture_route_module()
-    vaults = capture_route.managed_vaults(
+    vaults = capture_route.managed_vaults_for_config(
+        path,
         [item for item in (raw if isinstance(raw, list) else ()) if isinstance(item, str) and item.strip()],
-        home=capture_route.config_home(path),
     )
     if not vaults:
         raise ValueError("config lists no existing vault")

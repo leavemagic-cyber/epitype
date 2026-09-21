@@ -307,9 +307,9 @@ def load_vaults(config_path):
     if not isinstance(value, dict):
         raise ValueError("config must be an object")
     configured = value.get(memspec.CONFIG_VAULTS_FIELD)
-    found = capture_route.managed_vaults(
+    found = capture_route.managed_vaults_for_config(
+        path,
         configured if isinstance(configured, list) else (),
-        home=capture_route.config_home(path),
     )
     if not found:
         raise ValueError("config lists no existing vault")
