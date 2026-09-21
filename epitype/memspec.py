@@ -99,6 +99,9 @@ HOOK_TIMEOUT_SECONDS = 9.0
 SESSIONSTART_BUDGET_SECONDS = 5.0
 # 剩不到這個時間就不再起新的一段：一段起了跑不完，等於白付。
 SESSIONSTART_SEGMENT_FLOOR_SECONDS = 0.25
+# 動作閘守衛快取的暖機是純優化——暖不完不代表擋不住，只代表要多幾次工具呼叫才收斂。
+# 所以它拿固定的一小段，時間不夠時第一個讓路。（沒有這個上限時實測 300 卡吃掉 3.9 s。）
+SESSIONSTART_WARM_GUARD_BUDGET_SECONDS = 1.0
 HOOK_DEFAULT_BUDGET_BYTES = 8 * 1024
 HOOK_MAX_OUTPUT_BYTES = 10 * 1024
 # 決策卡 forbidden 正則的長度上限。Stop 閘與寫檔閘都在 hook 期限內編譯它，沒有上限

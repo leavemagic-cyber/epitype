@@ -961,6 +961,10 @@ def scan_vaults(vaults, today=None, time_budget=memspec.CARD_LINT_HOOK_BUDGET_SE
     deadline = time.monotonic() + time_budget
     reports = []
     for vault in vaults:
+        # 逐卡的檢查只救得了「這一庫掃不完」；期限已經過去還起下一庫，是拿下一庫的
+        # 第一次目錄走訪再賭一次，而那一趟本身沒有上限。
+        if time.monotonic() >= deadline:
+            return None
         try:
             report = scan_vault(vault, today, deadline)
         except Exception:
@@ -971,14 +975,22 @@ def scan_vaults(vaults, today=None, time_budget=memspec.CARD_LINT_HOOK_BUDGET_SE
     return reports
 
 
-def summary_line(vaults, today=None, time_budget=memspec.CARD_LINT_HOOK_BUDGET_SECONDS, reports=None):
+_NO_REPORTS = object()
+
+
+def summary_line(vaults, today=None, time_budget=memspec.CARD_LINT_HOOK_BUDGET_SECONDS,
+                 reports=_NO_REPORTS):
     """SessionStart 的一行，沒有任何 FAIL 就回 None。
 
     2026-09-09（§35）：WARN 不再開口。WARN 是「這張卡可以更好」，那是夢的清單；
     FAIL 是「喚回端會端出半真的卡」，那才是本場要有人動手的事。WARN 的數字仍附在
     同一行裡，因為要修 FAIL 的人本來就會一起看。
+
+    `reports=None` 是呼叫端說「共用的那一趟逾時了」，不是「還沒掃」：以前兩者都寫成
+    None，於是逾時的開場會在這裡用預設預算再掃一整趟——講好只付一次的預算，正好在
+    付不起的時候付兩次（實測 1.0 s 的預算實耗 2.07 s）。沒帶 reports 才自己掃。
     """
-    if reports is None:
+    if reports is _NO_REPORTS:
         reports = scan_vaults(vaults, today, time_budget)
     if reports is None:
         return None

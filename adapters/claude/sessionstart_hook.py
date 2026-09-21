@@ -340,12 +340,16 @@ def _handle(event, started_at):
 
     # 動作閘的守衛快取在這裡暖：工具呼叫每次只讀得動一小片，冷快取時排在後面的守衛
     # 卡等於還沒生效，而閘少擋是不會出聲的。開場付一次，之後每次呼叫都讀暖的。
-    # 純副作用：暖不起來就算了，不影響這場要注入什麼。
-    if _soft_remaining(started_at) > 0:
+    # 純副作用：暖不起來就算了，不影響這場要注入什麼——所以它只拿固定的一小段，撥不到
+    # 就整段省略；被截斷的部分照樣由工具呼叫的逐次補讀收斂，擋不擋得住不因此改變。
+    warm_seconds = _segment_budget(started_at, memspec.SESSIONSTART_WARM_GUARD_BUDGET_SECONDS)
+    if warm_seconds is not None:
         try:
             import pretooluse_gate
 
-            pretooluse_gate.warm_guard_cache(resolved, started_at)
+            pretooluse_gate.warm_guard_cache(
+                resolved, started_at, deadline=time.monotonic() + warm_seconds
+            )
         except Exception:
             pass
 
@@ -1105,6 +1109,32 @@ def _selftest():
             )
             bulk_config = root / "bulk-config.json"
             write_config(bulk_config, [bulk_vault])
+            # 固定成本當場量一次：同一支腳本、同樣的 import、一個幾乎空的庫。子程序啟動
+            # 與 import 是這台機器的事，不是產品的事，忙碌時會脹到好幾秒；以前用寫死的
+            # +4.0 去含它，於是並行跑整套測試時這一項會假敗（2026-09-22 實測：同一份程式
+            # 閒置時整支自測 14–24 s、忙碌時 50–82 s）。兩次相減，剩下的才是這 300 張卡
+            # 真正多花的時間，也才是這一案要釘的東西。
+            baseline_vault = root / "baseline-vault"
+            baseline_vault.mkdir()
+            (baseline_vault / memspec.MEMORY_INDEX_FILENAME).write_text(
+                "# Baseline\n", encoding="utf-8"
+            )
+            baseline_config = root / "baseline-config.json"
+            write_config(baseline_config, [baseline_vault])
+            baseline_started = time.monotonic()
+            run_synthetic(
+                Path(__file__),
+                {
+                    "hook_event_name": "SessionStart",
+                    "session_id": "selftest-baseline",
+                    "cwd": os.fspath(root),
+                    "source": "startup",
+                },
+                baseline_config,
+                environment={"USERPROFILE": os.fspath(root), "HOME": os.fspath(root),
+                             memspec.DREAM_MODE_ENV: memspec.DREAM_MODE_NIGHTLY},
+            )
+            baseline_elapsed = time.monotonic() - baseline_started
             bulk_started = time.monotonic()
             bulk_result = run_synthetic(
                 Path(__file__),
@@ -1155,11 +1185,19 @@ def _selftest():
                     bulk_result.returncode == 0 and bulk_shape_ok,
                 )
             )
-            # 上限＝開場自用預算＋子程序啟動與 import 的固定成本，仍遠低於宿主的 10 s。
+            # 上限＝開場自用預算，外加一段（型別檢查那一段的預算）當作粒度餘裕：預算是在
+            # 段與段之間問的，所以最後一段可以超出去一段的長度，那是設計，不是超時。固定
+            # 成本已經在 baseline 扣掉，所以這個數字不隨機器快慢浮動。
+            bulk_ceiling = (
+                memspec.SESSIONSTART_BUDGET_SECONDS + memspec.CARD_LINT_HOOK_BUDGET_SECONDS
+            )
+            bulk_cost = bulk_elapsed - baseline_elapsed
             checks.append(
                 (
-                    "a 300-card vault still answers inside the SessionStart budget",
-                    bulk_elapsed <= memspec.SESSIONSTART_BUDGET_SECONDS + 4.0,
+                    "a 300-card vault costs no more than the SessionStart budget on top of a near-empty one"
+                    f"（300 卡多花 {bulk_cost:.1f}s，上限 {bulk_ceiling:.1f}s；"
+                    f"空庫 {baseline_elapsed:.1f}s、300 卡 {bulk_elapsed:.1f}s）",
+                    bulk_cost <= bulk_ceiling,
                 )
             )
 

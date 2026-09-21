@@ -562,19 +562,31 @@ def _guard_cache(vault):
     return vault / memspec.FTS_INDEX_DIRECTORY / memspec.ACTION_GUARD_CACHE_FILENAME
 
 
-def warm_guard_cache(vaults, started_at):
-    """Read every card's guard status once, inside the caller's deadline.
+def warm_guard_cache(vaults, started_at, deadline=None):
+    """Read every card's guard status once, inside `deadline` (a time.monotonic() cap).
 
     A tool call may only re-read a bounded slice of a vault, so on a cold cache a
     guard sitting past that slice is not enforced yet — the gate under-enforces
     silently, which is the failure this whole mechanism exists to remove. SessionStart
     has budget a tool call does not, so it pays the discovery cost once per session
-    and every later call reads a warm cache."""
+    and every later call reads a warm cache.
+
+    Warming is pure optimisation, so the deadline is a hard stop, checked between
+    vaults and between cards inside a vault: whatever was read is written back to the
+    cache, and whatever was not stays on the per-call slice the gate already rotates
+    through. Truncating here changes how fast the cache finishes warming, never
+    whether a guard is enforced — the gate itself reads no less and skips nothing.
+    Without a deadline the segment takes its own default budget rather than running
+    until the host's timeout: `started_at` bounds the host's patience, not this
+    segment's share of it.
+    """
+    if deadline is None:
+        deadline = time.monotonic() + memspec.SESSIONSTART_WARM_GUARD_BUDGET_SECONDS
     for vault in vaults:
-        if expired(started_at):
+        if expired(started_at) or time.monotonic() >= deadline:
             return
         try:
-            _guards(vault, started_at, [], cap=_WARM_CAP)
+            _guards(vault, started_at, [], cap=_WARM_CAP, deadline=deadline)
         except Exception:
             continue
 
@@ -584,13 +596,18 @@ _WARM_CAP = 1 << 30
 _GUARD_CACHE_VERSION = 4
 
 
-def _guards(vault, started_at, defects, cap=None):
+def _guards(vault, started_at, defects, cap=None, deadline=None):
     """Every usable guard in one vault, discovered through a manifest cache.
 
     Same shape as the Stop gate's decision cache and for the same reason: reading
     every card on every tool call is the cost §34 objected to, so discovery is cached
     against (mtime, size, ctime, device, inode) and only changed cards — plus a
-    rotating slice of the known non-guards — are re-read, bounded per call."""
+    rotating slice of the known non-guards — are re-read, bounded per call.
+
+    `deadline` (time.monotonic()) bounds the re-reading on top of `cap`: a caller
+    that lifted the card cap must hand one over, or the segment is bounded only by
+    the host's timeout. Cards read before the deadline are still cached, so the next
+    call starts from there."""
     from epitype import cardscan
 
     vault = Path(vault).resolve()
@@ -605,7 +622,7 @@ def _guards(vault, started_at, defects, cap=None):
         return []
     manifest, paths = {}, {}
     for card_path, path, mtime_ns, size, ctime_ns in scan:
-        if expired(started_at):
+        if expired(started_at) or (deadline is not None and time.monotonic() >= deadline):
             return []
         # 走訪已經帶回這三項；再 stat 一次只為了 inode 與裝置編號，而 Windows 的
         # 目錄列表根本不給那兩項（實測回 0），等於每張卡多付一次系統呼叫換兩個零。
@@ -637,7 +654,7 @@ def _guards(vault, started_at, defects, cap=None):
     rotated = [key for key in negatives if key > cursor] + [key for key in negatives if key <= cursor]
     budget = memspec.ACTION_GUARD_MAX_CARDS_PER_VAULT if cap is None else cap
     for card_path in (changed + rotated)[:budget]:
-        if expired(started_at):
+        if expired(started_at) or (deadline is not None and time.monotonic() >= deadline):
             break
         try:
             known[card_path] = _read_guard(paths[card_path])
