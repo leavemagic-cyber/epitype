@@ -341,6 +341,36 @@ def _plan(host, label, key, path, wanted_of, home=None):
 
 PROJECT_SKIP_NO_ROOT = "找不到專案根（對話紀錄無 cwd 或目錄已不在）"
 PROJECT_SKIP_ANCESTOR = "是其他專案根（{child}）的上層目錄，寫進去會被底下每個專案一起載入"
+PROJECT_SKIP_SHARED_ROOT = (
+    "有 {count} 個庫指到同一個專案根（{vaults}），"
+    "先用 python epitype/capture_route.py --audit 歸戶再同步"
+)
+
+
+def _known_project_roots(home=None):
+    """這台機器上所有原生專案目錄反查得出的專案根：{比對鍵: 路徑}。
+
+    祖先判斷不能只拿「這一次產生出來的目標」互比：子專案的庫這次剛好反查不到根、沒有內
+    容可寫、或因為同根碰撞被剔除，它上層那個根就沒人擋——而寫錯上層的代價是底下每一個
+    專案每一場都載到不相干的卡。保護不該取決於別的庫這次有沒有成功。
+
+    所以掃的是每一個原生專案目錄，不看它的庫有沒有卡或 MEMORY.md：一個還沒寫過卡的專案
+    照樣擁有它的目錄。**做不到的那一半要講**：從來沒被開過、一份對話紀錄都沒有的專案反
+    查不出根，它的上層目錄我們就保護不了。
+    """
+    roots = {}
+    base = (Path(home) if home is not None else Path.home()).joinpath(
+        *capture_route.NATIVE_PROJECTS_SUBPATH)
+    try:
+        with os.scandir(base) as entries:
+            directories = [entry.path for entry in entries if entry.is_dir(follow_symlinks=False)]
+    except OSError:
+        return roots
+    for directory in sorted(directories):
+        root = capture_route.project_root_of(Path(directory) / capture_route.NATIVE_MEMORY_DIRNAME)
+        if root is not None:
+            roots.setdefault(_dir_key(root), root)
+    return roots
 
 
 def _dir_key(path):
@@ -370,7 +400,8 @@ def project_targets(vaults, hosts=None, home=None):
 
     另一個專案根的上層目錄也不在內：兩個宿主都沿路往上讀祖先目錄的 AGENTS.md／CLAUDE.md，
     所以寫進上層等於把那一庫的卡塞進底下每一個專案的每一場。這是純祖先關係判斷，不是
-    對某個目錄的特例。
+    對某個目錄的特例；比對的是這台機器上**所有**反查得出的專案根（`_known_project_roots`），
+    不是只有這一次的目標——但從來沒被開過的專案反查不出根，它的上層保護不到。
     """
     governance = {os.path.normcase(os.fspath(Path(item))) for item in contract_vaults(vaults)}
     found, skipped = [], []
@@ -388,8 +419,28 @@ def project_targets(vaults, hosts=None, home=None):
             continue
         found.append((vault, root, _dir_key(root)))
     targets = []
+    shared = {}
     for vault, root, key in found:
-        below = next((other for _v, other, other_key in found
+        shared.setdefault(key, []).append(vault)
+    # 祖先判斷的比對集合＝這台機器上所有反查得出的專案根，加上這次手上的這些。
+    known = _known_project_roots(home)
+    for _vault, root, key in found:
+        known.setdefault(key, root)
+    reported = set()
+    for vault, root, key in found:
+        together = shared[key]
+        if len(together) > 1:
+            # 同一個檔被兩個庫各寫一次＝後寫蓋前寫，而且每晚 check／apply 來回翻。哪一個
+            # 庫才是那個專案的，只有歸戶答得出來，產品不替使用者挑一個。這幾個庫全部不
+            # 產生目標，但它們的根照樣參與下面的祖先判斷：上層目錄不能因為底下的專案同
+            # 根被跳過就漏擋。
+            if key not in reported:
+                reported.add(key)
+                skipped.append((root, PROJECT_SKIP_SHARED_ROOT.format(
+                    count=len(together),
+                    vaults="、".join(os.fspath(item) for item in together))))
+            continue
+        below = next((known[other_key] for other_key in sorted(known)
                       if other_key != key and other_key.startswith(key + os.sep)), None)
         if below is not None:
             skipped.append((root, PROJECT_SKIP_ANCESTOR.format(child=below)))

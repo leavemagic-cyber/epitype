@@ -238,6 +238,41 @@ class ProjectSync(unittest.TestCase):
         self.assertIn("REMOVED project:money/AGENTS.md", report.getvalue())
         self.assertIn("REMOVED project:money/CLAUDE.md", report.getvalue())
 
+    # 祖先判斷看的是所有反查得出的根，不是只有這次產生出來的目標
+    def test_an_ancestor_is_blocked_even_when_the_child_vault_has_nothing_to_write(self):
+        above, above_vault = self._project("work")
+        below, _below_vault = self._project(
+            os.path.join("work", "child"), cards=False, index=False)
+        # 底下那個庫沒有卡也沒有 MEMORY.md，不會成為目標；上層照樣不准寫。
+        code, report = self._apply([self.governance, above_vault])
+        self.assertEqual(code, host_sync.EXIT_OK, report)
+        self.assertIn(f"SKIP   project {above}: 是其他專案根", report)
+        self.assertIn(os.fspath(below), report)
+        self.assertFalse((above / "AGENTS.md").exists())
+        self.assertFalse((above / "CLAUDE.md").exists())
+
+    # 兩個庫指到同一個專案根：全部跳過，不對同一個檔產生兩組目標
+    def test_two_vaults_pointing_at_one_root_are_all_skipped(self):
+        same, same_vault = self._project("same")
+        _other, other_vault = self._project("other", cwd=same)
+        _top, top_vault = self._project("top", cwd=self.root)
+        vaults = [self.governance, same_vault, other_vault, top_vault]
+        code, report = self._apply(vaults)
+        self.assertEqual(code, host_sync.EXIT_OK, report)
+        self.assertIn(f"SKIP   project {same}: 有 2 個庫指到同一個專案根", report)
+        for vault in (same_vault, other_vault):
+            self.assertIn(os.fspath(vault), report)
+        self.assertIn("--audit", report)
+        self.assertFalse((same / "AGENTS.md").exists())
+        self.assertFalse((same / "CLAUDE.md").exists())
+        # 同根那一組被剔除，不代表它們的根不算數：上層目錄照樣要被祖先規則擋下。
+        self.assertIn(f"SKIP   project {self.root}: 是其他專案根", report)
+        self.assertFalse((self.root / "AGENTS.md").exists())
+        targets, skipped = host_sync.project_targets(vaults, home=self.home)
+        self.assertEqual(targets, [])
+        self.assertEqual(sorted(os.fspath(item[0]) for item in skipped),
+                         sorted([os.fspath(same), os.fspath(self.root)]))
+
     # 通案：專案根是另一個專案根的上層目錄就整個跳過（兩個宿主都會往上讀祖先目錄）
     def test_a_project_root_above_another_one_is_skipped(self):
         above, above_vault = self._project("work")
