@@ -313,4 +313,4 @@ They compose: nothing here stops you running a memory summariser alongside it.
 
 ## Status
 
-v1.6.0, released 2026-09-22. Releases are cut when a batch of fixes is ready rather than on a fixed date. Issues get read, and an issue is the fastest way to move a fix up the queue.
+v1.6.1, released 2026-09-22. Releases are cut when a batch of fixes is ready rather than on a fixed date. Issues get read, and an issue is the fastest way to move a fix up the queue.

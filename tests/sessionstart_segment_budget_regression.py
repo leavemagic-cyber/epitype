@@ -33,6 +33,25 @@ CARDS = 300
 SLACK_SECONDS = 0.3
 
 
+def past_deadline(budget, start=1000.0, before=4):
+    """前 `before` 次問答都在期限內，之後每一次都已經過期。
+
+    要釘的是「掃到一半期限到了就停手並回 None」，所以不能一開始就過期——那會在
+    `scan_vaults` 的迴圈開頭就回 None，等於把「掃到一半逾時」偷換成「期限本來就過了」
+    （那條另有一項在測）。前幾次放行，是為了讓它真的走進 `scan_vault` 的逐卡迴圈。
+
+    釘「期限有沒有被遵守」不該靠「機器夠不夠慢」——快的機器在小預算內掃得完，測試就
+    紅在機器上而不是紅在缺陷上（2026-09-22 的發布閘就是這樣被擋下來的）。
+    """
+    calls = [0]
+
+    def clock():
+        calls[0] += 1
+        return start if calls[0] <= before else start + budget + 100.0
+
+    return clock
+
+
 def build_vault(root, count=CARDS):
     vault = root / "bulk-vault"
     vault.mkdir(parents=True)
@@ -111,21 +130,41 @@ class CardLintRespectsItsTimeBudget(unittest.TestCase):
 
     def test_a_tiny_budget_returns_none_inside_that_budget(self):
         # 逾時回 None 的語意不變：半個庫的數字是錯的數字，點名錯的比不點名更糟。
+        #
+        # 用假時鐘讓期限「必然」在掃描途中過去，不賭這台機器夠慢。2026-09-22 這一項的
+        # 第一版就是用 0.05 s 的真預算去賭 300 張卡掃不完：本機（Windows）綠、GitHub
+        # 的 runner 快到掃得完，於是回了報告而不是 None，把發布閘擋掉。期限有沒有被
+        # 遵守與機器快慢無關，斷言也就不該跟機器快慢有關。
         for budget in (0.05, 0.2):
             started = time.monotonic()
-            reports = card_lint.scan_vaults([self.vault], time_budget=budget)
+            with unittest.mock.patch.object(card_lint.time, "monotonic", past_deadline(budget)):
+                reports = card_lint.scan_vaults([self.vault], time_budget=budget)
             spent = time.monotonic() - started
             self.assertIsNone(reports, budget)
             self.assertLess(spent, budget + SLACK_SECONDS, budget)
 
     def test_a_spent_budget_does_not_start_the_next_vault(self):
         # 逐卡的檢查只救得了「這一庫掃不完」；期限過了還起下一庫，是再賭一次目錄走訪。
+        #
+        # 釘的是「第二庫根本沒被起」，所以直接數 scan_vault 被叫了幾次，不靠實耗去推。
+        # 時鐘由這裡掌握：第一庫照常掃完（沒逾時），掃完的那一刻期限才過去——真實世界
+        # 就是這個形狀，而這個形狀用真時鐘賭不出來。
         second = build_vault(self.root / "second-root")
-        started = time.monotonic()
-        reports = card_lint.scan_vaults([self.vault, second], time_budget=0.05)
-        spent = time.monotonic() - started
+        scanned = []
+        real_scan = card_lint.scan_vault
+        now = [1000.0]
+
+        def spy(vault, today, deadline):
+            scanned.append(Path(vault).name)
+            report = real_scan(vault, today, deadline)
+            now[0] = deadline + 1.0  # 這一庫掃完了，期限正好在這時過去
+            return report
+
+        with unittest.mock.patch.object(card_lint.time, "monotonic", lambda: now[0]), \
+                unittest.mock.patch.object(card_lint, "scan_vault", spy):
+            reports = card_lint.scan_vaults([self.vault, second], time_budget=5.0)
+        self.assertEqual(len(scanned), 1, scanned)
         self.assertIsNone(reports)
-        self.assertLess(spent, 0.05 + SLACK_SECONDS)
 
     def test_a_timed_out_shared_scan_is_not_paid_for_twice(self):
         # 開場先跑一趟 scan_vaults，再把結果餵給 summary_line。那一趟逾時時傳進來的
