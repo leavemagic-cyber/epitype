@@ -348,26 +348,25 @@ PROJECT_SKIP_SHARED_ROOT = (
 
 
 def _known_project_roots(home=None):
-    """這台機器上所有原生專案目錄反查得出的專案根：{比對鍵: 路徑}。
+    """這台機器上每個**裝著卡**的原生專案庫反查得出的專案根：{比對鍵: 路徑}。
 
-    祖先判斷不能只拿「這一次產生出來的目標」互比：子專案的庫這次剛好反查不到根、沒有內
-    容可寫、或因為同根碰撞被剔除，它上層那個根就沒人擋——而寫錯上層的代價是底下每一個
-    專案每一場都載到不相干的卡。保護不該取決於別的庫這次有沒有成功。
+    祖先判斷不能只拿「這一次產生出來的目標」互比：底下那個庫這次剛好沒有內容可寫、或
+    因為同根碰撞被剔除，它上層那個根就沒人擋——而寫錯上層的代價是底下每一個專案每一場
+    都載到不相干的卡。保護不該取決於別的庫這次有沒有成為目標。
 
-    所以掃的是每一個原生專案目錄，不看它的庫有沒有卡或 MEMORY.md：一個還沒寫過卡的專案
-    照樣擁有它的目錄。**做不到的那一半要講**：從來沒被開過、一份對話紀錄都沒有的專案反
-    查不出根，它的上層目錄我們就保護不了。
+    但擋人的資格是「那裡真的有一個庫」，不是「那個資料夾被開過一次」：空殼不是庫
+    （`capture_route.holds_cards` 的既有語意——宿主會替每個 cwd 開空目錄，包含專案自己的
+    子資料夾）。所以來源是 `native_vaults`，它已經用同一個判準過濾過；不然在專案的子目錄
+    裡跑過一場，就會讓那個專案自己的根永遠寫不進去。
+
+    **做不到的那一半要講**：從來沒被開過、一份對話紀錄都沒有的專案反查不出根，它的上層
+    目錄我們保護不了。
     """
     roots = {}
-    base = (Path(home) if home is not None else Path.home()).joinpath(
-        *capture_route.NATIVE_PROJECTS_SUBPATH)
-    try:
-        with os.scandir(base) as entries:
-            directories = [entry.path for entry in entries if entry.is_dir(follow_symlinks=False)]
-    except OSError:
-        return roots
-    for directory in sorted(directories):
-        root = capture_route.project_root_of(Path(directory) / capture_route.NATIVE_MEMORY_DIRNAME)
+    for vault in capture_route.native_vaults(home):
+        if not _native_project_vault(vault):
+            continue  # 家目錄底下那幾個不綁專案的庫沒有專案根可言
+        root = capture_route.project_root_of(vault)
         if root is not None:
             roots.setdefault(_dir_key(root), root)
     return roots
@@ -400,8 +399,9 @@ def project_targets(vaults, hosts=None, home=None):
 
     另一個專案根的上層目錄也不在內：兩個宿主都沿路往上讀祖先目錄的 AGENTS.md／CLAUDE.md，
     所以寫進上層等於把那一庫的卡塞進底下每一個專案的每一場。這是純祖先關係判斷，不是
-    對某個目錄的特例；比對的是這台機器上**所有**反查得出的專案根（`_known_project_roots`），
-    不是只有這一次的目標——但從來沒被開過的專案反查不出根，它的上層保護不到。
+    對某個目錄的特例；比對的是這台機器上每個裝著卡的原生庫反查得出的根
+    （`_known_project_roots`），不是只有這一次的目標。空殼不擋人（空殼不是庫），從來沒被
+    開過的專案反查不出根、它的上層也保護不到。
     """
     governance = {os.path.normcase(os.fspath(Path(item))) for item in contract_vaults(vaults)}
     found, skipped = [], []

@@ -238,18 +238,32 @@ class ProjectSync(unittest.TestCase):
         self.assertIn("REMOVED project:money/AGENTS.md", report.getvalue())
         self.assertIn("REMOVED project:money/CLAUDE.md", report.getvalue())
 
-    # 祖先判斷看的是所有反查得出的根，不是只有這次產生出來的目標
-    def test_an_ancestor_is_blocked_even_when_the_child_vault_has_nothing_to_write(self):
+    # 祖先判斷看的是所有裝著卡的庫反查得出的根，不是只有這次產生出來的目標
+    def test_a_vault_with_cards_below_blocks_the_root_above(self):
         above, above_vault = self._project("work")
-        below, _below_vault = self._project(
+        below, below_vault = self._project(
             os.path.join("work", "child"), cards=False, index=False)
-        # 底下那個庫沒有卡也沒有 MEMORY.md，不會成為目標；上層照樣不准寫。
+        # 底下那個庫裝著卡，但沒有規則卡也沒有 MEMORY.md，自己不會成為目標；上層照樣不
+        # 准寫——保護不該取決於底下那個庫這次剛好有沒有東西要寫。
+        (below_vault / "note.md").write_text(
+            "---\nname: note\ndescription: 2026-09-21 一張不是規則的卡\n---\nbody\n",
+            encoding="utf-8")
         code, report = self._apply([self.governance, above_vault])
         self.assertEqual(code, host_sync.EXIT_OK, report)
         self.assertIn(f"SKIP   project {above}: 是其他專案根", report)
         self.assertIn(os.fspath(below), report)
         self.assertFalse((above / "AGENTS.md").exists())
         self.assertFalse((above / "CLAUDE.md").exists())
+
+    # 空殼不是庫：專案自己的子資料夾被開過一場，不該讓那個專案的根永遠寫不進去
+    def test_an_empty_shell_below_does_not_block_the_root_above(self):
+        above, above_vault = self._project("work")
+        self._project(os.path.join("work", "child"), cards=False, index=False)
+        code, report = self._apply([self.governance, above_vault])
+        self.assertEqual(code, host_sync.EXIT_OK, report)
+        self.assertNotIn("SKIP", report)
+        self.assertIn(PROJECT_RULE_TEXT, (above / "AGENTS.md").read_text(encoding="utf-8"))
+        self.assertTrue((above / "CLAUDE.md").is_file())
 
     # 兩個庫指到同一個專案根：全部跳過，不對同一個檔產生兩組目標
     def test_two_vaults_pointing_at_one_root_are_all_skipped(self):
