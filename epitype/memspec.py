@@ -102,6 +102,10 @@ SESSIONSTART_SEGMENT_FLOOR_SECONDS = 0.25
 # 動作閘守衛快取的暖機是純優化——暖不完不代表擋不住，只代表要多幾次工具呼叫才收斂。
 # 所以它拿固定的一小段，時間不夠時第一個讓路。（沒有這個上限時實測 300 卡吃掉 3.9 s。）
 SESSIONSTART_WARM_GUARD_BUDGET_SECONDS = 1.0
+# 「這道守衛最近擋了你幾次」那一行：讀一段紀錄檔的尾巴，再查一次已經暖好的守衛快取。
+# 300 卡實測 0.00 s，但那是張數上限在收斂，不是時間上限——卡變大、變多或磁碟變慢時
+# 同一段一樣會吃掉預算，所以它也拿一段明寫的時間。
+SESSIONSTART_GUARD_NOTICE_BUDGET_SECONDS = 0.5
 HOOK_DEFAULT_BUDGET_BYTES = 8 * 1024
 HOOK_MAX_OUTPUT_BYTES = 10 * 1024
 # 決策卡 forbidden 正則的長度上限。Stop 閘與寫檔閘都在 hook 期限內編譯它，沒有上限

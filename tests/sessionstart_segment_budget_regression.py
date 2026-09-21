@@ -18,12 +18,14 @@ import os
 import tempfile
 import time
 import unittest
+import unittest.mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "adapters" / "claude")]
 from epitype import card_lint, memspec
 import pretooluse_gate as pretool
+import sessionstart_hook
 
 CARDS = 300
 # 期限是在「做下一張卡之前」問的，所以實耗可以超出一張卡的工時；這個餘裕含 Windows 上
@@ -141,15 +143,90 @@ class CardLintRespectsItsTimeBudget(unittest.TestCase):
         self.assertIsNotNone(card_lint.summary_line([vault], time_budget=5.0))
 
 
-class SessionStartAllocatesEverySegment(unittest.TestCase):
-    def test_the_warm_segment_is_allocated_not_unbounded(self):
-        # 這一段以前只問一次 `_soft_remaining > 0`，問完就放手跑到宿主砍人為止。
-        source = (ROOT / "adapters" / "claude" / "sessionstart_hook.py").read_text(
-            encoding="utf-8"
+class RepeatGuardNoticesRespectsItsDeadline(unittest.TestCase):
+    """張數上限不是時間上限：這一段 300 卡實測 0.00 s，但卡變大、變多或磁碟變慢時，
+    `ACTION_GUARD_MAX_CARDS_PER_VAULT` 攔不住它吃掉預算。"""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="epitype-notice-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+        self.vault = build_vault(self.root)
+        self.blocked_card = "scar-heredoc.md"
+        # 這一行只在同一張卡最近一直擋人時才出現，所以紀錄檔要先有夠多次擋下。
+        rows = [
+            json.dumps({
+                "kind": memspec.ACTION_GUARD_LOG_KIND,
+                "timestamp": "2026-09-22T00:00:00+00:00",
+                "card": self.blocked_card,
+            }, ensure_ascii=False)
+            for _ in range(memspec.GUARD_REPEAT_NOTICE_THRESHOLD + 2)
+        ]
+        (self.vault / memspec.GATE_LOG_FILENAME).write_text(
+            "\n".join(rows) + "\n", encoding="utf-8"
         )
-        self.assertIn("_segment_budget(started_at, memspec.SESSIONSTART_WARM_GUARD_BUDGET_SECONDS)",
-                      source)
+        # `now` 固定成紀錄的時間，這些列才落在「最近一天」的窗內。
+        self.now = 1758499200.0  # 2026-09-22T00:00:00Z
+
+    def notices(self, deadline):
+        return sessionstart_hook._repeat_guard_notices(
+            [self.vault], time.monotonic(), now=self.now, deadline=deadline
+        )
+
+    def test_a_generous_deadline_still_produces_the_line(self):
+        # 先釘住「時間夠的時候這一行真的會出現」，否則下面兩條可能只是在測一個死路徑。
+        lines = self.notices(time.monotonic() + 60.0)
+        self.assertTrue(lines)
+        self.assertIn(self.blocked_card, "\n".join(lines))
+
+    def test_an_already_expired_deadline_returns_nothing(self):
+        started = time.monotonic()
+        self.assertEqual(self.notices(time.monotonic() - 1.0), [])
+        self.assertLess(time.monotonic() - started, SLACK_SECONDS)
+
+    def test_a_deadline_that_passes_mid_scan_gives_no_half_true_count(self):
+        # 只數了一半的庫給出的「擋了 N 次」是錯的數字，而這一行的全部內容就是那個數字。
+        # 所以中止時回空，不回半真的數字——而且不能是例外。
+        #
+        # 時鐘用假的，量到的才是「期限到了就停」而不是「這台機器今天多快」：第一次問
+        # （進函式）還在期限內，第二次問（正要數第一個庫）已經過了。真正的計時交給
+        # 上面那兩條與 profile。
+        deadline = 100.0
+        ticks = iter([99.0] + [101.0] * 50)
+        with unittest.mock.patch("time.monotonic", lambda: next(ticks)):
+            lines = sessionstart_hook._repeat_guard_notices(
+                [self.vault, self.vault], 0.0, now=self.now, deadline=deadline
+            )
+        self.assertEqual(lines, [])
+
+    def test_a_short_real_deadline_answers_fully_or_not_at_all(self):
+        # 短期限的結果只有兩種是對的：完整的那一行，或什麼都不說。落在中間的（數到一半
+        # 的次數、少了庫的次數）才是這一段最該避免的東西。小庫通常來得及，所以這裡不能
+        # 斷言「一定回空」——那會變成在測這台機器多慢。
+        complete = self.notices(time.monotonic() + 60.0)
+        started = time.monotonic()
+        lines = self.notices(time.monotonic() + 0.01)
+        spent = time.monotonic() - started
+        self.assertIn(lines, ([], complete))
+        self.assertLess(spent, 0.01 + SLACK_SECONDS)
+
+
+class SessionStartAllocatesEverySegment(unittest.TestCase):
+    SEGMENTS = (
+        ("warm_guard_cache", "memspec.SESSIONSTART_WARM_GUARD_BUDGET_SECONDS"),
+        ("_repeat_guard_notices", "memspec.SESSIONSTART_GUARD_NOTICE_BUDGET_SECONDS"),
+    )
+
+    def source(self):
+        return (ROOT / "adapters" / "claude" / "sessionstart_hook.py").read_text(encoding="utf-8")
+
+    def test_every_segment_is_allocated_not_just_asked_if_time_is_left(self):
+        # 這些段以前都只問一次 `_soft_remaining > 0`，問完就放手跑到宿主砍人為止。
+        source = self.source()
+        for name, constant in self.SEGMENTS:
+            self.assertIn(f"_segment_budget(started_at, {constant})", source, name)
         self.assertNotIn("warm_guard_cache(resolved, started_at)\n", source)
+        self.assertNotIn("_repeat_guard_notices(resolved, started_at)\n", source)
 
     def test_the_budget_constants_stay_inside_the_host_timeout(self):
         # 讓數字過關的方式只有一種：把工作做完在預算內。調大預算不是修好。
@@ -158,7 +235,8 @@ class SessionStartAllocatesEverySegment(unittest.TestCase):
         )
         self.assertLessEqual(
             memspec.CARD_LINT_HOOK_BUDGET_SECONDS
-            + memspec.SESSIONSTART_WARM_GUARD_BUDGET_SECONDS,
+            + memspec.SESSIONSTART_WARM_GUARD_BUDGET_SECONDS
+            + memspec.SESSIONSTART_GUARD_NOTICE_BUDGET_SECONDS,
             memspec.SESSIONSTART_BUDGET_SECONDS,
         )
 

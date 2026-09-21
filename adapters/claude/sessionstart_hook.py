@@ -43,20 +43,32 @@ def _soft_remaining(started_at):
     return memspec.SESSIONSTART_BUDGET_SECONDS - (time.monotonic() - started_at)
 
 
-def _repeat_guard_notices(vaults, started_at, now=None):
+def _repeat_guard_notices(vaults, started_at, now=None, deadline=None):
     """最近一天一直擋人的守衛，一張一行（最多兩行）。
 
     這不是規則注入，是狀態：它報的是「這道守衛剛剛擋了你幾次」。規則本身在卡上，
     這一行只是讓它在我伸手之前抵達——2026-09-18 同一張卡一天擋 20 次、跨四個視窗，
-    每一次都是先撞牆才想起來。次數掉下來這一行自己消失，不需要有人回來拔掉。"""
+    每一次都是先撞牆才想起來。次數掉下來這一行自己消失，不需要有人回來拔掉。
+
+    `deadline`（time.monotonic()）是這一段的上限。次數的部分逾時就整段放棄回 []：
+    只數了一半的庫給出的「擋了 N 次」是個錯的數字，而這一行的全部內容就是那個數字。
+    建議詞不同——它是裝飾，`advice.get(card, "")` 本來就容許空的——所以那一圈逾時只是
+    中止，該印的行照印。"""
     import time as _time
     from datetime import datetime
 
     from epitype import memspec as _memspec
 
+    def out_of_time():
+        return deadline is not None and _time.monotonic() >= deadline
+
+    if out_of_time():
+        return []
     cutoff = (now if now is not None else _time.time()) - _memspec.GUARD_REPEAT_NOTICE_WINDOW_HOURS * 3600
     counts = {}
     for vault in vaults:
+        if out_of_time():
+            return []  # 半份紀錄數出來的次數是錯的次數
         path = Path(vault) / _memspec.GATE_LOG_FILENAME
         try:
             size = path.stat().st_size
@@ -96,7 +108,11 @@ def _repeat_guard_notices(vaults, started_at, now=None):
         import pretooluse_gate
 
         for vault in vaults:
-            for guard in pretooluse_gate._guards(Path(vault), started_at, []):
+            if out_of_time():
+                break  # 建議詞查不完就少幾句建議，次數照報
+            for guard in pretooluse_gate._guards(
+                Path(vault), started_at, [], deadline=deadline
+            ):
                 advice.setdefault(guard.card, guard.advice)
     except Exception:
         pass
@@ -354,9 +370,12 @@ def _handle(event, started_at):
             pass
 
     # 最近一直擋人的守衛，開場先說。擋得對但每次都要撞一輪，是這個機制自己的浪費。
-    if _soft_remaining(started_at) > 0:
+    notice_seconds = _segment_budget(started_at, memspec.SESSIONSTART_GUARD_NOTICE_BUDGET_SECONDS)
+    if notice_seconds is not None:
         try:
-            pieces.extend(_repeat_guard_notices(resolved, started_at))
+            pieces.extend(_repeat_guard_notices(
+                resolved, started_at, deadline=time.monotonic() + notice_seconds
+            ))
         except Exception:
             pass
 
