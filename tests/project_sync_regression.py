@@ -305,6 +305,66 @@ class ProjectSync(unittest.TestCase):
         self.assertEqual({os.fspath(item[1]) for item in targets}, {os.fspath(below)})
         self.assertEqual([os.fspath(item[0]) for item in skipped], [os.fspath(above)])
 
+    def _write(self, path, text):
+        """照字面寫下去：位元組保真的測項不能讓平台替我們換行尾。"""
+        with io.open(path, "w", encoding="utf-8", newline="\n") as stream:
+            stream.write(text)
+        return path.read_bytes()
+
+    # 區塊外面一個位元組都不准動（區塊已存在那一條路）
+    def test_rewriting_a_block_leaves_every_byte_around_it_alone(self):
+        project, vault = self._project("money")
+        path = project / "CLAUDE.md"  # 只有規則塊，尾端不會再被索引塊接一段
+        before = self._write(path, (
+            "# 我的專案\n\n這是前言。\n\n"
+            f"{RULES_BEGIN}\n舊的規則字\n{RULES_END}\n\n"
+            "## 後續標題\n\n這幾行在區塊後面。\n"))
+        code, report = self._apply([self.governance, vault])
+        self.assertEqual(code, host_sync.EXIT_OK, report)
+        after = path.read_bytes()
+        begin, end = RULES_BEGIN.encode("utf-8"), RULES_END.encode("utf-8")
+        self.assertEqual(after[:after.index(begin)], before[:before.index(begin)],
+                         "區塊前面的位元組要原樣")
+        self.assertEqual(after[after.index(end) + len(end):],
+                         before[before.index(end) + len(end):],
+                         "區塊後面的位元組要原樣（含那一行空白）")
+        self.assertIn(PROJECT_RULE_TEXT.encode("utf-8"), after)
+        code, second = self._apply([self.governance, vault])
+        self.assertEqual(path.read_bytes(), after, second)
+
+    # 舊標記就地換成產品標記那一條路，一樣只動標記之間
+    def test_replacing_the_private_markers_keeps_every_byte_around_them(self):
+        project, vault = self._project("titan")
+        path = project / "CLAUDE.md"
+        before = self._write(path, (
+            "# titan\n\n我自己的開頭\n\n"
+            f"{LEGACY_RULES_BEGIN}\n舊的規則字\n{LEGACY_RULES_END}\n\n"
+            "## titan 記憶索引分區\n\n- [一張卡](a.md)\n"))
+        code, report = self._apply([self.governance, vault])
+        self.assertEqual(code, host_sync.EXIT_OK, report)
+        after = path.read_bytes()
+        self.assertEqual(after[:after.index(RULES_BEGIN.encode("utf-8"))],
+                         before[:before.index(LEGACY_RULES_BEGIN.encode("utf-8"))])
+        end, legacy_end = RULES_END.encode("utf-8"), LEGACY_RULES_END.encode("utf-8")
+        self.assertEqual(after[after.index(end) + len(end):],
+                         before[before.index(legacy_end) + len(legacy_end):])
+
+    # remove 的接縫：前後各一個空行的寫法原樣留著
+    def test_remove_keeps_the_seam_the_way_the_user_wrote_it(self):
+        project, vault = self._project("money")
+        path = project / "CLAUDE.md"
+        self._write(path, (
+            "# 我的專案\n\n前言。\n\n"
+            f"{RULES_BEGIN}\n舊的規則字\n{RULES_END}\n\n"
+            "## 後續標題\n\n正文。\n"))
+        self._apply([self.governance, vault])
+        with _fake_home(self.home):
+            host_sync.remove(home=self.home, output=io.StringIO(),
+                             vaults=[self.governance, vault])
+        self.assertEqual(
+            path.read_bytes(),
+            "# 我的專案\n\n前言。\n\n## 後續標題\n\n正文。\n".encode("utf-8"))
+
     # (i) 要寫的內容自己含標記 → 拒寫，一個位元組都不動
     def test_content_carrying_a_marker_is_refused(self):
         project, vault = self._project("money")

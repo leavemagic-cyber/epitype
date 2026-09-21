@@ -223,7 +223,12 @@ def _locate(raw, name):
 
 
 def _drop(raw, begin, end):
-    """整段移除（含標記）；不存在或壞掉就原樣回傳。"""
+    """整段移除（含標記）；不存在或壞掉就原樣回傳。
+
+    接縫：區塊前後的空白會碰在一起，逐位元組原樣不可能，所以留「兩邊原本各自帶的換行數
+    裡比較多的那一個」——前後各一個空行的常見寫法因此原樣不動，也不會替使用者多壓或少壓
+    空行。區塊本來就在檔頭時前面沒有東西可接，後面的換行整個省掉。
+    """
     try:
         found = split_region(raw, begin, end)
     except ValueError:
@@ -231,11 +236,20 @@ def _drop(raw, begin, end):
     if found is None:
         return raw
     head, _inner, tail = found
-    return head.rstrip("\n") + ("\n\n" if head.strip() else "") + tail.lstrip("\n")
+    before, after = head.rstrip("\n"), tail.lstrip("\n")
+    if not before:
+        return after
+    return before + "\n" * max(len(head) - len(before), len(tail) - len(after)) + after
 
 
 def render(raw, name, wanted):
-    """把這一塊換成 `wanted`，回傳整份新內容。區塊不存在就建在檔尾。"""
+    """把這一塊換成 `wanted`，回傳整份新內容。區塊不存在就建在檔尾。
+
+    區塊已經在檔裡時逐位元組接回（`head + block + tail`），標記外面一個字都不動——這個
+    模組答應的就是「只動兩個標記之間」。以前這裡會把區塊後面的換行全部吃掉，全域宿主檔
+    看不出來（區塊都在檔尾、後面沒東西），寫進使用者自己的專案檔就是把他區塊後面那一行
+    空白吃掉。
+    """
     current, legacy_table = _marker_tables(name)
     begin, end = current[name]
     block = f"{begin}\n{wanted}\n{end}" if wanted else f"{begin}\n{end}"
@@ -244,7 +258,7 @@ def render(raw, name, wanted):
         base = raw.rstrip("\n")
         return (base + "\n\n" if base else "") + block + "\n"
     head, _current, tail = found
-    updated = head.rstrip("\n") + ("\n\n" if head.strip() else "") + block + "\n" + tail.lstrip("\n")
+    updated = head + block + tail
     if not legacy:
         # 產品標記在手，舊標記那一塊就該消失，不是留在旁邊各說各話。
         updated = _drop(updated, *legacy_table[name])
