@@ -298,15 +298,19 @@ def doc_sentences(directory):
 
 
 def load_vaults(config_path):
-    value = json.loads(Path(config_path).read_text(encoding="utf-8"))
+    """Every vault this machine manages: the configured ones first, then the native
+    vaults that hold cards (capture_route.managed_vaults — the config list is not a
+    roster). The home to scan comes from the config file that was read, so a synthetic
+    config never pulls the real machine's vaults into a synthetic run."""
+    path = Path(config_path)
+    value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict):
         raise ValueError("config must be an object")
-    found = []
-    for item in value.get(memspec.CONFIG_VAULTS_FIELD) or ():
-        if isinstance(item, str) and item.strip():
-            vault = Path(item).expanduser().resolve()
-            if vault.is_dir() and vault not in found:
-                found.append(vault)
+    configured = value.get(memspec.CONFIG_VAULTS_FIELD)
+    found = capture_route.managed_vaults(
+        configured if isinstance(configured, list) else (),
+        home=capture_route.config_home(path),
+    )
     if not found:
         raise ValueError("config lists no existing vault")
     return found

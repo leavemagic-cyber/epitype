@@ -30,7 +30,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from epitype import core_gen, memspec
+from epitype import capture_route, core_gen, memspec
 
 # unrecognised：這一塊現在有幾行認不出是 Epitype 上次寫的；取代前原文要先存起來。
 Region = namedtuple("Region", "name text present current unrecognised", defaults=(0,))
@@ -996,6 +996,17 @@ def _selftest():
     return 0 if status == "PASS" else 1
 
 
+def _managed_vaults(config_path=None):
+    """設定檔說得出來的受管庫；設定讀不到就回空清單（由呼叫端說「要給路徑」）。"""
+    path = Path(config_path or memspec.config_path())
+    options = memspec.config_options(path)
+    configured = options.get(memspec.CONFIG_VAULTS_FIELD)
+    return capture_route.managed_vaults(
+        configured if isinstance(configured, list) else (),
+        home=capture_route.config_home(path),
+    )
+
+
 def main(argv=None, output=sys.stdout):
     arguments = list(sys.argv[1:] if argv is None else argv)
     if arguments == ["--selftest"]:
@@ -1014,11 +1025,17 @@ def main(argv=None, output=sys.stdout):
     try:
         if parsed.remove:
             return remove(hosts=parsed.host, output=output)
-        if not parsed.vaults:
-            parser.error("要比對或寫入時必須給至少一個記憶庫路徑")
+        vaults = parsed.vaults
+        if not vaults:
+            # 沒給路徑＝「這台機器該同步的那些庫」：設定登記的加上掃描到裝著卡的原生庫
+            # （owner 2026-09-21：vaults 不是名冊）。寫進宿主檔的仍只有治理庫的規則，
+            # 那道界線在 contract_vaults，不因為清單變長而放寬。
+            vaults = _managed_vaults()
+            if not vaults:
+                parser.error("要比對或寫入時必須給至少一個記憶庫路徑")
         if parsed.apply:
-            return apply(parsed.vaults, hosts=parsed.host, output=output, actor=parsed.actor)
-        return check(parsed.vaults, hosts=parsed.host, output=output)
+            return apply(vaults, hosts=parsed.host, output=output, actor=parsed.actor)
+        return check(vaults, hosts=parsed.host, output=output)
     except Exception as exc:
         print(f"ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
         return EXIT_REFUSED

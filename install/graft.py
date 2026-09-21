@@ -636,26 +636,44 @@ def _detect_hosts(home):
     return tuple(name for name, path in paths.items() if path.is_file())
 
 
-def _detect_native_vaults(home, hosts):
-    candidates = []
+def _resolved(path):
+    try:
+        return Path(path).resolve()
+    except OSError:
+        return Path(path)
+
+
+def _detect_native_vaults(home, hosts, repo_root=REPO_ROOT):
+    """裝著卡的原生記憶庫，只留偵測到的宿主那幾個。
+
+    判準借用 capture_route（執行期落點與夜間用的同一份 holds_cards）：安裝器與執行期
+    各寫一套「這個目錄算不算庫」的話，同一個目錄會在裝的時候算、在跑的時候不算。常數
+    在這個檔另寫一份是為了不 import memspec，判斷不是常數，不適用那條。"""
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+    from epitype import capture_route
+
+    roots = []
     if "claude" in hosts:
-        candidates.extend((home / ".claude" / "memory", home / ".claude" / "memories"))
-        projects = home / ".claude" / "projects"
-        if projects.is_dir():
-            candidates.extend(path / "memory" for path in projects.iterdir() if path.is_dir())
+        roots.append(Path(home) / ".claude")
     if "codex" in hosts:
-        candidates.append(home / ".codex" / "memories")
-    result = []
-    seen = set()
-    for candidate in candidates:
-        if not candidate.is_dir() or not any(path.is_file() for path in candidate.rglob("*.md")):
-            continue
-        resolved = candidate.resolve()
-        key = os.path.normcase(os.fspath(resolved))
-        if key not in seen:
-            seen.add(key)
-            result.append(resolved)
-    return sorted(result, key=lambda item: os.path.normcase(os.fspath(item)))
+        roots.append(Path(home) / ".codex")
+    # 庫的路徑是 resolve 過的，根也要 resolve 才比得起來（CI 的 8.3 短路徑會對不上）。
+    keys = [os.path.normcase(os.fspath(_resolved(root))) + os.sep for root in roots]
+    return [
+        vault
+        for vault in capture_route.native_vaults(home)
+        if any(os.path.normcase(os.fspath(vault)).startswith(key) for key in keys)
+    ]
+
+
+def _managed_vaults(home, configured, repo_root=REPO_ROOT):
+    """執行期實際會被管的那些庫：登記的在前，接上掃描到裝著卡的原生庫。"""
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+    from epitype import capture_route
+
+    return capture_route.managed_vaults(configured, home=home)
 
 
 def _set_object_member(text, key, value):
@@ -1501,6 +1519,21 @@ def _doctor(home, dry_run=False, output=sys.stdout, clear_shim_status=False, sch
         vaults = config.get("vaults") if isinstance(config, dict) else None
         if not isinstance(vaults, list) or not vaults or not all(Path(item).is_dir() for item in vaults):
             raise ValueError("config vaults must be existing directories")
+        # 受管的不只登記的那幾個：裝著卡的原生庫本來就受管（owner 2026-09-21）。doctor
+        # 要照同一份清單報，否則「不在 config」會被讀成「沒人管」。
+        registered = {os.path.normcase(os.fspath(_resolved(Path(item).expanduser()))) for item in vaults}
+        managed = _managed_vaults(home, vaults)
+        discovered = [
+            item for item in managed
+            if os.path.normcase(os.fspath(item)) not in registered
+        ]
+        print(
+            f"VAULTS: managed {len(managed)} = config {len(managed) - len(discovered)} "
+            f"+ discovered {len(discovered)}",
+            file=output,
+        )
+        for item in discovered:
+            print(f"VAULTS: discovered {item}", file=output)
         repo_root = _validate_repo_root(
             config.get("repo_root") if isinstance(config, dict) else None,
             require_adapters=False,

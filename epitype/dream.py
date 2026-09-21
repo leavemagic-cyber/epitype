@@ -54,6 +54,11 @@ _EVENT_TYPE_BY_DIR = dict(memspec.EVENT_CARD_DIRECTORIES)  # {"grants": "grant",
 
 # 第 8–12 節（U-K，owner 2026-09-09）：全部只列候選，一個檔都不搬、不改、不刪。夢的
 # 這五節回答的是「有什麼東西沒經過確認就留在那裡」，處置一律是人的動作。
+# 每一庫自己的手寫段清單：白名單只寫得出治理庫的段名，別的庫的段名只有它自己知道。
+INDEX_SECTIONS_FILENAME = "index_sections.json"
+INDEX_SECTIONS_VERSION = 1
+INDEX_SECTIONS_FIRST_RUN = "首次納管：記下 {count} 個手寫段，本次未整形"
+
 POCKET_VAULT_MAX_ROWS = 50
 POCKET_VAULT_CANDIDATE = "專案資料夾已不在"
 POCKET_VAULT_NOTE = "只列候選：夢不搬、不改、不刪任何口袋庫的檔案"
@@ -1512,6 +1517,15 @@ def _draft_ttl_module():
     return draft_ttl
 
 
+def _capture_route_module():
+    """lazy import：受管庫的判定只有解析清單那一步要用，盤點路徑不為它付錢。"""
+    try:
+        from . import capture_route
+    except ImportError:  # Direct script execution keeps the CLI contract.
+        import capture_route
+    return capture_route
+
+
 def _views_module():
     """lazy import：夢的盤點路徑不為生成器付錢，整形與順路重生共用這一處。"""
     try:
@@ -1521,9 +1535,80 @@ def _views_module():
     return views
 
 
-def _allowed_index_section(title):
+def _allowed_index_section(title, allowed=None):
+    """這個段名是不是手寫區。內建預設永遠算，再加上這一庫自己記下來的段名。
+
+    白名單寫死四個段名時，那四個其實只是治理庫自己的段名；別的庫用自己的段名（例如
+    「## 專案執行約束」）整段都會被判成可搬，而專案庫的 MEMORY.md 是宿主每一場自動
+    載入的送達面，搬走等於當場斷了那個專案的記憶（owner 2026-09-21）。
+    """
     key = " ".join(str(title or "").split()).casefold()
-    return any(key == allowed.casefold() for allowed in memspec.INDEX_ALLOWED_SECTIONS)
+    if any(key == item.casefold() for item in memspec.INDEX_ALLOWED_SECTIONS):
+        return True
+    return any(key == " ".join(str(item or "").split()).casefold() for item in (allowed or ()))
+
+
+def _index_section_titles(text):
+    """MEMORY.md 目前所有 `##` 以上的段標題，原文順序、不重複。
+
+    判段規則與 `_split_index` 同一份（圍欄內不算標題、檔首 BOM 先剝掉），兩邊若各寫
+    一套，記下來的段名就會跟整形當下認得的段名對不起來。
+    """
+    titles = []
+    seen = set()
+    fenced = False
+    for position, raw in enumerate(text.splitlines()):
+        stripped = (raw.lstrip("\N{ZERO WIDTH NO-BREAK SPACE}") if position == 0 else raw).strip()
+        if stripped.startswith("```"):
+            fenced = not fenced
+            continue
+        if fenced or not stripped.startswith("#"):
+            continue
+        level = len(stripped) - len(stripped.lstrip("#"))
+        if level < 2:
+            continue
+        title = stripped.lstrip("#").strip()
+        key = " ".join(title.split()).casefold()
+        if title and key not in seen:
+            seen.add(key)
+            titles.append(title)
+    return titles
+
+
+def _index_sections_path(vault):
+    """這一庫的手寫段清單。`.epitype/` 已經是庫內部產物的落點，不另開目錄。"""
+    return Path(vault) / memspec.DREAM_DIRECTORY / INDEX_SECTIONS_FILENAME
+
+
+def _load_index_sections(vault):
+    """這一庫記下來的手寫段；沒有檔、讀不出來、格式不對一律回 None（＝當成第一次）。
+
+    退讓一律往安全側：認不出清單就不搬任何一行、重記一次，絕不反過來當成「沒有保護
+    ＝什麼都可以搬」。
+    """
+    try:
+        value = json.loads(_index_sections_path(vault).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(value, dict) or value.get("version") != INDEX_SECTIONS_VERSION:
+        return None
+    sections = value.get("sections")
+    if not isinstance(sections, list):
+        return None
+    return [item for item in sections if isinstance(item, str) and item.strip()]
+
+
+def _record_index_sections(vault, titles, stamp):
+    """把這一庫目前的手寫段記下來（內建預設也寫進去，讀檔的人看得到全貌）。"""
+    path = _index_sections_path(vault)
+    payload = {
+        "version": INDEX_SECTIONS_VERSION,
+        "sections": list(dict.fromkeys(list(memspec.INDEX_ALLOWED_SECTIONS) + list(titles))),
+        "recorded_at": stamp,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
+    return path
 
 
 def _index_card_targets(line):
@@ -1544,7 +1629,7 @@ def _index_stat(path):
     return (info.st_mtime_ns, info.st_size)
 
 
-def _split_index(text, listed):
+def _split_index(text, listed, allowed=None):
     """(留下的行, 要搬的 [(段標題, 原文行)], 留下但視圖沒列的連結行)。
 
     段標題＝最近一個 `##` 以上的標題（`#` 是檔名標題，之後算「不在任何段」）。允許段
@@ -1571,7 +1656,7 @@ def _split_index(text, listed):
             seen_section = seen_section or level >= 2
             keep.append(raw)
             continue
-        if fenced or not seen_section or (section is not None and _allowed_index_section(section)):
+        if fenced or not seen_section or (section is not None and _allowed_index_section(section, allowed)):
             keep.append(raw)
             continue
         targets = _index_card_targets(raw)
@@ -1631,6 +1716,9 @@ def shape_index(vault, today, apply=True, stamp=None):
     整形（Codex 2026-09-09 (c)）：讀→記 mtime＋大小→改→寫前再比→換名寫入（帶原內容
     比對）→再讀核對，任一步對不上就整份放棄並記一行，絕不硬寫。搬走的行不刪，原文
     留在 `_drafts/`。
+
+    哪些段算手寫區由每一庫自己說：第一次整形一個庫只把它當下的段名記進
+    `.epitype/index_sections.json`，那一次一行都不搬（`_load_index_sections`）。
     """
     vault = Path(vault)
     index_path = vault / memspec.MEMORY_INDEX_FILENAME
@@ -1661,7 +1749,24 @@ def shape_index(vault, today, apply=True, stamp=None):
         )
         return result
 
-    keep, moved, unlisted_lines = _split_index(text, listed)
+    stamp = stamp or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%MZ")
+    allowed = _load_index_sections(vault)
+    if allowed is None:
+        # 第一次整形這一庫（或清單讀不出來）：先把它現有的段名記下來，這一次一行都不搬。
+        # 這一庫的手寫段長什麼樣子，只有它自己的 MEMORY.md 說得準。
+        titles = _index_section_titles(text)
+        result["status"] = "recorded"
+        result["sections"] = len(titles)
+        result["reason"] = INDEX_SECTIONS_FIRST_RUN.format(count=len(titles))
+        if apply:
+            try:
+                result["sections_path"] = str(_record_index_sections(vault, titles, stamp))
+            except OSError as exc:
+                result["status"] = "error"
+                result["reason"] = f"{type(exc).__name__}: {exc}"
+        return result
+
+    keep, moved, unlisted_lines = _split_index(text, listed, allowed)
     result["moved"] = len(moved)
     result["kept"] = len(unlisted_lines)
     result["moved_examples"] = [line.strip() for _section, line in moved[:EXAMPLE_LIMIT]]
@@ -1677,7 +1782,6 @@ def shape_index(vault, today, apply=True, stamp=None):
             result["status"] = "abandoned"
             result["reason"] = memspec.INDEX_SHAPING_RACE_REASON
             return result
-        stamp = stamp or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%MZ")
         pruned_path, _written = _append_pruned(vault, today, moved, stamp)
         result["pruned_path"] = str(pruned_path)
         payload = "".join(keep).encode("utf-8")
@@ -2425,17 +2529,22 @@ def _config_path():
 
 
 def configured_vaults(config_path=None):
-    """登記的庫（只留存在的目錄）。夢只讀 vaults：跑不跑由排程器與 hook 決定。"""
-    value = json.loads(Path(config_path or _config_path()).read_text(encoding="utf-8"))
+    """夢今晚要整理的庫：設定檔登記的，加上掃描到裝著卡的原生庫。
+
+    登記清單答不了「這台機器上有多少地方在產生記憶」——裝著卡的原生庫本來就受管
+    （capture_route.managed_vaults，owner 2026-09-21）。夢只讀這份清單：跑不跑由排程器
+    與 hook 決定。要掃哪一個家由讀到的設定檔決定，合成設定不會掃到真機。
+    """
+    path = Path(config_path or _config_path())
+    value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict):
         raise ValueError("config root must be an object")
     raw = value.get(memspec.CONFIG_VAULTS_FIELD)
-    vaults = [
-        Path(item).expanduser().resolve()
-        for item in (raw if isinstance(raw, list) else ())
-        if isinstance(item, str) and item.strip()
-    ]
-    vaults = [vault for vault in vaults if vault.is_dir()]
+    capture_route = _capture_route_module()
+    vaults = capture_route.managed_vaults(
+        [item for item in (raw if isinstance(raw, list) else ()) if isinstance(item, str) and item.strip()],
+        home=capture_route.config_home(path),
+    )
     if not vaults:
         raise ValueError("config lists no existing vault")
     return vaults
@@ -3402,6 +3511,13 @@ def _selftest():
                 "- [還沒生成目錄的新卡](pending-card.md)\n"
             )
             index_path.write_bytes(index_text.encode("utf-8"))
+
+            def _seed_index_sections(target):
+                """這一庫已經被記過一次（清單只有內建預設）。整形的第一次是記段名、
+                一行都不搬；下面這些案子驗的是第二次以後：哪些行該搬、哪些不准動。"""
+                _record_index_sections(target, (), "2026-09-06T00:00Z")
+
+            _seed_index_sections(shaped)
             pruned_dir = shaped.joinpath(*memspec.INDEX_PRUNED_SUBPATH)
             pruned_file = pruned_dir / "20260906.md"
 
@@ -3488,6 +3604,7 @@ def _selftest():
                     )
                 _views_module().generate(built, stamp="2026-09-09T00:00Z")
                 (built / memspec.MEMORY_INDEX_FILENAME).write_bytes(payload)
+                _seed_index_sections(built)
                 return built, built / memspec.MEMORY_INDEX_FILENAME
 
             # 檔首 BOM：`## 索引卡` 前面多一個 BOM，第一行首字元就不是 `#`，第一個標題

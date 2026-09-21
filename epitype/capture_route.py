@@ -32,6 +32,12 @@ except ImportError:  # Direct script execution keeps the CLI contract.
 # 宿主（Claude Code）自己按 cwd 開一個記憶目錄：<home>/.claude/projects/<slug>/memory。
 NATIVE_PROJECTS_SUBPATH = (".claude", "projects")
 NATIVE_MEMORY_DIRNAME = "memory"
+# 宿主開在家目錄下、不綁專案的那幾個記憶庫；與專案庫一起構成「原生庫」的全部落點。
+NATIVE_SINGLE_VAULT_SUBPATHS = (
+    (".claude", "memory"),
+    (".claude", "memories"),
+    (".codex", "memories"),
+)
 _SLUG_PATTERN = re.compile(r"[^A-Za-z0-9]")
 
 # 落點與稽核的判定值：誤置、已在對的庫、卡上沒有 cwd（判不了，不搬）、卡讀不出來。
@@ -107,6 +113,93 @@ def native_cwd_vaults(cwd, home=None):
 def capture_vault(cwd, governance, home=None):
     """自動捕捉的事件卡該寫進哪個庫：專案的進專案庫，其餘進治理庫。"""
     return next(iter(native_cwd_vaults(cwd, home)), Path(governance).resolve())
+
+
+def native_vaults(home=None):
+    """這台機器上所有「裝著卡」的原生記憶庫，空殼不算。
+
+    判準沿用 holds_cards：安裝器、夜間夢與落點端若各寫一套「這個目錄算不算庫」，同一
+    個目錄會一邊被管、一邊不被管（2026-09-21 之前 install/graft.py 用 rglob 另判一
+    套）。要掃的根與安裝器的偵測清單同一份：專案庫與各宿主的單一庫。
+    """
+    base = Path(home) if home is not None else Path.home()
+    candidates = []
+    try:
+        with os.scandir(base.joinpath(*NATIVE_PROJECTS_SUBPATH)) as entries:
+            candidates.extend(
+                Path(entry.path) / NATIVE_MEMORY_DIRNAME
+                for entry in entries
+                if entry.is_dir(follow_symlinks=False)
+            )
+    except OSError:
+        pass
+    candidates.extend(base.joinpath(*parts) for parts in NATIVE_SINGLE_VAULT_SUBPATHS)
+    found = []
+    seen = set()
+    for candidate in candidates:
+        if not candidate.is_dir() or not holds_cards(candidate):
+            continue
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            continue
+        key = os.path.normcase(os.fspath(resolved))
+        if key in seen:
+            continue
+        seen.add(key)
+        found.append(resolved)
+    return sorted(found, key=lambda item: os.path.normcase(os.fspath(item)))
+
+
+def managed_vaults(configured, home=None):
+    """實際受管的庫：設定檔登記的（原順序、只留存在的）在前，接上掃描到的原生庫。
+
+    owner 2026-09-21：「不應該是登記，應該是所有不管是不是專案都通用才對」。設定檔的
+    `vaults` 不是名冊——裝著卡的原生庫本來就是這套東西在管的庫，沒被登記只代表沒人去
+    寫那一行，不代表它的卡不該進夜間夢、卡片檢查與視圖。
+
+    掃描只准在 CLI 與夜間這一側做。喚回與各 hook（adapters/）仍以 cwd 解析庫：實測
+    373 個專案目錄的全域掃描要 0.44 秒，每一則提問都付這個代價不可接受。
+    """
+    found = []
+    seen = set()
+    for item in configured or ():
+        try:
+            if isinstance(item, str) and not item.strip():
+                continue
+            path = Path(item).expanduser()
+            if not path.is_dir():
+                continue
+            resolved = path.resolve()
+        except (OSError, RuntimeError, TypeError, ValueError):
+            continue
+        key = os.path.normcase(os.fspath(resolved))
+        if key not in seen:
+            seen.add(key)
+            found.append(resolved)
+    for vault in native_vaults(home):
+        key = os.path.normcase(os.fspath(vault))
+        if key not in seen:
+            seen.add(key)
+            found.append(vault)
+    return found
+
+
+def config_home(config_path):
+    """要掃哪一台機器的家目錄：讀到的那份設定檔說了算（`<home>/.epitype/config.json`）。
+
+    合成設定（測試、`EPITYPE_CONFIG` 指到別處）因此只掃它自己那個家，一場合成的跑
+    不會把真機上的庫拉進來改。登記與掃描同源，不另立第二套家目錄推導。
+    """
+    path = Path(config_path).expanduser()
+    try:
+        path = path.resolve()
+    except OSError:
+        pass
+    parents = path.parents
+    if len(parents) > 1:
+        return parents[1]
+    return parents[0] if parents else path
 
 
 def event_cards(vault):
