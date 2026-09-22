@@ -4,6 +4,7 @@ import sys; sys.dont_write_bytecode = True; [getattr(stream, "reconfigure", lamb
 import os
 from pathlib import Path
 import subprocess
+import tempfile
 
 
 SELFTESTS = (
@@ -111,20 +112,27 @@ def _unresolved_fixture_roots(repo_root):
 
 
 def _run_selftest(repo_root, relative_path, environment):
+    """跑一支自測。每支拿到自己的暫存目錄——`--jobs` 的說明從一開始就這樣寫，但在
+    2026-09-22 之前並沒有實作：所有子行程共用同一份環境，於是標記檔全落在使用者真正的
+    `%TEMP%`，併行時互相踩到同一份清掃時間戳而假敗（實測 8 次跑紅 3 次），跑完還留下
+    數十個合成 session 的目錄（當天累積 2,302 項）。"""
     tool = repo_root / relative_path
     if not tool.is_file():
         return None, "missing tool"
     try:
-        return subprocess.run(
-            [sys.executable, str(tool), "--selftest"],
-            cwd=repo_root,
-            env=environment,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            check=False,
-        ), None
+        with tempfile.TemporaryDirectory(prefix="epitype-suite-") as scratch:
+            child = dict(environment)
+            child["TMPDIR"] = child["TEMP"] = child["TMP"] = scratch
+            return subprocess.run(
+                [sys.executable, str(tool), "--selftest"],
+                cwd=repo_root,
+                env=child,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            ), None
     except OSError as exc:
         return None, f"{type(exc).__name__}: {exc}"
 

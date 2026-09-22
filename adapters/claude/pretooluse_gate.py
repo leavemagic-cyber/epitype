@@ -27,6 +27,7 @@ if str(_REPO_ROOT) not in sys.path:
 from epitype import memspec
 from epitype import patch_envelope
 from _hook_common import (
+    isolated_temp_root,
     GATE_LOG_MAX_BYTES,
     append_gate_log,
     compile_bounded_regex,
@@ -1272,44 +1273,55 @@ def _selftest():
                 quiet.returncode == 0 and not quiet.stdout.strip() and not quiet.stderr.strip(),
             ))
 
-            sweep_root = Path(tempfile.gettempdir()) / memspec.NOTICE_MARKER_DIRECTORY
-            aged_session = sweep_root / ("aged-" + uuid.uuid4().hex)
-            aged_session.mkdir(parents=True, exist_ok=True)
-            aged_marker = aged_session / "0123456789abcdef"
-            aged_marker.write_text("aged\n", encoding="ascii")
-            aged_time = time.time() - memspec.NOTICE_MARKER_TTL_SECONDS - 60
-            os.utime(aged_marker, (aged_time, aged_time))
-            # 清掃改成有間隔的（每次呼叫都掃一遍舊標記，實測 2,945 次 stat、54 ms）。
-            # 把時間戳拿掉就代表「這一輪該掃了」，掃的行為本身照舊要驗。
-            try:
-                (sweep_root / memspec.NOTICE_SWEEP_STAMP).unlink()
-            except OSError:
-                pass
-            _notice_marker("sweep-" + uuid.uuid4().hex, "synthetic notice")
-            checks.append(
-                (
-                    "aged notice markers are swept instead of accumulating",
-                    not aged_marker.exists() and not aged_session.exists(),
-                )
-            )
-
-            second_session = sweep_root / ("aged2-" + uuid.uuid4().hex)
-            second_session.mkdir(parents=True, exist_ok=True)
-            second_marker = second_session / "0123456789abcdef"
-            second_marker.write_text("aged\n", encoding="ascii")
-            os.utime(second_marker, (aged_time, aged_time))
-            _notice_marker("sweep-" + uuid.uuid4().hex, "another notice")
-            checks.append(
-                (
-                    "剛掃過就不再掃：標記是同一場的去重，不是每次呼叫都要付的代價",
-                    second_marker.exists(),
-                )
-            )
-            for leftover in (second_marker, second_session):
+            # 這兩項在自己的暫存根裡跑。原本寫死使用者真正的 `%TEMP%`，於是併行跑整套
+            # 時別的行程會在「拿掉時間戳」與「呼叫」之間把時間戳重新建起來，清掃就不會
+            # 發生，這一項假敗（2026-09-22 實測：8 次跑出現 3 次紅）。而且每跑一次都在
+            # 使用者的暫存目錄留下 `aged-*`／`sweep-*`（同日實測堆了 2,302 個項目）。
+            # 隔離之後驗的還是同一段清掃程式：`temp_root()` 每次呼叫都重讀環境變數。
+            with tempfile.TemporaryDirectory(prefix="epitype-sweep-") as sweep_home:
+                saved_temp = {name: os.environ.get(name) for name in ("TMPDIR", "TEMP", "TMP")}
+                for name in saved_temp:
+                    os.environ[name] = sweep_home
                 try:
-                    leftover.unlink() if leftover.is_file() else leftover.rmdir()
-                except OSError:
-                    pass
+                    sweep_root = Path(sweep_home) / memspec.NOTICE_MARKER_DIRECTORY
+                    aged_session = sweep_root / ("aged-" + uuid.uuid4().hex)
+                    aged_session.mkdir(parents=True, exist_ok=True)
+                    aged_marker = aged_session / "0123456789abcdef"
+                    aged_marker.write_text("aged\n", encoding="ascii")
+                    aged_time = time.time() - memspec.NOTICE_MARKER_TTL_SECONDS - 60
+                    os.utime(aged_marker, (aged_time, aged_time))
+                    # 清掃改成有間隔的（每次呼叫都掃一遍舊標記，實測 2,945 次 stat、54 ms）。
+                    # 把時間戳拿掉就代表「這一輪該掃了」，掃的行為本身照舊要驗。
+                    try:
+                        (sweep_root / memspec.NOTICE_SWEEP_STAMP).unlink()
+                    except OSError:
+                        pass
+                    _notice_marker("sweep-" + uuid.uuid4().hex, "synthetic notice")
+                    checks.append(
+                        (
+                            "aged notice markers are swept instead of accumulating",
+                            not aged_marker.exists() and not aged_session.exists(),
+                        )
+                    )
+
+                    second_session = sweep_root / ("aged2-" + uuid.uuid4().hex)
+                    second_session.mkdir(parents=True, exist_ok=True)
+                    second_marker = second_session / "0123456789abcdef"
+                    second_marker.write_text("aged\n", encoding="ascii")
+                    os.utime(second_marker, (aged_time, aged_time))
+                    _notice_marker("sweep-" + uuid.uuid4().hex, "another notice")
+                    checks.append(
+                        (
+                            "剛掃過就不再掃：標記是同一場的去重，不是每次呼叫都要付的代價",
+                            second_marker.exists(),
+                        )
+                    )
+                finally:
+                    for name, value in saved_temp.items():
+                        if value is None:
+                            os.environ.pop(name, None)
+                        else:
+                            os.environ[name] = value
 
             miss = run_synthetic(
                 Path(__file__),
@@ -1779,7 +1791,8 @@ def _best_effort_record(event):
 
 def main():
     if "--selftest" in sys.argv[1:]:
-        return _selftest()
+        with isolated_temp_root():
+            return _selftest()
     defects = []
     try:
         event = read_event(sys.stdin)

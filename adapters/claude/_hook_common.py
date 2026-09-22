@@ -552,6 +552,44 @@ def emit(value):
     print(encoded)
 
 
+class isolated_temp_root:
+    """這一段期間，`temp_root()` 指向一個只屬於這次自測的暫存目錄。
+
+    標記檔（喚回去重、通知去重）落在 `temp_root()`，而那預設是使用者真正的 `%TEMP%`。
+    自測直接用真實暫存目錄有兩個代價，2026-09-22 都實測到了：併行跑整套時，不同測試
+    會踩到同一份清掃時間戳而假敗（8 次跑紅 3 次）；而且每跑一次就留下數十個合成
+    session 的標記（當天累積 2,302 項）。
+
+    設在最外層、而不是只設給子行程：父行程要在行程內用 `temp_root()` 算出路徑去檢查
+    子行程寫了什麼，兩邊必須是同一個根。`run_synthetic` 帶 `**os.environ`，所以子行程
+    自然繼承。真的要驗使用者暫存目錄的呼叫端，自己傳 `TEMP` 蓋掉。
+
+    寫成類別而不是 `@contextlib.contextmanager`：這個模組每一次工具呼叫都要載入，而
+    `contextlib` 只有自測用得到——同一份理由讓 `temp_root()` 也避開了 `tempfile`。
+    """
+
+    _NAMES = ("TMPDIR", "TEMP", "TMP")
+
+    def __enter__(self):
+        import tempfile as _tempfile
+
+        self._saved = {name: os.environ.get(name) for name in self._NAMES}
+        self._directory = _tempfile.TemporaryDirectory(prefix="epitype-selftest-")
+        root = self._directory.name
+        for name in self._NAMES:
+            os.environ[name] = root
+        return Path(root)
+
+    def __exit__(self, *_exception):
+        for name, value in self._saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+        self._directory.cleanup()
+        return False
+
+
 def run_synthetic(script, event, config_path, arguments=(), environment=None):
     import subprocess
 
@@ -559,6 +597,10 @@ def run_synthetic(script, event, config_path, arguments=(), environment=None):
     # 家目錄同理預設隔離：落點與喚回都會把 cwd 的原生專案庫算進來，而真機上 `C:\`
     # 是每個暫存 cwd 的祖先且它的原生庫就是治理庫——沒有這道隔離，一次 selftest
     # 就會把捕捉到的卡寫進 owner 的真庫。要測原生庫的呼叫端自己傳 HOME。
+    # 暫存目錄不在這裡換：標記檔是父子兩邊都要看的東西（父行程用 `temp_root()` 在
+    # 行程內算路徑、子行程實際寫檔），只換子行程的話兩邊就指到不同地方，測試會看不到
+    # 自己剛剛造出來的標記（2026-09-22 實測 5/5 確定性失敗）。隔離要在每支自測的最外層
+    # 做一次（`isolated_temp_root()`），子行程靠 `**os.environ` 自然繼承同一個根。
     isolated_home = os.fspath(Path(config_path).resolve().parent / "_synthetic_home")
     environment = {
         **os.environ,

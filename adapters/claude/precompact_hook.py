@@ -13,6 +13,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from epitype import compact_map, memspec
 from _hook_common import (
+    isolated_temp_root,
     clear_recall_markers,
     expired,
     governance_vault,
@@ -259,7 +260,8 @@ def _selftest():
 def main():
     arguments = sys.argv[1:]
     if "--selftest" in arguments:
-        return _selftest()
+        with isolated_temp_root():
+            return _selftest()
     try:
         # 只寫檔，永遠不輸出：`--codex` 仍被接受（Codex 的 hooks.json 這樣掛），
         # 但兩邊宿主的輸出路徑都已經退役，所以兩條路徑跑的是同一段程式。

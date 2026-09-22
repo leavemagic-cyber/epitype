@@ -25,6 +25,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from epitype import memspec
 from _hook_common import (
+    isolated_temp_root,
     append_gate_log,
     clear_recall_markers,
     compile_bounded_regex,
@@ -1464,7 +1465,8 @@ def _emits(value, started_at):
 
 def main():
     if "--selftest" in sys.argv[1:]:
-        return _selftest()
+        with isolated_temp_root():
+            return _selftest()
     defects = []
     try:
         event = read_event(sys.stdin)

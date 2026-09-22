@@ -27,6 +27,7 @@ from epitype.capture import (
     write_capture as _write_capture,
 )
 from _hook_common import (
+    isolated_temp_root,
     capture_vault as _capture_vault,
     emit,
     expired,
@@ -1668,7 +1669,8 @@ def _selftest():
 
 def main():
     if "--selftest" in sys.argv[1:]:
-        return _selftest()
+        with isolated_temp_root():
+            return _selftest()
     try:
         event = read_event(sys.stdin)
         delivery_markers = []

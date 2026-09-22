@@ -18,6 +18,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from epitype import card_lint, compact_map, memspec
 from _hook_common import (
+    isolated_temp_root,
     bounded_context,
     emit,
     expired,
@@ -1251,7 +1252,8 @@ def _selftest():
 
 def main():
     if "--selftest" in sys.argv[1:]:
-        return _selftest()
+        with isolated_temp_root():
+            return _selftest()
     try:
         event = read_event(sys.stdin)
         value = _handle(event, _STARTED_AT)
