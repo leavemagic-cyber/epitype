@@ -2647,10 +2647,21 @@ CARD_LINT_DECISION_FINDING = "規則{rule} {reason}｜{path}"
 # 掛鉤期限（HOOK_TIMEOUT_SECONDS）到了就放行，這是設計；但自測拿真的時鐘跑判斷案例，
 # 機器一忙，「逾時放行」跟「判斷錯了」長得一模一樣——2026-09-25 同一份 selftest 連跑六次
 # 出現四種結果。自測子行程改用注入的時鐘：判斷案例用 frozen（期限永遠不到），逾時行為
-# 另用 expired 明確斷言。只認這兩個值，其他值一律照真時鐘；正式宿主不會設這個變數。
+# 另用 expired 明確斷言。
+#
+# 注入只在 run_synthetic 起的子行程生效（Codex 審查 2026-09-25：正式掛鉤繼承
+# EPITYPE_HOOK_CLOCK=frozen 就等於拔掉 9 秒期限）。環境變數只帶一次性的 token；時鐘
+# 模式寫在設定檔旁邊、以該 token 命名的憑證檔裡，而且 HOME 必須在那個目錄底下。三者
+# 任一不合就照真時鐘，並在 stderr 留一行。run_synthetic 在子行程結束後刪掉憑證檔。
 HOOK_CLOCK_ENV = "EPITYPE_HOOK_CLOCK"
 HOOK_CLOCK_FROZEN = "frozen"
 HOOK_CLOCK_EXPIRED = "expired"
+HOOK_CLOCK_MODES = (HOOK_CLOCK_FROZEN, HOOK_CLOCK_EXPIRED)
+HOOK_CLOCK_CREDENTIAL_PREFIX = ".epitype-hook-clock-"
+HOOK_CLOCK_TOKEN_PATTERN = r"[0-9a-f]{32}"
+HOOK_CLOCK_REJECTED_NOTICE = (
+    "⚠ Epitype：忽略了不合法的時鐘注入（{env}），期限照真時鐘計算"
+)
 # 設定都還沒讀，期限就過了：一條規則都沒檢查。以前這一步安靜回空，跟「沒有東西要擋」
 # 在外面分不出來。
 STOP_GATE_EXPIRED_BEFORE_CHECK_DEFECT = (
@@ -2681,6 +2692,19 @@ FENCE_SHELL_MAX_BLOCKS = 20
 FENCE_SHELL_ERROR_MAX_CHARS = 160
 FENCE_SHELL_SNIPPET_MAX_CHARS = 80
 FENCE_SHELL_RULE = "fence_shell"
+# 決策快取換版（例如新增武裝欄位）時，舊快取的正例沿用、負例重認；重認每回合有上限，
+# 一回合認不完的那些這次不在檢查範圍內——要講出來，不然大庫升級後的頭幾回合看起來全部生效。
+STOP_GATE_CAPPED_DEFECT = (
+    "⚠ 這回合 {vault} 只認了 {checked}/{total} 張還沒認過的卡（每回合上限；快取換版或大量新卡）；"
+    "沒認到的那些若是武裝卡，這次沒有生效"
+)
+# bash／sh 的 -n 診斷裡，哪些字代表「這段語法錯」。未閉合的引號回的是 unexpected EOF，
+# 第一行不含 syntax error（Codex 審查 2026-09-25 以 Git Bash 重現）。不在這裡面的非零結束
+# ＝殼層本身沒跑起來（找不到、126／127、WSL 啟動器沒裝發行版），放行。
+FENCE_SHELL_POSIX_SYNTAX_PATTERN = (
+    r"syntax error|unexpected EOF|unexpected end of file|unterminated|unmatched"
+)
+FENCE_SHELL_POSIX_UNRUNNABLE_CODES = (126, 127)
 # fence_shell 是武裝欄位，也是閘門只讀頂層的那一種：寫在下一層＝什麼都不擋。
 CARD_ARMING_FIELDS = CARD_ARMING_FIELDS + (FENCE_SHELL_FIELD,)
 CARD_GATE_FIELDS = CARD_GATE_FIELDS + (FENCE_SHELL_FIELD,)
@@ -2828,6 +2852,8 @@ _EN = {
     "SEARCH_INDEX_STALE_REASON": '{count} tracked card(s) are missing from the search index ({cards}) → python epitype/memsearch.py build "{vault}"',
     "STOP_GATE_INCOMPLETE_DEFECT": "⚠ this turn ran out of time; only {checked}/{total} armed cards in {vault} were checked, so the rest did not apply this time",
     "STOP_GATE_UNSCANNED_DEFECT": "⚠ this turn ran out of time; {skipped} card(s) in {vault} were never even read (new or just-edited cards), so they were out of scope this time",
+    "STOP_GATE_CAPPED_DEFECT": "⚠ this turn only recognised {checked}/{total} not-yet-recognised cards in {vault} (per-turn cap; cache upgrade or many new cards); any armed card among the rest did not apply this time",
+    "HOOK_CLOCK_REJECTED_NOTICE": "⚠ Epitype: ignored an invalid clock injection ({env}); the deadline uses the real clock",
     "STOP_GATE_EXPIRED_BEFORE_CHECK_DEFECT": "⚠ this turn ran out of time before any rule was read, so nothing was checked this time",
     "STOP_GATE_FENCE_SHELL_REASON": "⚖ code block {index} ({lang}) fails the {shell} syntax check at line {line} \"{snippet}\" — {error}. Pressing Run will fail outright; rewrite it as valid {shell}. ({decision})",
     "STOP_GATE_FENCE_SHELL_SKIPPED_DEFECT": "⚠ Epitype turn gate: fence_shell of {decision} was not checked this time ({reason}); code blocks passed.",

@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "adapters" / "claud
 
 import json
 import tempfile
+import time
 import unittest
 from collections import namedtuple
 
@@ -247,16 +248,48 @@ class WiringIntoTheGate(unittest.TestCase):
         # 夜間報表與卡片檢查器都要認這種武裝，不然它們會叫人去「補武裝」一張已經在擋的卡。
         self.assertIn(memspec.TURN_CHECK_FIELD, memspec.CARD_ARMING_FIELDS)
 
-    def test_the_cache_only_accepts_its_own_version(self):
-        # 舊版快取被新碼接受的話，新欄位對舊卡默默不生效——加一個欄位就漏一批卡。
+    def test_an_old_cache_never_hides_a_new_field(self):
+        # 舊版快取被新碼照單全收的話，新欄位對舊卡默默不生效——加一個欄位就漏一批卡。
+        # 整份丟掉又會讓大庫升級後排在上限之後的規則暫時失效（2026-09-25 Codex 審查）。
+        # 所以舊版只留正例當「去哪裡找」的提示：負例不信，正例每回合從卡片重讀。
+        from epitype import cardscan
+
         with tempfile.TemporaryDirectory() as temporary:
-            cache = Path(temporary) / "stop_decisions.json"
-            cache.write_text(json.dumps({"version": 4, "manifest": {"a.md": [1, 2, 3, 4, 5]},
-                                         "decisions": {"a.md": {"key": "舊卡"}}}),
+            vault = Path(temporary).resolve()
+            (vault / "a.md").write_text(
+                "---\nname: 舊卡\ndescription: 2026-09-19 舊快取裡的正例\n"
+                f"{memspec.TURN_CHECK_FIELD}: {memspec.TURN_CHECK_LENGTH}\n---\nbody\n",
+                encoding="utf-8")
+            (vault / "b.md").write_text(
+                "---\nname: 新武裝\ndescription: 2026-09-25 舊快取把它記成負例\n"
+                f"{memspec.TURN_CHECK_FIELD}: {memspec.TURN_CHECK_LENGTH}\n---\nbody\n",
+                encoding="utf-8")
+            stamps = {card: [mtime, size, ctime] for card, _path, mtime, size, ctime
+                      in cardscan.scan_vault(vault)}
+            cache = vault / memspec.FTS_INDEX_DIRECTORY / "stop_decisions.json"
+            cache.parent.mkdir()
+            # 舊版的正例沒有 turn_check 欄位，負例把 b.md 記成「不是裁定」；兩張卡的時間戳
+            # 都跟快取一致，所以不是靠「卡片改過」才被重讀。
+            cache.write_text(json.dumps({
+                "version": stop_gate._DECISION_CACHE_VERSION - 1,
+                "manifest": stamps,
+                "decisions": {"a.md": {"key": "舊卡"}, "b.md": None},
+                "cursor": "b.md",
+            }), encoding="utf-8")
+            manifest, rulings, cursor = stop_gate._read_cache(cache)
+            self.assertEqual(rulings, {"a.md": {"key": "舊卡"}})
+            self.assertEqual(set(manifest), {"a.md"})
+            self.assertEqual(cursor, "")
+
+            found = {decision.key: decision for decision in stop_gate._decisions(vault, time.monotonic())}
+            self.assertEqual(found["舊卡"].turn_check, memspec.TURN_CHECK_LENGTH)
+            self.assertEqual(found["新武裝"].turn_check, memspec.TURN_CHECK_LENGTH)
+
+            # 比現在新的版本（降版回舊碼）一律整份不認。
+            cache.write_text(json.dumps({"version": stop_gate._DECISION_CACHE_VERSION + 1,
+                                         "manifest": stamps, "decisions": {"a.md": {"key": "舊卡"}}}),
                              encoding="utf-8")
-            manifest, rulings, _cursor = stop_gate._read_cache(cache)
-            self.assertEqual(manifest, {})
-            self.assertEqual(rulings, {})
+            self.assertEqual(stop_gate._read_cache(cache), ({}, {}, ""))
 
 
 class TheOpenedRecord(unittest.TestCase):

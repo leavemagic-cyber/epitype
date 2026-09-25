@@ -19,6 +19,10 @@ PASS、PASS、FAIL 20/22、FAIL 20/22），每次失敗的題目都不同。根�
 - 自測讀帳本時帳本不存在算零列：缺帳是一題具名的失敗，不再把整份自測炸成 ERROR。
 - 時鐘凍住後子行程不再在 9 秒自己收手，原本跟期限綁在一起的 19 秒子行程上限改成 120 秒，只用來
   抓卡死（96 個忙迴圈下單次實測 18 秒）。沒有刪題、沒有放寬任何斷言；分母 22→23。
+- 注入時鐘只在自測子行程生效（Codex 審查 2026-09-25：正式掛鉤繼承 `EPITYPE_HOOK_CLOCK=frozen`
+  就等於拔掉 9 秒期限）。環境變數只帶 `run_synthetic` 每次產生的一次性 token；模式寫在設定檔旁
+  以 token 命名的憑證檔，而且 HOME／USERPROFILE 必須在那個目錄底下，子行程結束就刪。任一不合
+  就照真時鐘，並在 stderr 留「忽略了不合法的時鐘注入」。
 
 ### 指令區塊用使用者實際的殼層解析器驗語法（`fence_shell`）
 
@@ -40,11 +44,16 @@ owner 按下執行鍵，跑在 Windows PowerShell 5.1，ParserError、什麼都�
   沒有卡宣告、或沒有相符區塊時一個行程都不起；子代理結束（SubagentStop）不查——那段話是給主線
   讀的，owner 不會在那裡按執行。Codex 的 `stop.py` 是同一支 `stop_gate.py` 的轉接，判斷共用。
 - 決策快取版本 6→7：舊快取把只帶 `fence_shell` 的卡記成「不是裁定」，不換版要等輪替才認得。
+  換版不整份丟：舊版的正例沿用（候選每回合本來就重讀確認），只丟負例重認；每回合重認有上限
+  （120 張），一回合認不完時 stderr 講「這回合只認了 N/M 張還沒認過的卡」。整份丟的話，大庫
+  （真庫 577 張）升級後排在後面的既有規則會暫時失效而且沒有訊號（Codex 審查 2026-09-25）。
+- bash／sh 的語法錯看殼層自己的診斷：`syntax error`、`unexpected EOF`（未閉合引號）、
+  `unexpected end of file` 等都算；只有殼層本身跑不起來（找不到、126／127、逾時）才放行。
 - `card_lint`：`fence_shell` 算武裝欄位；值不在 `powershell|bash|sh` → FAIL；包進下一層 →
   FAIL（disarmed-field）；只有 `fence_langs` → FAIL。`unenforceable` 的理由若是「閘門看不到／
   比對純文字／gate can't see」一類 → WARN「這是 Epitype 的缺口不是做不到：修 Epitype 讓閘門看得到，
   或改用能擋的欄位」。夜間重放（compliance）與夢的武裝判定也把 `fence_shell` 算成武裝。
-- 自測：stop_gate 23→32、card_lint 47→50、compliance 29→30。
+- 自測：stop_gate 23→35、card_lint 47→50、compliance 29→30。
 
 ### Claude Code 的 context 用量計＋壓縮前交接
 

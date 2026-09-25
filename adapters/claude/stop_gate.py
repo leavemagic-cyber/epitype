@@ -220,14 +220,25 @@ def _read_cache(cache_path):
         loaded = json.loads(cache_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}, {}, ""
-    # 只認當前版本。以前連舊版也收，於是每次加新欄位（到期、只管寫檔、內建檢查），
-    # 舊快取裡那些卡就少了那個欄位、新規則對它們默默不生效——而且完全沒有訊號。
-    if not isinstance(loaded, dict) or loaded.get("version") != _DECISION_CACHE_VERSION:
+    if not isinstance(loaded, dict):
         return {}, {}, ""
     manifest = loaded.get("manifest")
     rulings = loaded.get("decisions")
     if not isinstance(manifest, dict) or not isinstance(rulings, dict):
         return {}, {}, ""
+    version = loaded.get("version")
+    if version != _DECISION_CACHE_VERSION:
+        # 舊版的負例不能信：它不認得新的武裝欄位，照收的話只帶新欄位的卡永遠被當成
+        # 「不是裁定」而且沒有訊號。但整份丟掉也不行——每回合只重認上限張，大庫升級後
+        # 排在後面的既有規則會暫時失效（Codex 審查 2026-09-25）。所以正例沿用（候選每
+        # 回合本來就重讀確認），負例丟掉重認。
+        if isinstance(version, bool) or not isinstance(version, int) or version > _DECISION_CACHE_VERSION:
+            return {}, {}, ""
+        rulings = {
+            key: value for key, value in rulings.items()
+            if isinstance(value, dict) and value.get(_KEY)
+        }
+        return {key: value for key, value in manifest.items() if key in rulings}, rulings, ""
     cursor = loaded.get("cursor")
     return manifest, rulings, cursor if isinstance(cursor, str) else ""
 
@@ -293,6 +304,10 @@ def _decisions(vault, started_at, defects=None):
     refreshed = set()
     cap = memspec.STOP_GATE_MAX_CARDS_PER_VAULT
     scanning = (changed + rotated)[:cap]
+    if len(changed) > cap:
+        # 輪替重驗的負例不算：它們早就認過了。要講的是「還沒認過的卡這回合沒認完」。
+        defects.append(memspec.STOP_GATE_CAPPED_DEFECT.format(
+            checked=cap, total=len(changed), vault=vault.name))
     for position, card_path in enumerate(scanning):
         if expired(started_at):
             # 這裡逾時比下面那個迴圈逾時更難看得出來：沒被認過的卡根本進不了候選名單，
@@ -1086,10 +1101,14 @@ def _parse_posix(shell, blocks, timeout, executable=None):
         if result.returncode == 0:
             results.append(None)
             continue
-        first = next((line for line in result.stderr.splitlines() if line.strip()), "")
-        # 只有殼層自己說「語法錯」才算數。非零結束也可能是殼層本身壞了（Windows 上
-        # PATH 裡的 bash 可能是沒裝發行版的 WSL 啟動器）——那要放行，不能當成語法錯擋人。
-        if "syntax error" not in first.casefold():
+        # 語法錯要看殼層自己的診斷；殼層根本沒跑起來（126／127，或 Windows 上 PATH 裡的
+        # bash 是沒裝發行版的 WSL 啟動器）要放行，不能當成語法錯擋人。
+        first = next(
+            (line for line in result.stderr.splitlines()
+             if re.search(memspec.FENCE_SHELL_POSIX_SYNTAX_PATTERN, line, re.IGNORECASE)),
+            "",
+        )
+        if result.returncode in memspec.FENCE_SHELL_POSIX_UNRUNNABLE_CODES or not first:
             raise RuntimeError(f"{shell} exit {result.returncode}")
         found = _SHELL_ERROR_LINE_REGEX.search(first)
         line_number = int(next(group for group in found.groups() if group)) if found else 1
@@ -1329,8 +1348,9 @@ def _selftest():
                     Path(__file__),
                     event,
                     config_file,
-                    environment={**(environment or {}), memspec.HOOK_CLOCK_ENV: clock},
+                    environment=environment,
                     timeout=_SELFTEST_HANG_SECONDS,
+                    clock=clock,
                 )
 
             def gate_rows():
@@ -1850,6 +1870,24 @@ def _selftest():
                 if _shutil.which("bash")
                 else (bash_ok is None and bash_bad is None and bash_defects),
             ))
+
+            # 未閉合的引號：bash 回的是 unexpected EOF（不含 syntax error），照樣是語法錯。
+            _FENCE_RESULTS.clear()
+            quote_defects = []
+            bash_quote = _fence_shell_gap(
+                bash_decision, '```bash\necho "unterminated\n```', {}, time.monotonic(), quote_defects)
+            _FENCE_RESULTS.clear()
+            ps_quote = _fence_shell_gap(
+                fence_decision, '```powershell\nWrite-Host "unterminated\n```', {}, time.monotonic(),
+                quote_defects)
+            checks.append((
+                "fence_shell: 未閉合引號 bash 與 PowerShell 各擋一次（沒有解析器則放行並點名）",
+                (bash_quote is not None and "unexpected EOF" in bash_quote
+                 if _shutil.which("bash") else bash_quote is None)
+                and ps_quote is not None
+                and "第 1 個程式碼區塊（powershell）" in ps_quote
+                and (not quote_defects if _shutil.which("bash") else len(quote_defects) == 1),
+            ))
             _FENCE_RESULTS.clear()
 
             # 逾時放行是設計，但它必須跟「判斷沒擋」分得開：同一句禁語在期限已過的時鐘下
@@ -1875,6 +1913,94 @@ def _selftest():
                 and not any(row.get("session_id") == late_session for row in gate_rows()),
             ))
 
+            # 快取換版：舊版正例沿用、負例重認。大庫升級後第一回合，排在上限之後的既有武裝
+            # 卡仍然要擋；還沒認完的那些要在 stderr 講出來。
+            from epitype import cardscan
+
+            big_vault = root / "big-vault"
+            big_vault.mkdir()
+            for index in range(memspec.STOP_GATE_MAX_CARDS_PER_VAULT + 5):
+                (big_vault / f"note-{index:03d}.md").write_text(
+                    f"---\nname: note-{index:03d}\ndescription: 2026-09-01 沒有裁定的卡\n---\nbody\n",
+                    encoding="utf-8")
+            last_card = big_vault / [entry[0] for entry in cardscan.scan_vault(big_vault)][-1]
+            last_card.write_text(
+                "---\nname: 晚到的卡\ndescription: 2026-09-25 排在上限之後的武裝卡\n"
+                f"{memspec.ALIASES_FIELD}: [晚到]\n{memspec.FORBIDDEN_FIELD}: [晚到禁語]\n"
+                "metadata:\n  type: feedback\n---\nbody\n",
+                encoding="utf-8")
+            big_config = root / "big-config.json"
+            write_config(big_config, [big_vault])
+            capped_line = memspec.STOP_GATE_CAPPED_DEFECT.split("{")[0]
+
+            def big_run(message):
+                session_id = f"stopgate-big-{uuid.uuid4().hex}"
+                sessions.append(session_id)
+                result = synthetic(
+                    {"session_id": session_id, "hook_event_name": "Stop",
+                     "stop_hook_active": False, "last_assistant_message": message},
+                    big_config, environment=home)
+                return result, json.loads(result.stdout) if result.stdout.strip() else {}
+
+            fresh_result, fresh_value = big_run("這裡有晚到禁語。")
+            big_run("今天先到這裡。")
+            big_cache = big_vault / memspec.FTS_INDEX_DIRECTORY / _DECISION_CACHE_FILENAME
+            legacy = json.loads(big_cache.read_text(encoding="utf-8"))
+            legacy["version"] = _DECISION_CACHE_VERSION - 1
+            big_cache.write_text(json.dumps(legacy, ensure_ascii=False), encoding="utf-8")
+            upgraded_result, upgraded_value = big_run("這裡有晚到禁語。")
+            checks.append((
+                "快取換版＋超過上限張卡：排在後面的武裝卡升級後第一回合仍然擋，沒認完的在 stderr 講出來",
+                # 前提：這張卡確實排在上限之後——全新的庫第一回合認不到它，而且有講。
+                not fresh_value and capped_line in fresh_result.stderr
+                and upgraded_value.get("decision") == "block"
+                and "晚到禁語" in upgraded_value.get("reason", "")
+                and capped_line in upgraded_result.stderr,
+            ))
+
+            # 注入時鐘只給 run_synthetic 的子行程：正式掛鉤從環境繼承到 EPITYPE_HOOK_CLOCK
+            # 時，期限照真時鐘生效（起始 1,000 秒前 → 已逾時），並在 stderr 講一句。
+            import subprocess as _subprocess
+
+            probe = (
+                "import sys, time; sys.path[:0] = [{adapters!r}, {repo!r}]\n"
+                "import _hook_common\n"
+                "print(_hook_common.expired(time.monotonic() - 1000))\n"
+            ).format(adapters=os.fspath(Path(__file__).resolve().parent), repo=os.fspath(_REPO_ROOT))
+            outside_home = root / "outside-home"
+            outside_home.mkdir()
+            probe_config = root / "probe" / "config.json"
+            probe_config.parent.mkdir()
+            probe_config.write_text("{}", encoding="utf-8")
+            token = uuid.uuid4().hex
+            (probe_config.parent / (memspec.HOOK_CLOCK_CREDENTIAL_PREFIX + token)).write_text(
+                memspec.HOOK_CLOCK_FROZEN, encoding="ascii")
+
+            def clock_probe(value, home):
+                environment = {**os.environ, memspec.HOOK_CLOCK_ENV: value,
+                               memspec.EPITYPE_CONFIG_ENV: os.fspath(probe_config),
+                               "HOME": os.fspath(home), "USERPROFILE": os.fspath(home),
+                               "PYTHONDONTWRITEBYTECODE": "1"}
+                result = _subprocess.run(
+                    [sys.executable, "-c", probe], capture_output=True, text=True,
+                    encoding="utf-8", errors="replace", env=environment,
+                    timeout=_SELFTEST_HANG_SECONDS, check=False)
+                return result.stdout.strip(), memspec.HOOK_CLOCK_REJECTED_NOTICE.format(
+                    env=memspec.HOOK_CLOCK_ENV) in result.stderr
+
+            inherited = clock_probe(memspec.HOOK_CLOCK_FROZEN, probe_config.parent)
+            wrong_home = clock_probe(token, outside_home)
+            forged = clock_probe(uuid.uuid4().hex, probe_config.parent)
+            genuine = clock_probe(token, probe_config.parent)
+            checks.append((
+                "正式路徑繼承 EPITYPE_HOOK_CLOCK=frozen（或憑證不吻合）：期限照常生效，stderr 說明忽略了注入",
+                inherited == ("True", True)
+                and wrong_home == ("True", True)
+                and forged == ("True", True)
+                and genuine == ("False", False)
+                and not list(root.glob(memspec.HOOK_CLOCK_CREDENTIAL_PREFIX + "*")),
+            ))
+
             blown = time.monotonic() - memspec.HOOK_TIMEOUT_SECONDS - 1
             checks.append((
                 "期限在 marker 寫下之後才到：block 照樣送出，不會只留帳不擋",
@@ -1889,7 +2015,7 @@ def _selftest():
             clear_recall_markers(session_id)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 32
+    total = 35
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
