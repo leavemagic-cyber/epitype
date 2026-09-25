@@ -654,6 +654,14 @@ def trace_hook(event_name, event, started_at, codex=False, **fields):
         return False
 
 
+def trace_run():
+    """一次呼叫的追蹤編號（開始行與結束行配對用）。產不出來就回 None：追蹤不能擋掛鉤。"""
+    try:
+        return os.urandom(4).hex()
+    except Exception:
+        return None
+
+
 def failure_reason(exc):
     """追蹤裡的提早結束原因：設定檔不在與其他例外分開記，例外只記類別名。"""
     try:

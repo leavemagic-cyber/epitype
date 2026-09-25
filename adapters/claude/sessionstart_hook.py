@@ -30,6 +30,7 @@ from _hook_common import (
     resolve_vaults,
     run_synthetic,
     trace_hook,
+    trace_run,
     write_config,
 )
 
@@ -1288,7 +1289,10 @@ def _selftest():
             trace_file = root / memspec.CONTEXT_METER_TRACE_FILENAME
             all_rows = [json.loads(line) for line in trace_file.read_text(encoding="utf-8").splitlines()
                         ] if trace_file.is_file() else []
-            trace_rows = [row for row in all_rows if row.get("event") == "SessionStart"]
+            trace_rows = [row for row in all_rows
+                          if row.get("event") == "SessionStart" and row.get("phase") == "exit"]
+            start_runs = [row["run"] for row in all_rows
+                          if row.get("event") == "SessionStart" and row.get("phase") == "start"]
             checks.append((
                 "a compact resume traces map found (same file name PreCompact wrote), handoff found and the "
                 "lines that went out; startup is not traced",
@@ -1301,6 +1305,9 @@ def _selftest():
                 and any(row["session"] == "trace-no-map" and row["map"] is False and row["lines"] == []
                         for row in trace_rows)
                 and not any(row["session"] == "trace-startup" for row in trace_rows)
+                and not any(row.get("session") == "trace-startup" for row in all_rows)
+                and len(start_runs) == len(trace_rows)
+                and set(start_runs) == {row["run"] for row in trace_rows}
                 and all("source" not in row for row in trace_rows),
             ))
 
@@ -1536,10 +1543,14 @@ def main():
         with isolated_temp_root():
             return _selftest()
     event = None
-    # 追蹤只記壓縮續場：地圖與交接沒交回來的原因還沒查明（2026-09-25 Codex App 兩次）。
+    # 追蹤只記壓縮續場：地圖與交接沒交回來的原因還沒查明（2026-09-25 Codex App 兩次）。開始先記
+    # 一行（讀完事件、還沒讀設定），結束再記一行，兩行同一個 run：只有開始＝被砍或當掉。
+    run = trace_run()
     trace = {"outcome": "unknown", "map": False, "handoff": False, "lines": []}
     try:
         event = read_event(sys.stdin)
+        if isinstance(event, dict) and event.get("source") == "compact":
+            trace_hook("SessionStart", event, _STARTED_AT, phase="start", run=run)
         deliveries = []
         value = _handle(event, _STARTED_AT, deliveries, trace)
         if value is not None and not expired(_STARTED_AT):
@@ -1551,7 +1562,7 @@ def main():
     except Exception as exc:
         trace["outcome"], trace["lines"] = failure_reason(exc), []
     if trace.pop("source", None) == "compact":
-        trace_hook("SessionStart", event, _STARTED_AT, **trace)
+        trace_hook("SessionStart", event, _STARTED_AT, phase="exit", run=run, **trace)
     return 0
 
 

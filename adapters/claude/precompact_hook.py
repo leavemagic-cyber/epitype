@@ -25,6 +25,7 @@ from _hook_common import (
     recall_marker_directory,
     run_synthetic,
     trace_hook,
+    trace_run,
     write_codex_fixture,
     write_config,
 )
@@ -495,6 +496,8 @@ def _selftest():
             trace_file = root / memspec.CONTEXT_METER_TRACE_FILENAME
             rows = [json.loads(line) for line in trace_file.read_text(encoding="utf-8").splitlines()]
             rows = [row for row in rows if row.get("event") == "PreCompact"]
+            starts = [row for row in rows if row.get("phase") == "start"]
+            rows = [row for row in rows if row.get("phase") == "exit"]
             outcomes = {row["outcome"] for row in rows}
             checks.append((
                 "each PreCompact run traces host, markers cleared, map written and elapsed ms, "
@@ -506,6 +509,13 @@ def _selftest():
                 and any(row["session"] == "session-b" for row in rows)
                 and {"exception:JSONDecodeError", "config-missing", "no-transcript"} <= outcomes
                 and all(row["map"] is False for row in rows if row["outcome"] != "ok"),
+            ))
+            checks.append((
+                "every PreCompact run writes a start line before its work, paired with its exit line by run",
+                len(starts) == len(rows) > 0
+                and {row["run"] for row in starts} == {row["run"] for row in rows}
+                and all(isinstance(row["run"], str) and len(row["run"]) == 8 for row in starts)
+                and all("outcome" not in row and "map" not in row for row in starts),
             ))
             broken_root = root / "trace-broken"
             broken_root.mkdir()
@@ -524,7 +534,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 18
+    total = 19
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
@@ -540,17 +550,22 @@ def main():
         with isolated_temp_root():
             return _selftest()
     event = None
-    # 追蹤：壓縮後地圖沒交回來的原因還沒查明，每次都記一行（宿主、清標記、寫地圖、結束原因）。
+    codex = "--codex" in arguments
+    # 追蹤：壓縮後地圖沒交回來的原因還沒查明。開始先記一行（讀完事件、還沒讀設定、還沒載入
+    # 別的模組），結束再記一行（清標記、寫地圖、結束原因），兩行同一個 run：只有開始＝被砍或當掉。
+    run = trace_run()
     trace = {"outcome": "unknown", "cleared": False, "map": False, "lines": []}
     try:
         # 只寫檔，永遠不輸出：`--codex` 仍被接受（Codex 的 hooks.json 這樣掛），
         # 但兩邊宿主的輸出路徑都已經退役，所以兩條路徑跑的是同一段程式。
         event = read_event(sys.stdin)
-        _handle(event, _STARTED_AT, learn="--codex" not in arguments, trace=trace)
+        trace_hook("PreCompact", event, _STARTED_AT, codex=codex, phase="start", run=run)
+        _handle(event, _STARTED_AT, learn=not codex, trace=trace)
     except Exception as exc:
         trace["outcome"] = failure_reason(exc)
     trigger = (event.get("trigger") or event.get("triggered_by")) if isinstance(event, dict) else None
-    trace_hook("PreCompact", event, _STARTED_AT, codex="--codex" in arguments, trigger=trigger, **trace)
+    trace_hook("PreCompact", event, _STARTED_AT, codex=codex, phase="exit", run=run, trigger=trigger,
+               **trace)
     return 0
 
 

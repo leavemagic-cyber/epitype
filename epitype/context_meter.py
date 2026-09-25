@@ -2024,7 +2024,8 @@ def _selftest():
 
 
 def trace_command(count, path=None, out=print, now=None):
-    """印追蹤檔最後 count 行（唯讀）。第一行說檔在哪、追蹤開到哪一天。"""
+    """印追蹤檔最後 count 行（唯讀）。第一行說檔在哪、追蹤開到哪一天；開始與結束行依 run
+    配成一列，只有開始沒有結束的標出來（見 meter_trace.paired）。"""
     try:
         from . import meter_trace
     except ImportError:
@@ -2032,7 +2033,7 @@ def trace_command(count, path=None, out=print, now=None):
     target = Path(path) if path is not None else meter_trace.trace_path()
     state = "on" if meter_trace.enabled(now) else "off"
     out(f"# trace {target} ({state} until {meter_trace.until().isoformat()})")
-    for line in meter_trace.last(count, target):
+    for line in meter_trace.paired(meter_trace.last(count, target)):
         out(line)
     return 0
 

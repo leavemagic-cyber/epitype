@@ -168,6 +168,40 @@ def _release(descriptor):
         pass
 
 
+def new_run():
+    """一次掛鉤呼叫的編號：開始行與結束行帶同一個，CLI 用它配對。不載入 uuid（每次呼叫都付）。"""
+    return os.urandom(4).hex()
+
+
+def paired(lines):
+    """把 phase=start／exit 的兩行依 run 配成一列，其餘行原樣。回要印的字串，順序照檔案。
+
+    有開始沒結束＝掛鉤被宿主砍掉、當掉，或還在跑；連開始都沒有＝宿主根本沒叫它（或砍在
+    直譯器啟動、載入模組的那一段）。只配對傳進來的這幾行：結束行的開始行若在視窗外，標成
+    只有結束。"""
+    rows = []
+    for line in lines:
+        try:
+            value = json.loads(line)
+        except ValueError:
+            value = None
+        rows.append((line, value if isinstance(value, dict) else {}))
+    exits = {row.get("run") for _line, row in rows if row.get("phase") == "exit" and row.get("run")}
+    started = set()
+    shown = []
+    for line, row in rows:
+        phase, run = row.get("phase"), row.get("run")
+        if phase == "start" and run:
+            started.add(run)
+            if run not in exits:
+                shown.append("[START ONLY: killed, crashed or still running] " + line)
+        elif phase == "exit" and run:
+            shown.append(("[start+exit] " if run in started else "[exit only] ") + line)
+        else:
+            shown.append(line)
+    return shown
+
+
 def last(count, path=None):
     """最後 count 行，舊的在前（先換名的舊檔、再現檔）。兩個檔都有上限，所以整檔讀可以。"""
     target = Path(path) if path is not None else trace_path()
@@ -254,6 +288,25 @@ def _selftest():
                            and record("x", "not-a-dict", path=target, now="not-a-time", options={}) is False))
             checks.append(("last() on a missing file is empty", last(5, root / "absent.jsonl") == []))
 
+            # 配對：同一個 run 的開始與結束併成一列；只有開始的醒目標出；只有結束的、其他行照印。
+            sample = [
+                json.dumps({"event": "PreCompact", "phase": "start", "run": "a1"}),
+                json.dumps({"event": "PreCompact", "phase": "start", "run": "b2"}),
+                json.dumps({"event": "PreToolUse", "outcome": "meter-emitted"}),
+                json.dumps({"event": "PreCompact", "phase": "exit", "run": "a1", "outcome": "ok"}),
+                json.dumps({"event": "SessionStart", "phase": "exit", "run": "c3", "outcome": "ok"}),
+                "not json",
+            ]
+            shown = paired(sample)
+            checks.append(("start/exit lines pair by run; an unmatched start stands out",
+                           shown == [
+                               "[START ONLY: killed, crashed or still running] " + sample[1],
+                               sample[2],
+                               "[start+exit] " + sample[3],
+                               "[exit only] " + sample[4],
+                               "not json",
+                           ] and len(new_run()) == 8 and new_run() != new_run()))
+
             # 並行：8 條執行緒各寫 25 行（各自開檔、各自拿鎖），一行都不少、沒有一行被蓋壞。
             import threading
 
@@ -276,7 +329,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 7
+    total = 8
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
