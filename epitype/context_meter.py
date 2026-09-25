@@ -730,13 +730,14 @@ def codex_due(reading, marker_directory=None, environ=None, home=None, model=Non
 # ---------------------------------------------------------------- hook 端
 
 
-def notice(event, vault, marker_directory, options=None, environ=None, home=None):
+def notice(event, vault, marker_directory, options=None, environ=None, home=None, clock=None):
     """這次呼叫要附的那一行與要寫的標記名：(line, marker)；不該說就回 None。永不丟例外。
 
     標記由呼叫端在「真的輸出之後」用 `claim` 寫：沒送出去（預算擠掉、逾時）的提醒
     下一次還要再試。子代理的呼叫一律不說、也不寫標記——提醒被子代理吃掉，主線就永遠
     收不到了（Codex 的子代理有自己的 session_id 與 rollout，一樣帶 agent_id）。
-    宿主由 transcript 檔尾的列決定：Codex rollout 走 `codex_due`，其餘照 Claude 的門檻。"""
+    宿主由 transcript 檔尾的列決定：Codex rollout 走 `codex_due`，其餘照 Claude 的門檻。
+    `clock` 只給自測注入（見 `measure`）；hook 一律用真時鐘。"""
     try:
         if not isinstance(event, dict) or event.get("agent_id") or event.get("agentId"):
             return None
@@ -749,7 +750,7 @@ def notice(event, vault, marker_directory, options=None, environ=None, home=None
         options = memspec.config_options() if options is None else options
         if not enabled(options):
             return None
-        reading = measure(transcript)
+        reading = measure(transcript, clock=clock)
         if reading is None:
             return None
         if reading.host == memspec.CONTEXT_METER_HOST_CODEX:
@@ -797,13 +798,13 @@ def claim(marker_directory, marker):
     return True
 
 
-def record_autocompact(vault, transcript_path, environ=None, now=None, home=None):
+def record_autocompact(vault, transcript_path, environ=None, now=None, home=None, clock=None):
     """自動壓縮前的那一刻記下當下用量，給之後當門檻學。回寫入後的紀錄，或 None。
 
     只由 PreCompact 在 trigger=auto 時呼叫：手動壓縮的時點是人選的，不代表門檻。
     讀–追加–換名在同一把鎖裡：兩個場次同時壓縮時，沒有鎖的話後寫的會蓋掉先寫的那筆。
-    拿不到鎖就放棄這一筆（回 None）——少學一筆無妨，卡住壓縮不行。"""
-    tokens = current_tokens(transcript_path)
+    拿不到鎖就放棄這一筆（回 None）——少學一筆無妨，卡住壓縮不行。`clock` 只給自測注入。"""
+    tokens = current_tokens(transcript_path, clock=clock)
     if tokens is None:
         return None
     from datetime import datetime, timezone
@@ -1143,6 +1144,16 @@ def _selftest():
     from datetime import datetime, timedelta, timezone
 
     checks = []
+    # 讀法與判斷的題目一律用停住的時鐘：時間上限是 150 ms 的真時鐘，機器一忙，讀到一半就
+    # 「逾時回 None」，題目就跟著機器負載時好時壞（2026-09-25 併行實測 22/25）。時間上限的
+    # 行為另有題目用會前進的注入時鐘驗；效能題量的是本行程的 CPU 時間，不是牆鐘。
+
+    def frozen_clock():
+        return 0.0
+
+    def ticking_clock():
+        ticks = iter(range(1_000_000))
+        return lambda: float(next(ticks))
 
     def assistant(total, **flags):
         row = {"type": "assistant", "message": {"usage": {
@@ -1166,13 +1177,13 @@ def _selftest():
             # 1. 跨塊：最後一列是遠大於首塊的工具結果，用量在它前面。
             write(transcript, [assistant(1000), assistant(123456), tool_result(300 * 1024)])
             checks.append(("usage found across blocks behind a large tool result",
-                           current_tokens(transcript) == 123456))
+                           current_tokens(transcript, clock=frozen_clock) == 123456))
             # 用量那一列自己橫跨塊邊界（整列比首塊大）。
             big_assistant = json.loads(assistant(77777))
             big_assistant["message"]["content"] = "y" * (200 * 1024)
             write(transcript, [assistant(1000), json.dumps(big_assistant), tool_result(10)],
                   trailing_newline=False)
-            straddle = current_tokens(transcript)
+            straddle = current_tokens(transcript, clock=frozen_clock)
 
             # 2. sidechain／meta／compact summary 不算；加總為 0 的合成列不算。
             write(transcript, [assistant(50000), assistant(90000, isSidechain=True),
@@ -1180,20 +1191,20 @@ def _selftest():
                                json.dumps({"type": "assistant", "message": {"usage": {"input_tokens": 0}}})])
             checks.append(("sidechain, meta, compact-summary and zero rows are skipped; a row "
                            "straddling the block edge is still read",
-                           current_tokens(transcript) == 50000 and straddle == 77777))
+                           current_tokens(transcript, clock=frozen_clock) == 50000 and straddle == 77777))
 
             # 3. 檔不存在、沒有用量、壓縮邊界之後還沒有新用量：都回 None。
             write(transcript, [assistant(150000), json.dumps(
                 {"type": "system", "subtype": "compact_boundary",
                  "compactMetadata": {"trigger": "auto", "preTokens": 150000}}),
                 json.dumps({"type": "user", "isCompactSummary": True, "message": {"content": "s"}})])
-            after_boundary = current_tokens(transcript)
+            after_boundary = current_tokens(transcript, clock=frozen_clock)
             write(transcript, [tool_result(10)])
             checks.append(("missing file, no usage, and no usage since the compact boundary give None",
-                           current_tokens(root / "absent.jsonl") is None
-                           and current_tokens(transcript) is None
+                           current_tokens(root / "absent.jsonl", clock=frozen_clock) is None
+                           and current_tokens(transcript, clock=frozen_clock) is None
                            and after_boundary is None
-                           and current_tokens(None) is None))
+                           and current_tokens(None, clock=frozen_clock) is None))
 
             # 3b. 最後一行是 9 MiB 的工具結果（超過單行上限、也超過舊的 8 MiB 總量）：丟掉
             # 那一行的片段、繼續往前找，前一行的用量照樣讀得到（預設 150 ms 上限內）；
@@ -1202,8 +1213,8 @@ def _selftest():
             write(huge, [assistant(1000), assistant(345678), tool_result(9 * 1024 * 1024)])
             checks.append(("a 9 MiB tool-result last line is skipped whole and the usage before it is read "
                            "within the default limit; an exhausted time limit gives None",
-                           current_tokens(huge) == 345678
-                           and current_tokens(huge, time_limit=0) is None))
+                           current_tokens(huge, clock=frozen_clock) == 345678
+                           and current_tokens(huge, clock=ticking_clock()) is None))
 
             # 3c. 最後一行是超過單行上限的 assistant 列（欄位順序照真實 transcript：頂層
             # type 排在 message 之後）：最新用量讀不到就回 None，不拿前一筆 50,000 頂替。
@@ -1221,7 +1232,7 @@ def _selftest():
                 encoded = json.dumps(oversized_row, separators=separators)
                 write(oversized, [assistant(50000), encoded])
                 oversized_results.append(
-                    len(encoded) > memspec.CONTEXT_METER_LINE_MAX_BYTES and current_tokens(oversized) is None)
+                    len(encoded) > memspec.CONTEXT_METER_LINE_MAX_BYTES and current_tokens(oversized, clock=frozen_clock) is None)
             checks.append(("an oversized assistant last line gives None instead of the older usage",
                            oversized_results == [True, True]))
 
@@ -1271,10 +1282,10 @@ def _selftest():
             event = {"session_id": "s1", "transcript_path": os.fspath(transcript)}
             empty_vault = root / "empty-vault"
             empty_vault.mkdir()
-            unknown = notice(event, empty_vault, markers, options={}, environ=env92)
-            disabled = notice(event, vault, markers, environ=env92,
+            unknown = notice(event, empty_vault, markers, options={}, environ=env92, clock=frozen_clock)
+            disabled = notice(event, vault, markers, environ=env92, clock=frozen_clock,
                               options={"context_meter": {"enabled": False, "autocompact_tokens": 100000}})
-            garbage = notice(event, vault, markers, environ=env92,
+            garbage = notice(event, vault, markers, environ=env92, clock=frozen_clock,
                              options={"context_meter": {"enabled": "no", "autocompact_tokens": 100000}})
             checks.append(("unknown threshold, enabled=false and a garbage enabled value say nothing",
                            unknown is None and disabled is None and garbage is None
@@ -1285,7 +1296,8 @@ def _selftest():
 
             def call(total, directory=markers, extra=None):
                 write(transcript, [assistant(total)])
-                found = notice({**event, **(extra or {})}, vault, directory, options=options, environ=env92)
+                found = notice({**event, **(extra or {})}, vault, directory, options=options, environ=env92,
+                               clock=frozen_clock)
                 if found is not None:
                     claim(directory, found[1])
                 return found
@@ -1325,7 +1337,7 @@ def _selftest():
             rearmed = call(97500)
             scaled_options = {}
             write(transcript, [assistant(60000)])
-            scaled_line = notice({**event, "session_id": "s2"}, vault, root / "scaled",
+            scaled_line = notice({**event, "session_id": "s2"}, vault, root / "scaled", clock=frozen_clock,
                                  options=scaled_options, environ={memspec.CONTEXT_METER_PCT_ENV: "46"})
             checks.append(("cleared markers re-arm the reminder; a scaled threshold is labelled",
                            rearmed is not None and rearmed[1] == memspec.CONTEXT_METER_MARKER
@@ -1336,9 +1348,9 @@ def _selftest():
             # 9. 學習：record_autocompact 追加一筆、壞檔重建、只留 10 筆。
             state.write_text("{broken", encoding="utf-8")
             write(transcript, [assistant(150000)])
-            rebuilt = record_autocompact(vault, transcript, environ=env92)
+            rebuilt = record_autocompact(vault, transcript, environ=env92, clock=frozen_clock)
             for _ in range(12):
-                record_autocompact(vault, transcript, environ=env92)
+                record_autocompact(vault, transcript, environ=env92, clock=frozen_clock)
             kept = read_samples(state)
             checks.append(("autocompact learning rebuilds a broken state file and keeps the last 10",
                            rebuilt is not None and len(rebuilt) == 1
@@ -1362,7 +1374,7 @@ def _selftest():
                 "    time.sleep(0.001)\n"
                 "for _ in range(3):\n"
                 "    context_meter.record_autocompact(sys.argv[2], sys.argv[3],"
-                " environ={'" + memspec.CONTEXT_METER_PCT_ENV + "': '92'})\n"
+                " environ={'" + memspec.CONTEXT_METER_PCT_ENV + "': '92'}, clock=lambda: 0.0)\n"
             )
             repo_root = Path(__file__).resolve().parents[1]
             racers = []
@@ -1473,10 +1485,10 @@ def _selftest():
                             reasoning, call(), token_count(150000), output("x" * 4000),
                             '{"timestamp":"t","ordinal":99,"type":"response_item","payload":{"type":"function_c'],
                   trailing_newline=False)
-            mid_turn = measure(rollout)
+            mid_turn = measure(rollout, clock=frozen_clock)
             write(rollout, [meta, reasoning, call(), token_count(150000), message("assistant", "done"),
                             codex_row("turn_context", {"model": "gpt-small"}), message("user", "next")])
-            new_turn = measure(rollout)
+            new_turn = measure(rollout, clock=frozen_clock)
             checks.append(("a Codex rollout is read with Codex's own count; a row being written is ignored; "
                            "the Claude-only reader returns None for it",
                            mid_turn is not None and mid_turn.host == memspec.CONTEXT_METER_HOST_CODEX
@@ -1484,7 +1496,7 @@ def _selftest():
                            and mid_turn.model is None
                            and new_turn is not None and new_turn.tokens == 150001
                            and new_turn.model == "gpt-small"
-                           and current_tokens(rollout) is None))
+                           and current_tokens(rollout, clock=frozen_clock) is None))
 
             # C2. 模型可見位元組：圖片 7,373（原尺寸取上限 40,000）、文字照 UTF-8、音訊估不出來。
             image = {"type": "function_call_output", "call_id": "ab", "output": [
@@ -1504,13 +1516,13 @@ def _selftest():
             # C3. 壓縮邊界比最新 token_count 新＝不知道；壓縮後重算的 token_count 之後只算邊界之後
             # 的項；info 是 null 的 token_count 略過。
             write(rollout, [meta, token_count(200000), call(), compacted])
-            just_compacted = measure(rollout)
+            just_compacted = measure(rollout, clock=frozen_clock)
             write(rollout, [meta, token_count(200000), call(), compacted, token_count(30000),
                             message("user", "hello world!")])
-            after_compaction = measure(rollout)
+            after_compaction = measure(rollout, clock=frozen_clock)
             write(rollout, [meta, token_count(120000), call(),
                             codex_row("event_msg", {"type": "token_count", "info": None})])
-            null_info = measure(rollout)
+            null_info = measure(rollout, clock=frozen_clock)
             checks.append(("a compacted row newer than the latest token_count gives None; after it only the "
                            "items past the boundary count; a null-info token_count is skipped",
                            just_compacted is None
@@ -1534,7 +1546,7 @@ def _selftest():
                 if expected == 100000 and "custom_tool_call" in last:
                     rows = [meta, *padding, token_count(100000), last]
                 write(rollout, rows)
-                found = measure(rollout)
+                found = measure(rollout, clock=frozen_clock)
                 oversized_cases.append((found.tokens if found is not None else None) == expected)
             checks.append(("oversized Codex rows are judged by their head: model item anchors, tool output is "
                            "unknown, compacted is a boundary, events are skipped", oversized_cases == [True] * 4))
@@ -1602,7 +1614,7 @@ def _selftest():
                 write(rollout, [meta, reasoning, call(), token_count(total)])
                 found = notice({"session_id": session, "transcript_path": os.fspath(rollout),
                                 "model": model, **extra}, vault, directory, options=claude_override,
-                               environ=base_env)
+                               environ=base_env, clock=frozen_clock)
                 if found is not None:
                     claim(directory, found[1])
                 return found
@@ -1649,7 +1661,7 @@ def _selftest():
             learn_vault.mkdir()
             write(rollout, [meta, reasoning, call(), token_count(205000)])
             checks.append(("record_autocompact learns nothing from a Codex rollout",
-                           record_autocompact(learn_vault, rollout, environ=env92) is None
+                           record_autocompact(learn_vault, rollout, environ=env92, clock=frozen_clock) is None
                            and not state_path(learn_vault).exists()))
 
             # C9. 重播：第一個用量 ≥ 壓縮點－H 的 hook 點之後還要有一次取樣才算來得及。
@@ -1680,13 +1692,13 @@ def _selftest():
                 for row in (reasoning, call(), token_count(180000),
                             codex_row("event_msg", {"type": "item_completed", "item": "i" * (2 * 1024 * 1024)})):
                     stream.write((row + "\n").encode("utf-8"))
-            started = time.perf_counter()
-            large_reading = measure(large_rollout)
-            elapsed = time.perf_counter() - started
+            wall, started = time.perf_counter(), time.process_time()
+            large_reading = measure(large_rollout, clock=frozen_clock)
+            cpu, wall = time.process_time() - started, time.perf_counter() - wall
             print(f"context_meter: measure on a {large_rollout.stat().st_size / 1e6:.1f} MB Codex rollout "
-                  f"took {elapsed * 1000:.1f} ms")
+                  f"took {cpu * 1000:.1f} ms CPU ({wall * 1000:.1f} ms wall)")
             checks.append(("measure on a 20 MB Codex rollout ending in a 2 MB event row answers under 300 ms",
-                           large_reading is not None and large_reading.tokens == 180000 and elapsed < 0.3))
+                           large_reading is not None and large_reading.tokens == 180000 and cpu < 0.3))
 
             # 11. 效能：50 MB transcript、最後一列是 2 MB 工具結果，hook 只讀檔尾。
             large = root / "large.jsonl"
@@ -1697,20 +1709,19 @@ def _selftest():
                     stream.write(filler_block)
                 stream.write((assistant(222222) + "\n").encode("utf-8"))
                 stream.write((tool_result(2 * 1024 * 1024) + "\n").encode("utf-8"))
-            started = time.perf_counter()
-            measured = current_tokens(large)  # 預設的 150 ms 上限：逾時就不會是 222222
-            elapsed = time.perf_counter() - started
+            wall, started = time.perf_counter(), time.process_time()
+            measured = current_tokens(large, clock=frozen_clock)
+            cpu, wall = time.process_time() - started, time.perf_counter() - wall
             print(f"context_meter: current_tokens on a {large.stat().st_size / 1e6:.1f} MB "
-                  f"transcript took {elapsed * 1000:.1f} ms")
-            # 時間上限的回退用注入的時鐘驗：每讀一次前進 1 秒，預設 150 ms 在第一塊之前就用完；
-            # 時鐘不動就永遠不逾時。不賭 Windows 計時器的解析度。
-            ticks = iter(range(1_000_000))
-            exhausted = current_tokens(large, clock=lambda: float(next(ticks)))
-            frozen = current_tokens(large, clock=lambda: 0.0)
+                  f"transcript took {cpu * 1000:.1f} ms CPU ({wall * 1000:.1f} ms wall)")
+            # 時間上限的回退用注入的時鐘驗：每讀一次前進 1 秒，預設 150 ms 在第一塊之前就用完。
+            # 不賭 Windows 計時器的解析度，也不賭這台機器此刻忙不忙。
+            exhausted = current_tokens(large, clock=ticking_clock())
             checks.append(("current_tokens on a 50 MB transcript ending in a 2 MB tool result answers inside the "
                            "default 150 ms limit and under 300 ms; an exhausted default limit gives None",
                            measured == 222222 and large.stat().st_size >= 50 * 1000 * 1000
-                           and elapsed < 0.3 and exhausted is None and frozen == 222222))
+                           and cpu < memspec.CONTEXT_METER_TAIL_SECONDS and cpu < 0.3
+                           and exhausted is None))
     except Exception as exc:
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
