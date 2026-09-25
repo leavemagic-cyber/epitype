@@ -1143,17 +1143,66 @@ def _selftest():
     import time
     from datetime import datetime, timedelta, timezone
 
+    import builtins
+    import types
+
     checks = []
     # 讀法與判斷的題目一律用停住的時鐘：時間上限是 150 ms 的真時鐘，機器一忙，讀到一半就
-    # 「逾時回 None」，題目就跟著機器負載時好時壞（2026-09-25 併行實測 22/25）。時間上限的
-    # 行為另有題目用會前進的注入時鐘驗；效能題量的是本行程的 CPU 時間，不是牆鐘。
+    # 「逾時回 None」，題目就跟著機器負載時好時壞（2026-09-25 併行實測 22/25）。
+    # 「hook 只讀檔尾、預設期限內拿得到用量、過了期限就停」不量牆鐘，改用兩個替身驗：
+    # 計數檔（讀了幾次、幾位元組）與每讀一次就前進的時鐘——後者換掉的是模組的
+    # time.monotonic，走的是沒注入時鐘、沒給 time_limit 的正式預設路徑。
 
     def frozen_clock():
         return 0.0
 
-    def ticking_clock():
-        ticks = iter(range(1_000_000))
-        return lambda: float(next(ticks))
+    class CountingFile:
+        """包住真的檔：記下 read 了幾次、拿到幾位元組。"""
+
+        def __init__(self, raw, meter):
+            self._raw, self._meter = raw, meter
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exception):
+            self._raw.close()
+
+        def seek(self, *args):
+            return self._raw.seek(*args)
+
+        def tell(self):
+            return self._raw.tell()
+
+        def read(self, size=-1):
+            data = self._raw.read(size)
+            self._meter["reads"] += 1
+            self._meter["bytes"] += len(data)
+            return data
+
+    def metered(call, step=None):
+        """在計數檔底下跑 call()，回 (結果, 讀了幾次, 讀了幾位元組)。
+
+        step 不是 None：模組的 time.monotonic 換成「每讀一次前進 step 秒」，call 走的是
+        沒注入時鐘的預設路徑；step=0.1 時期限（0.15 s）在第二塊讀完後跨過，不是第一塊之前。"""
+        meter = {"reads": 0, "bytes": 0}
+        module = globals()
+        saved_time = module["time"]
+        module["open"] = lambda path, mode="r", *rest, **named: CountingFile(
+            builtins.open(path, mode, *rest, **named), meter)
+        if step is not None:
+            module["time"] = types.SimpleNamespace(monotonic=lambda: meter["reads"] * step)
+        try:
+            value = call()
+        finally:
+            module.pop("open", None)
+            module["time"] = saved_time
+        return value, meter["reads"], meter["bytes"]
+
+    crossing_step = 0.1  # 兩塊之後跨過 0.15 s
+    roomy_step = 0.001  # 150 次讀取之內都不逾時
+    first_block = memspec.CONTEXT_METER_TAIL_FIRST_BYTES
+    max_block = memspec.CONTEXT_METER_TAIL_MAX_BLOCK_BYTES
 
     def assistant(total, **flags):
         row = {"type": "assistant", "message": {"usage": {
@@ -1207,14 +1256,23 @@ def _selftest():
                            and current_tokens(None, clock=frozen_clock) is None))
 
             # 3b. 最後一行是 9 MiB 的工具結果（超過單行上限、也超過舊的 8 MiB 總量）：丟掉
-            # 那一行的片段、繼續往前找，前一行的用量照樣讀得到（預設 150 ms 上限內）；
-            # 時間上限到了回 None。
+            # 那一行的片段、繼續往前找，前一行的用量照樣讀得到。前面墊 4 MB：讀的位元組不超過
+            # 「用量那一列到檔尾」再多一塊，絕不是整檔；預設路徑拿得到，期限在讀到一半跨過就停。
             huge = root / "huge.jsonl"
-            write(huge, [assistant(1000), assistant(345678), tool_result(9 * 1024 * 1024)])
+            huge_tail = [assistant(345678), tool_result(9 * 1024 * 1024)]
+            write(huge, [assistant(1000)] + [tool_result(4000)] * 1000 + huge_tail)
+            huge_tail_bytes = len(("\n".join(huge_tail) + "\n").encode("utf-8"))
+            huge_size = huge.stat().st_size
+            huge_value, _reads, huge_bytes = metered(lambda: current_tokens(huge, clock=frozen_clock))
+            huge_default, _reads, _bytes = metered(lambda: current_tokens(huge), roomy_step)
+            huge_cut, cut_reads, cut_bytes = metered(lambda: current_tokens(huge), crossing_step)
             checks.append(("a 9 MiB tool-result last line is skipped whole and the usage before it is read "
-                           "within the default limit; an exhausted time limit gives None",
-                           current_tokens(huge, clock=frozen_clock) == 345678
-                           and current_tokens(huge, clock=ticking_clock()) is None))
+                           "on the default path, reading only the tail; the default deadline crossed "
+                           "mid-read gives None",
+                           huge_value == 345678 and huge_default == 345678
+                           and huge_bytes <= huge_tail_bytes + max_block
+                           and huge_bytes < huge_size and huge_size - huge_tail_bytes > 4 * 1000 * 1000
+                           and huge_cut is None and cut_reads == 2 and cut_bytes == 3 * first_block))
 
             # 3c. 最後一行是超過單行上限的 assistant 列（欄位順序照真實 transcript：頂層
             # type 排在 message 之後）：最新用量讀不到就回 None，不拿前一筆 50,000 頂替。
@@ -1683,22 +1741,50 @@ def _selftest():
                            and sorted(item.name for item in replay_root.iterdir())
                            == ["rollout-2026-09-25T00-00-00-r1.jsonl"]))
 
-            # C10. 效能：20 MB rollout、最後一列是 2 MB 的事件列，hook 只讀檔尾。
+            # C10. 50 MB rollout、最後一列是 2 MB 的事件列：hook 只讀檔尾（讀的位元組不超過「最後
+            # 一個模型產出項到檔尾」再多一塊）；預設路徑拿得到用量，期限在讀到一半跨過就停。
             large_rollout = root / "rollout-large.jsonl"
             filler_row = (output("f" * 2000) + "\n").encode("utf-8")
+            rollout_tail = [call(), token_count(180000),
+                            codex_row("event_msg", {"type": "item_completed", "item": "i" * (2 * 1024 * 1024)})]
             with large_rollout.open("wb") as stream:
                 stream.write((meta + "\n").encode("utf-8"))
-                stream.write(filler_row * (20 * 1024 * 1024 // len(filler_row)))
-                for row in (reasoning, call(), token_count(180000),
-                            codex_row("event_msg", {"type": "item_completed", "item": "i" * (2 * 1024 * 1024)})):
+                stream.write(filler_row * (50 * 1024 * 1024 // len(filler_row)))
+                stream.write((reasoning + "\n").encode("utf-8"))
+                for row in rollout_tail:
                     stream.write((row + "\n").encode("utf-8"))
-            wall, started = time.perf_counter(), time.process_time()
-            large_reading = measure(large_rollout, clock=frozen_clock)
-            cpu, wall = time.process_time() - started, time.perf_counter() - wall
-            print(f"context_meter: measure on a {large_rollout.stat().st_size / 1e6:.1f} MB Codex rollout "
-                  f"took {cpu * 1000:.1f} ms CPU ({wall * 1000:.1f} ms wall)")
-            checks.append(("measure on a 20 MB Codex rollout ending in a 2 MB event row answers under 300 ms",
-                           large_reading is not None and large_reading.tokens == 180000 and cpu < 0.3))
+            rollout_tail_bytes = len(("\n".join(rollout_tail) + "\n").encode("utf-8"))
+            rollout_size = large_rollout.stat().st_size
+            started = time.perf_counter()
+            large_reading, _reads, rollout_bytes = metered(lambda: measure(large_rollout, clock=frozen_clock))
+            print(f"context_meter: measure on a {rollout_size / 1e6:.1f} MB Codex rollout read "
+                  f"{rollout_bytes} bytes in {(time.perf_counter() - started) * 1000:.1f} ms (not asserted)")
+            rollout_default, _reads, _bytes = metered(lambda: measure(large_rollout), roomy_step)
+            rollout_cut, cut_reads, cut_bytes = metered(lambda: measure(large_rollout), crossing_step)
+            checks.append(("measure on a 50 MB Codex rollout ending in a 2 MB event row reads only the tail and "
+                           "answers on the default path; the default deadline crossed mid-read gives None",
+                           large_reading is not None and large_reading.tokens == 180000
+                           and rollout_default is not None and rollout_default.tokens == 180000
+                           and rollout_size >= 50 * 1000 * 1000
+                           and rollout_bytes <= rollout_tail_bytes + max_block and rollout_bytes < rollout_size
+                           and rollout_cut is None and cut_reads == 2 and cut_bytes == 3 * first_block))
+
+            # C10b. 同一條預設路徑走 notice（Codex）：期限在讀到一半跨過就不說、不寫標記；
+            # 沒跨過就說那一行。
+            codex_event = {"session_id": "dp-codex", "transcript_path": os.fspath(large_rollout), "model": "gpt-x"}
+            codex_cut_dir, codex_ok_dir = root / "dp-codex-cut", root / "dp-codex-ok"
+            codex_cut, _reads, _bytes = metered(
+                lambda: notice(codex_event, vault, codex_cut_dir, options={}, environ=base_env), crossing_step)
+            codex_ok, _reads, _bytes = metered(
+                lambda: notice(codex_event, vault, codex_ok_dir, options={}, environ=base_env), roomy_step)
+            checks.append(("notice for Codex on the default path says nothing when the deadline is crossed "
+                           "mid-read and says its line when it is not",
+                           codex_cut is None
+                           and not (codex_cut_dir / memspec.CONTEXT_METER_MARKER).exists()
+                           and codex_ok is not None
+                           and codex_ok[0] == memspec.CONTEXT_METER_CODEX_NOTICE.format(
+                               cur=180, left=30,
+                               path=os.fspath(_compact_map.handoff_destination(vault, "dp-codex", large_rollout)))))
 
             # 11. 效能：50 MB transcript、最後一列是 2 MB 工具結果，hook 只讀檔尾。
             large = root / "large.jsonl"
@@ -1709,24 +1795,49 @@ def _selftest():
                     stream.write(filler_block)
                 stream.write((assistant(222222) + "\n").encode("utf-8"))
                 stream.write((tool_result(2 * 1024 * 1024) + "\n").encode("utf-8"))
-            wall, started = time.perf_counter(), time.process_time()
-            measured = current_tokens(large, clock=frozen_clock)
-            cpu, wall = time.process_time() - started, time.perf_counter() - wall
-            print(f"context_meter: current_tokens on a {large.stat().st_size / 1e6:.1f} MB "
-                  f"transcript took {cpu * 1000:.1f} ms CPU ({wall * 1000:.1f} ms wall)")
-            # 時間上限的回退用注入的時鐘驗：每讀一次前進 1 秒，預設 150 ms 在第一塊之前就用完。
-            # 不賭 Windows 計時器的解析度，也不賭這台機器此刻忙不忙。
-            exhausted = current_tokens(large, clock=ticking_clock())
-            checks.append(("current_tokens on a 50 MB transcript ending in a 2 MB tool result answers inside the "
-                           "default 150 ms limit and under 300 ms; an exhausted default limit gives None",
-                           measured == 222222 and large.stat().st_size >= 50 * 1000 * 1000
-                           and cpu < memspec.CONTEXT_METER_TAIL_SECONDS and cpu < 0.3
-                           and exhausted is None))
+            large_tail_bytes = len((assistant(222222) + "\n" + tool_result(2 * 1024 * 1024) + "\n").encode("utf-8"))
+            large_size = large.stat().st_size
+            started = time.perf_counter()
+            measured, _reads, large_bytes = metered(lambda: current_tokens(large, clock=frozen_clock))
+            print(f"context_meter: current_tokens on a {large_size / 1e6:.1f} MB transcript read "
+                  f"{large_bytes} bytes in {(time.perf_counter() - started) * 1000:.1f} ms (not asserted)")
+            # 預設路徑：沒注入時鐘、沒給 time_limit。期限沒跨過就拿得到用量；每讀一次前進 0.1 s
+            # 時，讀完第二塊就跨過 0.15 s，停下來回 None——讀了剛好兩塊，證明期限是 0.15 s、
+            # 是在讀到一半時跨過，不是在第一塊之前。
+            default_value, _reads, _bytes = metered(lambda: current_tokens(large), roomy_step)
+            cut_value, cut_reads, cut_bytes = metered(lambda: current_tokens(large), crossing_step)
+            checks.append(("current_tokens on a 50 MB transcript ending in a 2 MB tool result reads only the tail "
+                           "and answers on the default path with the 0.15 s limit; the default deadline crossed "
+                           "mid-read gives None",
+                           measured == 222222 and default_value == 222222
+                           and large_size >= 50 * 1000 * 1000
+                           and large_bytes <= large_tail_bytes + max_block and large_bytes < large_size
+                           and large_bytes <= memspec.CONTEXT_METER_TAIL_MAX_BYTES
+                           and memspec.CONTEXT_METER_TAIL_SECONDS == 0.15
+                           and cut_value is None and cut_reads == 2 and cut_bytes == 3 * first_block))
+
+            # 11b. 同一條預設路徑走 notice（Claude）：期限在讀到一半跨過就不說、不寫標記；
+            # 沒跨過就說那一行。
+            claude_event = {"session_id": "dp-claude", "transcript_path": os.fspath(large)}
+            claude_options = {"context_meter": {"autocompact_tokens": 225000}}
+            claude_cut_dir, claude_ok_dir = root / "dp-claude-cut", root / "dp-claude-ok"
+            claude_cut, _reads, _bytes = metered(
+                lambda: notice(claude_event, vault, claude_cut_dir, options=claude_options), crossing_step)
+            claude_ok, _reads, _bytes = metered(
+                lambda: notice(claude_event, vault, claude_ok_dir, options=claude_options), roomy_step)
+            checks.append(("notice for Claude on the default path says nothing when the deadline is crossed "
+                           "mid-read and says its line when it is not",
+                           claude_cut is None
+                           and not (claude_cut_dir / memspec.CONTEXT_METER_MARKER).exists()
+                           and claude_ok is not None
+                           and claude_ok[0] == render(
+                               222222, 225000, memspec.CONTEXT_METER_SOURCE_OVERRIDE,
+                               _compact_map.handoff_destination(vault, "dp-claude", large))))
     except Exception as exc:
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 25
+    total = 27
     status_word = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status_word} {passed}/{total}")
     if status_word != "PASS":
