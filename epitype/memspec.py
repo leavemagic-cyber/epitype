@@ -2940,7 +2940,8 @@ RECURRENCE_GATE_PREVENTIVE_WINDOW = 24
 # 這條與下面的 RECURRENCE_GATE_LEAD_PATTERN 都是拿 `match(line, pos)` 從行中間接著比，
 # 不能寫 `^`：`^` 只認整行開頭，帶 pos 的 match 永遠比不到。
 RECURRENCE_GATE_CONDITIONAL_AFTER_PATTERN = r"\s*(?:時|的話)"
-# 日期緊貼在標記前面（「2026-09-25 又犯」）就是在記某一天發生的事，條件詞救不了它。
+# 日期緊貼在標記前面（「2026-09-25 又犯」）就是在記某一天發生的事，前置條件詞與後接「就／則」
+# 救不了它；只有標記後緊接「時／的話」（「2026-09-25 再犯時先補…」）先判成條件句。
 RECURRENCE_GATE_DATED_MARKER_PATTERN = (
     r"(?:\d{4}[-/.]\d{1,2}[-/.]\d{1,2}|(?<!\d)\d{1,2}[-/]\d{1,2}|\d{1,2}\s*月\s*\d{1,2}\s*日|今天)"
     r"[\s,，:：]*$"

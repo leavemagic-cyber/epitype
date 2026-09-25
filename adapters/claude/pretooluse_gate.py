@@ -483,19 +483,21 @@ def _incident_line(line):
     ordinary words. Two shapes count — a marker and a date on the same line, or a bold
     or heading line that opens with the marker. A marker right after a preventive word
     never counts, and neither does a conditional one (「再犯時先補 forbidden」): that is
-    the rule's own text about what to do next time. A date right before the marker
-    (「2026-09-25 又犯」) names a day it happened, so no condition word excuses it."""
+    the rule's own text about what to do next time. 「時／的話」 right after the marker is
+    checked before the date, so 「2026-09-25 再犯時先補…」 is still a rule; the cost is that
+    a narrative phrased 「那天又犯時…」 passes. Otherwise a date right before the marker
+    (「2026-09-25 又犯就…」) names a day it happened, and a trailing 就／則 does not excuse it."""
     hits = []
     for hit in memspec.RECURRENCE_GATE_MARKER_REGEX.finditer(line):
         window = line[max(0, hit.start() - memspec.RECURRENCE_GATE_PREVENTIVE_WINDOW):hit.start()]
         if memspec.RECURRENCE_GATE_PREVENTIVE_REGEX.search(window) is not None:
             continue
+        if memspec.RECURRENCE_GATE_CONDITIONAL_AFTER_REGEX.match(line, hit.end()) is not None:
+            continue
         if memspec.RECURRENCE_GATE_DATED_MARKER_REGEX.search(window) is not None:
             hits.append(hit)
             continue
         if memspec.RECURRENCE_GATE_CONDITIONAL_BEFORE_REGEX.search(window) is not None:
-            continue
-        if memspec.RECURRENCE_GATE_CONDITIONAL_AFTER_REGEX.match(line, hit.end()) is not None:
             continue
         hits.append(hit)
     if not hits:
@@ -2153,13 +2155,15 @@ def _selftest():
                 "2026-09-25 起的處理規則：再犯時先補 forbidden。",
                 "If this recurs after 2026-09-25, add a forbidden pattern before anything else.",
                 "- 如果 2026-10-01 之後又犯，就改修 Epitype 本身。",
+                "2026-09-25 再犯時先補 forbidden。",
+                "2026-09-25 再犯的話先補 forbidden。",
             )):
                 conditional_card = write_vault / f"feedback-conditional-{index}.md"
                 conditional_card.write_text(
                     recurrence_card(f"feedback-conditional-{index}"), encoding="utf-8")
                 conditional.append(append_incident(conditional_card, text))
             checks.append((
-                "條件句（「再犯時先補 forbidden」「如果…又犯，就」「if this recurs」）是規則正文，放行",
+                "條件句（「再犯時先補 forbidden」「如果…又犯，就」「if this recurs」，日期緊貼標記但後接「時／的話」亦同）是規則正文，放行",
                 all(
                     result.returncode == 0 and out.get("permissionDecision") != "deny"
                     for result, out in conditional
