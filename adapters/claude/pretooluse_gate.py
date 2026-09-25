@@ -993,7 +993,7 @@ def _write_review(event, tool_name, tool_input, config, started_at):
 def _context_meter_line(event, config, started_at):
     """(用量計那一行, (標記目錄, 標記名))，或 None。
 
-    標記放在喚回標記目錄：PreCompact 清喚回標記時一起清掉，壓縮後兩段重新武裝。
+    標記放在喚回標記目錄：PreCompact 清喚回標記時一起清掉，壓縮後重新武裝。
     子代理的呼叫由 context_meter.notice 擋掉——提醒被子代理吃掉，主線就永遠收不到。"""
     if config is None or expired(started_at):
         return None
@@ -1764,7 +1764,7 @@ def _selftest():
                 and bare_write_out.get("permissionDecision") == "deny",
             ))
 
-            # 用量計：放行路徑在 0.66T 附一行含交接檔路徑的提醒，同一段只說一次；
+            # 用量計：放行路徑跨過 0.97T 附一行含交接檔路徑的提醒，同一個壓縮週期只說一次；
             # 子代理的呼叫不說、不寫標記，之後主線照樣收得到。
             from epitype import compact_map
 
@@ -1778,7 +1778,7 @@ def _selftest():
             meter_config.write_text(json.dumps(meter_options), encoding="utf-8")
             meter_transcript = root / "meter.jsonl"
             meter_transcript.write_text(json.dumps({"type": "assistant", "message": {"usage": {
-                "input_tokens": 60000, "cache_creation_input_tokens": 1000,
+                "input_tokens": 92000, "cache_creation_input_tokens": 1000,
                 "cache_read_input_tokens": 5000}}}) + "\n", encoding="utf-8")
 
             def meter_call(session_id, **extra):
@@ -1798,11 +1798,11 @@ def _selftest():
             first_meter, first_context = meter_call("meter-main")
             second_meter, second_context = meter_call("meter-main")
             checks.append((
-                "at 0.66 of the threshold the first allowed call carries the handoff line, the next one nothing",
+                "at 0.98 of the threshold the first allowed call carries the handoff line, the next one nothing",
                 first_meter.returncode == 0
                 and "permissionDecision" not in first_meter.stdout
                 and main_handoff in first_context
-                and "66k" in first_context
+                and "98k" in first_context
                 and second_meter.returncode == 0
                 and not second_meter.stdout.strip()
                 and not second_context,
@@ -1811,7 +1811,7 @@ def _selftest():
                 compact_map.handoff_destination(meter_vault, "meter-sub", meter_transcript))
             by_agent, agent_context = meter_call("meter-sub", agent_id="agent-1")
             agent_left_no_marker = not (
-                recall_marker_directory("meter-sub") / memspec.CONTEXT_METER_MARKER_A).exists()
+                recall_marker_directory("meter-sub") / memspec.CONTEXT_METER_MARKER).exists()
             after_agent, after_context = meter_call("meter-sub")
             checks.append((
                 "a subagent's call says nothing and claims nothing, so the main thread still gets the line",

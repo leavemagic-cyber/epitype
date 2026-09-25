@@ -3,7 +3,7 @@ import sys; sys.dont_write_bytecode = True; [getattr(stream, "reconfigure", lamb
 
 模型看不到自己的 context 用量，也無法自己觸發壓縮；PreCompact 的文字到不了模型
 （2026-08-19 實證）。所以只能在壓縮「之前」、由每次都會跑的 hook（PreToolUse、
-UserPromptSubmit）在跨過門檻的那一次附一行字。這支模組只算數字與決定要不要說，
+UserPromptSubmit）在跨過學到的壓縮點 97% 的那一次附一行字，提醒模型自己把交接落檔。這支模組只算數字與決定要不要說，
 輸出與標記的時機歸 adapter：先輸出、後寫標記，沒送出去的提醒下次再試。
 
 門檻不猜（見 memspec 的 CONTEXT_METER 段落）：設定覆寫 → 學到的自動壓縮用量 → 都沒有
@@ -13,6 +13,7 @@ UserPromptSubmit）在跨過門檻的那一次附一行字。這支模組只算�
 import json
 import os
 from pathlib import Path
+import time
 
 try:
     from . import memspec
@@ -72,11 +73,16 @@ def _scan_lines(lines):
     return False, None
 
 
-def current_tokens(transcript_path):
+def current_tokens(transcript_path, time_limit=None):
     """這場目前的 context 用量（最後一筆主鏈 assistant 的三欄加總）；找不到回 None。
 
-    從檔尾反向分塊讀：首塊 64 KiB、逐次加倍，總共最多 8 MiB。最後一行可能是好幾 MB
-    的工具結果，所以一行跨好幾塊也要接得起來。任何讀檔錯誤都回 None（hook 不得因此出錯）。"""
+    從檔尾反向分塊讀：首塊 64 KiB、逐次加倍到 1 MiB 為止，總共最多 64 MiB，而且有
+    時間上限（預設 150 ms，到了就回 None：hook 每次工具呼叫都要付這一份）。最後一行
+    可能是好幾 MB 的工具結果：一行超過單行上限還沒看到開頭，就把累積的片段丟掉、只
+    繼續往前找換行——那一行本來就不是用量列，記憶體不跟著它長。任何讀檔錯誤都回 None。"""
+    line_max = memspec.CONTEXT_METER_LINE_MAX_BYTES
+    limit = memspec.CONTEXT_METER_TAIL_SECONDS if time_limit is None else time_limit
+    deadline = time.monotonic() + limit
     try:
         stream = open(transcript_path, "rb")
     except (OSError, TypeError, ValueError):
@@ -88,24 +94,38 @@ def current_tokens(transcript_path):
             block = memspec.CONTEXT_METER_TAIL_FIRST_BYTES
             budget = memspec.CONTEXT_METER_TAIL_MAX_BYTES
             pending = b""  # 一行的後半段：它的開頭還在更前面、尚未讀到。
+            oversized = False  # pending 那一行已超過單行上限、片段已丟：它的開頭也不要。
             while end > 0 and budget > 0:
+                if time.monotonic() > deadline:
+                    return None
                 size = min(block, end, budget)
                 start = end - size
                 stream.seek(start)
-                data = stream.read(size) + pending
+                chunk = stream.read(size)
                 budget -= size
-                if start > 0:
-                    cut = data.find(b"\n")
-                    if cut < 0:
-                        pending, end, block = data, start, block * 2
-                        continue
-                    pending, complete = data[:cut], data[cut + 1:]
+                end = start
+                block = min(block * 2, memspec.CONTEXT_METER_TAIL_MAX_BLOCK_BYTES)
+                # 讀到檔頭時，第 0 個位元組就是一行的開頭：整塊都是完整的行。
+                cut = chunk.find(b"\n") if start > 0 else -1
+                if start > 0 and cut < 0:
+                    if not oversized:
+                        pending = chunk + pending
+                        if len(pending) > line_max:
+                            pending, oversized = b"", True
+                    continue
+                body = chunk[cut + 1:]
+                if oversized:
+                    last = body.rfind(b"\n")
+                    complete = body[:last + 1] if last >= 0 else b""
                 else:
-                    pending, complete = b"", data
+                    complete = body + pending
                 found, value = _scan_lines(complete.split(b"\n"))
                 if found:
                     return value
-                end, block = start, block * 2
+                pending = chunk[:cut] if start > 0 else b""
+                oversized = len(pending) > line_max
+                if oversized:
+                    pending = b""
         except OSError:
             return None
     return None
@@ -195,21 +215,21 @@ def _median(values):
     return (ordered[middle - 1] + ordered[middle]) / 2
 
 
-def learned_threshold(samples, current_pct):
+def learned_threshold(samples, pct_now):
     """(門檻, 來源) 或 (None, None)。取最近 5 筆，逐筆換算到目前的 pct 再取中位數。
 
     紀錄當時的 pct 跟現在一樣：原值。兩邊都是 1–100 的數字但不同：按比例換算。
     有一邊不是數字（例如一邊沒設）：那一筆換算不了，丟掉——不拿不同設定下的數字硬套。"""
-    current_pct = "" if current_pct is None else str(current_pct).strip()
+    pct_now = "" if pct_now is None else str(pct_now).strip()
     values = []
     scaled = False
     for sample in list(samples)[-memspec.CONTEXT_METER_STATE_MEDIAN_OF:]:
         recorded = sample.get("pct", "").strip()
         tokens = sample["tokens"]
-        if recorded == current_pct:
+        if recorded == pct_now:
             values.append(tokens)
             continue
-        old, new = _pct(recorded), _pct(current_pct)
+        old, new = _pct(recorded), _pct(pct_now)
         if old is None or new is None:
             continue
         if old != new:
@@ -221,7 +241,20 @@ def learned_threshold(samples, current_pct):
     return int(_median(values)), source
 
 
-def threshold(options, state_file, environ=None):
+def current_pct(environ=None, home=None):
+    """宿主現在用的自動壓縮百分比字串（可能是空字串）。
+
+    先看行程環境變數；沒有這個變數時退到宿主設定 `~/.claude/settings.json` 的 `env`
+    （讀不到當空）。hook 行程不一定繼承得到設定裡的 env：只看環境變數的話，學到的
+    pct=92 會跟 hook 看到的空字串對不上，整個用量計就安靜地不提醒。"""
+    environ = os.environ if environ is None else environ
+    value = environ.get(memspec.CONTEXT_METER_PCT_ENV)
+    if value is not None:
+        return str(value).strip()
+    return (_settings_pct(home) or "").strip()
+
+
+def threshold(options, state_file, environ=None, home=None):
     """(自動壓縮門檻 tokens, 來源)；不知道就 (None, None)——不知道就不提醒。"""
     section = _section(options)
     if section is None:
@@ -229,20 +262,20 @@ def threshold(options, state_file, environ=None):
     override = section.get(memspec.CONTEXT_METER_OVERRIDE_FIELD)
     if _positive_int(override):
         return override, memspec.CONTEXT_METER_SOURCE_OVERRIDE
-    environ = os.environ if environ is None else environ
     if state_file is None:
         return None, None
-    return learned_threshold(read_samples(state_file), environ.get(memspec.CONTEXT_METER_PCT_ENV, ""))
+    samples = read_samples(state_file)
+    if not samples:
+        return None, None
+    return learned_threshold(samples, current_pct(environ, home))
 
 
 def stage(current, limit):
-    """'B'、'A' 或 None。一次跳過兩段時只算 B。"""
+    """跨過門檻的 97% 回那一段的標記名，否則 None。只有一段。"""
     if not _positive_int(limit) or not isinstance(current, (int, float)):
         return None
-    if current >= memspec.CONTEXT_METER_STAGE_B_RATIO * limit:
-        return "B"
-    if current >= memspec.CONTEXT_METER_STAGE_A_RATIO * limit:
-        return "A"
+    if current >= memspec.CONTEXT_METER_STAGE_RATIO * limit:
+        return memspec.CONTEXT_METER_MARKER
     return None
 
 
@@ -250,19 +283,16 @@ def _k(tokens):
     return int(round(max(0, tokens) / 1000))
 
 
-def render(which, current, limit, source, path):
+def render(current, limit, source, path):
     mark = memspec.CONTEXT_METER_SCALED_MARK if source == memspec.CONTEXT_METER_SOURCE_SCALED else ""
-    if which == "B":
-        return memspec.CONTEXT_METER_STAGE_B_NOTICE.format(
-            cur=_k(current), left=_k(limit - current), mark=mark, path=os.fspath(path))
-    return memspec.CONTEXT_METER_STAGE_A_NOTICE.format(
-        cur=_k(current), thr=_k(limit), mark=mark, path=os.fspath(path))
+    return memspec.CONTEXT_METER_NOTICE.format(
+        cur=_k(current), left=_k(limit - current), mark=mark, path=os.fspath(path))
 
 
 # ---------------------------------------------------------------- hook 端
 
 
-def notice(event, vault, marker_directory, options=None, environ=None):
+def notice(event, vault, marker_directory, options=None, environ=None, home=None):
     """這次呼叫要附的那一行與要寫的標記名：(line, marker)；不該說就回 None。永不丟例外。
 
     標記由呼叫端在「真的輸出之後」用 `claim` 寫：沒送出去（預算擠掉、逾時）的提醒
@@ -280,26 +310,22 @@ def notice(event, vault, marker_directory, options=None, environ=None):
         options = memspec.config_options() if options is None else options
         if not enabled(options):
             return None
-        limit, source = threshold(options, state_path(vault), environ)
+        limit, source = threshold(options, state_path(vault), environ, home)
         if limit is None:
             return None
         current = current_tokens(transcript)
-        which = stage(current, limit)
-        if which is None:
+        marker = stage(current, limit)
+        if marker is None:
             return None
-        directory = Path(marker_directory)
-        if (directory / memspec.CONTEXT_METER_MARKER_B).exists():
-            return None  # 發過 B 就不再發 A，也不再發 B。
-        marker = memspec.CONTEXT_METER_MARKER_B if which == "B" else memspec.CONTEXT_METER_MARKER_A
-        if (directory / marker).exists():
-            return None
+        if (Path(marker_directory) / marker).exists():
+            return None  # 這個壓縮週期已經說過。
         # 用到才載入：compact_map 會帶進 hashlib 與 argparse，絕大多數呼叫走不到這裡。
         try:
             from . import compact_map
         except ImportError:
             import compact_map
         path = compact_map.handoff_destination(vault, session_id, transcript)
-        return render(which, current, limit, source, path), marker
+        return render(current, limit, source, path), marker
     except Exception:
         return None
 
@@ -316,22 +342,27 @@ def claim(marker_directory, marker):
     return True
 
 
-def record_autocompact(vault, transcript_path, environ=None, now=None):
+def record_autocompact(vault, transcript_path, environ=None, now=None, home=None):
     """自動壓縮前的那一刻記下當下用量，給之後當門檻學。回寫入後的紀錄，或 None。
 
-    只由 PreCompact 在 trigger=auto 時呼叫：手動壓縮的時點是人選的，不代表門檻。"""
+    只由 PreCompact 在 trigger=auto 時呼叫：手動壓縮的時點是人選的，不代表門檻。
+    讀–追加–換名在同一把鎖裡：兩個場次同時壓縮時，沒有鎖的話後寫的會蓋掉先寫的那筆。
+    拿不到鎖就放棄這一筆（回 None）——少學一筆無妨，卡住壓縮不行。"""
     tokens = current_tokens(transcript_path)
     if tokens is None:
         return None
     from datetime import datetime, timezone
 
-    environ = os.environ if environ is None else environ
     stamp = (now or datetime.now(timezone.utc)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    sample = {"tokens": tokens, "pct": current_pct(environ, home), "at": stamp}
     path = state_path(vault)
-    samples = read_samples(path)  # 檔壞了＝從空的重建。
-    samples.append({"tokens": tokens, "pct": environ.get(memspec.CONTEXT_METER_PCT_ENV, "") or "",
-                    "at": stamp})
-    return write_samples(path, samples)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with memspec.file_lock(path, memspec.CONTEXT_METER_LOCK_SECONDS) as locked:
+        if not locked:
+            return None
+        samples = read_samples(path)  # 檔壞了＝從空的重建。
+        samples.append(sample)
+        return write_samples(path, samples)
 
 
 # ---------------------------------------------------------------- CLI
@@ -423,7 +454,7 @@ def _governance(vault_argument, options):
     return governance_vault([Path(item).expanduser().resolve() for item in vaults if isinstance(item, str)])
 
 
-def calibrate(root, apply=False, vault=None, pct="", now=None, out=print):
+def calibrate(root, apply=False, vault=None, pct="", now=None, out=print, force=False):
     found = scan_autocompactions(root, now=now)
     recent = found[-memspec.CONTEXT_METER_STATE_MEDIAN_OF:]
     if not recent:
@@ -435,6 +466,18 @@ def calibrate(root, apply=False, vault=None, pct="", now=None, out=print):
     last = recent[-1][0].strftime("%Y-%m-%dT%H:%M:%SZ")
     out(f"calibrate: candidate={candidate} tokens samples={len(recent)} "
         f"(of {len(found)} found) range={first}..{last} pct={pct or '(unset)'}")
+    values = [tokens for _when, tokens in recent]
+    spread = max(values) / min(values)
+    if spread > memspec.CONTEXT_METER_CALIBRATE_MAX_SPREAD:
+        # 差這麼多多半是混了不同 pct 或不同視窗：寫進去就是拿別的設定下的數字當門檻。
+        out(f"calibrate: the samples disagree (max/min={spread:.2f} > "
+            f"{memspec.CONTEXT_METER_CALIBRATE_MAX_SPREAD:.2f}): {', '.join(str(v) for v in values)}; "
+            f"they probably mix different {memspec.CONTEXT_METER_PCT_ENV} values or context windows. "
+            f"Set {memspec.CONTEXT_METER_CONFIG_FIELD}.{memspec.CONTEXT_METER_OVERRIDE_FIELD} in the config, "
+            "or re-run with the right --pct once the recent compactions share one setting; --force writes them anyway")
+        if apply and not force:
+            out("calibrate: refused to write; nothing written")
+            return None
     if not apply:
         out("calibrate: dry run; pass --apply to write the learned state")
         return candidate
@@ -456,13 +499,13 @@ def status(options, vault, transcript=None, environ=None, out=print):
         out("status: disabled by config")
         return None
     limit, source = threshold(options, state_path(vault) if vault else None, environ)
-    pct = environ.get(memspec.CONTEXT_METER_PCT_ENV, "")
+    pct = current_pct(environ)
     if limit is None:
         out(f"status: threshold unknown (no override, no learned sample usable at pct={pct or '(unset)'}); "
             "no reminders. Run 'epitype context-meter calibrate --apply' or let one auto-compaction happen.")
     else:
         out(f"status: threshold={limit} tokens source={source} pct={pct or '(unset)'} "
-            f"A={int(memspec.CONTEXT_METER_STAGE_A_RATIO * limit)} B={int(memspec.CONTEXT_METER_STAGE_B_RATIO * limit)}")
+            f"remind_at={int(memspec.CONTEXT_METER_STAGE_RATIO * limit)}")
     if transcript:
         current = current_tokens(transcript)
         if current is None:
@@ -470,7 +513,7 @@ def status(options, vault, transcript=None, environ=None, out=print):
         else:
             where = stage(current, limit) if limit else None
             share = f" ({current / limit:.0%} of threshold)" if limit else ""
-            out(f"status: current={current} tokens{share} stage={where or '-'}")
+            out(f"status: current={current} tokens{share} due={'yes' if where else 'no'}")
     return limit
 
 
@@ -478,6 +521,7 @@ def status(options, vault, transcript=None, environ=None, out=print):
 
 
 def _selftest():
+    import subprocess
     import tempfile
     import time
     from datetime import datetime, timedelta, timezone
@@ -535,6 +579,15 @@ def _selftest():
                            and after_boundary is None
                            and current_tokens(None) is None))
 
+            # 3b. 最後一行是 9 MiB 的工具結果（超過單行上限、也超過舊的 8 MiB 總量）：丟掉
+            # 那一行的片段、繼續往前找，前一行的用量照樣讀得到；時間上限到了回 None。
+            huge = root / "huge.jsonl"
+            write(huge, [assistant(1000), assistant(345678), tool_result(9 * 1024 * 1024)])
+            checks.append(("a 9 MiB last line is skipped whole and the usage before it is read; "
+                           "an exhausted time limit gives None",
+                           current_tokens(huge, time_limit=10.0) == 345678
+                           and current_tokens(huge, time_limit=0) is None))
+
             # 4. 三層門檻：覆寫 > 學到 > 未知；pct 換算。
             vault = root / "vault"
             vault.mkdir()
@@ -547,7 +600,8 @@ def _selftest():
             bad_override = threshold({"context_meter": {"autocompact_tokens": True}}, state, env92)
             scaled = threshold({}, state, {memspec.CONTEXT_METER_PCT_ENV: "46"})
             same_value = threshold({}, state, {memspec.CONTEXT_METER_PCT_ENV: "92.0"})
-            unset = threshold({}, state, {})
+            no_settings_home = root / "home-without-settings"
+            unset = threshold({}, state, {}, home=no_settings_home)
             checks.append(("threshold order override > learned (median of last 5) > unknown, with pct scaling",
                            override == (50000, memspec.CONTEXT_METER_SOURCE_OVERRIDE)
                            and learned == (120000, memspec.CONTEXT_METER_SOURCE_LEARNED)
@@ -556,6 +610,23 @@ def _selftest():
                            and same_value == (120000, memspec.CONTEXT_METER_SOURCE_LEARNED)
                            and unset == (None, None)
                            and threshold({}, root / "none.json", env92) == (None, None)))
+
+            # 4b. hook 行程沒有這個環境變數：退到宿主設定 ~/.claude/settings.json 的 env；
+            # 設定壞掉當空；變數有設（即使是空字串）就以變數為準。
+            settings_home = root / "home-with-settings"
+            (settings_home / ".claude").mkdir(parents=True)
+            (settings_home / ".claude" / "settings.json").write_text(
+                json.dumps({"env": {memspec.CONTEXT_METER_PCT_ENV: "92"}}), encoding="utf-8")
+            broken_home = root / "home-broken-settings"
+            (broken_home / ".claude").mkdir(parents=True)
+            (broken_home / ".claude" / "settings.json").write_text("{broken", encoding="utf-8")
+            checks.append(("without the environment variable the host settings' env supplies the pct",
+                           threshold({}, state, {}, home=settings_home)
+                           == (120000, memspec.CONTEXT_METER_SOURCE_LEARNED)
+                           and threshold({}, state, {}, home=broken_home) == (None, None)
+                           and threshold({}, state, {memspec.CONTEXT_METER_PCT_ENV: ""},
+                                         home=settings_home) == (None, None)
+                           and current_pct({}, settings_home) == "92"))
 
             # 5. 未知時不提醒（用量再高也一樣）；enabled=false 不做。
             markers = root / "markers"
@@ -572,69 +643,58 @@ def _selftest():
                            unknown is None and disabled is None and garbage is None
                            and not markers.exists()))
 
-            # 6. A 與 B 各一次；過 B 之後不再發 A。
+            # 6. 只有一段、在 0.97T：低於不發；跨過發一次；同一個壓縮週期不重發。
             options = {"context_meter": {"autocompact_tokens": 100000}}
-            sent = []
 
             def call(total, directory=markers, extra=None):
                 write(transcript, [assistant(total)])
                 found = notice({**event, **(extra or {})}, vault, directory, options=options, environ=env92)
                 if found is not None:
                     claim(directory, found[1])
-                    sent.append(found)
                 return found
 
-            below = call(64000)
-            first_a = call(66000)
-            second_a = call(70000)
-            first_b = call(91000)
-            second_b = call(95000)
-            back_to_a = call(70000)
-            handoff = None
+            far_below = call(66000)
+            just_below = call(96900)
+            first = call(97500)
+            again = call(98000)
+            past_threshold = call(101000)
             try:
                 from . import compact_map as _compact_map
             except ImportError:
                 import compact_map as _compact_map
             handoff = _compact_map.handoff_destination(vault, "s1", transcript)
-            checks.append(("A and B are each said once per cycle and A never follows B",
-                           below is None and first_a is not None and second_a is None
-                           and first_b is not None and second_b is None and back_to_a is None
-                           and first_a[1] == memspec.CONTEXT_METER_MARKER_A
-                           and first_b[1] == memspec.CONTEXT_METER_MARKER_B
-                           and os.fspath(handoff) in first_a[0] and os.fspath(handoff) in first_b[0]
-                           and first_a[0] == memspec.CONTEXT_METER_STAGE_A_NOTICE.format(
-                               cur=66, thr=100, mark="", path=os.fspath(handoff))
-                           and first_b[0] == memspec.CONTEXT_METER_STAGE_B_NOTICE.format(
-                               cur=91, left=9, mark="", path=os.fspath(handoff))))
+            checks.append(("one reminder at 0.97T: nothing below it, once when crossed, not again in the cycle",
+                           far_below is None and just_below is None
+                           and first is not None and again is None and past_threshold is None
+                           and first[1] == memspec.CONTEXT_METER_MARKER
+                           and sorted(item.name for item in markers.iterdir()) == [memspec.CONTEXT_METER_MARKER]
+                           and first[0] == memspec.CONTEXT_METER_NOTICE.format(
+                               cur=98, left=2, mark="", path=os.fspath(handoff))))
 
-            # 7. 直接跳到 B：只發 B。子代理不說、不寫標記。
-            jump = root / "jump"
-            direct_b = call(93000, jump)
-            then_a = call(70000, jump)
+            # 7. 子代理不說、不寫標記，主線之後照樣收得到。
             sub = root / "sub"
-            by_agent = call(93000, sub, {"agent_id": "a1"})
-            main_after = call(93000, sub)
-            checks.append(("jumping straight past B says only B; a subagent call says nothing and "
-                           "leaves the main thread's reminder armed",
-                           direct_b is not None and direct_b[1] == memspec.CONTEXT_METER_MARKER_B
-                           and then_a is None
-                           and not (jump / memspec.CONTEXT_METER_MARKER_A).exists()
-                           and by_agent is None and main_after is not None
-                           and main_after[1] == memspec.CONTEXT_METER_MARKER_B))
+            by_agent = call(98000, sub, {"agent_id": "a1"})
+            by_agent_camel = call(98000, sub, {"agentId": "a1"})
+            agent_left_nothing = not sub.exists() or not any(sub.iterdir())
+            main_after = call(98000, sub)
+            checks.append(("a subagent call says nothing and leaves the main thread's reminder armed",
+                           by_agent is None and by_agent_camel is None and agent_left_nothing
+                           and main_after is not None
+                           and main_after[1] == memspec.CONTEXT_METER_MARKER))
 
             # 8. 標記清掉（壓縮）之後重新武裝；換算值標上「（換算）」。
             for item in markers.iterdir():
                 item.unlink()
-            rearmed = call(66000)
+            rearmed = call(97500)
             scaled_options = {}
             write(transcript, [assistant(60000)])
             scaled_line = notice({**event, "session_id": "s2"}, vault, root / "scaled",
                                  options=scaled_options, environ={memspec.CONTEXT_METER_PCT_ENV: "46"})
-            checks.append(("cleared markers re-arm the reminders; a scaled threshold is labelled",
-                           rearmed is not None and rearmed[1] == memspec.CONTEXT_METER_MARKER_A
+            checks.append(("cleared markers re-arm the reminder; a scaled threshold is labelled",
+                           rearmed is not None and rearmed[1] == memspec.CONTEXT_METER_MARKER
                            and scaled_line is not None
                            and memspec.CONTEXT_METER_SCALED_MARK in scaled_line[0]
-                           and memspec.CONTEXT_METER_SCALED_MARK not in first_a[0]))
+                           and memspec.CONTEXT_METER_SCALED_MARK not in first[0]))
 
             # 9. 學習：record_autocompact 追加一筆、壞檔重建、只留 10 筆。
             state.write_text("{broken", encoding="utf-8")
@@ -648,6 +708,44 @@ def _selftest():
                            and rebuilt[0]["tokens"] == 150000 and rebuilt[0]["pct"] == "92"
                            and len(kept) == memspec.CONTEXT_METER_STATE_KEEP
                            and not list(state.parent.glob(".*.tmp-*"))))
+
+            # 9b. 兩個行程同時記錄：讀–追加–換名在同一把鎖裡，每一筆都留下。
+            race_vault = root / "race-vault"
+            race_dir = root / "race"
+            race_dir.mkdir()
+            child = (
+                "import sys, time, pathlib\n"
+                "sys.path.insert(0, sys.argv[1])\n"
+                "from epitype import context_meter\n"
+                "ready = pathlib.Path(sys.argv[4]) / ('ready-' + sys.argv[5])\n"
+                "go = pathlib.Path(sys.argv[4]) / 'go'\n"
+                "ready.write_text('1')\n"
+                "limit = time.monotonic() + 60\n"
+                "while not go.exists() and time.monotonic() < limit:\n"
+                "    time.sleep(0.001)\n"
+                "for _ in range(3):\n"
+                "    context_meter.record_autocompact(sys.argv[2], sys.argv[3],"
+                " environ={'" + memspec.CONTEXT_METER_PCT_ENV + "': '92'})\n"
+            )
+            repo_root = Path(__file__).resolve().parents[1]
+            racers = []
+            for name, tokens in (("a", 111111), ("b", 222222)):
+                source = race_dir / f"{name}.jsonl"
+                write(source, [assistant(tokens)])
+                racers.append(subprocess.Popen(
+                    [sys.executable, "-c", child, os.fspath(repo_root), os.fspath(race_vault),
+                     os.fspath(source), os.fspath(race_dir), name]))
+            limit = time.monotonic() + 60
+            while (not all((race_dir / f"ready-{name}").exists() for name in "ab")
+                   and time.monotonic() < limit):
+                time.sleep(0.01)
+            (race_dir / "go").write_text("1", encoding="utf-8")
+            codes = [racer.wait(timeout=120) for racer in racers]
+            raced = [sample["tokens"] for sample in read_samples(state_path(race_vault))]
+            checks.append(("two processes recording at once both keep every sample",
+                           codes == [0, 0]
+                           and sorted(raced) == [111111] * 3 + [222222] * 3
+                           and not Path(os.fspath(state_path(race_vault)) + ".lock").exists()))
 
             # 10. calibrate：只取 auto、近 30 天、最近 5 筆的中位數；預設不寫。
             projects = root / "projects"
@@ -664,12 +762,18 @@ def _selftest():
                 tool_result(10), boundary("auto", 180000, 9), boundary("auto", 181000, 8),
                 boundary("auto", 182000, 7), boundary("auto", 183000, 6), boundary("auto", 900000, 5),
                 boundary("auto", 184000, 4)])
+            tight = root / "projects-tight"
+            (tight / "p1").mkdir(parents=True)
+            write(tight / "p1" / "a.jsonl", [
+                boundary("auto", 1, 40), boundary("manual", 999999, 1), tool_result(10),
+                boundary("auto", 180000, 9), boundary("auto", 181000, 8), boundary("auto", 182000, 7),
+                boundary("auto", 183000, 6), boundary("auto", 186000, 5), boundary("auto", 184000, 4)])
             calibrated_vault = root / "calibrated"
             lines = []
-            dry = calibrate(projects, apply=False, vault=calibrated_vault, pct="92", now=now,
+            dry = calibrate(tight, apply=False, vault=calibrated_vault, pct="92", now=now,
                             out=lines.append)
             wrote_nothing = not state_path(calibrated_vault).exists()
-            applied = calibrate(projects, apply=True, vault=calibrated_vault, pct="92", now=now,
+            applied = calibrate(tight, apply=True, vault=calibrated_vault, pct="92", now=now,
                                 out=lines.append)
             checks.append(("calibrate takes the median of the last 5 auto compactions within 30 days "
                            "and writes only with --apply",
@@ -677,6 +781,22 @@ def _selftest():
                            and threshold({}, state_path(calibrated_vault), env92)
                            == (183000, memspec.CONTEXT_METER_SOURCE_LEARNED)
                            and "samples=5" in lines[0]))
+
+            # 10b. 最近 5 筆差超過 10%：拒寫、印出各筆與改用 --pct／設定覆寫的提示；--force 才寫。
+            spread_vault = root / "spread"
+            spread_lines = []
+            refused = calibrate(projects, apply=True, vault=spread_vault, pct="92", now=now,
+                                out=spread_lines.append)
+            refused_nothing = not state_path(spread_vault).exists()
+            forced = calibrate(projects, apply=True, vault=spread_vault, pct="92", now=now,
+                               out=spread_lines.append, force=True)
+            spread_text = "\n".join(spread_lines)
+            checks.append(("calibrate refuses samples more than 10% apart unless forced, naming each value",
+                           refused is None and refused_nothing
+                           and "900000" in spread_text and "181000" in spread_text
+                           and "--pct" in spread_text and memspec.CONTEXT_METER_OVERRIDE_FIELD in spread_text
+                           and forced == 183000
+                           and len(read_samples(state_path(spread_vault))) == 5))
 
             # 11. 效能：50 MB transcript、最後一列是 2 MB 工具結果，hook 只讀檔尾。
             large = root / "large.jsonl"
@@ -699,7 +819,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 11
+    total = 15
     status_word = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status_word} {passed}/{total}")
     if status_word != "PASS":
@@ -722,6 +842,8 @@ def main(argv=None):
     calibrate_parser.add_argument("--apply", action="store_true", help="write the learned state (default: print only)")
     calibrate_parser.add_argument("--pct", help=f"{memspec.CONTEXT_METER_PCT_ENV} to record "
                                   "(default: environment, then ~/.claude/settings.json env)")
+    calibrate_parser.add_argument("--force", action="store_true",
+                                  help="write even when the recent samples disagree by more than 10%%")
     calibrate_parser.add_argument("--root", help="transcript root (default: ~/.claude/projects)")
     calibrate_parser.add_argument("--vault", help="governance vault (default: from the Epitype config)")
     status_parser = commands.add_parser("status", help="print the threshold, its source and the current usage")
@@ -740,7 +862,7 @@ def main(argv=None):
         pct, pct_source = _resolve_pct(args.pct)
         print(f"calibrate: pct source={pct_source}")
         root = Path(args.root).expanduser() if args.root else Path.home() / ".claude" / "projects"
-        calibrate(root, apply=args.apply, vault=vault, pct=pct)
+        calibrate(root, apply=args.apply, vault=vault, pct=pct, force=args.force)
         return 0
     status(options, vault, args.transcript)
     return 0

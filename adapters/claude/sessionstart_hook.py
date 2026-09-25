@@ -338,20 +338,21 @@ def _handle(event, started_at):
 
     # 壓縮續場先放地圖那一行：續場丟掉的是原文，而其餘幾行在別的場次還會再出現一次；
     # 預算裁不下時，先保住唯一一份回得去原文的指標。其他 source 一個字都不加。
-    # 交接檔那一行排在地圖前面：它是模型自己整理過的接續點，地圖只是回撈原文的索引。
+    # 交接檔那一行排在地圖之後：預算只裁得下一行時，留下的必須是地圖——它是唯一回得去
+    # 原文的指標；交接是模型自己整理過的接續點，可以從地圖回撈的原文重建。
     if source == "compact":
-        try:
-            handoff_line = _handoff_line(event, governance)
-        except Exception:
-            handoff_line = None
-        if handoff_line:
-            pieces.append(handoff_line)
         try:
             map_line = _compact_map_line(event, governance)
         except Exception:
             map_line = None
         if map_line:
             pieces.append(map_line)
+        try:
+            handoff_line = _handoff_line(event, governance)
+        except Exception:
+            handoff_line = None
+        if handoff_line:
+            pieces.append(handoff_line)
     if _soft_remaining(started_at) > 0:
         try:
             _dream_spawn(dream, governance_vault(config, for_write=True), started_at, source=source)
@@ -1101,14 +1102,29 @@ def _selftest():
             handoff_startup, handoff_startup_context = map_run({**claude_shape, "source": "startup"})
             handoff_lines = handoff_context.splitlines()
             checks.append((
-                "交接檔存在且非空：壓縮續場多一行、排在地圖那行之前；startup 不加",
+                "交接檔存在且非空：壓縮續場多一行、排在地圖那行之後；startup 不加",
                 handoff_run.returncode == 0
                 and bool(handoff_expected)
                 and handoff_lines.count(handoff_expected) == 1
                 and expected_line in handoff_lines
-                and handoff_lines.index(handoff_expected) < handoff_lines.index(expected_line)
+                and handoff_lines.index(expected_line) < handoff_lines.index(handoff_expected)
                 and handoff_startup.returncode == 0
                 and handoff_expected not in handoff_startup_context,
+            ))
+            # 預算只放得下一行：留地圖、丟交接。
+            one_line_budget = (len(expected_line.encode("utf-8"))
+                               + len(memspec.CONTEXT_TRUNCATED_SUFFIX.format(dropped=1).encode("utf-8"))
+                               + 8)
+            one_line_config = root / "one-line-config.json"
+            write_config(one_line_config, [map_vault], budget=one_line_budget)
+            one_line_run, one_line_context = map_run(claude_shape, one_line_config)
+            checks.append((
+                "預算只放得下一行時，留下的是地圖那一行，被裁掉的是交接",
+                one_line_run.returncode == 0
+                and one_line_budget < len(expected_line.encode("utf-8"))
+                + len(handoff_expected.encode("utf-8")) + 1
+                and expected_line in one_line_context.splitlines()
+                and handoff_expected not in one_line_context,
             ))
             handoff_file.write_text("", encoding="utf-8")
             empty_run, empty_context = map_run(claude_shape)
@@ -1296,7 +1312,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 31
+    total = 32
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

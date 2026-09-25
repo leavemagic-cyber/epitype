@@ -245,7 +245,7 @@ def _with_context_meter(value, config, event, started_at, delivery_markers):
     """用量計那一行排在最後、優先度最低：整段放不進預算就不附，也不寫標記，下次再試。
 
     標記跟喚回的標記走同一條「先輸出、後寫」（main 裡的 _claim_marker），放在喚回標記
-    目錄，PreCompact 清掉時兩段一起重新武裝。行程內呼叫（delivery_markers 為 None）
+    目錄，PreCompact 清掉時一起重新武裝。行程內呼叫（delivery_markers 為 None）
     寫不了標記，一律不附——否則同一段會每次都說。"""
     if delivery_markers is None or expired(started_at):
         return value
@@ -1680,7 +1680,7 @@ def _selftest():
                 )
             )
 
-            # 用量計：跨過 A 的那一則提問附一行（含交接檔路徑）、先輸出後寫標記，下一則不再附；
+            # 用量計：跨過 0.97T 的那一則提問附一行（含交接檔路徑）、先輸出後寫標記，下一則不再附；
             # 預算放不下時不附也不寫標記，放得下的下一則再試。
             from epitype import compact_map
 
@@ -1688,7 +1688,7 @@ def _selftest():
             meter_vault.mkdir()
             meter_transcript = root / "meter.jsonl"
             meter_transcript.write_text(json.dumps({"type": "assistant", "message": {"usage": {
-                "input_tokens": 60000, "cache_creation_input_tokens": 1000,
+                "input_tokens": 92000, "cache_creation_input_tokens": 1000,
                 "cache_read_input_tokens": 5000}}}) + "\n", encoding="utf-8")
 
             def meter_config(budget):
@@ -1717,15 +1717,15 @@ def _selftest():
             first_prompt, first_context = meter_prompt("meter-s1", roomy)
             second_prompt, second_context = meter_prompt("meter-s1", roomy)
             checks.append((
-                "the prompt that crosses A carries the handoff line and claims it; the next one does not",
+                "the prompt that crosses 0.97T carries the handoff line and claims it; the next one does not",
                 first_prompt.returncode == 0
                 and handoff in first_context
-                and (recall_marker_directory("meter-s1") / memspec.CONTEXT_METER_MARKER_A).is_file()
+                and (recall_marker_directory("meter-s1") / memspec.CONTEXT_METER_MARKER).is_file()
                 and second_prompt.returncode == 0
                 and handoff not in second_context,
             ))
             tight_prompt, tight_context = meter_prompt("meter-s2", meter_config(40))
-            tight_marker = (recall_marker_directory("meter-s2") / memspec.CONTEXT_METER_MARKER_A).exists()
+            tight_marker = (recall_marker_directory("meter-s2") / memspec.CONTEXT_METER_MARKER).exists()
             retry_prompt, retry_context = meter_prompt("meter-s2", roomy)
             checks.append((
                 "a line the budget cannot hold is not sent and not claimed, so the next prompt sends it",
