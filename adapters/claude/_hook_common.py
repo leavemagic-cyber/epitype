@@ -80,10 +80,56 @@ def event_session_id(event):
     return value if isinstance(value, str) else ""
 
 
-def expired(started_at):
-    import time
+# 自測子行程的注入時鐘。只認 run_synthetic 發的一次性憑證（規則見 memspec 的
+# HOOK_CLOCK_ENV 段）；驗一次就記住，期限每一段都要查。None＝還沒驗。
+_HOOK_CLOCK = None
 
-    return time.monotonic() - started_at >= memspec.HOOK_TIMEOUT_SECONDS
+
+def _verified_hook_clock(token):
+    """憑證全部吻合才回注入的模式；沒設回空字串；設了卻不吻合也回空字串並講一句。"""
+    if not token:
+        return ""
+    mode = ""
+    try:
+        config = os.environ.get(memspec.EPITYPE_CONFIG_ENV)
+        homes = [os.environ.get(name) for name in ("HOME", "USERPROFILE") if os.environ.get(name)]
+        if re.fullmatch(memspec.HOOK_CLOCK_TOKEN_PATTERN, token) and config and homes:
+            directory = Path(config).resolve().parent
+            inside = all(
+                Path(home).resolve() == directory or directory in Path(home).resolve().parents
+                for home in homes
+            )
+            if inside:
+                value = (directory / (memspec.HOOK_CLOCK_CREDENTIAL_PREFIX + token)).read_text(
+                    encoding="ascii").strip()
+                mode = value if value in memspec.HOOK_CLOCK_MODES else ""
+    except (OSError, ValueError, RuntimeError):
+        mode = ""
+    if not mode:
+        # 正式掛鉤碰到這個變數，多半是從哪個環境漏進來的。期限照真時鐘算，但要說出來。
+        print(memspec.HOOK_CLOCK_REJECTED_NOTICE.format(env=memspec.HOOK_CLOCK_ENV),
+              file=sys.stderr)
+    return mode
+
+
+def _hook_clock():
+    global _HOOK_CLOCK
+    if _HOOK_CLOCK is None:
+        _HOOK_CLOCK = _verified_hook_clock(os.environ.get(memspec.HOOK_CLOCK_ENV, ""))
+    return _HOOK_CLOCK
+
+
+def remaining_seconds(started_at):
+    clock = _hook_clock()
+    if clock == memspec.HOOK_CLOCK_FROZEN:
+        return memspec.HOOK_TIMEOUT_SECONDS
+    if clock == memspec.HOOK_CLOCK_EXPIRED:
+        return 0.0
+    return memspec.HOOK_TIMEOUT_SECONDS - (time.monotonic() - started_at)
+
+
+def expired(started_at):
+    return remaining_seconds(started_at) <= 0
 
 
 def read_event(stream):
@@ -457,7 +503,7 @@ def _rotate_gate_log_if_oversized(target):
 
 def append_gate_log(vault, row, started_at):
     target = vault / memspec.GATE_LOG_FILENAME
-    remaining = memspec.HOOK_TIMEOUT_SECONDS - (time.monotonic() - started_at)
+    remaining = remaining_seconds(started_at)
     if remaining <= 0:
         raise TimeoutError("hook deadline reached")
     value = {
@@ -595,7 +641,8 @@ class isolated_temp_root:
         return False
 
 
-def run_synthetic(script, event, config_path, arguments=(), environment=None):
+def run_synthetic(script, event, config_path, arguments=(), environment=None, timeout=None,
+                  clock=None):
     import subprocess
 
     # 合成測試永遠不得起背景夢：預設關掉，呼叫端要測通知行時再自己開回來。
@@ -607,6 +654,7 @@ def run_synthetic(script, event, config_path, arguments=(), environment=None):
     # 自己剛剛造出來的標記（2026-09-22 實測 5/5 確定性失敗）。隔離要在每支自測的最外層
     # 做一次（`isolated_temp_root()`），子行程靠 `**os.environ` 自然繼承同一個根。
     isolated_home = os.fspath(Path(config_path).resolve().parent / "_synthetic_home")
+    explicit = environment
     environment = {
         **os.environ,
         memspec.DREAM_MODE_ENV: memspec.DREAM_MODE_OFF,
@@ -616,17 +664,39 @@ def run_synthetic(script, event, config_path, arguments=(), environment=None):
     }
     environment[memspec.EPITYPE_CONFIG_ENV] = os.fspath(config_path)
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
-    return subprocess.run(
-        [sys.executable, os.fspath(script), *arguments],
-        input=json.dumps(event, ensure_ascii=False),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        env=environment,
-        timeout=memspec.HOOK_TIMEOUT_SECONDS + 10,
-        check=False,
-    )
+    credential = None
+    if clock is not None:
+        # 注入時鐘只給這一個子行程：一次性 token 進環境變數，模式寫進設定檔旁以 token
+        # 命名的憑證檔，子行程結束就刪。沒有這張憑證，掛鉤一律照真時鐘（memspec 該段）。
+        import uuid
+
+        if clock not in memspec.HOOK_CLOCK_MODES:
+            raise ValueError(f"unknown hook clock: {clock}")
+        token = uuid.uuid4().hex
+        credential = Path(config_path).resolve().parent / (memspec.HOOK_CLOCK_CREDENTIAL_PREFIX + token)
+        credential.write_text(clock, encoding="ascii")
+        environment[memspec.HOOK_CLOCK_ENV] = token
+    elif memspec.HOOK_CLOCK_ENV not in (explicit or {}):
+        # 父行程環境裡漏進來的值不帶給子行程；要測「繼承到這個變數」的呼叫端自己明傳。
+        environment.pop(memspec.HOOK_CLOCK_ENV, None)
+    try:
+        return subprocess.run(
+            [sys.executable, os.fspath(script), *arguments],
+            input=json.dumps(event, ensure_ascii=False),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=environment,
+            timeout=memspec.HOOK_TIMEOUT_SECONDS + 10 if timeout is None else timeout,
+            check=False,
+        )
+    finally:
+        if credential is not None:
+            try:
+                credential.unlink()
+            except OSError:
+                pass
 
 
 def write_config(path, vaults, budget=memspec.HOOK_DEFAULT_BUDGET_BYTES):

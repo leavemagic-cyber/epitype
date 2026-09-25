@@ -2643,6 +2643,100 @@ CARD_LINT_DECISION_LINT_FAILED_REASON = "決策 lint 無法完成：{error}"
 CARD_LINT_DECISION_FINDING = "規則{rule} {reason}｜{path}"
 
 
+# ---- shell parse（回合結束閘：自測時鐘、圍籬指令區塊的殼層語法檢查）------------------
+# 掛鉤期限（HOOK_TIMEOUT_SECONDS）到了就放行，這是設計；但自測拿真的時鐘跑判斷案例，
+# 機器一忙，「逾時放行」跟「判斷錯了」長得一模一樣——2026-09-25 同一份 selftest 連跑六次
+# 出現四種結果。自測子行程改用注入的時鐘：判斷案例用 frozen（期限永遠不到），逾時行為
+# 另用 expired 明確斷言。
+#
+# 注入只在 run_synthetic 起的子行程生效（Codex 審查 2026-09-25：正式掛鉤繼承
+# EPITYPE_HOOK_CLOCK=frozen 就等於拔掉 9 秒期限）。環境變數只帶一次性的 token；時鐘
+# 模式寫在設定檔旁邊、以該 token 命名的憑證檔裡，而且 HOME 必須在那個目錄底下。三者
+# 任一不合就照真時鐘，並在 stderr 留一行。run_synthetic 在子行程結束後刪掉憑證檔。
+HOOK_CLOCK_ENV = "EPITYPE_HOOK_CLOCK"
+HOOK_CLOCK_FROZEN = "frozen"
+HOOK_CLOCK_EXPIRED = "expired"
+HOOK_CLOCK_MODES = (HOOK_CLOCK_FROZEN, HOOK_CLOCK_EXPIRED)
+HOOK_CLOCK_CREDENTIAL_PREFIX = ".epitype-hook-clock-"
+HOOK_CLOCK_TOKEN_PATTERN = r"[0-9a-f]{32}"
+HOOK_CLOCK_REJECTED_NOTICE = (
+    "⚠ Epitype：忽略了不合法的時鐘注入（{env}），期限照真時鐘計算"
+)
+# 設定都還沒讀，期限就過了：一條規則都沒檢查。以前這一步安靜回空，跟「沒有東西要擋」
+# 在外面分不出來。
+STOP_GATE_EXPIRED_BEFORE_CHECK_DEFECT = (
+    "⚠ 這回合逾時，規則一條都還沒讀就放行了；這一次沒有被任何規則檢查過"
+)
+# 圍籬指令區塊用使用者實際的殼層解析器驗語法（只解析、不執行）。回合閘 2026-09-19 起遮掉
+# 圍籬區塊再比對 forbidden（一天誤擋八次），那道遮罩不動；這裡是另一條路：不猜字面，
+# 直接問 owner 按「執行」時真正會跑它的那個殼層「這段合不合法」。桌面版的執行鍵不管
+# 語言標記寫什麼，按下去都是 owner 自己的 Windows PowerShell 5.1（2026-09-25 實測）。
+FENCE_SHELL_FIELD = "fence_shell"
+FENCE_LANGS_FIELD = "fence_langs"
+FENCE_SHELL_POWERSHELL = "powershell"   # Windows PowerShell 5.1 的 powershell.exe，不是 pwsh
+FENCE_SHELL_BASH = "bash"
+FENCE_SHELL_SH = "sh"
+FENCE_SHELL_VALUES = (FENCE_SHELL_POWERSHELL, FENCE_SHELL_BASH, FENCE_SHELL_SH)
+FENCE_SHELL_DISPLAY = {
+    FENCE_SHELL_POWERSHELL: "Windows PowerShell 5.1",
+    FENCE_SHELL_BASH: "bash",
+    FENCE_SHELL_SH: "sh",
+}
+# 沒標語言的區塊不查：那多半是輸出、檔案內容或提示詞，owner 不會拿去按執行。
+FENCE_SHELL_DEFAULT_LANGS = (
+    "bash", "sh", "shell", "zsh", "console", "powershell", "pwsh", "ps1", "ps", "cmd", "bat",
+)
+# 解析器的上限。超過就放行並在 stderr 留一行——閘門不能因為解析器卡住而失敗。
+FENCE_SHELL_TIMEOUT_SECONDS = 5.0
+FENCE_SHELL_MAX_BLOCKS = 20
+FENCE_SHELL_ERROR_MAX_CHARS = 160
+FENCE_SHELL_SNIPPET_MAX_CHARS = 80
+FENCE_SHELL_RULE = "fence_shell"
+# 決策快取換版（例如新增武裝欄位）時，舊快取的正例沿用、負例重認；重認每回合有上限，
+# 一回合認不完的那些這次不在檢查範圍內——要講出來，不然大庫升級後的頭幾回合看起來全部生效。
+STOP_GATE_CAPPED_DEFECT = (
+    "⚠ 這回合 {vault} 只認了 {checked}/{total} 張還沒認過的卡（每回合上限；快取換版或大量新卡）；"
+    "沒認到的那些若是武裝卡，這次沒有生效"
+)
+# bash／sh 的 -n 診斷裡，哪些字代表「這段語法錯」。未閉合的引號回的是 unexpected EOF，
+# 第一行不含 syntax error（Codex 審查 2026-09-25 以 Git Bash 重現）。不在這裡面的非零結束
+# ＝殼層本身沒跑起來（找不到、126／127、WSL 啟動器沒裝發行版），放行。
+FENCE_SHELL_POSIX_SYNTAX_PATTERN = (
+    r"syntax error|unexpected EOF|unexpected end of file|unterminated|unmatched"
+)
+FENCE_SHELL_POSIX_UNRUNNABLE_CODES = (126, 127)
+# fence_shell 是武裝欄位，也是閘門只讀頂層的那一種：寫在下一層＝什麼都不擋。
+CARD_ARMING_FIELDS = CARD_ARMING_FIELDS + (FENCE_SHELL_FIELD,)
+CARD_GATE_FIELDS = CARD_GATE_FIELDS + (FENCE_SHELL_FIELD,)
+STOP_GATE_FENCE_SHELL_REASON = (
+    "⚖ 第 {index} 個程式碼區塊（{lang}）過不了 {shell} 的語法檢查：第 {line} 行「{snippet}」——"
+    "{error}。owner 按執行會直接失敗，改成 {shell} 合法的寫法。（{decision}）"
+)
+STOP_GATE_FENCE_SHELL_SKIPPED_DEFECT = (
+    "⚠ Epitype 回合閘：{decision} 的 fence_shell 這次沒檢查（{reason}），程式碼區塊放行。"
+)
+STOP_GATE_FENCE_SHELL_UNKNOWN_REASON = "值「{value}」不在 {allowed}"
+STOP_GATE_FENCE_SHELL_TRUNCATED_DEFECT = (
+    "⚠ Epitype 回合閘：{decision} 的 fence_shell 只檢查了前 {checked}/{total} 個程式碼區塊。"
+)
+CARD_LINT_FENCE_SHELL_VALUE_REASON = (
+    "{field}={value} 不在 {allowed}；powershell 指的是 Windows PowerShell 5.1 的 powershell.exe（不是 pwsh）"
+)
+# `unenforceable` 本來是「這條規則本質上綁不住」的誠實聲明。理由若是「閘門看不到／只比對
+# 純文字」，那不是規則綁不住，是 Epitype 還沒長出看得到它的那隻眼睛——2026-09-25 的執行鍵
+# 卡就是這樣被放著，直到 owner 按下去 ParserError。
+UNENFORCEABLE_PRODUCT_GAP_PATTERN = (
+    r"(?:閘門?|gate|hook)[^。；;\n]{0,16}?(?:看不[到見]|讀不到|比對的?是?純文字|只比對(?:純)?文字|只看(?:純)?文字)"
+    r"|比對純文字|純文字比對"
+    r"|gates?\s*(?:can(?:'|no)?t|cannot|does\s*n[o']t|do\s*n[o']t)\s*see"
+    r"|match(?:es|ing)?\s+(?:only\s+)?plain\s+text"
+)
+CARD_LINT_UNENFORCEABLE_GAP_REASON = (
+    "{field} 的理由是「閘門看不到／比對純文字」一類——這是 Epitype 的缺口不是做不到："
+    "修 Epitype 讓閘門看得到，或改用能擋的欄位（{armed}）"
+)
+
+
 # ── U58 顯示語言 ───────────────────────────────────────────────────────────
 # Epitype 的說明是英文出貨的，擋下來的那一句卻寫死繁中——陌生人裝完第一次被擋，看到的
 # 是一句他讀不懂的話。這裡只換**顯示字**：樣式、欄名、log kind、任何閘拿去比對的東西
@@ -2758,6 +2852,13 @@ _EN = {
     "SEARCH_INDEX_STALE_REASON": '{count} tracked card(s) are missing from the search index ({cards}) → python epitype/memsearch.py build "{vault}"',
     "STOP_GATE_INCOMPLETE_DEFECT": "⚠ this turn ran out of time; only {checked}/{total} armed cards in {vault} were checked, so the rest did not apply this time",
     "STOP_GATE_UNSCANNED_DEFECT": "⚠ this turn ran out of time; {skipped} card(s) in {vault} were never even read (new or just-edited cards), so they were out of scope this time",
+    "STOP_GATE_CAPPED_DEFECT": "⚠ this turn only recognised {checked}/{total} not-yet-recognised cards in {vault} (per-turn cap; cache upgrade or many new cards); any armed card among the rest did not apply this time",
+    "HOOK_CLOCK_REJECTED_NOTICE": "⚠ Epitype: ignored an invalid clock injection ({env}); the deadline uses the real clock",
+    "STOP_GATE_EXPIRED_BEFORE_CHECK_DEFECT": "⚠ this turn ran out of time before any rule was read, so nothing was checked this time",
+    "STOP_GATE_FENCE_SHELL_REASON": "⚖ code block {index} ({lang}) fails the {shell} syntax check at line {line} \"{snippet}\" — {error}. Pressing Run will fail outright; rewrite it as valid {shell}. ({decision})",
+    "STOP_GATE_FENCE_SHELL_SKIPPED_DEFECT": "⚠ Epitype turn gate: fence_shell of {decision} was not checked this time ({reason}); code blocks passed.",
+    "STOP_GATE_FENCE_SHELL_UNKNOWN_REASON": "value \"{value}\" is not one of {allowed}",
+    "STOP_GATE_FENCE_SHELL_TRUNCATED_DEFECT": "⚠ Epitype turn gate: fence_shell of {decision} checked only the first {checked}/{total} code blocks.",
     "STOP_GATE_FORBIDDEN_REASON": '⚖ do not say "{fragment}"; rewrite it. ({decision}: {quote})',
     "STOP_GATE_QUESTION_REASON": "the owner ruled on this on {decided_at}: {quote}. Do not ask again; act on the ruling",
     "STOP_GATE_QUESTION_REASON_UNDATED": "the owner has ruled on this: {quote}. Do not ask again; act on the ruling",

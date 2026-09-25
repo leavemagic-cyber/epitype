@@ -2,6 +2,59 @@
 
 ## Unreleased
 
+### 回合結束閘自測不再隨機器負載時好時壞
+
+2026-09-25 在 master 上連跑 `stop_gate.py --selftest` 六次得到四種結果（FAIL 21/22、ERROR 0/22、
+PASS、PASS、FAIL 20/22、FAIL 20/22），每次失敗的題目都不同。根因：自測的子行程用真的時鐘跑，
+機器被別的工作吃滿時單次要 10–18 秒，超過掛鉤自己的 9 秒期限（`HOOK_TIMEOUT_SECONDS`），閘門
+照設計逾時放行——不擋、不記帳，而「設定都還沒讀就逾時」那一步連一句話都不講，於是「逾時放行」
+跟「判斷錯了」在自測裡長得一樣；帳本整個沒寫出來時，自測讀檔直接丟 FileNotFoundError 變成 ERROR。
+用 96 個忙迴圈壓測，基線 `d223155` 連三次得到 FAIL 20/22、ERROR 0/22、FAIL 21/22，重現原樣。
+
+- 掛鉤的期限判斷改走可注入的時鐘（環境變數 `EPITYPE_HOOK_CLOCK`，只認 `frozen`／`expired`，
+  正式宿主不會設）。自測的判斷案例一律用 `frozen`；逾時行為另立一題用 `expired` 明確斷言：
+  同一句禁語照樣放行、不記帳，而且 stderr 要說出這一回合沒有檢查。
+- 產品端補上那句話：期限在讀設定之前就過了，現在會留一行「這回合逾時，規則一條都還沒讀就放行了」。
+  以前這一步安靜回空。逾時放行本身不變（owner 2026-09-05 裁定的 9 秒期限照舊）。
+- 自測讀帳本時帳本不存在算零列：缺帳是一題具名的失敗，不再把整份自測炸成 ERROR。
+- 時鐘凍住後子行程不再在 9 秒自己收手，原本跟期限綁在一起的 19 秒子行程上限改成 120 秒，只用來
+  抓卡死（96 個忙迴圈下單次實測 18 秒）。沒有刪題、沒有放寬任何斷言；分母 22→23。
+- 注入時鐘只在自測子行程生效（Codex 審查 2026-09-25：正式掛鉤繼承 `EPITYPE_HOOK_CLOCK=frozen`
+  就等於拔掉 9 秒期限）。環境變數只帶 `run_synthetic` 每次產生的一次性 token；模式寫在設定檔旁
+  以 token 命名的憑證檔，而且 HOME／USERPROFILE 必須在那個目錄底下，子行程結束就刪。任一不合
+  就照真時鐘，並在 stderr 留「忽略了不合法的時鐘注入」。
+
+### 指令區塊用使用者實際的殼層解析器驗語法（`fence_shell`）
+
+2026-09-25 模型給了 `cd C:/titan && PYTHONIOENCODING=utf-8 "...python.exe" "...py"`（標 `bash`），
+owner 按下執行鍵，跑在 Windows PowerShell 5.1，ParserError、什麼都沒跑。對應的卡寫著
+`unenforceable: …Stop 閘比對的是純文字`——那不是規則綁不住，是閘門看不到。
+
+- **2026-09-19 的圍籬遮罩不變**：字面規則（forbidden 等）照舊看不到程式碼區塊裡的字。
+  新的是另一條路：不猜字面，直接用真的解析器驗語法。
+- 新卡片欄位 `fence_shell`（`powershell`＝Windows PowerShell 5.1 的 `powershell.exe`、不是
+  pwsh；`bash`；`sh`），選填 `fence_langs`（要查的語言標記，預設 bash、sh、shell、zsh、console、
+  powershell、pwsh、ps1、ps、cmd、bat，不分大小寫；未標語言的區塊不查）。
+- 回合閘：有現行卡宣告 `fence_shell` 時，取出這一回合相符標記的圍籬區塊，只解析、不執行——
+  PowerShell 用 `[System.Management.Automation.Language.Parser]::ParseInput`，一個
+  `powershell.exe -NoProfile -NonInteractive` 行程經 stdin 的 JSON 一次驗全部區塊；bash／sh 用
+  `-n`，而且只有殼層自己說 syntax error 才算數。解析失敗就擋，理由點名卡、第幾個區塊、行號、
+  那一行與解析器的第一個錯誤，並提示 owner 按執行會直接失敗。稽核列照舊只記規則（`fence_shell`）
+  與卡名。解析器不存在、逾時（5 秒，且不超過掛鉤剩餘期限）、出例外 → 放行並在 stderr 留一行。
+  沒有卡宣告、或沒有相符區塊時一個行程都不起；子代理結束（SubagentStop）不查——那段話是給主線
+  讀的，owner 不會在那裡按執行。Codex 的 `stop.py` 是同一支 `stop_gate.py` 的轉接，判斷共用。
+- 決策快取版本 6→7：舊快取把只帶 `fence_shell` 的卡記成「不是裁定」，不換版要等輪替才認得。
+  換版不整份丟：舊版的正例沿用（候選每回合本來就重讀確認），只丟負例重認；每回合重認有上限
+  （120 張），一回合認不完時 stderr 講「這回合只認了 N/M 張還沒認過的卡」。整份丟的話，大庫
+  （真庫 577 張）升級後排在後面的既有規則會暫時失效而且沒有訊號（Codex 審查 2026-09-25）。
+- bash／sh 的語法錯看殼層自己的診斷：`syntax error`、`unexpected EOF`（未閉合引號）、
+  `unexpected end of file` 等都算；只有殼層本身跑不起來（找不到、126／127、逾時）才放行。
+- `card_lint`：`fence_shell` 算武裝欄位；值不在 `powershell|bash|sh` → FAIL；包進下一層 →
+  FAIL（disarmed-field）；只有 `fence_langs` → FAIL。`unenforceable` 的理由若是「閘門看不到／
+  比對純文字／gate can't see」一類 → WARN「這是 Epitype 的缺口不是做不到：修 Epitype 讓閘門看得到，
+  或改用能擋的欄位」。夜間重放（compliance）與夢的武裝判定也把 `fence_shell` 算成武裝。
+- 自測：stop_gate 23→35、card_lint 47→50、compliance 29→30。
+
 ### Claude Code 的 context 用量計＋壓縮前交接
 
 這個功能取代 owner 2026-09-17 的「上下文快滿提醒廢除，不重做」裁定（`decision-no-context-pressure-reminder-20260917`；依 owner 2026-09-25 的指示）。

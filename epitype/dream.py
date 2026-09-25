@@ -407,6 +407,8 @@ def _section_decisions(vaults, today, since_date, config):
                     # 比對永遠看不到，但閘擋得下來（2026-09-19）。
                     or card.fields.get(memspec.TURN_CHECK_FIELD, "").strip()
                     in memspec.TURN_CHECK_NAMES
+                    or card.fields.get(memspec.FENCE_SHELL_FIELD, "").strip()
+                    in memspec.FENCE_SHELL_VALUES
                     or bool(card.fields.get(memspec.UNENFORCEABLE_FIELD, "").strip())
                 )
                 has_forbidden = armed

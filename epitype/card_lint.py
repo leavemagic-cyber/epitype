@@ -230,6 +230,43 @@ def _example_findings(path, fields, front_lines, counts, today):
     return findings
 
 
+def _fence_shell_findings(fields, counts):
+    """fence_shell 的值必須是閘門認得的殼層；fence_langs 單獨出現等於什麼都不查。"""
+    findings = []
+    shell = fields.get(memspec.FENCE_SHELL_FIELD, "").strip()
+    if shell and shell.casefold() not in memspec.FENCE_SHELL_VALUES:
+        findings.append((
+            FAIL,
+            "fence-shell",
+            memspec.CARD_LINT_FENCE_SHELL_VALUE_REASON.format(
+                field=memspec.FENCE_SHELL_FIELD, value=shell,
+                allowed="|".join(memspec.FENCE_SHELL_VALUES)),
+        ))
+    langs = fields.get(memspec.FENCE_LANGS_FIELD, "").strip() or counts.get(memspec.FENCE_LANGS_FIELD)
+    if langs and not shell:
+        findings.append((
+            FAIL,
+            "fence-pair",
+            memspec.CARD_REQUIRE_PAIR_REASON.format(
+                present=memspec.FENCE_LANGS_FIELD, missing=memspec.FENCE_SHELL_FIELD),
+        ))
+    return findings
+
+
+def _unenforceable_gap_findings(fields):
+    """「閘門看不到」不是綁不住的理由，是 Epitype 的缺口；點出來，不要讓它被當成定論放著。"""
+    reason = fields.get(memspec.UNENFORCEABLE_FIELD, "").strip()
+    if not reason or not re.search(memspec.UNENFORCEABLE_PRODUCT_GAP_PATTERN, reason, re.IGNORECASE):
+        return []
+    return [(
+        WARN,
+        "unenforceable-gap",
+        memspec.CARD_LINT_UNENFORCEABLE_GAP_REASON.format(
+            field=memspec.UNENFORCEABLE_FIELD,
+            armed=memspec.SLASH_JOINER.join(memspec.CARD_ARMING_FIELDS)),
+    )]
+
+
 def _require_findings(fields):
     """`require_when` 與 `require_text` 成對才有意義。
 
@@ -687,7 +724,9 @@ def _check_card(path, relative, today):
     findings.extend(_guard_findings(fields, front_lines))
     findings.extend(_pattern_findings(fields, front_lines))
     findings.extend(_require_findings(fields))
+    findings.extend(_fence_shell_findings(fields, counts))
     findings.extend(_arming_findings(fields, counts, card_type, today))
+    findings.extend(_unenforceable_gap_findings(fields))
     findings.extend(_example_findings(path, fields, front_lines, counts, today))
 
     for field in memspec.DEPRECATED_CARD_FIELDS:
@@ -1615,11 +1654,58 @@ def _selftest():
                 and fixed["fail"] == report["fail"]
                 and fixed["by_type"] == report["by_type"],
             ))
+
+            # fence_shell：另開一個庫，不動上面那些以整庫計數驗的題目。
+            fence_vault = Path(temp_dir).resolve() / "fence-vault"
+            fence_vault.mkdir()
+            head = "---\nname: {name}\ndescription: 2026-09-25 指令區塊\naliases: [執行鍵]\n"
+            tail = "metadata:\n  type: feedback\n---\nbody\n"
+            fence_cards = {
+                "fence-good.md": head + "fence_shell: powershell\nfence_langs: [bash, PowerShell]\n" + tail,
+                "fence-pwsh.md": head + "fence_shell: pwsh\n" + tail,
+                "fence-nested.md": head + "metadata:\n  type: feedback\n  fence_shell: powershell\n---\nbody\n",
+                "fence-langs-alone.md": head + "unenforceable: 判斷型\nfence_langs:\n  - bash\n" + tail,
+                "gap-plain-text.md": head + "unenforceable: 結構型：程式碼區塊的數量與語言標記是版面結構，Stop 閘比對的是純文字\n" + tail,
+                "gap-english.md": head + "unenforceable: the gate can't see code fences\n" + tail,
+            }
+            for name, text in fence_cards.items():
+                (fence_vault / name).write_text(text.format(name=Path(name).stem), encoding="utf-8")
+            fence_report = scan_vault(fence_vault, today=date(2026, 9, 25))
+            good_rules, _card = _findings_of(fence_report, "fence-good.md")
+            checks.append((
+                "fence_shell: powershell 是武裝欄位——不判 unarmed、不要求例句，也沒有任何 FAIL",
+                good_rules == set(),
+            ))
+            pwsh_rules, _card = _findings_of(fence_report, "fence-pwsh.md")
+            nested_rules, _card = _findings_of(fence_report, "fence-nested.md")
+            alone_rules, _card = _findings_of(fence_report, "fence-langs-alone.md")
+            checks.append((
+                "fence_shell: 值不在 powershell|bash|sh → FAIL；包進下一層 → FAIL disarmed-field；"
+                "只有 fence_langs → FAIL fence-pair",
+                (FAIL, "fence-shell") in pwsh_rules
+                and "pwsh" in _reason_of(fence_report, "fence-pwsh.md", "fence-shell")
+                and (FAIL, "disarmed-field") in nested_rules
+                and memspec.FENCE_SHELL_FIELD in _reason_of(fence_report, "fence-nested.md", "disarmed-field")
+                and (FAIL, "fence-pair") in alone_rules,
+            ))
+            gap_rules, _card = _findings_of(fence_report, "gap-plain-text.md")
+            english_rules, _card = _findings_of(fence_report, "gap-english.md")
+            plain_rules, _card = _findings_of(report, "feedback-good.md")
+            checks.append((
+                "unenforceable 理由是「閘門看不到／比對純文字」→ WARN 產品缺口；真的綁不住的理由不受影響",
+                (WARN, "unenforceable-gap") in gap_rules
+                and "這是 Epitype 的缺口不是做不到" in _reason_of(
+                    fence_report, "gap-plain-text.md", "unenforceable-gap")
+                and memspec.FENCE_SHELL_FIELD in _reason_of(
+                    fence_report, "gap-plain-text.md", "unenforceable-gap")
+                and (WARN, "unenforceable-gap") in english_rules
+                and not any(rule == "unenforceable-gap" for _level, rule in plain_rules),
+            ))
     except Exception as exc:
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 47
+    total = 50
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
