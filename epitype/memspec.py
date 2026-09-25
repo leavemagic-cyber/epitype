@@ -268,6 +268,23 @@ CONTEXT_METER_CODEX_NOTICE = (
     "（原話）、目標、決定與理由、進度、確切路徑／指令／數字、下一步、已排除的路；之後每到"
     "里程碑就更新，直到壓縮。"
 )
+# 標記裡記著搶到當下的用量。之後讀到的用量跌掉這個比例以上＝已經壓縮過、而 PreCompact
+# 沒把標記清掉（2026-09-25 Codex App 實例：17:03 壓縮後一路到 204k 都沒提醒），就把標記
+# 移掉、重新武裝。依據（同一份 rollout，8 次壓縮）：壓縮後第一筆用量是壓縮前的 0.131–0.163；
+# 兩次壓縮之間 last_token_usage 沒有任何一筆下跌。提醒只在壓縮點附近搶（Codex 壓縮點－44k、
+# Claude 0.97T），所以壓縮後的用量離「跌 40%」還有一大段；而週期內的起伏到不了 40%。
+CONTEXT_METER_REARM_DROP_RATIO = 0.4
+# 標記檔只讀開頭這麼多：它是一行 JSON，讀多了只是把別人放進來的大檔讀進每一次工具呼叫。
+CONTEXT_METER_MARKER_MAX_BYTES = 256
+# 壓縮前後掛鉤的追蹤：每次一行 JSON，放在設定檔旁（~/.epitype）。追查「壓縮後地圖與交接
+# 沒交回來」用（原因未查明，不猜），所以有到期日：過了就自己停，要延長在設定的
+# context_meter.trace_until 寫一個新日期（YYYY-MM-DD，UTC，當天含）。
+CONTEXT_METER_TRACE_FILENAME = "context_meter_trace.jsonl"
+CONTEXT_METER_TRACE_MAX_BYTES = 1024 * 1024
+CONTEXT_METER_TRACE_LOCK_SECONDS = 0.2
+CONTEXT_METER_TRACE_UNTIL = "2026-10-26"
+CONTEXT_METER_TRACE_UNTIL_FIELD = "trace_until"
+CONTEXT_METER_TRACE_DEFAULT_LAST = 50
 GATE_LOG_FILENAME = "_GATE_LOG.jsonl"
 RECALL_MARKER_DIRECTORY = "epitype_markers"
 RECALL_MARKER_TTL_SECONDS = 7 * 24 * 3600

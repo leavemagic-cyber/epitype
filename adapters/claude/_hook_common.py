@@ -603,6 +603,67 @@ def emit(value):
     print(encoded)
 
 
+def append_context(value, event_name, line):
+    """在既有輸出的 additionalContext 最後加一行；沒有輸出就只放這一行。其他欄位原樣保留。"""
+    if value is None:
+        return payload(event_name, line)
+    output = dict(value.get("hookSpecificOutput") or {})
+    context = output.get("additionalContext") or ""
+    output.setdefault("hookEventName", event_name)
+    output["additionalContext"] = (context + "\n" + line) if context else line
+    return {**value, "hookSpecificOutput": output}
+
+
+def claim_meter(value, event_name, pending):
+    """用量計那一行：輸出之前先搶標記，搶到的才附上。回 (value, 搶到的, 沒搶到的)。
+
+    `pending` 是 [(標記目錄, 標記名, 用量, 那一行)]，預算在放進來之前已經算過（含這一行）。
+    Codex 一次並行好幾個工具呼叫，每個 hook 行程都看到「還沒說過」；先輸出再寫標記，同一秒
+    就會說好幾次。搶到之後沒送出去（逾時、輸出失敗）的，呼叫端一定要 `release_meter`，
+    否則這個週期再也不說。"""
+    from epitype import context_meter
+
+    won, lost = [], []
+    for directory, marker, tokens, line in pending:
+        if context_meter.claim(directory, marker, tokens):
+            won.append((directory, marker, tokens))
+            value = append_context(value, event_name, line)
+        else:
+            lost.append((directory, marker, tokens))
+    return value, won, lost
+
+
+def release_meter(won):
+    """放掉搶到卻沒送出去的標記。永不丟例外：這條路本來就在收拾失敗。"""
+    try:
+        from epitype import context_meter
+
+        for directory, marker, _tokens in won:
+            context_meter.release(directory, marker)
+    except Exception:
+        pass
+
+
+def trace_hook(event_name, event, started_at, codex=False, **fields):
+    """壓縮前後與用量提醒的追蹤一行（epitype.meter_trace）。用到才載入；永不丟例外。"""
+    try:
+        from epitype import meter_trace
+
+        return meter_trace.record(event_name, event, started_at, codex=codex, **fields)
+    except Exception:
+        return False
+
+
+def failure_reason(exc):
+    """追蹤裡的提早結束原因：設定檔不在與其他例外分開記，例外只記類別名。"""
+    try:
+        if not config_path().is_file():
+            return "config-missing"
+    except Exception:
+        pass
+    return "exception:" + type(exc).__name__
+
+
 class isolated_temp_root:
     """這一段期間，`temp_root()` 指向一個只屬於這次自測的暫存目錄。
 
@@ -697,6 +758,55 @@ def run_synthetic(script, event, config_path, arguments=(), environment=None, ti
                 credential.unlink()
             except OSError:
                 pass
+
+
+def run_concurrent(script, event, config_path, count, environment=None, settle_seconds=2.0,
+                   close_stdout=False):
+    """自測用：同時起 count 個掛鉤行程，等它們載入完、卡在讀 stdin，再一起餵同一個事件——
+    重現 Codex 一次並行好幾個工具呼叫。回 [(returncode, stdout, stderr)]。
+
+    環境跟 run_synthetic 一樣隔離（家目錄、夢關掉、不帶注入時鐘）。settle_seconds 只是
+    「大概都載入完了」：晚到的行程會看到標記、什麼都不說，不會讓「只有一個說」變假。
+    close_stdout=True 在餵事件前關掉讀端，模擬「輸出失敗」（stdout 回空字串）。"""
+    import subprocess
+
+    isolated_home = os.fspath(Path(config_path).resolve().parent / "_synthetic_home")
+    environment = {
+        **os.environ,
+        memspec.DREAM_MODE_ENV: memspec.DREAM_MODE_OFF,
+        "HOME": isolated_home,
+        "USERPROFILE": isolated_home,
+        **(environment or {}),
+    }
+    environment[memspec.EPITYPE_CONFIG_ENV] = os.fspath(config_path)
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    environment.pop(memspec.HOOK_CLOCK_ENV, None)
+    processes = [
+        subprocess.Popen([sys.executable, os.fspath(script)], stdin=subprocess.PIPE,
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=environment)
+        for _ in range(count)
+    ]
+    results = []
+    try:
+        if close_stdout:
+            for process in processes:
+                process.stdout.close()
+                process.stdout = None
+        time.sleep(settle_seconds)
+        data = json.dumps(event, ensure_ascii=False).encode("utf-8")
+        for process in processes:
+            process.stdin.write(data)
+        for process in processes:
+            process.stdin.close()
+        for process in processes:
+            out, err = process.communicate(timeout=memspec.HOOK_TIMEOUT_SECONDS + 20)
+            results.append((process.returncode, (out or b"").decode("utf-8", "replace"),
+                            err.decode("utf-8", "replace")))
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.kill()
+    return results
 
 
 def write_codex_fixture(root, session_id, total, auto_limit=210000):

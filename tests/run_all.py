@@ -22,6 +22,7 @@ SELFTESTS = (
     Path("epitype") / "scar_census.py",
     Path("epitype") / "token_meter.py",
     Path("epitype") / "context_meter.py",
+    Path("epitype") / "meter_trace.py",
     Path("epitype") / "gates_report.py",
     Path("epitype") / "pending_lint.py",
     Path("epitype") / "harvest.py",

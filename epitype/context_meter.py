@@ -4,7 +4,8 @@ import sys; sys.dont_write_bytecode = True; [getattr(stream, "reconfigure", lamb
 模型看不到自己的 context 用量，也無法自己觸發壓縮；PreCompact 的文字到不了模型
 （2026-08-19 實證）。所以只能在壓縮「之前」、由每次都會跑的 hook（PreToolUse、
 UserPromptSubmit）在跨過學到的壓縮點 97% 的那一次附一行字，提醒模型自己把交接落檔。這支模組只算數字與決定要不要說，
-輸出與標記的時機歸 adapter：先輸出、後寫標記，沒送出去的提醒下次再試。
+輸出與標記的時機歸 adapter：先搶標記（獨占建立）、搶到的才輸出——Codex 並行的工具呼叫
+會同時看到「還沒說過」；搶到卻沒送出去的放掉標記，下次再試。
 
 門檻不猜（見 memspec 的 CONTEXT_METER 段落）：設定覆寫 → 學到的自動壓縮用量 → 都沒有
 就完全不提醒。hook 內每次呼叫只讀 transcript 檔尾，找不到就算了，永遠不讀整檔。
@@ -731,13 +732,16 @@ def codex_due(reading, marker_directory=None, environ=None, home=None, model=Non
 
 
 def notice(event, vault, marker_directory, options=None, environ=None, home=None, clock=None):
-    """這次呼叫要附的那一行與要寫的標記名：(line, marker)；不該說就回 None。永不丟例外。
+    """這次呼叫要附的那一行、標記名與當下用量：(line, marker, tokens)；不該說就回 None。
+    永不丟例外。
 
-    標記由呼叫端在「真的輸出之後」用 `claim` 寫：沒送出去（預算擠掉、逾時）的提醒
-    下一次還要再試。子代理的呼叫一律不說、也不寫標記——提醒被子代理吃掉，主線就永遠
-    收不到了（Codex 的子代理有自己的 session_id 與 rollout，一樣帶 agent_id）。
-    宿主由 transcript 檔尾的列決定：Codex rollout 走 `codex_due`，其餘照 Claude 的門檻。
-    `clock` 只給自測注入（見 `measure`）；hook 一律用真時鐘。"""
+    這只是「看起來還沒說過」：呼叫端要在輸出之前用 `claim(目錄, marker, tokens)` 搶標記，
+    搶到的才輸出——Codex 一次並行好幾個工具呼叫，每個 hook 行程這裡都會回同一行。搶到卻
+    沒送出去（預算擠掉、逾時、輸出失敗）的要 `release`，下一次再試。子代理的呼叫一律不說、
+    也不碰標記——提醒被子代理吃掉，主線就永遠收不到了（Codex 的子代理有自己的 session_id
+    與 rollout，一樣帶 agent_id）。宿主由 transcript 檔尾的列決定：Codex rollout 走
+    `codex_due`，其餘照 Claude 的門檻。標記記的用量比現在高出很多＝壓縮過而 PreCompact
+    沒清到，先重新武裝（`_rearm_if_stale`）。`clock` 只給自測注入（見 `measure`）。"""
     try:
         if not isinstance(event, dict) or event.get("agent_id") or event.get("agentId"):
             return None
@@ -753,6 +757,9 @@ def notice(event, vault, marker_directory, options=None, environ=None, home=None
         reading = measure(transcript, clock=clock)
         if reading is None:
             return None
+        stored = _rearm_if_stale(marker_directory, memspec.CONTEXT_METER_MARKER, reading.tokens)
+        if stored is not None:
+            _trace_rearm(event, stored, reading.tokens)
         if reading.host == memspec.CONTEXT_METER_HOST_CODEX:
             due = codex_due(reading, marker_directory, environ, home, event.get("model"))
             if due is None:
@@ -761,7 +768,7 @@ def notice(event, vault, marker_directory, options=None, environ=None, home=None
             line = memspec.CONTEXT_METER_CODEX_NOTICE.format(
                 cur=_k(current), left=_k(limit - current),
                 path=os.fspath(_handoff(vault, session_id, transcript)))
-            return line, memspec.CONTEXT_METER_MARKER
+            return line, memspec.CONTEXT_METER_MARKER, current
         limit, source = threshold(options, state_path(vault), environ, home)
         if limit is None:
             return None
@@ -772,9 +779,54 @@ def notice(event, vault, marker_directory, options=None, environ=None, home=None
         if (Path(marker_directory) / marker).exists():
             return None  # 這個壓縮週期已經說過。
         path = _handoff(vault, session_id, transcript)
-        return render(current, limit, source, path), marker
+        return render(current, limit, source, path), marker, current
     except Exception:
         return None
+
+
+def _marker_tokens(path):
+    """標記裡記的用量；舊格式（只有標記名）、壞檔、讀不到都回 None＝不判定過期。"""
+    try:
+        with open(path, "rb") as stream:
+            value = json.loads(stream.read(memspec.CONTEXT_METER_MARKER_MAX_BYTES))
+    except (OSError, ValueError):
+        return None
+    tokens = value.get("tokens") if isinstance(value, dict) else None
+    return tokens if _positive_int(tokens) else None
+
+
+def _rearm_if_stale(marker_directory, marker, current):
+    """標記在、但現在的用量比標記記的跌了 REARM_DROP_RATIO 以上：移掉標記，回標記記的用量；
+    否則回 None。
+
+    PreCompact 是清標記的主路，但它沒跑完（宿主逾時砍掉）的話，下一個週期就永遠不提醒。
+    這裡要在「低點」就移掉：到了下一次提醒點，用量又爬回標記記的那一帶，就看不出來了。
+    移不掉就當它還在——寧可這一次不說，也不要每次都說。"""
+    if marker_directory is None or not _nonnegative_int(current):
+        return None
+    path = Path(marker_directory) / marker
+    stored = _marker_tokens(path)
+    if stored is None or current > stored * (1 - memspec.CONTEXT_METER_REARM_DROP_RATIO):
+        return None
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return None  # 同時間別的行程已經移掉了；由它記。
+    except OSError:
+        return None
+    return stored
+
+
+def _trace_rearm(event, stored, current):
+    try:
+        try:
+            from . import meter_trace
+        except ImportError:
+            import meter_trace
+        meter_trace.record(event.get("hook_event_name") or "meter", event, None,
+                           outcome="meter-rearmed", stored=stored, tokens=current)
+    except Exception:
+        pass
 
 
 def _handoff(vault, session_id, transcript):
@@ -786,16 +838,43 @@ def _handoff(vault, session_id, transcript):
     return compact_map.handoff_destination(vault, session_id, transcript)
 
 
-def claim(marker_directory, marker):
-    """寫下「這一段這個壓縮週期已經說過」。已經有了回 False；寫不了也回 False（下次再試）。"""
+def claim(marker_directory, marker, tokens=None):
+    """搶「這個壓縮週期由我來說」：獨占建立標記，搶到回 True。
+
+    同時跑的幾個 hook 行程只有一個建得起來，其餘回 False、不得輸出這一行。已經有了、
+    寫不了都回 False。標記記下當下用量（給 `_rearm_if_stale`）與行程號（給 `release`）。
+    建起來了卻寫不進內容：刪掉自己剛建的空標記再回 False——留著它，這個週期就再也不說。"""
     try:
-        directory = Path(marker_directory)
-        directory.mkdir(parents=True, exist_ok=True)
-        with (directory / marker).open("x", encoding="ascii") as stream:
-            stream.write(marker + "\n")
+        path = Path(marker_directory) / marker
+        path.parent.mkdir(parents=True, exist_ok=True)
+        stream = path.open("x", encoding="ascii")
     except (OSError, TypeError, ValueError):
         return False
+    try:
+        with stream:
+            stream.write(json.dumps({"tokens": tokens if _positive_int(tokens) else None,
+                                     "pid": os.getpid()}) + "\n")
+    except (OSError, TypeError, ValueError):
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        return False
     return True
+
+
+def release(marker_directory, marker):
+    """放掉自己搶到、卻沒送出去的標記，讓下一次再試。只刪自己行程寫的那一份；永不丟例外。"""
+    try:
+        path = Path(marker_directory) / marker
+        with open(path, "rb") as stream:
+            value = json.loads(stream.read(memspec.CONTEXT_METER_MARKER_MAX_BYTES))
+        if isinstance(value, dict) and value.get("pid") == os.getpid():
+            path.unlink()
+            return True
+    except (OSError, TypeError, ValueError):
+        pass
+    return False
 
 
 def record_autocompact(vault, transcript_path, environ=None, now=None, home=None, clock=None):
@@ -1218,9 +1297,12 @@ def _selftest():
     def write(path, rows, trailing_newline=True):
         path.write_text("\n".join(rows) + ("\n" if trailing_newline else ""), encoding="utf-8")
 
+    saved_config_env = os.environ.get(memspec.EPITYPE_CONFIG_ENV)
     try:
         with tempfile.TemporaryDirectory(prefix="epitype-context-meter-") as temp_dir:
             root = Path(temp_dir).resolve()
+            # 追蹤檔落在設定檔旁：自測一律指到暫存根，絕不寫進真的 ~/.epitype。
+            os.environ[memspec.EPITYPE_CONFIG_ENV] = os.fspath(root / "selftest-config.json")
             transcript = root / "t.jsonl"
 
             # 1. 跨塊：最後一列是遠大於首塊的工具結果，用量在它前面。
@@ -1357,7 +1439,7 @@ def _selftest():
                 found = notice({**event, **(extra or {})}, vault, directory, options=options, environ=env92,
                                clock=frozen_clock)
                 if found is not None:
-                    claim(directory, found[1])
+                    claim(directory, found[1], found[2])
                 return found
 
             far_below = call(66000)
@@ -1402,6 +1484,77 @@ def _selftest():
                            and scaled_line is not None
                            and memspec.CONTEXT_METER_SCALED_MARK in scaled_line[0]
                            and memspec.CONTEXT_METER_SCALED_MARK not in first[0]))
+
+            # 8b. 並行：幾個行程在任何一個搶標記之前都看到「還沒說過」（Codex 並行的工具
+            # 呼叫），但獨占建立只讓一個搶到；搶到卻沒送出去的放掉，下一次再說；別的行程
+            # 寫的標記 release 不動。
+            race = root / "claim-race"
+            write(transcript, [assistant(98000)])
+            seen = [notice(event, vault, race, options=options, environ=env92, clock=frozen_clock)
+                    for _ in range(5)]
+            wins = [claim(race, found[1], found[2]) for found in seen if found is not None]
+            race_marker = race / memspec.CONTEXT_METER_MARKER
+            stored_race = _marker_tokens(race_marker)
+            after_claim = notice(event, vault, race, options=options, environ=env92, clock=frozen_clock)
+            released = release(race, memspec.CONTEXT_METER_MARKER)
+            retried = notice(event, vault, race, options=options, environ=env92, clock=frozen_clock)
+            race_marker.write_text(json.dumps({"tokens": 98000, "pid": os.getpid() + 1}) + "\n",
+                                   encoding="ascii")
+            foreign = release(race, memspec.CONTEXT_METER_MARKER)
+            checks.append(("concurrent notices all see the line but exactly one claim wins; a released claim "
+                           "is retried; another process's marker is not released",
+                           len(seen) == 5 and all(found is not None for found in seen)
+                           and wins.count(True) == 1 and len(wins) == 5 and stored_race == 98000
+                           and after_claim is None and released is True and retried is not None
+                           and foreign is False and race_marker.is_file()))
+
+            broken_claim_dir = root / "claim-broken"
+            real_getpid = os.getpid
+            os.getpid = lambda: object()  # 內容寫不出去（JSON 序列化失敗）
+            try:
+                broken_claim = claim(broken_claim_dir, memspec.CONTEXT_METER_MARKER, 98000)
+            finally:
+                os.getpid = real_getpid
+            checks.append(("a claim whose content cannot be written removes its empty marker",
+                           broken_claim is False
+                           and not (broken_claim_dir / memspec.CONTEXT_METER_MARKER).exists()))
+
+            # 8c. PreCompact 沒清到標記（Claude）：跌 ≥40% 才重新武裝、並記一行追蹤；舊格式
+            # 標記（沒有用量）不自己武裝，照舊等 PreCompact。
+            stale = root / "stale"
+            stale_first = call(97500, stale)
+            stale_dip = call(60000, stale)  # 60000 > 0.6×97500
+            stale_dip_kept = (stale / memspec.CONTEXT_METER_MARKER).is_file()
+            stale_back = call(97600, stale)
+            stale_drop = call(58000, stale)  # ≤ 0.6×97500
+            stale_cleared = not (stale / memspec.CONTEXT_METER_MARKER).exists()
+            stale_again = call(97500, stale)
+            legacy = root / "legacy"
+            legacy.mkdir()
+            (legacy / memspec.CONTEXT_METER_MARKER).write_text(memspec.CONTEXT_METER_MARKER + "\n",
+                                                                encoding="ascii")
+            call(10000, legacy)
+            legacy_kept = (legacy / memspec.CONTEXT_METER_MARKER).is_file() and call(98000, legacy) is None
+            trace_file = root / memspec.CONTEXT_METER_TRACE_FILENAME
+            rearm_rows = [json.loads(line) for line in trace_file.read_text(encoding="utf-8").splitlines()
+                          if '"meter-rearmed"' in line] if trace_file.is_file() else []
+            checks.append(("Claude: a marker PreCompact left behind re-arms after a >=40% drop (traced), "
+                           "not after a smaller dip; a legacy marker without usage waits for PreCompact",
+                           stale_first is not None and stale_dip is None and stale_dip_kept
+                           and stale_back is None and stale_drop is None and stale_cleared
+                           and stale_again is not None and legacy_kept
+                           and any(row.get("stored") == 97500 and row.get("tokens") == 58000
+                                   and row.get("session") == "s1" for row in rearm_rows)))
+
+            # 8d. 唯讀 CLI：印檔在哪、開到哪一天，再印最後 N 行。
+            printed = []
+            before_cli = trace_file.read_bytes() if trace_file.is_file() else b""
+            cli_status = trace_command(1, trace_file, out=printed.append)
+            checks.append(("`context-meter trace --last N` prints where the trace is and its last N lines, read-only",
+                           cli_status == 0 and len(printed) == 2
+                           and printed[0].startswith(f"# trace {trace_file} (")
+                           and json.loads(printed[1]).get("outcome") == "meter-rearmed"
+                           and trace_file.read_bytes() == before_cli))
 
             # 9. 學習：record_autocompact 追加一筆、壞檔重建、只留 10 筆。
             state.write_text("{broken", encoding="utf-8")
@@ -1674,7 +1827,7 @@ def _selftest():
                                 "model": model, **extra}, vault, directory, options=claude_override,
                                environ=base_env, clock=frozen_clock)
                 if found is not None:
-                    claim(directory, found[1])
+                    claim(directory, found[1], found[2])
                 return found
 
             below = codex_call(210000 - headroom - 1)
@@ -1697,6 +1850,24 @@ def _selftest():
                                _compact_map.handoff_destination(vault, "cx2", rollout)) in small[0]
                            and by_subagent is None
                            and not (root / "codex-markers-3").exists()))
+
+            # C6b. PreCompact 沒清到標記：壓縮後用量跌到標記記的 60% 以下就重新武裝；週期內
+            # 的起伏（跌不到 40%）不算。
+            codex_stale = root / "codex-stale"
+            codex_point = 210000 - headroom + 500
+            codex_claimed = codex_call(codex_point, directory=codex_stale)
+            codex_dip = codex_call(int(codex_point * 0.61), directory=codex_stale)
+            codex_dip_kept = (codex_stale / memspec.CONTEXT_METER_MARKER).is_file()
+            codex_back = codex_call(209000, directory=codex_stale)
+            codex_low = codex_call(28000, directory=codex_stale)
+            codex_low_cleared = not (codex_stale / memspec.CONTEXT_METER_MARKER).exists()
+            codex_rearmed = codex_call(codex_point, directory=codex_stale)
+            checks.append(("Codex: a marker PreCompact left behind re-arms after a >=40% drop, "
+                           "not after a smaller dip",
+                           codex_claimed is not None and codex_claimed[2] == codex_point
+                           and codex_dip is None and codex_dip_kept and codex_back is None
+                           and codex_low is None and codex_low_cleared
+                           and codex_rearmed is not None and codex_rearmed[0] == codex_claimed[0]))
 
             # C7. 壓縮點記在標記目錄：設定沒變就沿用，設定一變就重算。
             cache_dir = root / "codex-cache"
@@ -1835,9 +2006,14 @@ def _selftest():
                                _compact_map.handoff_destination(vault, "dp-claude", large))))
     except Exception as exc:
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
+    finally:
+        if saved_config_env is None:
+            os.environ.pop(memspec.EPITYPE_CONFIG_ENV, None)
+        else:
+            os.environ[memspec.EPITYPE_CONFIG_ENV] = saved_config_env
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 27
+    total = 32
     status_word = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status_word} {passed}/{total}")
     if status_word != "PASS":
@@ -1845,6 +2021,20 @@ def _selftest():
             if not ok:
                 print(f"FAILED: {name}", file=sys.stderr)
     return 0 if status_word == "PASS" else 1
+
+
+def trace_command(count, path=None, out=print, now=None):
+    """印追蹤檔最後 count 行（唯讀）。第一行說檔在哪、追蹤開到哪一天。"""
+    try:
+        from . import meter_trace
+    except ImportError:
+        import meter_trace
+    target = Path(path) if path is not None else meter_trace.trace_path()
+    state = "on" if meter_trace.enabled(now) else "off"
+    out(f"# trace {target} ({state} until {meter_trace.until().isoformat()})")
+    for line in meter_trace.last(count, target):
+        out(line)
+    return 0
 
 
 def main(argv=None):
@@ -1871,6 +2061,10 @@ def main(argv=None):
     status_parser = commands.add_parser("status", help="print the threshold, its source and the current usage")
     status_parser.add_argument("--transcript", help="a Claude Code transcript or Codex rollout JSONL to measure")
     status_parser.add_argument("--vault", help="governance vault (default: from the Epitype config)")
+    trace_parser = commands.add_parser(
+        "trace", help="print (read-only) the last lines of the PreCompact/SessionStart/reminder trace")
+    trace_parser.add_argument("--last", type=int, default=memspec.CONTEXT_METER_TRACE_DEFAULT_LAST,
+                              help="how many lines (default: %(default)s)")
     args = parser.parse_args(argv)
 
     if args.selftest:
@@ -1889,6 +2083,8 @@ def main(argv=None):
         root = Path(args.root).expanduser() if args.root else Path.home() / ".claude" / "projects"
         calibrate(root)
         return 0
+    if args.command == "trace":
+        return trace_command(args.last)
     options = memspec.config_options()
     status(options, _governance(args.vault, options), args.transcript)
     return 0
