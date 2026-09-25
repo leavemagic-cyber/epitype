@@ -153,8 +153,8 @@ def parse(text):
                     hunks[-1]["eof"] = True
                 continue
             if any(stripped.startswith(prefix) for prefix in _STRUCTURE_PREFIXES):
-                # 改名：寫入後的內容落在另一個路徑，原路徑上套出來的結果不是任何人會讀到的檔。
-                hunks = None
+                # 改名只換落點，段落照樣套在原檔上：套出來的全文就是新路徑上的內容。
+                # 把它當成套不上會讓「改名＋追加事故」整個不判。
                 continue
             if stripped.startswith("@@"):
                 if hunks is not None:
@@ -179,18 +179,36 @@ def full_content(entry):
     return "\n".join(entry.additions)
 
 
+# Codex seek_sequence.rs 最寬鬆的那一輪：各種破折號、彎引號、特殊空白當成 ASCII 比。
+# 少了這一輪，Codex 套得上的補丁在這裡套不上，閘門就會判到一份沒有人寫過的檔。
+_PUNCTUATION_FOLD = str.maketrans({
+    **dict.fromkeys("‐‑‒–—―−", "-"),
+    **dict.fromkeys("‘’‚‛", "'"),
+    **dict.fromkeys("“”„‟", '"'),
+    **dict.fromkeys(
+        "            　", " "),
+})
+
+
+def _fold(value):
+    return value.strip().translate(_PUNCTUATION_FOLD)
+
+
 def _seek(lines, pattern, start, at_end):
-    """Codex 找段落的順序：逐字、去行尾空白、去兩端空白，找第一個對得上的位置。"""
+    """照 Codex seek_sequence.rs：逐字 → 去行尾空白 → 去兩端空白 → 標點正規化，
+    每一輪都從頭找，第一個對得上的位置勝出。
+
+    `*** End of File` 的段落只准落在檔尾：Codex 從檔尾那個位置開始找，而那也是
+    最後一個可能的位置，所以檔尾對不上就是套不上，不會回頭去比前面的行。"""
     if not pattern:
         return start
     if len(pattern) > len(lines):
         return None
     last = len(lines) - len(pattern)
-    starts = [last] if at_end and last >= start else []
-    starts += list(range(start, last + 1))
-    for normalise in (lambda value: value, str.rstrip, str.strip):
+    first = max(last, start) if at_end else start
+    for normalise in (lambda value: value, str.rstrip, str.strip, _fold):
         wanted = [normalise(item) for item in pattern]
-        for index in starts:
+        for index in range(first, last + 1):
             if [normalise(item) for item in lines[index:index + len(pattern)]] == wanted:
                 return index
     return None
@@ -267,11 +285,22 @@ def _selftest():
                    apply_update(files[1], before) == "top\ndef thing():\ncontext line\nadded line\ntail\n"
                    and apply_update(files[1], "﻿" + before.replace("\n", "\r\n"))
                    == "top\ndef thing():\ncontext line\nadded line\ntail\n"))
-    checks.append(("套不上、Add File、改名，一律回 None",
+    checks.append(("套不上、Add File 一律回 None",
                    apply_update(files[1], "nothing here\n") is None
-                   and apply_update(files[0], before) is None
-                   and parse("\n".join((BEGIN_MARKER, "*** Update File: a.md", "*** Move to: b.md",
-                                        "@@", " x", "+y", END_MARKER)))[0].hunks is None))
+                   and apply_update(files[0], before) is None))
+    moved = parse("\n".join((BEGIN_MARKER, "*** Update File: a.md", "*** Move to: b.md",
+                             "@@", " x", "+y", END_MARKER)))[0]
+    checks.append(("改名只換落點，段落照樣套在原檔上", apply_update(moved, "x\n") == "x\ny\n"))
+    dashed = parse("\n".join((BEGIN_MARKER, "*** Update File: a.md", "@@",
+                              "-  - 'run-two'", "+  - 'run-three'", END_MARKER)))[0]
+    checks.append(("補丁寫 ASCII 連字號，檔裡是 en dash／彎引號也對得上（Codex 最寬鬆那一輪）",
+                   apply_update(dashed, "a\n  - 'run–two'\n") == "a\n  - 'run-three'\n"
+                   and apply_update(dashed, "a\n  - ‘run-two’\n") == "a\n  - 'run-three'\n"))
+    tail = parse("\n".join((BEGIN_MARKER, "*** Update File: a.md", "@@", " keep", "+new",
+                            "*** End of File", END_MARKER)))[0]
+    checks.append(("End of File 的段落只准落在檔尾，前面對得上也不算",
+                   apply_update(tail, "x\nkeep\n") == "x\nkeep\nnew\n"
+                   and apply_update(tail, "keep\nx\n") is None))
     appended = parse("\n".join((BEGIN_MARKER, "*** Update File: a.md", "+tail line", END_MARKER)))[0]
     checks.append(("沒有舊行的段落接在檔尾", apply_update(appended, "a\nb\n") == "a\nb\ntail line\n"))
     checks.append(("路徑照原字串留著", [item.path for item in files] == ["new.md", "old.md", "gone.md"]))

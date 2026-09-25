@@ -51,9 +51,10 @@ transcript：用量 ≥800k 時相鄰兩筆主鏈用量的增幅 p99=11.2k、最
 card_lint），這次新增的行比刪掉的行多出事故敘述，而且武裝欄位（`forbidden`、`guard_*`、`require_*`、
 `turn_check*`）沒有新增或改動，就擋下。事故敘述的判定刻意收窄：再犯標記要跟日期同一行，或開頭就是標記的
 粗體／標題行；「免得以後再犯」「永遠別再犯」「防再犯規則」這類一般用語放行（4 個真庫約一半的命中是這種），
-「再犯時先補 forbidden」這類條件句是規則正文，也放行。Codex 的 Update File 會先套在磁碟上的卡（照 Codex 找段落的
-規則，`patch_envelope.apply_update`）再判，同一段內容走 Write、Edit、patch 三條路結論一致；套不上才退回只看新增行，
-位置不明的一律照正文判。
+「再犯時先補 forbidden」這類條件句是規則正文，也放行（條件只認標記後的「時／的話」或同一子句前面的條件詞；
+日期緊貼標記一律算事故）。Codex 的 Update File 會先套在磁碟上的卡再判（`patch_envelope.apply_update`，照 Codex
+`seek_sequence.rs` 的逐級寬鬆比對，含標點正規化；`*** End of File` 只比檔尾），同一段內容走 Write、Edit、patch
+三條路結論一致；補丁套不上時 Codex 也寫不出東西，放行並記 `patch_unappliable`。
 新卡、project／reference／decision 卡、同一次寫入正在武裝、再犯字樣只在武裝／例句／unenforceable 欄位裡，
 一律放行。擋下記 `write_block`（rule `recurrence`），放行記 `write_allow`（`outcome` 標原因），都只記規則與卡名。
 沒有新增 hook 事件，全部 fail-open。說明見 `docs/FAILURE_MODES.md` §45。

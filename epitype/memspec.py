@@ -2934,11 +2934,17 @@ RECURRENCE_GATE_PREVENTIVE_PATTERN = (
 )
 RECURRENCE_GATE_PREVENTIVE_WINDOW = 24
 # 條件句是規則正文，不是事故：「2026-09-25 起的處理規則：再犯時先補 forbidden」寫的是
-# 以後怎麼做（2026-09-25 交叉審查實測被誤擋）。標記後面緊接「時／的話／就／則」，或同
-# 一個子句裡前面有「若／如果／一旦／萬一／假如」、if／when，都不算。
+# 以後怎麼做（2026-09-25 交叉審查實測被誤擋）。只認兩種證據：標記後面緊接「時／的話」，
+# 或同一個子句裡前面有「若／如果／一旦／萬一／假如」、if／when。後面單獨接「就／則」
+# 證明不了什麼——「2026-09-25 又犯就表示閘門失效」是事故（第二輪審查實測被放過）。
 # 這條與下面的 RECURRENCE_GATE_LEAD_PATTERN 都是拿 `match(line, pos)` 從行中間接著比，
 # 不能寫 `^`：`^` 只認整行開頭，帶 pos 的 match 永遠比不到。
-RECURRENCE_GATE_CONDITIONAL_AFTER_PATTERN = r"\s*(?:時|的話|就|則)"
+RECURRENCE_GATE_CONDITIONAL_AFTER_PATTERN = r"\s*(?:時|的話)"
+# 日期緊貼在標記前面（「2026-09-25 又犯」）就是在記某一天發生的事，條件詞救不了它。
+RECURRENCE_GATE_DATED_MARKER_PATTERN = (
+    r"(?:\d{4}[-/.]\d{1,2}[-/.]\d{1,2}|(?<!\d)\d{1,2}[-/]\d{1,2}|\d{1,2}\s*月\s*\d{1,2}\s*日|今天)"
+    r"[\s,，:：]*$"
+)
 RECURRENCE_GATE_CONDITIONAL_BEFORE_PATTERN = (
     r"(?:若|如果|一旦|萬一|假如)[^，。；;,.!?！？：:]*$"
     r"|\b(?:if|when|whenever)\b[^,.;:!?]*$"
@@ -2959,6 +2965,9 @@ RECURRENCE_GATE_ALLOW_LOG_KIND = "write_allow"
 RECURRENCE_GATE_OUTCOME_ARMING = "arming_changed"
 RECURRENCE_GATE_OUTCOME_EXEMPT_FIELDS = "exempt_fields_only"
 RECURRENCE_GATE_OUTCOME_REPEAT = "repeat"
+# 補丁套不上磁碟上的卡：Codex 自己也會失敗、什麼都不會寫出去，只憑新增行去擋一份
+# 不會存在的內容是誤擋。
+RECURRENCE_GATE_OUTCOME_UNAPPLIABLE = "patch_unappliable"
 RECURRENCE_GATE_REASON = (
     "🔁 再犯不是往卡上加一段：{path} 是行為卡（{card_type}），這次新增的文字在記一次再犯"
     "（「{fragment}」），可是卡上能擋的欄位一個都沒新增或改動。再犯＝這張卡擋不住的證據，"
@@ -2983,6 +2992,7 @@ _LAZY_REGEX.update({
     "RECURRENCE_GATE_PREVENTIVE_REGEX": lambda: re.compile(
         RECURRENCE_GATE_PREVENTIVE_PATTERN, re.IGNORECASE),
     "RECURRENCE_GATE_DATE_REGEX": lambda: re.compile(RECURRENCE_GATE_DATE_PATTERN),
+    "RECURRENCE_GATE_DATED_MARKER_REGEX": lambda: re.compile(RECURRENCE_GATE_DATED_MARKER_PATTERN),
     "RECURRENCE_GATE_CONDITIONAL_AFTER_REGEX": lambda: re.compile(
         RECURRENCE_GATE_CONDITIONAL_AFTER_PATTERN),
     "RECURRENCE_GATE_CONDITIONAL_BEFORE_REGEX": lambda: re.compile(

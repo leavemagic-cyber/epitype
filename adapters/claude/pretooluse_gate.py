@@ -483,11 +483,15 @@ def _incident_line(line):
     ordinary words. Two shapes count — a marker and a date on the same line, or a bold
     or heading line that opens with the marker. A marker right after a preventive word
     never counts, and neither does a conditional one (「再犯時先補 forbidden」): that is
-    the rule's own text about what to do next time."""
+    the rule's own text about what to do next time. A date right before the marker
+    (「2026-09-25 又犯」) names a day it happened, so no condition word excuses it."""
     hits = []
     for hit in memspec.RECURRENCE_GATE_MARKER_REGEX.finditer(line):
         window = line[max(0, hit.start() - memspec.RECURRENCE_GATE_PREVENTIVE_WINDOW):hit.start()]
         if memspec.RECURRENCE_GATE_PREVENTIVE_REGEX.search(window) is not None:
+            continue
+        if memspec.RECURRENCE_GATE_DATED_MARKER_REGEX.search(window) is not None:
+            hits.append(hit)
             continue
         if memspec.RECURRENCE_GATE_CONDITIONAL_BEFORE_REGEX.search(window) is not None:
             continue
@@ -506,40 +510,6 @@ def _incident_line(line):
     return any(hit.start() == start for hit in hits)
 
 
-def _envelope_card_lines(additions):
-    """(free lines, exempt-field lines, arming) for a patch's added lines alone.
-
-    The fallback when the patch cannot be applied to the card on disk — and then Codex
-    cannot apply it either, so nothing it says lands. A field is known only when its
-    `key:` line is among the additions; any other line, indented or not, is judged as
-    body, the same place a full write would almost always put it. Guessing "maybe under
-    an armed field" instead let an indented incident line through that the same
-    content as a Write was denied for (2026-09-25 cross review)."""
-    free, exempt = [], []
-    arming = False
-    for run in additions:
-        parent = None
-        for raw_line in str(run).splitlines():
-            line = raw_line.rstrip()
-            if line[:1].isspace():
-                if parent is None:
-                    free.append(line)
-                elif parent in memspec.RECURRENCE_GATE_EXEMPT_FIELDS:
-                    exempt.append(line)
-                    arming = arming or parent in memspec.RECURRENCE_GATE_ARMING_FIELDS
-                else:
-                    free.append(line)
-                continue
-            match = memspec.TOP_LEVEL_FIELD.match(line)
-            parent = match.group(1) if match else None
-            if parent in memspec.RECURRENCE_GATE_EXEMPT_FIELDS:
-                exempt.append(line)
-                arming = arming or parent in memspec.RECURRENCE_GATE_ARMING_FIELDS
-            else:
-                free.append(line)
-    return free, exempt, arming
-
-
 def _recurrence_review(card, target, additions, prospective, patch, started_at, session_id):
     """Deny value when this write narrates a recurrence into a behaviour card that it
     leaves exactly as unable to block as before; None otherwise (docs/FAILURE_MODES.md
@@ -549,7 +519,8 @@ def _recurrence_review(card, target, additions, prospective, patch, started_at, 
     Judged only on an existing card with frontmatter. A new card, a project/reference/
     decision card, and a named-tool write whose post-write text cannot be known are not
     this rule's business. A patch is applied to the card on disk, so it is judged on the
-    same post-write text as a Write or Edit of the same content."""
+    same post-write text as a Write or Edit of the same content; a patch that cannot be
+    applied writes nothing in Codex either, and passes."""
     if prospective is not None:
         new_text = prospective
     elif patch is not None:
@@ -579,30 +550,37 @@ def _recurrence_review(card, target, additions, prospective, patch, started_at, 
     card_type = next((kind for kind in kinds if kind in memspec.RECURRENCE_GATE_CARD_TYPES), None)
     if card_type is None:
         return None
+    if prospective is None:
+        # 補丁套不上磁碟上的卡，Codex 自己也會失敗、什麼都不會寫出去：放行，只在新增行
+        # 真的有事故敘述時記一筆，讓這次繞過在稽核裡看得見。
+        if any(
+            _incident_line(line.rstrip())
+            for run in additions
+            for line in str(run).splitlines()
+        ):
+            _best_effort_audit(
+                _append_recurrence_allow, vault, memspec.RECURRENCE_GATE_OUTCOME_UNAPPLIABLE,
+                relative, target, started_at, session_id)
+        return None
 
     exempt_fields = memspec.RECURRENCE_GATE_EXEMPT_FIELDS
     old_lines = _card_lines(before)
     old_blocks, old_inside = _field_spans(before, exempt_fields)
-    removed_free = []
-    if prospective is not None:
-        new_lines = _card_lines(prospective)
-        new_blocks, new_inside = _field_spans(prospective, exempt_fields)
-        # 只有新增或改動算武裝；把欄位刪掉是拆防線，不是裝防線。
-        arming = any(
-            new_blocks.get(field) and new_blocks[field] != old_blocks.get(field)
-            for field in memspec.RECURRENCE_GATE_ARMING_FIELDS
-        )
-        added_free, removed_free = _line_delta(
-            [line for index, line in enumerate(old_lines) if index not in old_inside],
-            [line for index, line in enumerate(new_lines) if index not in new_inside],
-        )
-        added_exempt, _removed = _line_delta(
-            [line for index, line in enumerate(old_lines) if index in old_inside],
-            [line for index, line in enumerate(new_lines) if index in new_inside],
-        )
-    else:
-        # 套不上的補丁在 Codex 那邊也套不上；只剩新增行可看時，位置不明的一律照正文判。
-        added_free, added_exempt, arming = _envelope_card_lines(additions)
+    new_lines = _card_lines(prospective)
+    new_blocks, new_inside = _field_spans(prospective, exempt_fields)
+    # 只有新增或改動算武裝；把欄位刪掉是拆防線，不是裝防線。
+    arming = any(
+        new_blocks.get(field) and new_blocks[field] != old_blocks.get(field)
+        for field in memspec.RECURRENCE_GATE_ARMING_FIELDS
+    )
+    added_free, removed_free = _line_delta(
+        [line for index, line in enumerate(old_lines) if index not in old_inside],
+        [line for index, line in enumerate(new_lines) if index not in new_inside],
+    )
+    added_exempt, _removed = _line_delta(
+        [line for index, line in enumerate(old_lines) if index in old_inside],
+        [line for index, line in enumerate(new_lines) if index in new_inside],
+    )
 
     incidents = [line for line in added_free if _incident_line(line)]
     # 淨增才算：改一個錯字的舊事故行是一刪一增，不是又記了一次。
@@ -2258,6 +2236,76 @@ def _selftest():
                 ),
             ))
 
+            dated_card = write_vault / "feedback-dated-then.md"
+            dated_card.write_text(recurrence_card("feedback-dated-then"), encoding="utf-8")
+            _dated_result, dated_out = append_incident(
+                dated_card, "2026-09-25 又犯就表示閘門失效。")
+            checks.append((
+                "日期緊貼標記、後面單獨接「就」不算條件句：「2026-09-25 又犯就表示閘門失效。」照擋",
+                dated_out.get("permissionDecision") == "deny",
+            ))
+
+            def patch_command(card_path, *hunk_lines):
+                return "\n".join((
+                    "apply_patch <<'EOF'", patch_envelope.BEGIN_MARKER,
+                    f"*** Update File: {os.fspath(card_path)}", *hunk_lines,
+                    patch_envelope.END_MARKER, "EOF"))
+
+            # 檔裡是 en dash，補丁寫 ASCII 連字號：Codex 最寬鬆那一輪對得上，這裡也要對得上，
+            # 否則會拿「套不上」去判一個 Codex 實際會寫出去的武裝修改。
+            dash_old = "  - 'run–two.{0,3}x'"
+            dash_new = "  - 'run-three.{0,3}x'"
+            dash_card = write_vault / "feedback-dash.md"
+            dash_text = recurrence_card(
+                "feedback-dash", extra=f"{memspec.FORBIDDEN_FIELD}:\n{dash_old}\n")
+            dash_card.write_text(dash_text, encoding="utf-8")
+            _dash_write, dash_write_out = write_call("Write", {
+                "file_path": os.fspath(dash_card),
+                "content": dash_text.replace(dash_old, dash_new) + "\n" + recurrence_line + "\n",
+            })
+            _dash_patch, dash_patch_out = write_call("Bash", {"command": patch_command(
+                dash_card, "@@", " " + memspec.FORBIDDEN_FIELD + ":",
+                "-" + dash_old.replace("–", "-"), "+" + dash_new,
+                "@@", " " + recurrence_body.rstrip("\n"), "+", "+" + recurrence_line)})
+            checks.append((
+                "既有 forbidden 的 run–two（en dash）改成 run-three 並追加事故：補丁與完整寫入同樣放行",
+                dash_write_out.get("permissionDecision") != "deny"
+                and dash_patch_out.get("permissionDecision") != "deny"
+                # 兩條路各記一筆 arming_changed：補丁那條是套出全文後判定的，不是湊巧放過。
+                and sum(
+                    row.get("card_path") == "feedback-dash.md"
+                    and row.get("outcome") == memspec.RECURRENCE_GATE_OUTCOME_ARMING
+                    for row in recurrence_rows()
+                ) == 2,
+            ))
+
+            lost_card = write_vault / "feedback-lost-anchor.md"
+            lost_card.write_text(recurrence_card("feedback-lost-anchor"), encoding="utf-8")
+            _lost_result, lost_out = write_call("Bash", {"command": patch_command(
+                lost_card, "@@ 這一行不在卡裡", "+", "+" + recurrence_line)})
+            checks.append((
+                "補丁的 @@ 定位行找不到（Codex 也套不上）：放行，並記 patch_unappliable",
+                lost_out.get("permissionDecision") != "deny"
+                and any(
+                    row.get("card_path") == "feedback-lost-anchor.md"
+                    and row.get("outcome") == memspec.RECURRENCE_GATE_OUTCOME_UNAPPLIABLE
+                    for row in recurrence_rows()
+                ),
+            ))
+
+            eof_card = write_vault / "feedback-eof.md"
+            eof_card.write_text(recurrence_card("feedback-eof") + "tail line\n", encoding="utf-8")
+            _eof_miss, eof_miss_out = write_call("Bash", {"command": patch_command(
+                eof_card, "@@", " " + recurrence_body.rstrip("\n"), "+" + recurrence_line,
+                "*** End of File")})
+            _eof_hit, eof_hit_out = write_call("Bash", {"command": patch_command(
+                eof_card, "@@", " tail line", "+" + recurrence_line, "*** End of File")})
+            checks.append((
+                "End of File 段落只比檔尾：上下文在前面的行就是套不上而放行，落在檔尾才照判而擋",
+                eof_miss_out.get("permissionDecision") != "deny"
+                and eof_hit_out.get("permissionDecision") == "deny",
+            ))
+
             bom_card = write_vault / "feedback-bom.md"
             bom_card.write_bytes(
                 "﻿".encode("utf-8") + recurrence_card("feedback-bom").encode("utf-8"))
@@ -2445,7 +2493,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 49
+    total = 53
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
