@@ -29,6 +29,7 @@ from epitype.capture import (
 from _hook_common import (
     isolated_temp_root,
     capture_vault as _capture_vault,
+    claim_meter,
     emit,
     expired,
     governance_vault,
@@ -38,9 +39,12 @@ from _hook_common import (
     payload_fits,
     read_event,
     recall_marker_directory,
+    release_meter,
     scoped_vaults,
+    run_concurrent,
     run_synthetic,
     session_component,
+    trace_hook,
     write_codex_fixture,
     write_config,
 )
@@ -228,7 +232,7 @@ def _card_identity(line, aliases):
     return f"{text}{separator}{aliases.get(alias, alias)}{slash}{rest}"
 
 
-def _handle(event, started_at, delivery_markers=None):
+def _handle(event, started_at, delivery_markers=None, meter_pending=None):
     prompt = event.get("prompt")
     if not isinstance(prompt, str) or not prompt.strip():
         return None
@@ -239,16 +243,18 @@ def _handle(event, started_at, delivery_markers=None):
     if expired(started_at):
         return None
     value = _with_notes(value, config, event)
-    return _with_context_meter(value, config, event, started_at, delivery_markers)
+    return _with_context_meter(value, config, event, started_at, meter_pending)
 
 
-def _with_context_meter(value, config, event, started_at, delivery_markers):
-    """用量計那一行排在最後、優先度最低：整段放不進預算就不附，也不寫標記，下次再試。
+def _with_context_meter(value, config, event, started_at, meter_pending):
+    """用量計那一行排在最後、優先度最低：整段放不進預算就不附，也不搶標記，下次再試。
 
-    標記跟喚回的標記走同一條「先輸出、後寫」（main 裡的 _claim_marker），放在喚回標記
-    目錄，PreCompact 清掉時一起重新武裝。行程內呼叫（delivery_markers 為 None）
-    寫不了標記，一律不附——否則同一段會每次都說。"""
-    if delivery_markers is None or expired(started_at):
+    這裡不附上那一行，只把 (標記目錄, 標記名, 用量, 那一行) 放進 meter_pending：main 在
+    輸出之前搶標記（獨占建立），搶到才附——同一秒並行的 PreToolUse 也在搶同一個標記。
+    跟喚回標記的「先輸出、後寫」不同：喚回一則提問只跑一次，用量提醒會被並行的 hook 同時
+    看到。標記放在喚回標記目錄，PreCompact 清掉時一起重新武裝。行程內呼叫（meter_pending
+    為 None）搶不了標記，一律不附——否則同一段會每次都說。"""
+    if meter_pending is None or expired(started_at):
         return value
     session_id = event.get("session_id", event.get("sessionId", ""))
     if not isinstance(session_id, str) or not session_id:
@@ -260,13 +266,13 @@ def _with_context_meter(value, config, event, started_at, delivery_markers):
         return value
     if found is None:
         return value
-    line, marker = found
+    line, marker, tokens = found
     context = value.get("hookSpecificOutput", {}).get("additionalContext", "") if value else ""
     combined = (context + "\n" + line) if context else line
     if not payload_fits("UserPromptSubmit", combined, config[memspec.CONFIG_BUDGET_BYTES_FIELD]):
         return value
-    delivery_markers.append((session_id, marker))
-    return payload("UserPromptSubmit", combined)
+    meter_pending.append((recall_marker_directory(session_id), marker, tokens, line))
+    return value
 
 
 def _with_notes(value, config, event):
@@ -1768,6 +1774,52 @@ def _selftest():
                 and codex_second.returncode == 0
                 and codex_line not in codex_second_context,
             ))
+
+            # 並行：提問與同一秒的工具呼叫搶同一個標記，只有搶到的說；沒搶到的記 meter-lost。
+            # 搶到卻輸出失敗的放掉標記（meter-released），下一則照說。
+            race_rollout, race_env = write_codex_fixture(root, "meter-race", 170000)
+            race_event = {"hook_event_name": "UserPromptSubmit", "prompt": "zzqx unrelated question",
+                          "session_id": "meter-race", "turn_id": "t1", "cwd": os.fspath(root),
+                          "transcript_path": os.fspath(race_rollout), "model": "gpt-x",
+                          "permission_mode": "default"}
+            race_runs = run_concurrent(Path(__file__), race_event, roomy, 4, environment=race_env)
+            race_line = memspec.CONTEXT_METER_CODEX_NOTICE.format(
+                cur=170, left=40,
+                path=os.fspath(compact_map.handoff_destination(meter_vault, "meter-race", race_rollout)))
+            trace_file = roomy.parent / memspec.CONTEXT_METER_TRACE_FILENAME
+
+            def traced(session):
+                if not trace_file.is_file():
+                    return []
+                return [json.loads(line)["outcome"] for line in trace_file.read_text(encoding="utf-8").splitlines()
+                        if f'"session":"{session}"' in line and '"event":"UserPromptSubmit"' in line]
+
+            def context_of(stdout):
+                value = json.loads(stdout) if stdout.strip() else {}
+                return value.get("hookSpecificOutput", {}).get("additionalContext", "").splitlines()
+
+            race_outcomes = traced("meter-race")
+            unsent_rollout, unsent_env = write_codex_fixture(root, "meter-unsent", 170000)
+            unsent_event = {**race_event, "session_id": "meter-unsent",
+                            "transcript_path": os.fspath(unsent_rollout)}
+            run_concurrent(Path(__file__), unsent_event, roomy, 1, environment=unsent_env,
+                           settle_seconds=0, close_stdout=True)
+            unsent_marker = (recall_marker_directory("meter-unsent") / memspec.CONTEXT_METER_MARKER).exists()
+            unsent_outcomes = traced("meter-unsent")
+            unsent_retry = run_synthetic(Path(__file__), unsent_event, roomy, environment=unsent_env)
+            checks.append((
+                "concurrent prompts: exactly one says the line; a claim whose output fails is released and retried",
+                all(code == 0 for code, _out, _err in race_runs)
+                and sum(race_line in context_of(out) for _code, out, _err in race_runs) == 1
+                and race_outcomes.count("meter-emitted") == 1
+                and race_outcomes.count("meter-lost") >= 1
+                and not unsent_marker and "meter-released" in unsent_outcomes
+                and "meter-emitted" not in unsent_outcomes
+                and memspec.CONTEXT_METER_CODEX_NOTICE.format(
+                    cur=170, left=40,
+                    path=os.fspath(compact_map.handoff_destination(meter_vault, "meter-unsent", unsent_rollout)))
+                in context_of(unsent_retry.stdout),
+            ))
     except Exception as exc:
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
     finally:
@@ -1775,7 +1827,7 @@ def _selftest():
             shutil.rmtree(marker_directory, ignore_errors=True)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 52
+    total = 53
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
@@ -1789,20 +1841,41 @@ def main():
     if "--selftest" in sys.argv[1:]:
         with isolated_temp_root():
             return _selftest()
+    event = None
+    won = []
     try:
         event = read_event(sys.stdin)
         delivery_markers = []
-        value = _handle(event, _STARTED_AT, delivery_markers)
-        if value is not None and not expired(_STARTED_AT):
-            emit(value)
-            sys.stdout.flush()
+        meter_pending = []
+        value = _handle(event, _STARTED_AT, delivery_markers, meter_pending)
+        if (value is not None or meter_pending) and not expired(_STARTED_AT):
+            lost = []
+            if meter_pending:
+                # 用量提醒先搶、搶到才附；搶到卻沒印出去的在下面放掉，下一次再試。
+                value, won, lost = claim_meter(value, "UserPromptSubmit", meter_pending)
+            if value is not None:
+                emit(value)
+                sys.stdout.flush()
+            emitted, won = won, []
+            _trace_meter(event, emitted, lost)
             # A failed output must not consume the retry. A crash after output
             # can repeat context, but must never suppress context not emitted.
             for session_id, digest in delivery_markers:
                 _claim_marker(session_id, digest)
     except Exception:
         pass
+    if won:
+        release_meter(won)
+        _trace_meter(event, (), (), won)
     return 0
+
+
+def _trace_meter(event, emitted, lost, released=()):
+    """用量提醒的去向各記一行：說了、並行時沒搶到、搶到卻沒送出去而放掉。"""
+    for outcome, items in (("meter-emitted", emitted), ("meter-lost", lost),
+                           ("meter-released", released)):
+        for _directory, _marker, tokens in items:
+            trace_hook("UserPromptSubmit", event, _STARTED_AT, outcome=outcome, tokens=tokens)
 
 
 if __name__ == "__main__":

@@ -18,11 +18,14 @@ from _hook_common import (
     isolated_temp_root,
     clear_recall_markers,
     expired,
+    failure_reason,
     governance_vault,
     load_config,
     read_event,
     recall_marker_directory,
     run_synthetic,
+    trace_hook,
+    trace_run,
     write_codex_fixture,
     write_config,
 )
@@ -94,16 +97,21 @@ def _learn_threshold(event, vault, transcript):
         pass
 
 
-def _handle(event, started_at, learn=True):
+def _handle(event, started_at, learn=True, trace=None):
+    """寫地圖、清標記。`trace` 是給追蹤的一個 dict：提早結束的原因、標記清了沒、地圖寫了沒。"""
+    trace = {} if trace is None else trace
     transcript_value = event.get("transcript_path")
     if not isinstance(transcript_value, str) or not transcript_value.strip():
+        trace["outcome"] = "no-transcript"
         return None
     config = load_config(started_at)
     if config is None or expired(started_at):
+        trace["outcome"] = "budget-expired"
         return None
 
     transcript = Path(transcript_value).expanduser().resolve()
     if not transcript.is_file():
+        trace["outcome"] = "transcript-missing"
         return None
     session_id = event.get("session_id", event.get("sessionId", ""))
     # 子代理跟主線共用 session_id：它自己的壓縮不代表主線的 context 變小了，所以主線
@@ -113,22 +121,27 @@ def _handle(event, started_at, learn=True):
         clear_recall_markers(session_id, keep=(memspec.CONTEXT_METER_MARKER,))
     else:
         clear_recall_markers(session_id)
+    trace["cleared"] = True
     vault = governance_vault(config, for_write=True)
     # 只有 Claude 側要學門檻：Codex 的壓縮點從它自己的設定算（context_meter.codex_limit），
     # 學進來反而會把 Codex 的數字混進 Claude 的門檻。
     if learn:
         _learn_threshold(event, vault, transcript)
     destination = _map_destination(vault, event, transcript)
+    # 地圖檔名（session＋transcript 路徑雜湊）：跟 SessionStart 找的那個對不上，追蹤裡一眼看得出來。
+    trace["stem"] = destination.stem
     handoff = compact_map.handoff_destination(vault, session_id, transcript)
     compact_map.build_map(
         transcript,
         destination,
         memspec.COMPACT_MAP_DEFAULT_BUDGET_BYTES,
     )
+    trace["map"] = True
     _sweep_maps(
         destination.parent,
         (destination, handoff, compact_map.handoff_delivered_path(handoff)),
     )
+    trace["outcome"] = "ok"
     # 這裡曾經回一句「地圖已落於…」。它在兩邊宿主都到不了模型：Claude Code 的
     # PreCompact 不能注入（2026-08-19 實證），Codex 0.153 的 PreCompactOutcome 只有
     # Continue／Stopped。印一句沒有人收得到的話，只會讓下一個讀碼的人以為鏈是通的。
@@ -476,11 +489,52 @@ def _selftest():
                     and not bad_result.stderr,
                 )
             )
+
+            # 追蹤：每次一行，寫在設定檔旁；提早結束要說出原因。
+            run_synthetic(Path(__file__), {"session_id": "no-transcript"}, config)
+            run_synthetic(Path(__file__), {"transcript_path": str(transcript)}, root / "absent-config.json")
+            trace_file = root / memspec.CONTEXT_METER_TRACE_FILENAME
+            rows = [json.loads(line) for line in trace_file.read_text(encoding="utf-8").splitlines()]
+            rows = [row for row in rows if row.get("event") == "PreCompact"]
+            starts = [row for row in rows if row.get("phase") == "start"]
+            rows = [row for row in rows if row.get("phase") == "exit"]
+            outcomes = {row["outcome"] for row in rows}
+            checks.append((
+                "each PreCompact run traces host, markers cleared, map written and elapsed ms, "
+                "or the reason it stopped early",
+                any(row["host"] == "claude" and row["outcome"] == "ok" and row["map"] is True
+                    and row["cleared"] is True and row["lines"] == [] and isinstance(row["ms"], int)
+                    for row in rows)
+                and any(row["host"] == "codex" and row["outcome"] == "ok" for row in rows)
+                and any(row["session"] == "session-b" for row in rows)
+                and {"exception:JSONDecodeError", "config-missing", "no-transcript"} <= outcomes
+                and all(row["map"] is False for row in rows if row["outcome"] != "ok"),
+            ))
+            checks.append((
+                "every PreCompact run writes a start line before its work, paired with its exit line by run",
+                len(starts) == len(rows) > 0
+                and {row["run"] for row in starts} == {row["run"] for row in rows}
+                and all(isinstance(row["run"], str) and len(row["run"]) == 8 for row in starts)
+                and all("outcome" not in row and "map" not in row for row in starts),
+            ))
+            broken_root = root / "trace-broken"
+            broken_root.mkdir()
+            (broken_root / memspec.CONTEXT_METER_TRACE_FILENAME).mkdir()
+            broken_config = broken_root / "config.json"
+            write_config(broken_config, [vault])
+            broken_transcript = root / "transcript-broken-trace.jsonl"
+            broken_transcript.write_text(transcript.read_text(encoding="utf-8"), encoding="utf-8")
+            broken_run = run_synthetic(Path(__file__), {"transcript_path": str(broken_transcript)}, broken_config)
+            checks.append((
+                "a trace that cannot be written changes nothing: the map is written and the hook is silent",
+                broken_run.returncode == 0 and not broken_run.stdout and not broken_run.stderr
+                and _map_destination(vault, {}, broken_transcript.resolve()).is_file(),
+            ))
     except Exception as exc:
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 16
+    total = 19
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
@@ -495,12 +549,23 @@ def main():
     if "--selftest" in arguments:
         with isolated_temp_root():
             return _selftest()
+    event = None
+    codex = "--codex" in arguments
+    # 追蹤：壓縮後地圖沒交回來的原因還沒查明。開始先記一行（讀完事件、還沒讀設定、還沒載入
+    # 別的模組），結束再記一行（清標記、寫地圖、結束原因），兩行同一個 run：只有開始＝被砍或當掉。
+    run = trace_run()
+    trace = {"outcome": "unknown", "cleared": False, "map": False, "lines": []}
     try:
         # 只寫檔，永遠不輸出：`--codex` 仍被接受（Codex 的 hooks.json 這樣掛），
         # 但兩邊宿主的輸出路徑都已經退役，所以兩條路徑跑的是同一段程式。
-        _handle(read_event(sys.stdin), _STARTED_AT, learn="--codex" not in arguments)
-    except Exception:
-        pass
+        event = read_event(sys.stdin)
+        trace_hook("PreCompact", event, _STARTED_AT, codex=codex, phase="start", run=run)
+        _handle(event, _STARTED_AT, learn=not codex, trace=trace)
+    except Exception as exc:
+        trace["outcome"] = failure_reason(exc)
+    trigger = (event.get("trigger") or event.get("triggered_by")) if isinstance(event, dict) else None
+    trace_hook("PreCompact", event, _STARTED_AT, codex=codex, phase="exit", run=run, trigger=trigger,
+               **trace)
     return 0
 
 

@@ -31,6 +31,7 @@ from _hook_common import (
     isolated_temp_root,
     GATE_LOG_MAX_BYTES,
     append_gate_log,
+    claim_meter,
     compile_bounded_regex,
     config_path,
     declared_frontmatter,
@@ -42,9 +43,12 @@ from _hook_common import (
     payload_fits,
     read_event,
     recall_marker_directory,
+    release_meter,
     resolve_vaults,
+    run_concurrent,
     run_synthetic,
     sequence_fields,
+    trace_hook,
     with_session,
     write_codex_fixture,
     write_config,
@@ -1227,7 +1231,7 @@ def _write_review(event, tool_name, tool_input, config, started_at):
 
 
 def _context_meter_line(event, config, started_at):
-    """(用量計那一行, (標記目錄, 標記名))，或 None。
+    """(用量計那一行, 標記目錄, 標記名, 用量)，或 None。
 
     標記放在喚回標記目錄：PreCompact 清喚回標記時一起清掉，壓縮後重新武裝。
     子代理的呼叫由 context_meter.notice 擋掉——提醒被子代理吃掉，主線就永遠收不到。"""
@@ -1243,7 +1247,7 @@ def _context_meter_line(event, config, started_at):
         return None
     if found is None:
         return None
-    return found[0], (directory, found[1])
+    return found[0], directory, found[1], found[2]
 
 
 def _allow_context(event, notices=(), config=None, started_at=None, meter_claims=None):
@@ -1253,8 +1257,11 @@ def _allow_context(event, notices=(), config=None, started_at=None, meter_claims
     gate exists to prevent.
 
     The context meter's line rides last and only when the whole context still fits
-    the budget; its marker is claimed by the caller after the output is written, so
-    a line that was dropped or never printed is tried again on the next call.
+    the budget. It is not added here: it goes into `meter_claims` as
+    (directory, marker, tokens, line), and main claims the marker right before the
+    output and adds the line only if this process won the claim — Codex runs several
+    tool calls at once, and every one of their hooks sees "not said yet". A claim
+    whose output then fails is released, so the line is tried again on the next call.
     `meter_claims` is None for in-process callers, which get no meter line."""
     lines = []
     session_id = event.get("session_id")
@@ -1266,8 +1273,7 @@ def _allow_context(event, notices=(), config=None, started_at=None, meter_claims
         if meter is not None and payload_fits(
                 "PreToolUse", "\n".join([*lines, meter[0]]),
                 config[memspec.CONFIG_BUDGET_BYTES_FIELD]):
-            lines.append(meter[0])
-            meter_claims.append(meter[1])
+            meter_claims.append((meter[1], meter[2], meter[3], meter[0]))
     if not lines:
         return None
     return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": "\n".join(lines)}}
@@ -2511,6 +2517,57 @@ def _selftest():
                 and not codex_second.stdout.strip(),
             ))
 
+            # 並行：Codex 一次並行好幾個工具呼叫。六個 hook 行程同時看到「還沒說過」，只有
+            # 搶到標記的那一個說；其餘各記一行 meter-lost（至少一行＝真的並行過）。
+            race_rollout, race_env = write_codex_fixture(root, "codex-race", 170000)
+            race_event = {"hook_event_name": "PreToolUse", "session_id": "codex-race", "turn_id": "t1",
+                          "transcript_path": os.fspath(race_rollout), "cwd": os.fspath(root),
+                          "model": "gpt-x", "permission_mode": "default", "tool_name": "Bash",
+                          "tool_use_id": "call-1", "tool_input": {"command": "echo hi"}}
+            race_runs = run_concurrent(Path(__file__), race_event, meter_config, 6, environment=race_env)
+            race_line = memspec.CONTEXT_METER_CODEX_NOTICE.format(
+                cur=170, left=40,
+                path=os.fspath(compact_map.handoff_destination(meter_vault, "codex-race", race_rollout)))
+            trace_file = meter_config.parent / memspec.CONTEXT_METER_TRACE_FILENAME
+
+            def traced(session):
+                if not trace_file.is_file():
+                    return []
+                return [json.loads(line)["outcome"] for line in trace_file.read_text(encoding="utf-8").splitlines()
+                        if f'"session":"{session}"' in line and '"event":"PreToolUse"' in line]
+
+            race_outcomes = traced("codex-race")
+
+            def context_of(stdout):
+                value = json.loads(stdout) if stdout.strip() else {}
+                return value.get("hookSpecificOutput", {}).get("additionalContext", "").splitlines()
+            checks.append((
+                "six concurrent Codex PreToolUse hooks at limit-H: exactly one says the line, the others lose the claim",
+                all(code == 0 for code, _out, _err in race_runs)
+                and sum(race_line in context_of(out) for _code, out, _err in race_runs) == 1
+                and race_outcomes.count("meter-emitted") == 1
+                and race_outcomes.count("meter-lost") >= 1
+                and (recall_marker_directory("codex-race") / memspec.CONTEXT_METER_MARKER).is_file(),
+            ))
+
+            # 搶到卻沒送出去（輸出失敗）：放掉標記、記一行 meter-released，下一次照說。
+            lost_rollout, lost_env = write_codex_fixture(root, "codex-unsent", 170000)
+            lost_event = {**race_event, "session_id": "codex-unsent", "transcript_path": os.fspath(lost_rollout)}
+            run_concurrent(Path(__file__), lost_event, meter_config, 1, environment=lost_env,
+                           settle_seconds=0, close_stdout=True)
+            unsent_marker = (recall_marker_directory("codex-unsent") / memspec.CONTEXT_METER_MARKER).exists()
+            unsent_outcomes = traced("codex-unsent")
+            unsent_retry = run_synthetic(Path(__file__), lost_event, meter_config, environment=lost_env)
+            checks.append((
+                "a claimed line whose output fails is released (traced) and said on the next call",
+                not unsent_marker and "meter-released" in unsent_outcomes
+                and "meter-emitted" not in unsent_outcomes
+                and memspec.CONTEXT_METER_CODEX_NOTICE.format(
+                    cur=170, left=40,
+                    path=os.fspath(compact_map.handoff_destination(meter_vault, "codex-unsent", lost_rollout)))
+                in context_of(unsent_retry.stdout),
+            ))
+
             missing_config = root / "missing-config.json"
             missing = run_synthetic(
                 Path(__file__),
@@ -2529,7 +2586,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 54
+    total = 56
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
@@ -2577,6 +2634,8 @@ def main():
             return _selftest()
     defects = []
     meter_claims = []
+    won = []
+    event = None
     try:
         event = read_event(sys.stdin)
         value = _handle(event, _STARTED_AT, defects, meter_claims)
@@ -2589,15 +2648,19 @@ def main():
         # about, so it is named on stderr rather than swallowed.
         for line in defects[: memspec.GATE_DEFECT_MAX_LINES]:
             print(line, file=sys.stderr)
-        if value is not None:
-            output = value.get("hookSpecificOutput", {})
+        if value is not None or meter_claims:
+            output = (value or {}).get("hookSpecificOutput", {})
             is_deny = output.get("permissionDecision") == "deny"
             if is_deny or not expired(_STARTED_AT):
-                emit(value)
-                sys.stdout.flush()
-                # 先輸出、後寫標記：沒印出去的用量提醒不得被標成「說過了」。
-                for directory, marker in meter_claims:
-                    context_meter.claim(directory, marker)
+                lost = []
+                if meter_claims and not is_deny:
+                    # 先搶、搶到才附：並行的 hook 行程只有一個說。搶到卻沒印出去的在下面放掉。
+                    value, won, lost = claim_meter(value, "PreToolUse", meter_claims)
+                if value is not None:
+                    emit(value)
+                    sys.stdout.flush()
+                emitted, won = won, []
+                _trace_meter(event, emitted, lost)
     except Exception as exc:
         # 這裡是最後一道：設定檔壞了、記憶庫讀不到、程式本身有 bug，全都走這一圈。
         # 仍然 fail-open（不擋住工作），但裝了卻用不了的時候一定要講一句——安靜退場
@@ -2610,7 +2673,18 @@ def main():
                     reason=type(exc).__name__), file=sys.stderr)
         except Exception:
             pass
+    if won:
+        release_meter(won)
+        _trace_meter(event, (), (), won)
     return 0
+
+
+def _trace_meter(event, emitted, lost, released=()):
+    """用量提醒的去向各記一行：說了、並行時沒搶到、搶到卻沒送出去而放掉。"""
+    for outcome, items in (("meter-emitted", emitted), ("meter-lost", lost),
+                           ("meter-released", released)):
+        for _directory, _marker, tokens in items:
+            trace_hook("PreToolUse", event, _STARTED_AT, outcome=outcome, tokens=tokens)
 
 
 if __name__ == "__main__":

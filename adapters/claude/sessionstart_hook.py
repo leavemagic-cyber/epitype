@@ -21,6 +21,7 @@ from _hook_common import (
     bounded_context,
     emit,
     expired,
+    failure_reason,
     governance_vault,
     load_config,
     native_cwd_vaults,
@@ -28,6 +29,8 @@ from _hook_common import (
     read_event,
     resolve_vaults,
     run_synthetic,
+    trace_hook,
+    trace_run,
     write_config,
 )
 
@@ -275,7 +278,7 @@ def _dream_mark_notified(governance, state, completed):
         return False
 
 
-def _compact_map_line(event, governance):
+def _compact_map_line(event, governance, trace=None):
     """壓縮續場唯一新增的一行：這一場壓縮前的原文地圖在哪裡。
 
     PreCompact 已經把地圖寫到 `map_destination(庫, session_id, transcript)`，但它印的
@@ -288,7 +291,11 @@ def _compact_map_line(event, governance):
     session_id = event.get("session_id", event.get("sessionId", ""))
     try:
         destination = compact_map.map_destination(governance, session_id, transcript)
-        if not destination.is_file():
+        exists = destination.is_file()
+        if trace is not None:
+            # 地圖在、這一行卻沒出去（例如路徑超過 240 B），或找的檔名跟 PreCompact 寫的不同，都要分得出來。
+            trace["map"], trace["stem"] = exists, destination.stem
+        if not exists:
             return None
     except (OSError, RuntimeError, ValueError):
         return None
@@ -389,9 +396,13 @@ def _startup_segments(pieces, vaults, resolved, governance, started_at):
             pass
 
 
-def _handle(event, started_at, deliveries=None):
+def _handle(event, started_at, deliveries=None, trace=None):
+    """`trace` 是給追蹤的一個 dict：source、地圖在不在、交接有沒有、哪幾行進了輸出、提早結束的原因。"""
+    trace = {} if trace is None else trace
+    trace["source"] = event.get("source") if isinstance(event, dict) else None
     config = load_config(started_at)
     if config is None:
+        trace["outcome"] = "budget-expired"
         return None
     budget = config[memspec.CONFIG_BUDGET_BYTES_FIELD]
     pieces = []
@@ -410,6 +421,7 @@ def _handle(event, started_at, deliveries=None):
 
     source = event.get("source") if isinstance(event, dict) else None
     handoff = None
+    map_line = None
     dream = config.get(memspec.DREAM_CONFIG_FIELD) or {}
 
     # 壓縮續場先放地圖那一行：續場丟掉的是原文，而其餘幾行在別的場次還會再出現一次；
@@ -418,7 +430,7 @@ def _handle(event, started_at, deliveries=None):
     # 原文的指標；交接是模型自己整理過的接續點，可以從地圖回撈的原文重建。
     if source == "compact":
         try:
-            map_line = _compact_map_line(event, governance)
+            map_line = _compact_map_line(event, governance, trace)
         except Exception:
             map_line = None
         if map_line:
@@ -427,6 +439,7 @@ def _handle(event, started_at, deliveries=None):
             handoff = _handoff_line(event, governance)
         except Exception:
             handoff = None
+        trace["handoff"] = bool(handoff)
         if handoff:
             pieces.append(handoff[0])
     if _soft_remaining(started_at) > 0:
@@ -455,10 +468,15 @@ def _handle(event, started_at, deliveries=None):
     # 「不應該塞，這是多餘設計」；FAILURE_MODES §40）。索引分區由同步工具寫進宿主檔，
     # 宿主每一場自己載入；hook 再送一份，是同一段文字付兩次錢。
     if expired(started_at):
+        trace["outcome"] = "budget-expired"
         return None
     context = bounded_context("SessionStart", pieces, budget)
     if context and handoff and deliveries is not None and handoff[0] in context.splitlines():
         deliveries.append(handoff[1:])
+    sent = context.splitlines() if context else []
+    trace["lines"] = [name for name, line in (("map", map_line), ("handoff", handoff[0] if handoff else None))
+                      if line and line in sent]
+    trace["outcome"] = "ok" if context else "empty"
     return payload("SessionStart", context) if context else None
 
 
@@ -1265,6 +1283,34 @@ def _selftest():
                 and codex_context.splitlines() == [codex_map_line, codex_handoff_line],
             ))
 
+            # 追蹤：壓縮續場每次一行（地圖在不在、交接有沒有、哪幾行真的出去）；開場不記。
+            map_run({**codex_event, "session_id": "trace-startup", "source": "startup"})
+            map_run({**codex_event, "session_id": "trace-no-map"})
+            trace_file = root / memspec.CONTEXT_METER_TRACE_FILENAME
+            all_rows = [json.loads(line) for line in trace_file.read_text(encoding="utf-8").splitlines()
+                        ] if trace_file.is_file() else []
+            trace_rows = [row for row in all_rows
+                          if row.get("event") == "SessionStart" and row.get("phase") == "exit"]
+            start_runs = [row["run"] for row in all_rows
+                          if row.get("event") == "SessionStart" and row.get("phase") == "start"]
+            checks.append((
+                "a compact resume traces map found (same file name PreCompact wrote), handoff found and the "
+                "lines that went out; startup is not traced",
+                any(row["host"] == "codex" and row["session"] == codex_session and row["outcome"] == "ok"
+                    and row["map"] is True and row["handoff"] is True and row["stem"] == codex_map.stem
+                    and row["lines"] == ["map", "handoff"] and isinstance(row["ms"], int)
+                    for row in trace_rows)
+                and any(row.get("event") == "PreCompact" and row.get("host") == "codex"
+                        and row.get("stem") == codex_map.stem and row.get("map") is True for row in all_rows)
+                and any(row["session"] == "trace-no-map" and row["map"] is False and row["lines"] == []
+                        for row in trace_rows)
+                and not any(row["session"] == "trace-startup" for row in trace_rows)
+                and not any(row.get("session") == "trace-startup" for row in all_rows)
+                and len(start_runs) == len(trace_rows)
+                and set(start_runs) == {row["run"] for row in trace_rows}
+                and all("source" not in row for row in trace_rows),
+            ))
+
             # 壓縮續場不跑卡片檢查、守衛快取暖機與重複擋人提醒：宿主有硬逾時，這三段曾占掉
             # 壓縮續場 2 s 以上，整段被砍時地圖那行跟著消失。開場照跑（同一個呼叫端對照）。
             import pretooluse_gate as _gate
@@ -1482,7 +1528,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 37
+    total = 38
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
@@ -1496,16 +1542,27 @@ def main():
     if "--selftest" in sys.argv[1:]:
         with isolated_temp_root():
             return _selftest()
+    event = None
+    # 追蹤只記壓縮續場：地圖與交接沒交回來的原因還沒查明（2026-09-25 Codex App 兩次）。開始先記
+    # 一行（讀完事件、還沒讀設定），結束再記一行，兩行同一個 run：只有開始＝被砍或當掉。
+    run = trace_run()
+    trace = {"outcome": "unknown", "map": False, "handoff": False, "lines": []}
     try:
         event = read_event(sys.stdin)
+        if isinstance(event, dict) and event.get("source") == "compact":
+            trace_hook("SessionStart", event, _STARTED_AT, phase="start", run=run)
         deliveries = []
-        value = _handle(event, _STARTED_AT, deliveries)
+        value = _handle(event, _STARTED_AT, deliveries, trace)
         if value is not None and not expired(_STARTED_AT):
             emit(value)
             sys.stdout.flush()
             _record_deliveries(deliveries)
-    except Exception:
-        pass
+        elif value is not None:
+            trace["outcome"], trace["lines"] = "budget-expired-before-output", []
+    except Exception as exc:
+        trace["outcome"], trace["lines"] = failure_reason(exc), []
+    if trace.pop("source", None) == "compact":
+        trace_hook("SessionStart", event, _STARTED_AT, phase="exit", run=run, **trace)
     return 0
 
 
