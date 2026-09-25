@@ -30,13 +30,12 @@ transcript：用量 ≥800k 時相鄰兩筆主鏈用量的增幅 p99=11.2k、最
 **不知道就不提醒。** 模型名稱與 hook 輸入都看不出視窗是 200k 還是 1M；拿公式猜，猜錯時 1M 的使用者
 會在 100k 就被叫，學會忽略這一行比沒有這一行更糟。
 
-**限制。** 只做 Claude Code；Codex 側沒有做。第一次要先跑一次 `epitype context-meter calibrate --apply`
-（從近 30 天的自動壓縮紀錄學），或等一次自動壓縮，之前完全不會提醒。`calibrate` 從終端機跑時若環境
-變數沒有 pct，會退到 `~/.claude/settings.json` 的 `env`（hook 端比對時也是同一套退路），也可用 `--pct` 指定；
-pct 來自設定檔時只收設定檔最後修改之後的樣本（那段期間設定沒變）；來自環境變數或 `--pct` 時照收，但會印明
-證實不了每筆當時的 pct。能歸屬的樣本少於 3 筆、或最近 5 筆差超過 10%，`--apply` 都會拒寫並說明原因，
-要寫得加 `--force`；寫入跟 `PreCompact` 的學習用同一把鎖。記下的 pct 必須跟 hook 行程看到的
-值一致，否則學到的樣本會被當成換算不了而不用。`epitype context-meter status` 可以看目前門檻與來源。
+**限制。** 只做 Claude Code；Codex 側沒有做。壓縮點只從這台機器實際的自動壓縮學（`PreCompact` 當下看得到
+自己的 pct），不從歷史紀錄回填，所以**首次提醒要等這台機器第一次自動壓縮之後**，在那之前完全不會提醒（要
+提早就在設定寫 `context_meter.autocompact_tokens`）。`epitype context-meter calibrate` 只是唯讀報告：列出近
+30 天自動壓縮最近 5 筆的中位數、樣本數與時間範圍，不寫任何東西——歷史樣本當時用的 pct 證明不了（行程環境
+變數優先於設定檔），證明不了就不學。hook 端比對 pct 時，行程沒有這個環境變數會退到 `~/.claude/settings.json`
+的 `env`。`epitype context-meter status` 可以看目前門檻與來源。
 
 ## v1.7.0 (2026-09-22)
 

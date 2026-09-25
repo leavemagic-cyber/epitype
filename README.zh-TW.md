@@ -235,7 +235,7 @@ epitype search recall "自然語言提示" --vault C:\path\to\vault
 | `epitype capture-route <vault> [--audit] [--apply] [--home HOME] [--json]` | 用落點規則盤點一個庫裡自動捕捉的事件卡：卡屬於它 `cwd` 指到的專案庫，所以治理庫裡其實屬於別的庫的卡會列成 `MISROUTED <卡> -> <庫>`。`--audit` 唯讀；`--apply` 才真的搬（`os.replace`、同名加 `-2`、永不刪），並在卡的正文補一行歸戶註記。 |
 | `epitype harvest [--inventory] [--docs DOCS] [--since SINCE] [--drafts-only] [--reevaluate DIR [--apply]] [--quarantine-drops [DIR]]` | 零模型回放捕捉規則到歷史 transcript 與文件，做第一次大整理的補課；也能用現行規則重新評斷草稿或 vault 自己的事件卡。 `--drafts-only` 時，找到的東西一律留在待審草稿區。 |
 | `epitype token-meter [rollout] [--selftest]` | 讀 Codex rollout JSONL，印出最後一筆當前與累計 token 用量對照視窗大小。 |
-| `epitype context-meter calibrate [--apply] [--pct N]`／`status [--transcript PATH]` | Claude Code 用量計：`calibrate` 從近 30 天的自動壓縮紀錄取最近 5 筆中位數當門檻，預設只印，`--apply` 才寫；`status` 印目前門檻、來源與（給 transcript 時）當前用量落在哪一段。 |
+| `epitype context-meter calibrate [--root DIR]`／`status [--transcript PATH]` | Claude Code 用量計：`calibrate` 是唯讀報告，列出近 30 天自動壓縮最近 5 筆的中位數、樣本數與時間範圍，不寫任何東西——門檻只從這台機器實際的自動壓縮學，首次提醒要等第一次自動壓縮之後；`status` 印目前門檻、來源與（給 transcript 時）當前用量落在哪一段。 |
 | `epitype scar-census build` | 建立四層傷疤普查的機器生成視圖。 |
 | `epitype compact-map build` | 建立有界的壓縮復原地圖，與 `PreCompact` 每場自動寫的是同一種。 |
 | `epitype source SOURCE.jsonl [--find TEXT] [--role user\|assistant\|all] [--line N] [--offset BYTES] [--limit 1..8]` | 唯讀查原始訊息，列出角色、實體行號、雜湊及截斷／涵蓋範圍。指定 offset 時行號相對該位元位置。逐字查找不等於現行裁定或前提已受證據支持。 |

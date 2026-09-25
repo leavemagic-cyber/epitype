@@ -194,12 +194,12 @@ CONTEXT_METER_ASSISTANT_TYPE_MARKERS = (b'"type":"assistant"', b'"type": "assist
 # 學習狀態檔的讀–追加–換名在同一把鎖裡；拿不到就放棄這一筆（學習不是關卡）。
 CONTEXT_METER_LOCK_SECONDS = 0.5
 CONTEXT_METER_CALIBRATE_DAYS = 30
-# calibrate 的最近幾筆差太多（最大／最小超過這個比例）＝多半混了不同 pct 或不同視窗，
-# 寫進去就是拿別的設定下的數字當門檻；要寫得 --force。
-CONTEXT_METER_CALIBRATE_MAX_SPREAD = 1.10
-# 能歸屬 pct 的樣本少於這個數就不寫（要寫得 --force）。
-CONTEXT_METER_CALIBRATE_MIN_SAMPLES = 3
-CONTEXT_METER_CALIBRATE_PCT_UNPROVEN = "calibrate：無法證實各樣本當時的 pct（pct={pct}，來自 {source}，套用到每一筆樣本）"
+# calibrate 只報告、不寫：歷史樣本當時用的 pct 證明不了（行程環境變數優先於設定檔，設定檔
+# 的修改時間也證明不了哪個行程用了什麼），證明不了就不學。學習只剩 PreCompact 那一條路。
+CONTEXT_METER_CALIBRATE_REPORT_ONLY = (
+    "calibrate：只是報告，不寫入。壓縮點只從這台機器實際的自動壓縮學（PreCompact 當下看得到自己的 pct），"
+    "不從歷史紀錄回填；首次提醒要等這台機器第一次自動壓縮之後。"
+)
 CONTEXT_METER_SOURCE_OVERRIDE = "override"
 CONTEXT_METER_SOURCE_LEARNED = "learned"
 CONTEXT_METER_SOURCE_SCALED = "scaled"
@@ -2706,7 +2706,11 @@ _EN = {
         "and the paths already ruled out); continue only after it is written."
     ),
     "CONTEXT_METER_HANDOFF_NOTICE": "Pre-compaction handoff: {path}; read it before you continue.",
-    "CONTEXT_METER_CALIBRATE_PCT_UNPROVEN": "calibrate: the pct each sample was taken under cannot be verified (pct={pct}, from {source}, applied to every sample)",
+    "CONTEXT_METER_CALIBRATE_REPORT_ONLY": (
+        "calibrate: report only, nothing is written. The compaction point is learned only from this "
+        "machine's actual auto-compactions (PreCompact sees its own pct at that moment), never back-filled "
+        "from history; the first reminder waits for this machine's first auto-compaction."
+    ),
     "DECISION_PREFIX": "⚖ ruling: ",
     "VAULT_MISSING_REASON": "No such vault: {vault}\n(Scanning a folder that does not exist reports 0 problems, which looks exactly like \"clean\"; so this reports an error instead of 0.)",
     "RULE_HOSTS_REASON": "{value} in {field} is not one of {allowed}",
