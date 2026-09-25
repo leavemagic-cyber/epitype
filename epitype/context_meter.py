@@ -1,5 +1,5 @@
 import sys; sys.dont_write_bytecode = True; [getattr(stream, "reconfigure", lambda **_: None)(encoding="utf-8", errors="replace") for stream in (sys.stdout, sys.stderr)]  # cp950 主控台先轉 UTF-8。
-"""Claude Code 的 context 用量計：壓縮前提醒寫交接，壓縮後由 SessionStart 交回。
+"""Claude Code 與 Codex 的 context 用量計：壓縮前提醒寫交接，壓縮後由 SessionStart 交回。
 
 模型看不到自己的 context 用量，也無法自己觸發壓縮；PreCompact 的文字到不了模型
 （2026-08-19 實證）。所以只能在壓縮「之前」、由每次都會跑的 hook（PreToolUse、
@@ -8,11 +8,17 @@ UserPromptSubmit）在跨過學到的壓縮點 97% 的那一次附一行字，�
 
 門檻不猜（見 memspec 的 CONTEXT_METER 段落）：設定覆寫 → 學到的自動壓縮用量 → 都沒有
 就完全不提醒。hook 內每次呼叫只讀 transcript 檔尾，找不到就算了，永遠不讀整檔。
+
+Codex 不套上面這一套：同一個 hook 從檔尾的列認出是 Codex rollout，就照 Codex 自己的算法
+算用量（最新 token_count＋最後一個模型產出項之後各項的估計），壓縮點從 Codex 的設定與
+模型目錄算，提醒點是壓縮點減固定餘裕（memspec 的 Codex 段）。兩邊共用同一個標記名與
+交接檔路徑，壓縮後的交回也是同一條路。
 """
 
 import json
 import os
 from pathlib import Path
+import re
 import time
 
 try:
@@ -53,23 +59,31 @@ def _is_compact_boundary(row):
     )
 
 
-def _scan_lines(lines):
-    """由後往前看完整的行。回 (found, value)：found=True 時 value 是用量或 None。
+def _claude_line(raw):
+    """Claude transcript 的一行：(found, value)，found=True 時 value 是用量或 None。
 
     壓縮邊界之後還沒有新的 assistant 用量時，檔裡最後一筆用量是壓縮「前」的數字——
     拿它算，剛壓縮完就會立刻再叫一次。所以碰到邊界就停，回「目前不知道」。"""
+    if b'"usage"' not in raw and b'"compact_boundary"' not in raw:
+        return False, None
+    try:
+        row = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return False, None  # 正在寫的最後一行、或壞行：當作不存在。
+    if _is_compact_boundary(row):
+        return True, None
+    total = _usage_total(row)
+    if total is not None:
+        return True, total
+    return False, None
+
+
+def _scan_lines(lines):
+    """由後往前看完整的行。回 (found, value)：found=True 時 value 是用量或 None。"""
     for raw in reversed(lines):
-        if b'"usage"' not in raw and b'"compact_boundary"' not in raw:
-            continue
-        try:
-            row = json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, ValueError):
-            continue  # 正在寫的最後一行、或壞行：當作不存在。
-        if _is_compact_boundary(row):
-            return True, None
-        total = _usage_total(row)
-        if total is not None:
-            return True, total
+        found, value = _claude_line(raw)
+        if found:
+            return True, value
     return False, None
 
 
@@ -83,19 +97,286 @@ def _oversized_assistant(tail):
     return any(marker in window for marker in memspec.CONTEXT_METER_ASSISTANT_TYPE_MARKERS)
 
 
-def current_tokens(transcript_path, time_limit=None, clock=None):
-    """這場目前的 context 用量（最後一筆主鏈 assistant 的三欄加總）；找不到回 None。
+_CODEX_ROW_HEAD = re.compile(memspec.CONTEXT_METER_CODEX_ROW_HEAD)
+_CODEX_ROLE = re.compile(rb'"role":"([a-z_]{1,32})"')
+# 超過單行上限的 Codex 列只看得到行首；role 在 payload 開頭附近（type、id 之後）。
+_CODEX_ROLE_WINDOW_BYTES = 4096
+
+
+def _codex_head(raw):
+    """Codex rollout 一列的 (列型別, 項型別)；不是 Codex 列回 None。只看行首，不 parse。"""
+    match = _CODEX_ROW_HEAD.match(raw)
+    if match is None:
+        return None
+    sub = match.group(2)
+    return match.group(1).decode("ascii"), (sub.decode("ascii") if sub else None)
+
+
+def _text_bytes(value):
+    return len(value.encode("utf-8")) if isinstance(value, str) else 0
+
+
+def _json_bytes(value):
+    return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+
+
+def _codex_part_bytes(part):
+    """一個內容片段的模型可見位元組（history.rs estimate_response_item_model_visible_bytes）。
+    認不得的片段（例如音訊）回 None：估不出來就當整個用量不知道，不拿 0 頂替。"""
+    if not isinstance(part, dict):
+        return None
+    kind = part.get("type")
+    if kind in ("input_text", "output_text", "text"):
+        return _text_bytes(part.get("text"))
+    if kind == "input_image":
+        if part.get("detail") == "original":
+            return memspec.CONTEXT_METER_CODEX_ORIGINAL_IMAGE_BYTES
+        return memspec.CONTEXT_METER_CODEX_IMAGE_BYTES
+    if kind == "encrypted_content":
+        return -(-_text_bytes(part.get("encrypted_content")) * 9 // 16)
+    return None
+
+
+def _codex_parts_bytes(parts):
+    if isinstance(parts, str):
+        return _text_bytes(parts)
+    if not isinstance(parts, list):
+        return None
+    total = 0
+    for part in parts:
+        size = _codex_part_bytes(part)
+        if size is None:
+            return None
+        total += size
+    return total
+
+
+def _codex_model_generated(payload):
+    kind = payload.get("type")
+    if kind == "message":
+        return payload.get("role") == "assistant"
+    return kind in memspec.CONTEXT_METER_CODEX_MODEL_ITEM_TYPES
+
+
+def _codex_item_tokens(payload):
+    """一個非模型產出項的估計 tokens（位元組 ÷4 無條件進位）；估不出來回 None。
+
+    Codex 對不認得的項算 0（ResponseItem::Other），這裡照做；認得、但內容片段估不出來
+    的才回 None。"""
+    kind = payload.get("type")
+    if kind == "message":
+        size = _codex_parts_bytes(payload.get("content"))
+    elif kind == "agent_message":
+        size = _codex_parts_bytes(payload.get("content"))
+        if size is not None:
+            size += _text_bytes(payload.get("author")) + _text_bytes(payload.get("recipient"))
+    elif kind in ("function_call_output", "custom_tool_call_output"):
+        size = _codex_parts_bytes(payload.get("output"))
+        if size is not None:
+            size += sum(_text_bytes(payload.get(field)) for field in ("call_id", "name", "namespace"))
+    elif kind in ("tool_search_output", "additional_tools"):
+        tools = payload.get("tools")
+        size = _json_bytes(tools) if tools is not None else 0
+    else:
+        size = 0
+    if size is None:
+        return None
+    per_token = memspec.CONTEXT_METER_CODEX_BYTES_PER_TOKEN
+    return -(-size // per_token)
+
+
+def _nonnegative_int(value):
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+class Reading:
+    """一次檔尾讀取的結果。tokens 為 None＝不知道；window 是 Codex 自報的硬上限。"""
+
+    __slots__ = ("host", "tokens", "window", "model")
+
+    def __init__(self, host, tokens, window=None, model=None):
+        self.host, self.tokens, self.window, self.model = host, tokens, window, model
+
+    def __repr__(self):
+        return f"Reading({self.host!r}, {self.tokens!r}, window={self.window!r}, model={self.model!r})"
+
+
+class _CodexTail:
+    """由後往前看 Codex rollout 的列，照 Codex 自己的算法算用量。
+
+    先找最新一筆 token_count（有 info 的）與最後一個模型產出項；兩者之間、以及之後的
+    非模型項（工具結果、使用者／developer 訊息）逐項估計加上去。壓縮邊界（compacted 列）
+    比最新的 token_count 還新＝壓縮完還沒有新的用量，回不知道——拿壓縮前的數字算，剛
+    壓縮完就會立刻再叫一次。途中碰到的 turn_context 順手記下模型名稱（hook 輸入沒帶
+    model 時的退路），但不為它多讀。"""
+
+    def __init__(self):
+        self.total = None
+        self.window = None
+        self.after = 0
+        self.anchored = False
+        self.model = None
+        self.unknown = False
+        self.counted = False
+
+    def _settle(self):
+        if self.total is None or not self.anchored:
+            return False
+        self.counted = True
+        return True
+
+    def _parse(self, raw):
+        try:
+            row = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            return None  # 正在寫的最後一行、或壞行：當作不存在。
+        payload = row.get("payload") if isinstance(row, dict) else None
+        return payload if isinstance(payload, dict) else None
+
+    def feed(self, kind, sub, raw):
+        """一行完整的列；回 True＝夠了，停止往前讀。"""
+        if kind == "compacted":
+            return self._boundary()
+        if kind == "turn_context" and self.model is None:
+            payload = self._parse(raw)
+            model = payload.get("model") if payload else None
+            if isinstance(model, str) and model:
+                self.model = model
+        elif kind == "event_msg" and sub == "token_count" and self.total is None:
+            payload = self._parse(raw)
+            info = payload.get("info") if payload else None
+            usage = info.get("last_token_usage") if isinstance(info, dict) else None
+            total = usage.get("total_tokens") if isinstance(usage, dict) else None
+            if _nonnegative_int(total):
+                self.total = total
+                window = info.get("model_context_window")
+                self.window = window if _nonnegative_int(window) and window > 0 else None
+        elif kind == "response_item" and not self.anchored:
+            payload = self._parse(raw)
+            if payload is None:
+                return False
+            if _codex_model_generated(payload):
+                self.anchored = True
+            else:
+                tokens = _codex_item_tokens(payload)
+                if tokens is None:
+                    self.unknown = True
+                    return True
+                self.after += tokens
+        return self._settle()
+
+    def _boundary(self):
+        if self.total is None:
+            self.unknown = True
+            return True
+        # 壓縮後的歷史從這裡開始：邊界之前的項不在這一段裡，用量就是邊界之後的部分。
+        self.anchored = True
+        return self._settle()
+
+    def oversized(self, head, raw_head):
+        """超過單行上限的一列，只看得到行首：認得出型別就照型別處理，否則略過。"""
+        if head is None:
+            return False
+        kind, sub = head
+        if kind == "compacted":
+            return self._boundary()
+        if kind == "response_item" and not self.anchored:
+            if sub == "message":
+                match = _CODEX_ROLE.search(raw_head[:_CODEX_ROLE_WINDOW_BYTES])
+                generated = match is not None and match.group(1) == b"assistant"
+            else:
+                generated = sub in memspec.CONTEXT_METER_CODEX_MODEL_ITEM_TYPES
+            if not generated:
+                # 讀不完的工具結果（多半是 base64 圖片）估不出模型可見的大小：不知道。
+                self.unknown = True
+                return True
+            self.anchored = True
+            return self._settle()
+        return False
+
+    def reading(self, complete):
+        """讀到檔頭都沒碰到模型產出項：從檔頭起的每一項都算在最後一筆用量之後。
+        讀到上限或逾時還沒定下來：不知道。"""
+        if self.unknown or self.total is None or not (self.counted or complete):
+            return None
+        return Reading(memspec.CONTEXT_METER_HOST_CODEX, self.total + self.after, self.window, self.model)
+
+
+class _Tail:
+    """檔尾反向讀到的行交給這裡：第一行認得出宿主之後，就照那個宿主的規則找用量。"""
+
+    def __init__(self):
+        self.host = None
+        self.done = False
+        self.value = None
+        self.codex = _CodexTail()
+
+    def _classify(self, raw):
+        self.host = (memspec.CONTEXT_METER_HOST_CODEX if _codex_head(raw) is not None
+                     else memspec.CONTEXT_METER_HOST_CLAUDE)
+
+    def lines(self, lines):
+        for raw in reversed(lines):
+            if self.host is None:
+                if not raw.strip():
+                    continue
+                self._classify(raw)
+            if self.host == memspec.CONTEXT_METER_HOST_CLAUDE:
+                found, value = _claude_line(raw)
+                if found:
+                    self.value, self.done = value, True
+                    return True
+                continue
+            head = _codex_head(raw)
+            if head is not None and self.codex.feed(head[0], head[1], raw):
+                self.done = True
+                return True
+        return False
+
+    def oversized_tail(self, tail):
+        """一行超過單行上限、開頭還沒讀到：Claude（或還認不出宿主時）先用行尾認 assistant 列。"""
+        if self.host == memspec.CONTEXT_METER_HOST_CODEX:
+            return False
+        if _oversized_assistant(tail):
+            self.value, self.done = None, True
+            return True
+        return False
+
+    def oversized_head(self, head):
+        """那一行的開頭終於讀到了（只有這一段，整行已丟）。"""
+        if self.host is None:
+            if not head.strip():
+                return False
+            self._classify(head)
+        if self.host != memspec.CONTEXT_METER_HOST_CODEX:
+            return False
+        if self.codex.oversized(_codex_head(head), head):
+            self.done = True
+            return True
+        return False
+
+    def result(self, complete):
+        if self.host == memspec.CONTEXT_METER_HOST_CODEX:
+            return self.codex.reading(complete)
+        if self.done and self.value is not None:
+            return Reading(memspec.CONTEXT_METER_HOST_CLAUDE, self.value)
+        return None
+
+
+def measure(transcript_path, time_limit=None, clock=None):
+    """這場目前的 context 用量：Reading，或 None（不知道）。
 
     從檔尾反向分塊讀：首塊 64 KiB、逐次加倍到 1 MiB 為止，總共最多 64 MiB，而且有
-    時間上限（預設 150 ms，到了就回 None：hook 每次工具呼叫都要付這一份；時鐘可注入，
+    時間上限（預設 150 ms，到了就停：hook 每次工具呼叫都要付這一份；時鐘可注入，
     測試不必賭 Windows 計時器的解析度）。最後一行
     可能是好幾 MB 的工具結果：一行超過單行上限還沒看到開頭，先用行尾認它是不是
-    assistant 列——是就回 None；不是就把累積的片段丟掉、只繼續往前找換行，記憶體不跟著
-    它長。任何讀檔錯誤都回 None。"""
+    Claude 的 assistant 列——是就回 None；不是就把累積的片段丟掉、只繼續往前找換行，
+    記憶體不跟著它長；那一行的開頭讀到時再交給 Codex 的規則認型別。任何讀檔錯誤都回 None。"""
     line_max = memspec.CONTEXT_METER_LINE_MAX_BYTES
     limit = memspec.CONTEXT_METER_TAIL_SECONDS if time_limit is None else time_limit
     clock = time.monotonic if clock is None else clock
     deadline = clock() + limit
+    tail = _Tail()
     try:
         stream = open(transcript_path, "rb")
     except (OSError, TypeError, ValueError):
@@ -110,7 +391,7 @@ def current_tokens(transcript_path, time_limit=None, clock=None):
             oversized = False  # pending 那一行已超過單行上限、片段已丟：它的開頭也不要。
             while end > 0 and budget > 0:
                 if clock() >= deadline:
-                    return None
+                    return tail.result(complete=False)
                 size = min(block, end, budget)
                 start = end - size
                 stream.seek(start)
@@ -124,28 +405,41 @@ def current_tokens(transcript_path, time_limit=None, clock=None):
                     if not oversized:
                         pending = chunk + pending
                         if len(pending) > line_max:
-                            if _oversized_assistant(pending):
-                                return None
+                            if tail.oversized_tail(pending):
+                                return tail.result(complete=False)
                             pending, oversized = b"", True
                     continue
                 body = chunk[cut + 1:]
                 if oversized:
                     last = body.rfind(b"\n")
                     complete = body[:last + 1] if last >= 0 else b""
+                    # 那一行排在 complete 之後：反向讀的順序裡它先處理。
+                    if tail.oversized_head(body[last + 1:]):
+                        return tail.result(complete=False)
                 else:
                     complete = body + pending
-                found, value = _scan_lines(complete.split(b"\n"))
-                if found:
-                    return value
+                if tail.lines(complete.split(b"\n")):
+                    return tail.result(complete=False)
                 pending = chunk[:cut] if start > 0 else b""
                 oversized = len(pending) > line_max
                 if oversized:
-                    if _oversized_assistant(pending):
-                        return None
+                    if tail.oversized_tail(pending):
+                        return tail.result(complete=False)
                     pending = b""
         except OSError:
             return None
-    return None
+    return tail.result(complete=(end == 0))
+
+
+def current_tokens(transcript_path, time_limit=None, clock=None):
+    """Claude transcript 目前的 context 用量（最後一筆主鏈 assistant 的三欄加總）；找不到回 None。
+
+    只認 Claude：Codex rollout 一律回 None——這支也餵 PreCompact 的學習，Codex 的數字
+    不能學進 Claude 的門檻。讀法見 `measure`。"""
+    reading = measure(transcript_path, time_limit, clock)
+    if reading is None or reading.host != memspec.CONTEXT_METER_HOST_CLAUDE:
+        return None
+    return reading.tokens
 
 
 # ---------------------------------------------------------------- 門檻
@@ -306,6 +600,133 @@ def render(current, limit, source, path):
         cur=_k(current), left=_k(limit - current), mark=mark, path=os.fspath(path))
 
 
+# ---------------------------------------------------------------- Codex 壓縮點
+
+
+def codex_home(environ=None, home=None):
+    """Codex 的設定目錄：`$CODEX_HOME`，沒設就是 `~/.codex`。"""
+    environ = os.environ if environ is None else environ
+    value = environ.get(memspec.CONTEXT_METER_CODEX_HOME_ENV)
+    if isinstance(value, str) and value.strip():
+        return Path(value.strip()).expanduser()
+    return Path(home or Path.home()) / ".codex"
+
+
+def codex_limit(model=None, environ=None, home=None):
+    """Codex 這一刻的自動壓縮點 tokens；讀不到、看不懂或不在支援範圍內都回 None。
+
+    算法照 Codex 原始碼（memspec 的 Codex 段）：壓縮點＝min(自動門檻, 硬上限)。模型名稱
+    先用 rollout 最新 turn_context 的，沒有才用設定的 `model`。用到才載入 tomllib（約
+    40–60 ms）：呼叫端只在用量已經接近 Codex 自報的硬上限時才走到這裡。"""
+    root = codex_home(environ, home)
+    try:
+        import tomllib
+
+        config = tomllib.loads((root / memspec.CONTEXT_METER_CODEX_CONFIG_FILENAME).read_text(
+            encoding="utf-8"))
+        catalog = json.loads((root / memspec.CONTEXT_METER_CODEX_CATALOG_FILENAME).read_text(
+            encoding="utf-8"))
+    except (OSError, ValueError, ImportError):
+        return None
+    if not isinstance(config, dict) or not isinstance(catalog, dict):
+        return None
+    # profile 會整組覆寫模型與門檻；其他範圍與 token_budget 換掉的是壓縮的算法本身。
+    if config.get("profile") is not None:
+        return None
+    if config.get("model_auto_compact_token_limit_scope", "total") != "total":
+        return None
+    features = config.get("features", {})
+    if not isinstance(features, dict):
+        return None
+    budget = features.get("token_budget", False)
+    if budget is not False and not (isinstance(budget, dict) and budget.get("enabled") is False):
+        return None
+    if not isinstance(model, str) or not model:
+        model = config.get("model")
+    if not isinstance(model, str) or not model:
+        return None
+    models = catalog.get("models")
+    if not isinstance(models, list):
+        return None
+    entry = next((item for item in models if isinstance(item, dict) and item.get("slug") == model), None)
+    if entry is None:
+        return None
+    percent = entry.get("effective_context_window_percent")
+    catalog_window = entry.get("context_window")
+    maximum = entry.get("max_context_window")
+    auto = config.get("model_auto_compact_token_limit", entry.get("auto_compact_token_limit"))
+    configured = config.get("model_context_window")
+    if not _positive_int(percent) or any(
+            value is not None and not _positive_int(value)
+            for value in (catalog_window, maximum, auto, configured)):
+        return None
+    if configured is not None:
+        window = min(configured, maximum) if maximum is not None else configured
+    else:
+        window = catalog_window if catalog_window is not None else maximum
+    if window is None:
+        return None
+    ceiling = window * memspec.CONTEXT_METER_CODEX_AUTO_NUMERATOR // memspec.CONTEXT_METER_CODEX_AUTO_DENOMINATOR
+    auto = ceiling if auto is None else min(auto, ceiling)
+    return min(auto, window * percent // 100)
+
+
+def _codex_limit_cached(model, directory, environ=None, home=None):
+    """`codex_limit`，但記在這一場的標記目錄裡：鍵是設定檔與模型目錄的 (mtime_ns, 大小)、
+    Codex 設定目錄與模型名稱，任何一項變了就重算。
+
+    每次工具呼叫都要知道壓縮點，而重算一次要載入 tomllib 再解析兩個檔（實測 90–130 ms）。
+    標記目錄在壓縮時整個清掉，所以每個壓縮週期最多重算一次。"""
+    root = codex_home(environ, home)
+    try:
+        stats = [os.stat(root / name) for name in (memspec.CONTEXT_METER_CODEX_CONFIG_FILENAME,
+                                                     memspec.CONTEXT_METER_CODEX_CATALOG_FILENAME)]
+    except OSError:
+        return None
+    key = [os.fspath(root), model or ""] + [value for info in stats for value in (info.st_mtime_ns, info.st_size)]
+    cache = Path(directory) / memspec.CONTEXT_METER_CODEX_LIMIT_CACHE if directory is not None else None
+    if cache is not None:
+        try:
+            stored = json.loads(cache.read_text(encoding="utf-8"))
+            if isinstance(stored, dict) and stored.get("key") == key:
+                limit = stored.get("limit")
+                if limit is None or _positive_int(limit):
+                    return limit
+        except (OSError, ValueError):
+            pass
+    limit = codex_limit(model, environ, home)
+    if cache is not None:
+        staging = cache.with_name("." + cache.name + ".tmp-%d" % os.getpid())
+        try:
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            staging.write_text(json.dumps({"key": key, "limit": limit}), encoding="utf-8")
+            os.replace(staging, cache)
+        except OSError:
+            try:
+                staging.unlink()
+            except OSError:
+                pass
+    return limit
+
+
+def codex_due(reading, marker_directory=None, environ=None, home=None, model=None):
+    """(用量, 壓縮點)：這一刻該提醒 Codex 寫交接；否則 None。
+
+    提醒點是壓縮點減固定餘裕，不是比例：Codex 一步就可能跨過好幾萬 tokens。模型名稱
+    先用 hook 輸入的 `model`（Codex 每次都帶這一回合的模型），再用 rollout 途中看到的
+    turn_context，最後才是設定的 `model`。"""
+    current = reading.tokens
+    if not _nonnegative_int(current):
+        return None
+    if marker_directory is not None and (Path(marker_directory) / memspec.CONTEXT_METER_MARKER).exists():
+        return None  # 這個壓縮週期已經說過。
+    model = model if isinstance(model, str) and model else reading.model
+    limit = _codex_limit_cached(model, marker_directory, environ, home)
+    if limit is None or current < limit - memspec.CONTEXT_METER_CODEX_HEADROOM_TOKENS:
+        return None
+    return current, limit
+
+
 # ---------------------------------------------------------------- hook 端
 
 
@@ -314,7 +735,8 @@ def notice(event, vault, marker_directory, options=None, environ=None, home=None
 
     標記由呼叫端在「真的輸出之後」用 `claim` 寫：沒送出去（預算擠掉、逾時）的提醒
     下一次還要再試。子代理的呼叫一律不說、也不寫標記——提醒被子代理吃掉，主線就永遠
-    收不到了。"""
+    收不到了（Codex 的子代理有自己的 session_id 與 rollout，一樣帶 agent_id）。
+    宿主由 transcript 檔尾的列決定：Codex rollout 走 `codex_due`，其餘照 Claude 的門檻。"""
     try:
         if not isinstance(event, dict) or event.get("agent_id") or event.get("agentId"):
             return None
@@ -327,24 +749,40 @@ def notice(event, vault, marker_directory, options=None, environ=None, home=None
         options = memspec.config_options() if options is None else options
         if not enabled(options):
             return None
+        reading = measure(transcript)
+        if reading is None:
+            return None
+        if reading.host == memspec.CONTEXT_METER_HOST_CODEX:
+            due = codex_due(reading, marker_directory, environ, home, event.get("model"))
+            if due is None:
+                return None
+            current, limit = due
+            line = memspec.CONTEXT_METER_CODEX_NOTICE.format(
+                cur=_k(current), left=_k(limit - current),
+                path=os.fspath(_handoff(vault, session_id, transcript)))
+            return line, memspec.CONTEXT_METER_MARKER
         limit, source = threshold(options, state_path(vault), environ, home)
         if limit is None:
             return None
-        current = current_tokens(transcript)
+        current = reading.tokens
         marker = stage(current, limit)
         if marker is None:
             return None
         if (Path(marker_directory) / marker).exists():
             return None  # 這個壓縮週期已經說過。
-        # 用到才載入：compact_map 會帶進 hashlib 與 argparse，絕大多數呼叫走不到這裡。
-        try:
-            from . import compact_map
-        except ImportError:
-            import compact_map
-        path = compact_map.handoff_destination(vault, session_id, transcript)
+        path = _handoff(vault, session_id, transcript)
         return render(current, limit, source, path), marker
     except Exception:
         return None
+
+
+def _handoff(vault, session_id, transcript):
+    # 用到才載入：compact_map 會帶進 hashlib，絕大多數呼叫走不到這裡。
+    try:
+        from . import compact_map
+    except ImportError:
+        import compact_map
+    return compact_map.handoff_destination(vault, session_id, transcript)
 
 
 def claim(marker_directory, marker):
@@ -486,6 +924,15 @@ def status(options, vault, transcript=None, environ=None, out=print):
     if not enabled(options):
         out("status: disabled by config")
         return None
+    reading = measure(transcript) if transcript else None
+    if reading is not None and reading.host == memspec.CONTEXT_METER_HOST_CODEX:
+        limit = codex_limit(reading.model, environ)
+        headroom = memspec.CONTEXT_METER_CODEX_HEADROOM_TOKENS
+        out(f"status: host=codex current={reading.tokens} model={reading.model or '(config model)'} "
+            f"hard_cap={reading.window or 'unknown'} limit={limit or 'unknown'} "
+            f"remind_at={limit - headroom if limit else '-'} "
+            f"due={'yes' if limit and reading.tokens >= limit - headroom else 'no'}")
+        return limit
     limit, source = threshold(options, state_path(vault) if vault else None, environ)
     pct = current_pct(environ)
     if limit is None:
@@ -496,7 +943,7 @@ def status(options, vault, transcript=None, environ=None, out=print):
         out(f"status: threshold={limit} tokens source={source} pct={pct or '(unset)'} "
             f"remind_at={int(memspec.CONTEXT_METER_STAGE_RATIO * limit)}")
     if transcript:
-        current = current_tokens(transcript)
+        current = reading.tokens if reading is not None else None
         if current is None:
             out(f"status: current usage unknown for {transcript}")
         else:
@@ -504,6 +951,184 @@ def status(options, vault, transcript=None, environ=None, out=print):
             share = f" ({current / limit:.0%} of threshold)" if limit else ""
             out(f"status: current={current} tokens{share} due={'yes' if where else 'no'}")
     return limit
+
+
+# ---------------------------------------------------------------- Codex 重播（唯讀）
+
+
+_CODEX_NAME = re.compile(rb'"name":"([^"]{1,128})"')
+
+
+def _codex_replay_file(path, window):
+    """一個 rollout 從頭重播：每個壓縮週期裡 hook 會跑的那些點當下的用量（Codex 算法）。
+
+    回 (週期清單, 自動壓縮數)。週期＝[提醒點清單, 結束時的取樣序號, 是否以自動壓縮結束
+    （None＝檔尾、沒有壓縮）, 當時的硬上限, 是否主線, 壓縮那一刻的用量]；
+    提醒點＝(用量或 None, 當下的取樣序號)。hook 點：PreToolUse＝每個會觸發它的工具呼叫
+    （write_stdin 與 code-mode wait 不觸發），用量含那一列本身；UserPromptSubmit＝一回合
+    開始（task_started）後、第一個 response_item 之前，在回合前的壓縮之後。取樣序號＝
+    模型開始一次新回應的次數（模型產出項緊跟在非模型項之後）。只收 Codex 自報的硬上限
+    等於 window 的週期（同一組設定）。"""
+    total = None
+    reported = None
+    after = 0  # None＝有一項估不出來
+    previous_generated = False
+    sampling = 0
+    points = []
+    cycles = []
+    turn_active = False
+    turn_compactions = []
+    pending_prompt = False
+    line_max = memspec.CONTEXT_METER_LINE_MAX_BYTES
+    skip_tools = memspec.CONTEXT_METER_CODEX_UNHOOKED_TOOLS
+
+    def current():
+        if total is None or after is None:
+            return None
+        return total + after
+
+    def close_turn():
+        # 自動或手動：手動壓縮自成一回合，裡面沒有使用者訊息、也沒有模型產出項。
+        for index in turn_compactions:
+            cycles[index][2] = turn_active
+        turn_compactions.clear()
+
+    main = True
+    with open(path, "rb") as stream:
+        for number, raw in enumerate(stream):
+            if number == 0 and memspec.CONTEXT_METER_CODEX_SUBAGENT_MARKER in raw[:_CODEX_ROLE_WINDOW_BYTES]:
+                main = False
+            head = _codex_head(raw)
+            if head is None:
+                continue
+            kind, sub = head
+            if kind == "event_msg" and sub == "task_started":
+                close_turn()
+                turn_active = False
+                pending_prompt = True
+                previous_generated = False
+                continue
+            if kind == "compacted":
+                cycles.append([points, sampling, False, reported, main, current()])
+                turn_compactions.append(len(cycles) - 1)
+                points = []
+                total, after = None, 0
+                continue
+            if kind == "event_msg" and sub == "token_count":
+                try:
+                    info = json.loads(raw)["payload"].get("info")
+                    value = info["last_token_usage"]["total_tokens"]
+                except (ValueError, KeyError, TypeError, AttributeError):
+                    continue
+                if _nonnegative_int(value):
+                    total = value
+                    window_value = info.get("model_context_window")
+                    reported = window_value if _nonnegative_int(window_value) else reported
+                continue
+            if kind != "response_item":
+                continue
+            if pending_prompt:
+                pending_prompt = False
+                points.append((current(), sampling))
+            oversized = len(raw) > line_max
+            if sub == "message":
+                match = _CODEX_ROLE.search(raw[:_CODEX_ROLE_WINDOW_BYTES])
+                generated = match is not None and match.group(1) == b"assistant"
+                if match is not None and match.group(1) == b"user":
+                    turn_active = True
+            else:
+                generated = sub in memspec.CONTEXT_METER_CODEX_MODEL_ITEM_TYPES
+            if generated:
+                turn_active = True
+                if not previous_generated:
+                    sampling += 1
+                previous_generated = True
+                after = 0
+                if sub in ("function_call", "custom_tool_call"):
+                    name = _CODEX_NAME.search(raw[:_CODEX_ROLE_WINDOW_BYTES])
+                    if name is None or name.group(1).decode("utf-8", "replace") not in skip_tools:
+                        points.append((current(), sampling))
+                continue
+            previous_generated = False
+            if after is None:
+                continue
+            if oversized:
+                after = None
+                continue
+            try:
+                tokens = _codex_item_tokens(json.loads(raw)["payload"])
+            except (ValueError, KeyError, TypeError):
+                continue
+            after = None if tokens is None else after + tokens
+    close_turn()
+    cycles.append([points, sampling, None, reported, main, None])  # 檔尾：這個週期沒有壓縮
+    kept = [cycle for cycle in cycles if cycle[3] == window]
+    return kept, sum(1 for cycle in kept if cycle[2] is True)
+
+
+def _quantile(values, share):
+    ordered = sorted(values)
+    return ordered[min(len(ordered) - 1, int(share * len(ordered)))] if ordered else None
+
+
+def codex_calibrate(root, since, limit, window, headrooms, out=print):
+    """唯讀重播 `<root>/**/rollout-*.jsonl`（修改時間在 since 之後）。什麼都不寫。
+
+    對每個候選 H：主線自動壓縮裡，第一個用量 ≥ limit−H 的 hook 點之後、壓縮之前至少還有
+    一次模型取樣（看得到提醒、還能動手寫交接）的比例；提早的取樣次數中位數；沒有壓縮
+    的週期（場次結束）裡白提醒的次數。另列「用量已達壓縮點」的那一部分：壓縮那一刻照
+    Codex 算法算出的用量 ≥ limit 的，才是這個門檻造成的壓縮——也拿來驗算法對不對。
+    回 [(H, 命中, 自動壓縮數, 門檻型命中, 門檻型數, 中位數, 白提醒)]。"""
+    files = [path for path in sorted(Path(root).rglob("rollout-*.jsonl"))
+             if path.stat().st_mtime >= since]
+    cycles = []
+    for path in files:
+        try:
+            found, _count = _codex_replay_file(path, window)
+        except OSError:
+            continue
+        cycles.extend(found)
+    # 子代理的呼叫一律不提醒（notice 見 agent_id 就不說），所以 H 只看主線。
+    auto = [cycle for cycle in cycles if cycle[2] is True and cycle[4]]
+    driven = [cycle for cycle in auto if cycle[5] is not None and cycle[5] >= limit]
+    driven_ids = {id(cycle) for cycle in driven}
+    open_cycles = [cycle for cycle in cycles if cycle[2] is None and cycle[4]]
+    pre = [cycle[5] - limit for cycle in auto if cycle[5] is not None]
+
+    def first_warning(points, headroom):
+        return next((at for value, at in points if value is not None and value >= limit - headroom), None)
+
+    rows = []
+    for headroom in headrooms:
+        hits = driven_hits = 0
+        warned = []
+        for cycle in auto:
+            points, end = cycle[0], cycle[1]
+            first = first_warning(points, headroom)
+            if first is not None and end - first >= 1:
+                hits += 1
+                if id(cycle) in driven_ids:
+                    driven_hits += 1
+                    warned.append(end - first)
+        wasted = sum(1 for cycle in open_cycles if first_warning(cycle[0], headroom) is not None)
+        median = _median(warned) if warned else 0
+        rows.append((headroom, hits, len(auto), driven_hits, len(driven), median, wasted))
+    out(f"codex-calibrate: files={len(files)} cycles={len(cycles)} main_auto={len(auto)} "
+        f"main_auto_at_limit={len(driven)} subagent_auto="
+        f"{sum(1 for cycle in cycles if cycle[2] is True and not cycle[4])} "
+        f"manual={sum(1 for cycle in cycles if cycle[2] is False)} main_open={len(open_cycles)} "
+        f"limit={limit} hard_cap={window}")
+    if pre:
+        out(f"count at compaction minus limit (main auto, known {len(pre)}/{len(auto)}): "
+            f"p5={_quantile(pre, 0.05)} p50={_quantile(pre, 0.5)} p95={_quantile(pre, 0.95)} "
+            f"min={min(pre)} max={max(pre)}")
+    out("H\thit(all auto)\trate\thit(at limit)\trate\tmedian_steps(at limit)\tfired_without_compaction")
+    for headroom, hits, count, driven_hits, driven_count, median, wasted in rows:
+        rate = hits / count if count else 0
+        driven_rate = driven_hits / driven_count if driven_count else 0
+        out(f"{headroom}\t{hits}/{count}\t{rate:.1%}\t{driven_hits}/{driven_count}\t{driven_rate:.1%}"
+            f"\t{median:g}\t{wasted}/{len(open_cycles)}")
+    return rows
 
 
 # ---------------------------------------------------------------- 自測
@@ -811,6 +1436,258 @@ def _selftest():
                            and cli_code == 0 and apply_rejected
                            and not state_path(cal_vault).exists()))
 
+            # ---- Codex ----
+            import itertools
+
+            ordinals = itertools.count(1)
+
+            def codex_row(kind, payload):
+                return json.dumps({"timestamp": "2026-09-25T00:00:00.000Z", "ordinal": next(ordinals),
+                                   "type": kind, "payload": payload}, ensure_ascii=False, separators=(",", ":"))
+
+            def token_count(total, window=228000):
+                return codex_row("event_msg", {"type": "token_count", "info": {
+                    "total_token_usage": {"total_tokens": 9_999_999},
+                    "last_token_usage": {"input_tokens": total - 100, "output_tokens": 100, "total_tokens": total},
+                    "model_context_window": window}})
+
+            def call(name="exec_command"):
+                return codex_row("response_item", {"type": "function_call", "name": name,
+                                                   "arguments": "{}", "call_id": "c1"})
+
+            def output(body):
+                return codex_row("response_item", {"type": "function_call_output", "call_id": "c1", "output": body})
+
+            def message(role, text):
+                return codex_row("response_item", {"type": "message", "role": role,
+                                                   "content": [{"type": "input_text", "text": text}]})
+
+            reasoning = codex_row("response_item", {"type": "reasoning", "summary": [], "encrypted_content": "e"})
+            compacted = codex_row("compacted", {"message": "", "replacement_history": []})
+            meta = codex_row("session_meta", {"id": "cx", "source": "vscode"})
+            rollout = root / "rollout-2026-09-25T00-00-00-cx.jsonl"
+
+            # C1. 認得出 Codex rollout：用量＝最新 token_count＋最後一個模型產出項之後各項的估計
+            # （位元組 ÷4 無條件進位）；正在寫的最後一行不算；Claude 的讀法對它回 None。
+            write(rollout, [meta, codex_row("turn_context", {"model": "old"}), message("user", "hi"),
+                            reasoning, call(), token_count(150000), output("x" * 4000),
+                            '{"timestamp":"t","ordinal":99,"type":"response_item","payload":{"type":"function_c'],
+                  trailing_newline=False)
+            mid_turn = measure(rollout)
+            write(rollout, [meta, reasoning, call(), token_count(150000), message("assistant", "done"),
+                            codex_row("turn_context", {"model": "gpt-small"}), message("user", "next")])
+            new_turn = measure(rollout)
+            checks.append(("a Codex rollout is read with Codex's own count; a row being written is ignored; "
+                           "the Claude-only reader returns None for it",
+                           mid_turn is not None and mid_turn.host == memspec.CONTEXT_METER_HOST_CODEX
+                           and mid_turn.tokens == 150000 + 1001 and mid_turn.window == 228000
+                           and mid_turn.model is None
+                           and new_turn is not None and new_turn.tokens == 150001
+                           and new_turn.model == "gpt-small"
+                           and current_tokens(rollout) is None))
+
+            # C2. 模型可見位元組：圖片 7,373（原尺寸取上限 40,000）、文字照 UTF-8、音訊估不出來。
+            image = {"type": "function_call_output", "call_id": "ab", "output": [
+                {"type": "input_text", "text": "abcd"}, {"type": "input_image", "image_url": "data:x"}]}
+            original = {"type": "function_call_output", "call_id": "ab", "output": [
+                {"type": "input_text", "text": "abcd"},
+                {"type": "input_image", "image_url": "data:x", "detail": "original"}]}
+            audio = {"type": "message", "role": "user", "content": [{"type": "input_audio", "audio_url": "a"}]}
+            checks.append(("Codex item estimates follow its byte rules and give None for an unknown part",
+                           _codex_item_tokens(image) == 1845
+                           and _codex_item_tokens(original) == 10002
+                           and _codex_item_tokens({"type": "message", "role": "developer",
+                                                   "content": [{"type": "input_text", "text": "中文"}]}) == 2
+                           and _codex_item_tokens(audio) is None
+                           and _codex_item_tokens({"type": "ghost_snapshot"}) == 0))
+
+            # C3. 壓縮邊界比最新 token_count 新＝不知道；壓縮後重算的 token_count 之後只算邊界之後
+            # 的項；info 是 null 的 token_count 略過。
+            write(rollout, [meta, token_count(200000), call(), compacted])
+            just_compacted = measure(rollout)
+            write(rollout, [meta, token_count(200000), call(), compacted, token_count(30000),
+                            message("user", "hello world!")])
+            after_compaction = measure(rollout)
+            write(rollout, [meta, token_count(120000), call(),
+                            codex_row("event_msg", {"type": "token_count", "info": None})])
+            null_info = measure(rollout)
+            checks.append(("a compacted row newer than the latest token_count gives None; after it only the "
+                           "items past the boundary count; a null-info token_count is skipped",
+                           just_compacted is None
+                           and after_compaction is not None and after_compaction.tokens == 30003
+                           and null_info is not None and null_info.tokens == 120000))
+
+            # C4. 超過單行上限的 Codex 列只看行首：模型產出項照樣當錨、工具結果估不出來＝不知道、
+            # 壓縮邊界照樣是邊界、事件列略過。
+            # 行尾累積過單行上限時還沒碰到換行，才算「超過單行上限」：3 MiB 一行才走得到那條路。
+            huge = "y" * (3 * memspec.CONTEXT_METER_LINE_MAX_BYTES)
+            oversized_cases = []
+            for last, expected in (
+                    (codex_row("response_item", {"type": "custom_tool_call", "name": "apply_patch",
+                                                 "call_id": "c1", "input": huge}), 100000),
+                    (output(huge), None),
+                    (codex_row("compacted", {"message": "", "replacement_history": [huge]}), None),
+                    (codex_row("event_msg", {"type": "item_completed", "item": huge}), 100000)):
+                # 前面墊 2 MB：讀到檔頭時整行都在手上，就不是「超過單行上限」的情形。
+                padding = [output("p" * 2000)] * 1100
+                rows = [meta, *padding, token_count(100000), call(), last]
+                if expected == 100000 and "custom_tool_call" in last:
+                    rows = [meta, *padding, token_count(100000), last]
+                write(rollout, rows)
+                found = measure(rollout)
+                oversized_cases.append((found.tokens if found is not None else None) == expected)
+            checks.append(("oversized Codex rows are judged by their head: model item anchors, tool output is "
+                           "unknown, compacted is a boundary, events are skipped", oversized_cases == [True] * 4))
+
+            # C5. 壓縮點照 Codex：設定的視窗夾在目錄上限內，min(自動門檻, 視窗×9/10, 硬上限)；
+            # 範圍、token_budget、profile、找不到模型、壞設定都回 None；CODEX_HOME 優先於家目錄。
+            catalog = {"models": [
+                {"slug": "gpt-x", "context_window": 272000, "max_context_window": 872000,
+                 "auto_compact_token_limit": None, "effective_context_window_percent": 95},
+                {"slug": "gpt-small", "context_window": 128000, "max_context_window": 128000,
+                 "auto_compact_token_limit": None, "effective_context_window_percent": 95},
+                {"slug": "gpt-low", "context_window": 240000, "max_context_window": 240000,
+                 "auto_compact_token_limit": None, "effective_context_window_percent": 80},
+                {"slug": "gpt-auto", "context_window": 272000, "max_context_window": 272000,
+                 "auto_compact_token_limit": 150000, "effective_context_window_percent": 95}]}
+            pinned = 'model = "gpt-x"\nmodel_context_window = 240000\nmodel_auto_compact_token_limit = 210000\n'
+
+            def codex_dir(name, config_text):
+                directory = root / "codex-homes" / name
+                directory.mkdir(parents=True)
+                (directory / memspec.CONTEXT_METER_CODEX_CONFIG_FILENAME).write_text(config_text, encoding="utf-8")
+                (directory / memspec.CONTEXT_METER_CODEX_CATALOG_FILENAME).write_text(
+                    json.dumps(catalog), encoding="utf-8")
+                return {memspec.CONTEXT_METER_CODEX_HOME_ENV: os.fspath(directory)}
+
+            base_env = codex_dir("base", pinned)
+            fallback_home = root / "codex-user"
+            (fallback_home / ".codex").mkdir(parents=True)
+            (fallback_home / ".codex" / memspec.CONTEXT_METER_CODEX_CONFIG_FILENAME).write_text(
+                'model = "gpt-small"\n', encoding="utf-8")
+            (fallback_home / ".codex" / memspec.CONTEXT_METER_CODEX_CATALOG_FILENAME).write_text(
+                json.dumps(catalog), encoding="utf-8")
+            limits = {
+                "pinned": codex_limit(None, base_env),
+                "event model": codex_limit("gpt-small", base_env),
+                "catalog only": codex_limit(None, codex_dir("plain", 'model = "gpt-x"\n')),
+                "clamped": codex_limit(None, codex_dir("clamp", 'model = "gpt-x"\nmodel_context_window = 1000000\n')),
+                "percent": codex_limit("gpt-low", codex_dir("low", 'model = "gpt-x"\n')),
+                "catalog auto": codex_limit("gpt-auto", codex_dir("auto", 'model = "gpt-x"\n')),
+                "budget off": codex_limit(None, codex_dir("budget-off", pinned + "[features.token_budget]\nenabled = false\n")),
+                "home": codex_limit(None, {}, fallback_home),
+            }
+            unknown_limits = [
+                codex_limit(None, codex_dir("scope", pinned + 'model_auto_compact_token_limit_scope = "body_after_prefix"\n')),
+                codex_limit(None, codex_dir("budget", pinned + "[features]\ntoken_budget = true\n")),
+                codex_limit(None, codex_dir("profile", 'profile = "fast"\n' + pinned)),
+                codex_limit("no-such-model", base_env),
+                codex_limit(None, codex_dir("broken", "model = \n")),
+                codex_limit(None, {memspec.CONTEXT_METER_CODEX_HOME_ENV: os.fspath(root / "no-codex-here")}),
+            ]
+            checks.append(("codex_limit follows Codex's window and auto-compact rules and is None outside them",
+                           limits == {"pinned": 210000, "event model": 115200, "catalog only": 244800,
+                                      "clamped": 784800, "percent": 192000, "catalog auto": 150000,
+                                      "budget off": 210000,
+                                      "home": 115200}
+                           and unknown_limits == [None] * 6))
+
+            # C6. Codex 的提醒：壓縮點－H 以下不說；跨過說一次（Codex 的字、交接檔路徑）、同一個
+            # 週期不再說；Claude 的全域覆寫不套上 Codex；hook 輸入的 model 優先於設定。
+            headroom = memspec.CONTEXT_METER_CODEX_HEADROOM_TOKENS
+            codex_markers = root / "codex-markers"
+            claude_override = {"context_meter": {"autocompact_tokens": 100000}}
+
+            def codex_call(total, session="cx1", model="gpt-x", directory=codex_markers, **extra):
+                write(rollout, [meta, reasoning, call(), token_count(total)])
+                found = notice({"session_id": session, "transcript_path": os.fspath(rollout),
+                                "model": model, **extra}, vault, directory, options=claude_override,
+                               environ=base_env)
+                if found is not None:
+                    claim(directory, found[1])
+                return found
+
+            below = codex_call(210000 - headroom - 1)
+            override_ignored = codex_call(120000)
+            due = codex_call(210000 - headroom + 500)
+            repeat = codex_call(209000)
+            small = codex_call(115200 - headroom, session="cx2", directory=root / "codex-markers-2",
+                               model="gpt-small")
+            by_subagent = codex_call(200000, session="cx3", directory=root / "codex-markers-3", agent_id="a1")
+            codex_handoff = _compact_map.handoff_destination(vault, "cx1", rollout)
+            checks.append(("the Codex reminder fires once at limit-H with Codex's text and the handoff path, "
+                           "ignores the Claude override, prefers the event's model, and skips subagents",
+                           below is None and override_ignored is None
+                           and due is not None and due[1] == memspec.CONTEXT_METER_MARKER
+                           and due[0] == memspec.CONTEXT_METER_CODEX_NOTICE.format(
+                               cur=_k(210000 - headroom + 500), left=_k(headroom - 500),
+                               path=os.fspath(codex_handoff))
+                           and repeat is None
+                           and small is not None and os.fspath(
+                               _compact_map.handoff_destination(vault, "cx2", rollout)) in small[0]
+                           and by_subagent is None
+                           and not (root / "codex-markers-3").exists()))
+
+            # C7. 壓縮點記在標記目錄：設定沒變就沿用，設定一變就重算。
+            cache_dir = root / "codex-cache"
+            first_limit = _codex_limit_cached("gpt-x", cache_dir, base_env)
+            cache_file = cache_dir / memspec.CONTEXT_METER_CODEX_LIMIT_CACHE
+            stored = json.loads(cache_file.read_text(encoding="utf-8"))
+            cache_file.write_text(json.dumps({"key": stored["key"], "limit": 123}), encoding="utf-8")
+            reused = _codex_limit_cached("gpt-x", cache_dir, base_env)
+            config_file = Path(base_env[memspec.CONTEXT_METER_CODEX_HOME_ENV]) / memspec.CONTEXT_METER_CODEX_CONFIG_FILENAME
+            config_file.write_text(pinned.replace("210000", "200000") + "# changed\n", encoding="utf-8")
+            recomputed = _codex_limit_cached("gpt-x", cache_dir, base_env)
+            other_model = _codex_limit_cached("gpt-small", cache_dir, base_env)
+            config_file.write_text(pinned, encoding="utf-8")
+            checks.append(("the Codex limit is cached per session and recomputed when the config changes",
+                           first_limit == 210000 and reused == 123 and recomputed == 200000
+                           and other_model == 115200))
+
+            # C8. PreCompact 的學習只收 Claude：Codex rollout 一筆都不寫。
+            learn_vault = root / "learn-vault"
+            learn_vault.mkdir()
+            write(rollout, [meta, reasoning, call(), token_count(205000)])
+            checks.append(("record_autocompact learns nothing from a Codex rollout",
+                           record_autocompact(learn_vault, rollout, environ=env92) is None
+                           and not state_path(learn_vault).exists()))
+
+            # C9. 重播：第一個用量 ≥ 壓縮點－H 的 hook 點之後還要有一次取樣才算來得及。
+            replay_root = root / "replay" / "2026" / "09" / "25"
+            replay_root.mkdir(parents=True)
+            write(replay_root / "rollout-2026-09-25T00-00-00-r1.jsonl", [
+                meta, codex_row("event_msg", {"type": "task_started"}), message("user", "go"),
+                reasoning, call(), token_count(150000), output("o"),
+                reasoning, call(), token_count(170000), output("o"),
+                reasoning, call(), token_count(205000), output("o"),
+                compacted, token_count(20000), reasoning, call(), token_count(40000)])
+            replay_lines = []
+            replay_rows = codex_calibrate(root / "replay", 0, 210000, 228000, [45000, 60000],
+                                          out=replay_lines.append)
+            checks.append(("the Codex replay counts a hit only when a sampling follows the first point at "
+                           "limit-H, and reports without writing",
+                           [row[:3] for row in replay_rows] == [(45000, 0, 1), (60000, 1, 1)]
+                           and "main_auto=1" in replay_lines[0]
+                           and sorted(item.name for item in replay_root.iterdir())
+                           == ["rollout-2026-09-25T00-00-00-r1.jsonl"]))
+
+            # C10. 效能：20 MB rollout、最後一列是 2 MB 的事件列，hook 只讀檔尾。
+            large_rollout = root / "rollout-large.jsonl"
+            filler_row = (output("f" * 2000) + "\n").encode("utf-8")
+            with large_rollout.open("wb") as stream:
+                stream.write((meta + "\n").encode("utf-8"))
+                stream.write(filler_row * (20 * 1024 * 1024 // len(filler_row)))
+                for row in (reasoning, call(), token_count(180000),
+                            codex_row("event_msg", {"type": "item_completed", "item": "i" * (2 * 1024 * 1024)})):
+                    stream.write((row + "\n").encode("utf-8"))
+            started = time.perf_counter()
+            large_reading = measure(large_rollout)
+            elapsed = time.perf_counter() - started
+            print(f"context_meter: measure on a {large_rollout.stat().st_size / 1e6:.1f} MB Codex rollout "
+                  f"took {elapsed * 1000:.1f} ms")
+            checks.append(("measure on a 20 MB Codex rollout ending in a 2 MB event row answers under 300 ms",
+                           large_reading is not None and large_reading.tokens == 180000 and elapsed < 0.3))
+
             # 11. 效能：50 MB transcript、最後一列是 2 MB 工具結果，hook 只讀檔尾。
             large = root / "large.jsonl"
             filler = (assistant(1234) + "\n").encode("utf-8") * 1
@@ -838,7 +1715,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 15
+    total = 25
     status_word = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status_word} {passed}/{total}")
     if status_word != "PASS":
@@ -853,14 +1730,24 @@ def main(argv=None):
 
     parser = argparse.ArgumentParser(
         prog="epitype context-meter",
-        description="Claude Code context meter: learned auto-compaction threshold and current usage.")
+        description="Context meter for Claude Code (learned auto-compaction threshold) and Codex "
+                    "(its own auto-compaction limit): current usage and when the handoff reminder fires.")
     parser.add_argument("--selftest", action="store_true")
     commands = parser.add_subparsers(dest="command")
     calibrate_parser = commands.add_parser(
         "calibrate", help="report (read-only) the auto-compaction points in recent Claude Code transcripts")
     calibrate_parser.add_argument("--root", help="transcript root (default: ~/.claude/projects)")
+    replay_parser = commands.add_parser(
+        "codex-calibrate", help="replay Codex rollouts (read-only) and report the reminder headroom H")
+    replay_parser.add_argument("--root", help="rollout root (default: $CODEX_HOME/sessions)")
+    replay_parser.add_argument("--since", default="2026-09-02", help="only rollouts modified on or after this date")
+    replay_parser.add_argument("--limit", type=int, required=True, help="the auto-compaction limit in force")
+    replay_parser.add_argument("--hard-cap", type=int, required=True,
+                               help="the model_context_window the rollouts reported for that setting")
+    replay_parser.add_argument("--headroom", type=int, nargs="+",
+                               default=list(range(10000, 82000, 2000)), help="candidate H values")
     status_parser = commands.add_parser("status", help="print the threshold, its source and the current usage")
-    status_parser.add_argument("--transcript", help="a Claude Code transcript JSONL to measure")
+    status_parser.add_argument("--transcript", help="a Claude Code transcript or Codex rollout JSONL to measure")
     status_parser.add_argument("--vault", help="governance vault (default: from the Epitype config)")
     args = parser.parse_args(argv)
 
@@ -869,6 +1756,13 @@ def main(argv=None):
     if args.command is None:
         parser.print_help()
         return 2
+    if args.command == "codex-calibrate":
+        from datetime import datetime, timezone
+
+        root = Path(args.root).expanduser() if args.root else codex_home() / "sessions"
+        since = datetime.fromisoformat(args.since).replace(tzinfo=timezone.utc).timestamp()
+        codex_calibrate(root, since, args.limit, args.hard_cap, args.headroom)
+        return 0
     if args.command == "calibrate":
         root = Path(args.root).expanduser() if args.root else Path.home() / ".claude" / "projects"
         calibrate(root)

@@ -46,6 +46,7 @@ from _hook_common import (
     run_synthetic,
     sequence_fields,
     with_session,
+    write_codex_fixture,
     write_config,
 )
 
@@ -2479,6 +2480,37 @@ def _selftest():
                 and sub_handoff in after_context,
             ))
 
+            # Codex 形狀的 PreToolUse（rollout 在 .codex/sessions、帶 model 與 turn_id）：到了
+            # 壓縮點－H 放行時附 Codex 的那一行，輸出是 Codex 認得的 additionalContext（沒有
+            # permissionDecision），同一個週期不再說；Claude 的全域覆寫（100000）不套上 Codex。
+            codex_rollout, codex_env = write_codex_fixture(root, "codex-meter", 170000)
+
+            def codex_meter_call():
+                result = run_synthetic(
+                    Path(__file__),
+                    {"hook_event_name": "PreToolUse", "session_id": "codex-meter", "turn_id": "t1",
+                     "transcript_path": os.fspath(codex_rollout), "cwd": os.fspath(root),
+                     "model": "gpt-x", "permission_mode": "default", "tool_name": "Bash",
+                     "tool_use_id": "call-1", "tool_input": {"command": "echo hi"}},
+                    meter_config, environment=codex_env,
+                )
+                value = json.loads(result.stdout) if result.stdout.strip() else {}
+                return result, value.get("hookSpecificOutput", {})
+
+            codex_first, codex_first_out = codex_meter_call()
+            codex_second, codex_second_out = codex_meter_call()
+            codex_handoff = os.fspath(
+                compact_map.handoff_destination(meter_vault, "codex-meter", codex_rollout))
+            checks.append((
+                "a Codex-shaped PreToolUse at limit-H carries Codex's line as additionalContext once",
+                codex_first.returncode == 0
+                and set(codex_first_out) == {"hookEventName", "additionalContext"}
+                and codex_first_out["additionalContext"] == memspec.CONTEXT_METER_CODEX_NOTICE.format(
+                    cur=170, left=40, path=codex_handoff)
+                and codex_second.returncode == 0
+                and not codex_second.stdout.strip(),
+            ))
+
             missing_config = root / "missing-config.json"
             missing = run_synthetic(
                 Path(__file__),
@@ -2497,7 +2529,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 53
+    total = 54
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

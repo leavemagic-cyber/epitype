@@ -21,6 +21,7 @@ from _hook_common import (
     read_event,
     recall_marker_directory,
     run_synthetic,
+    write_codex_fixture,
     write_config,
 )
 
@@ -109,7 +110,8 @@ def _handle(event, started_at, learn=True):
     else:
         clear_recall_markers(session_id)
     vault = governance_vault(config, for_write=True)
-    # 用量計只做 Claude 側：Codex 的 rollout 沒有同形狀的用量列，學到的會是空的。
+    # 只有 Claude 側要學門檻：Codex 的壓縮點從它自己的設定算（context_meter.codex_limit），
+    # 學進來反而會把 Codex 的數字混進 Claude 的門檻。
     if learn:
         _learn_threshold(event, vault, transcript)
     destination = _map_destination(vault, event, transcript)
@@ -380,6 +382,28 @@ def _selftest():
                 and not (auto_markers / "digest").exists(),
             ))
 
+            # Codex（--codex）的自動壓縮：清掉這一場的用量計標記與壓縮點快取（下一個週期重新
+            # 武裝），而且一筆都不學——Codex 的數字不能變成 Claude 的門檻。
+            codex_rollout, codex_env = write_codex_fixture(root, "codex-pc", 205000)
+            codex_markers = recall_marker_directory("codex-pc")
+            codex_markers.mkdir(parents=True, exist_ok=True)
+            for name in (memspec.CONTEXT_METER_MARKER, memspec.CONTEXT_METER_CODEX_LIMIT_CACHE):
+                (codex_markers / name).write_text("x\n", encoding="ascii")
+            codex_run = run_synthetic(
+                Path(__file__),
+                {"hook_event_name": "PreCompact", "session_id": "codex-pc", "turn_id": "t1",
+                 "transcript_path": os.fspath(codex_rollout), "cwd": os.fspath(root),
+                 "model": "gpt-x", "trigger": "auto"},
+                config, arguments=("--codex",), environment={**pct_env, **codex_env})
+            checks.append((
+                "a Codex auto compaction clears the meter marker and limit cache and learns nothing",
+                codex_run.returncode == 0
+                and not (codex_markers / memspec.CONTEXT_METER_MARKER).exists()
+                and not (codex_markers / memspec.CONTEXT_METER_CODEX_LIMIT_CACHE).exists()
+                and len(context_meter.read_samples(state)) == before_subagent
+                and compact_map.map_destination(vault, "codex-pc", codex_rollout).is_file(),
+            ))
+
             # enabled=false：自動壓縮也不學。
             disabled_config = root / "disabled-config.json"
             write_config(disabled_config, [vault])
@@ -448,7 +472,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 15
+    total = 16
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

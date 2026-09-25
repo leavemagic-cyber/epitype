@@ -2,6 +2,44 @@
 
 ## Unreleased
 
+### Codex 也有壓縮前交接提醒（照 Codex 自己的算法）
+
+owner 2026-09-25：Codex App 自動壓縮前要自動落檔，而且不能照抄 Claude 的設計——Codex 用自己的規則算
+用量與壓縮點。之前用量計只認 Claude transcript 的 assistant 用量列，Codex rollout 一律「不知道」，所以
+Codex 從來沒收到過提醒。
+
+- **認宿主**：同一支 hook 看 transcript 檔尾的列：`{"timestamp":…,"type":…,"payload":…}` 是 Codex rollout，
+  其餘照 Claude 原本的讀法（Claude 的結果逐位元組不變，原有 15 項自測照舊）。
+- **用量**：照 Codex `get_total_token_usage`——最新 `token_count` 的 `last_token_usage.total_tokens`，加上最後
+  一個模型產出項之後各項的估計（模型看得到的位元組 ÷4 無條件進位，圖片 7,373 位元組）。壓縮邊界比最新的
+  `token_count` 還新、或有一項估不出來（讀不完的 base64 圖片）＝不知道。
+- **壓縮點**：從 `$CODEX_HOME`（預設 `~/.codex`）的 `config.toml` 與 `models_cache.json` 照 Codex 原始碼算：
+  min(自動門檻, 視窗×9/10, 視窗×effective_context_window_percent)。模型名稱用 hook 輸入的 `model`。
+  `model_auto_compact_token_limit_scope` 不是 total、開了 `features.token_budget`、設了 `profile`、找不到
+  模型——一律不提醒，不猜。算好的壓縮點記在這一場的標記目錄（壓縮時清掉），一個週期最多重算一次。
+- **提醒點＝壓縮點－44k**，不是比例。`epitype context-meter codex-calibrate --limit 210000 --hard-cap 228000`
+  重播 `~/.codex/sessions` 385 份 rollout：主線 244 次自動壓縮，H=44k 時 233 次（95.5%）在壓縮前至少還有一次
+  模型取樣看得到提醒（42k 94.7%、30k 84.0%、10k 29.9%）；提早的取樣次數中位數 20；271 個沒有壓縮就結束
+  的週期裡有 27 個會白提醒一次。
+- **提醒文字**：交接檔路徑，寫什麼（仍有效的使用者指示原話、目標、決定與理由、進度、確切路徑／指令／
+  數字、下一步、已排除的路），之後每到里程碑就更新到壓縮為止——提醒得早，交接要跟著工作更新。
+- **不外洩**：`context_meter.autocompact_tokens` 覆寫只給 Claude；`PreCompact --codex` 本來就不學，
+  `current_tokens` 對 Codex rollout 回 None，Codex 的數字進不了 Claude 的學習狀態檔。
+- 子代理照舊不提醒（hook 輸入帶 `agent_id`）；Codex 的子代理有自己的 session 與 rollout，搶不到主線的標記。
+- 已知限制：用量不含 Codex 在 `server_reasoning_included=false` 時另加的舊回合推理估計（重播：加上它之後
+  壓縮那一刻的用量中位數比壓縮點高 1.8k，不加則低 6.9k）；44k 的餘裕是對著實際壓縮時點量的，已經吸收
+  這一段。
+- 自測：context_meter 15→25、pretooluse_gate 53→54、recall_hook 51→52、precompact 15→16。
+
+### 壓縮續場只交回地圖與交接
+
+Codex rollout 34 MB 時 SessionStart（source=compact）要 3.2 s（owner 機器實測；本機同條件 3.6–4.2 s），
+其中卡片檢查、守衛快取暖機與重複擋人提醒占 2 s 以上。Codex 的掛鉤有 10 秒硬逾時而 hooks.json 不能改，
+機器一忙整段被砍，地圖與交接那兩行跟著消失（09-22..09-25 主線 105 次壓縮有 16 次沒拿回地圖，推論是
+逾時，未證實）。壓縮續場改成只交回地圖與交接：那三段只在開場跑，`card_lint` 用到才載入，`compact_map`
+的 argparse／tempfile 改成 CLI 才載入。本機同一份 rollout 0.82–0.94 s（同時段裸 Python 啟動 0.18–0.23 s）。
+壓縮續場不再出現壞卡那一行（🧾）與重複擋人提醒；開場照舊。
+
 ### 回合結束閘自測不再隨機器負載時好時壞
 
 2026-09-25 在 master 上連跑 `stop_gate.py --selftest` 六次得到四種結果（FAIL 21/22、ERROR 0/22、
