@@ -80,10 +80,21 @@ def event_session_id(event):
     return value if isinstance(value, str) else ""
 
 
-def expired(started_at):
-    import time
+# 自測子行程的注入時鐘（memspec.HOOK_CLOCK_ENV）。匯入時讀一次：期限每一段都要查，
+# 每次都去翻環境變數是白付的錢。
+_HOOK_CLOCK = os.environ.get(memspec.HOOK_CLOCK_ENV, "")
 
-    return time.monotonic() - started_at >= memspec.HOOK_TIMEOUT_SECONDS
+
+def remaining_seconds(started_at):
+    if _HOOK_CLOCK == memspec.HOOK_CLOCK_FROZEN:
+        return memspec.HOOK_TIMEOUT_SECONDS
+    if _HOOK_CLOCK == memspec.HOOK_CLOCK_EXPIRED:
+        return 0.0
+    return memspec.HOOK_TIMEOUT_SECONDS - (time.monotonic() - started_at)
+
+
+def expired(started_at):
+    return remaining_seconds(started_at) <= 0
 
 
 def read_event(stream):
@@ -457,7 +468,7 @@ def _rotate_gate_log_if_oversized(target):
 
 def append_gate_log(vault, row, started_at):
     target = vault / memspec.GATE_LOG_FILENAME
-    remaining = memspec.HOOK_TIMEOUT_SECONDS - (time.monotonic() - started_at)
+    remaining = remaining_seconds(started_at)
     if remaining <= 0:
         raise TimeoutError("hook deadline reached")
     value = {
@@ -595,7 +606,7 @@ class isolated_temp_root:
         return False
 
 
-def run_synthetic(script, event, config_path, arguments=(), environment=None):
+def run_synthetic(script, event, config_path, arguments=(), environment=None, timeout=None):
     import subprocess
 
     # 合成測試永遠不得起背景夢：預設關掉，呼叫端要測通知行時再自己開回來。
@@ -624,7 +635,7 @@ def run_synthetic(script, event, config_path, arguments=(), environment=None):
         encoding="utf-8",
         errors="replace",
         env=environment,
-        timeout=memspec.HOOK_TIMEOUT_SECONDS + 10,
+        timeout=memspec.HOOK_TIMEOUT_SECONDS + 10 if timeout is None else timeout,
         check=False,
     )
 

@@ -2643,6 +2643,21 @@ CARD_LINT_DECISION_LINT_FAILED_REASON = "決策 lint 無法完成：{error}"
 CARD_LINT_DECISION_FINDING = "規則{rule} {reason}｜{path}"
 
 
+# ---- shell parse（回合結束閘：自測時鐘、圍籬指令區塊的殼層語法檢查）------------------
+# 掛鉤期限（HOOK_TIMEOUT_SECONDS）到了就放行，這是設計；但自測拿真的時鐘跑判斷案例，
+# 機器一忙，「逾時放行」跟「判斷錯了」長得一模一樣——2026-09-25 同一份 selftest 連跑六次
+# 出現四種結果。自測子行程改用注入的時鐘：判斷案例用 frozen（期限永遠不到），逾時行為
+# 另用 expired 明確斷言。只認這兩個值，其他值一律照真時鐘；正式宿主不會設這個變數。
+HOOK_CLOCK_ENV = "EPITYPE_HOOK_CLOCK"
+HOOK_CLOCK_FROZEN = "frozen"
+HOOK_CLOCK_EXPIRED = "expired"
+# 設定都還沒讀，期限就過了：一條規則都沒檢查。以前這一步安靜回空，跟「沒有東西要擋」
+# 在外面分不出來。
+STOP_GATE_EXPIRED_BEFORE_CHECK_DEFECT = (
+    "⚠ 這回合逾時，規則一條都還沒讀就放行了；這一次沒有被任何規則檢查過"
+)
+
+
 # ── U58 顯示語言 ───────────────────────────────────────────────────────────
 # Epitype 的說明是英文出貨的，擋下來的那一句卻寫死繁中——陌生人裝完第一次被擋，看到的
 # 是一句他讀不懂的話。這裡只換**顯示字**：樣式、欄名、log kind、任何閘拿去比對的東西
@@ -2758,6 +2773,7 @@ _EN = {
     "SEARCH_INDEX_STALE_REASON": '{count} tracked card(s) are missing from the search index ({cards}) → python epitype/memsearch.py build "{vault}"',
     "STOP_GATE_INCOMPLETE_DEFECT": "⚠ this turn ran out of time; only {checked}/{total} armed cards in {vault} were checked, so the rest did not apply this time",
     "STOP_GATE_UNSCANNED_DEFECT": "⚠ this turn ran out of time; {skipped} card(s) in {vault} were never even read (new or just-edited cards), so they were out of scope this time",
+    "STOP_GATE_EXPIRED_BEFORE_CHECK_DEFECT": "⚠ this turn ran out of time before any rule was read, so nothing was checked this time",
     "STOP_GATE_FORBIDDEN_REASON": '⚖ do not say "{fragment}"; rewrite it. ({decision}: {quote})',
     "STOP_GATE_QUESTION_REASON": "the owner ruled on this on {decided_at}: {quote}. Do not ask again; act on the ruling",
     "STOP_GATE_QUESTION_REASON_UNDATED": "the owner has ruled on this: {quote}. Do not ask again; act on the ruling",

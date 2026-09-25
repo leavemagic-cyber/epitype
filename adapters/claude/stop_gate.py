@@ -68,6 +68,8 @@ _ADVICE = "advice"
 _EXPIRES = "expires"
 _TURN_CHECK_RULE = "turn_check"
 
+_SELFTEST_HANG_SECONDS = 120
+
 _Turn = namedtuple("_Turn", "texts prompt dispatch calls_after_dispatch")
 
 
@@ -896,6 +898,8 @@ def _handle(event, started_at, defects):
     message = memspec.join_turn_text(texts)
     config = load_config(started_at)
     if config is None:
+        # load_config 只在期限已過時回 None（其他壞法都丟例外）。放行照舊，但要講出來。
+        defects.append(memspec.STOP_GATE_EXPIRED_BEFORE_CHECK_DEFECT)
         return None
     return _verdict(event, message, config, started_at, defects, turn)
 
@@ -1106,6 +1110,30 @@ def _selftest():
             config = root / "config.json"
             write_config(config, [vault])
 
+            def synthetic(event, config_file, environment=None, clock=memspec.HOOK_CLOCK_FROZEN):
+                # 判斷案例一律用凍住的時鐘：機器再忙，期限也不會替判斷做決定。逾時放行
+                # 另有一題用 expired 明確斷言，兩件事不再混在同一個結果裡。
+                # 時鐘凍住之後，子行程不再在期限到時自己收手，原本跟期限綁在一起的 19 秒
+                # 上限就沒有依據了（96 個忙迴圈下單次實測 18 秒）。這個上限只抓卡死。
+                return run_synthetic(
+                    Path(__file__),
+                    event,
+                    config_file,
+                    environment={**(environment or {}), memspec.HOOK_CLOCK_ENV: clock},
+                    timeout=_SELFTEST_HANG_SECONDS,
+                )
+
+            def gate_rows():
+                # 帳本不存在就是零列：缺帳是一題具名的失敗，不是把整份自測炸成 ERROR。
+                target = vault / memspec.GATE_LOG_FILENAME
+                if not target.exists():
+                    return []
+                return [
+                    json.loads(line)
+                    for line in target.read_text(encoding="utf-8").splitlines()
+                    if line.strip()
+                ]
+
             def run(message, session=None, extra=None):
                 session_id = session or f"stopgate-{uuid.uuid4().hex}"
                 if session_id not in sessions:
@@ -1120,8 +1148,7 @@ def _selftest():
                 # An event carrying cwd makes every ancestor look for a same-slug
                 # native vault under home; without this the run would pull the
                 # test machine's real vaults into a synthetic case.
-                result = run_synthetic(
-                    Path(__file__),
+                result = synthetic(
                     event,
                     config,
                     environment={"HOME": os.fspath(root), "USERPROFILE": os.fspath(root)},
@@ -1132,11 +1159,7 @@ def _selftest():
             forbidden_result, forbidden_value, forbidden_session = run(
                 "我建議虛擬盤先用不同參數跑一週再說。"
             )
-            log_rows = [
-                json.loads(line)
-                for line in (vault / memspec.GATE_LOG_FILENAME).read_text(encoding="utf-8").splitlines()
-                if line.strip()
-            ]
+            log_rows = gate_rows()
             checks.append((
                 "a forbidden phrase is blocked and audited as stop_block",
                 forbidden_result.returncode == 0
@@ -1261,7 +1284,7 @@ def _selftest():
                 "stop_hook_active": True,
                 "last_assistant_message": "我建議虛擬盤先用不同參數跑一週再說。",
             }
-            active_result = run_synthetic(Path(__file__), active_event, config)
+            active_result = synthetic(active_event, config)
             checks.append((
                 "stop_hook_active is never blocked again, so the host cannot loop",
                 active_result.returncode == 0
@@ -1339,8 +1362,7 @@ def _selftest():
             )
             plain_config = root / "plain-config.json"
             write_config(plain_config, [plain_vault])
-            plain_result = run_synthetic(
-                Path(__file__),
+            plain_result = synthetic(
                 {
                     "session_id": "stopgate-plain",
                     "stop_hook_active": False,
@@ -1357,8 +1379,7 @@ def _selftest():
 
             bad_config = root / "bad-config.json"
             bad_config.write_text("{broken", encoding="utf-8")
-            bad_result = run_synthetic(
-                Path(__file__),
+            bad_result = synthetic(
                 {
                     "session_id": "stopgate-bad",
                     "stop_hook_active": False,
@@ -1393,8 +1414,7 @@ def _selftest():
             )
             evil_config = root / "evil-config.json"
             write_config(evil_config, [evil_vault])
-            evil_result = run_synthetic(
-                Path(__file__),
+            evil_result = synthetic(
                 {
                     "session_id": "stopgate-evil",
                     "stop_hook_active": False,
@@ -1427,6 +1447,29 @@ def _selftest():
                 and before == after,
             ))
 
+            # 逾時放行是設計，但它必須跟「判斷沒擋」分得開：同一句禁語在期限已過的時鐘下
+            # 不擋、不記帳，而且 stderr 明說這一回合沒檢查。
+            late_session = f"stopgate-late-{uuid.uuid4().hex}"
+            sessions.append(late_session)
+            late_result = synthetic(
+                {
+                    "session_id": late_session,
+                    "hook_event_name": "Stop",
+                    "stop_hook_active": False,
+                    "last_assistant_message": "我建議虛擬盤先用不同參數跑一週再說。",
+                },
+                config,
+                environment={"HOME": os.fspath(root), "USERPROFILE": os.fspath(root)},
+                clock=memspec.HOOK_CLOCK_EXPIRED,
+            )
+            checks.append((
+                "期限已過：禁語照樣放行、不記帳，stderr 明說這回合沒有檢查",
+                late_result.returncode == 0
+                and not late_result.stdout.strip()
+                and memspec.STOP_GATE_EXPIRED_BEFORE_CHECK_DEFECT in late_result.stderr
+                and not any(row.get("session_id") == late_session for row in gate_rows()),
+            ))
+
             blown = time.monotonic() - memspec.HOOK_TIMEOUT_SECONDS - 1
             checks.append((
                 "期限在 marker 寫下之後才到：block 照樣送出，不會只留帳不擋",
@@ -1441,7 +1484,7 @@ def _selftest():
             clear_recall_markers(session_id)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 22
+    total = 23
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
