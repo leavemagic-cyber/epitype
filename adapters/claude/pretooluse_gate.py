@@ -408,6 +408,237 @@ def _append_write_block(vault, rule, subject, target, started_at, session_id=Non
     )
 
 
+def _append_recurrence_allow(vault, outcome, relative, target, started_at, session_id=None):
+    """Audit a recurrence the gate saw and let through, in the write_block row's shape
+    and with the same limit: rule, card and outcome, never the text."""
+    append_gate_log(
+        vault,
+        with_session(
+            {
+                "kind": memspec.RECURRENCE_GATE_ALLOW_LOG_KIND,
+                "rule": memspec.RECURRENCE_GATE_RULE,
+                "filename": target.name,
+                "card_path": relative,
+                "outcome": outcome,
+            },
+            session_id,
+        ),
+        started_at,
+    )
+
+
+def _card_lines(text):
+    """A card's lines as the recurrence rule counts them: BOM dropped, right-stripped,
+    split exactly like memspec.split_frontmatter so the indexes line up."""
+    return [line.rstrip() for line in text.lstrip("﻿").splitlines()]
+
+
+def _field_spans(text, fields):
+    """({field: its non-blank frontmatter lines}, indexes of every line inside those fields).
+
+    The top-level reading every gate uses: a field is its `key:` line plus the indented
+    lines under it. A key nested one level down is not the field — the gates do not
+    read it, and card_lint already FAILs that card as disarmed."""
+    blocks, inside = {}, set()
+    front, closing = memspec.split_frontmatter(text)
+    if front is None or closing is None:
+        return blocks, inside
+    parent = None
+    for offset, raw_line in enumerate(front):
+        index = offset + 1
+        line = raw_line.rstrip()
+        if not line.strip() or line[:1].isspace():
+            if parent in fields:
+                inside.add(index)
+                if line.strip():
+                    blocks[parent] += (line,)
+            continue
+        match = memspec.TOP_LEVEL_FIELD.match(line)
+        parent = match.group(1) if match else None
+        if parent in fields:
+            inside.add(index)
+            blocks[parent] = blocks.get(parent, ()) + (line,)
+    return blocks, inside
+
+
+def _line_delta(before, after):
+    """(lines only `after` has, lines only `before` has), counted as multisets so a
+    duplicated line is still one addition."""
+    from collections import Counter
+
+    remaining = Counter(before)
+    added = []
+    for line in after:
+        if remaining[line] > 0:
+            remaining[line] -= 1
+        else:
+            added.append(line)
+    return added, list(remaining.elements())
+
+
+def _incident_line(line):
+    """True when the line narrates this rule being broken again.
+
+    A marker alone is not a narrative: real vaults say 「免得以後再犯」「防再犯規則」 as
+    ordinary words. Two shapes count — a marker and a date on the same line, or a bold
+    or heading line that opens with the marker — and a marker right after a preventive
+    word never counts."""
+    hits = []
+    for hit in memspec.RECURRENCE_GATE_MARKER_REGEX.finditer(line):
+        window = line[max(0, hit.start() - memspec.RECURRENCE_GATE_PREVENTIVE_WINDOW):hit.start()]
+        if memspec.RECURRENCE_GATE_PREVENTIVE_REGEX.search(window) is None:
+            hits.append(hit)
+    if not hits:
+        return False
+    if memspec.RECURRENCE_GATE_DATE_REGEX.search(line) is not None:
+        return True
+    emphasis = memspec.RECURRENCE_GATE_EMPHASIS_REGEX.match(line)
+    if emphasis is None:
+        return False
+    lead = memspec.RECURRENCE_GATE_LEAD_REGEX.match(line, emphasis.end())
+    start = lead.end() if lead is not None else emphasis.end()
+    return any(hit.start() == start for hit in hits)
+
+
+def _envelope_card_lines(additions, armed_on_disk):
+    """(free lines, exempt-field lines, arming, uncertain) for a patch's added lines.
+
+    An Update File shows only what it adds, so a field is known only when its `key:`
+    line is among the additions. An indented line with no such key above it could be a
+    new item under an armed field already on disk: that is `uncertain`, and uncertain
+    passes, because a gate that guessed would block the very edit that arms the card."""
+    free, exempt = [], []
+    arming = uncertain = False
+    for run in additions:
+        parent = None
+        for raw_line in str(run).splitlines():
+            line = raw_line.rstrip()
+            if line[:1].isspace():
+                if parent is None:
+                    uncertain = uncertain or armed_on_disk
+                    free.append(line)
+                elif parent in memspec.RECURRENCE_GATE_EXEMPT_FIELDS:
+                    exempt.append(line)
+                    arming = arming or parent in memspec.RECURRENCE_GATE_ARMING_FIELDS
+                else:
+                    free.append(line)
+                continue
+            match = memspec.TOP_LEVEL_FIELD.match(line)
+            parent = match.group(1) if match else None
+            if parent in memspec.RECURRENCE_GATE_EXEMPT_FIELDS:
+                exempt.append(line)
+                arming = arming or parent in memspec.RECURRENCE_GATE_ARMING_FIELDS
+            else:
+                free.append(line)
+    return free, exempt, arming, uncertain
+
+
+def _recurrence_review(card, target, additions, prospective, envelope, started_at, session_id):
+    """Deny value when this write narrates a recurrence into a behaviour card that it
+    leaves exactly as unable to block as before; None otherwise (docs/FAILURE_MODES.md
+    §45). `card` is the (vault, relative path) the target already resolved to.
+
+    Judged only on an existing card with frontmatter. A new card, a project/reference/
+    decision card, and any write whose post-write text cannot be known (except a
+    patch's added lines) are not this rule's business."""
+    if prospective is not None:
+        new_text = prospective
+    elif envelope:
+        new_text = "\n".join(str(run) for run in additions)
+    else:
+        return None
+    if memspec.RECURRENCE_GATE_MARKER_REGEX.search(new_text) is None:
+        return None
+    try:
+        if not target.is_file() or target.stat().st_size > memspec.WRITE_GATE_MAX_CONTENT_BYTES:
+            return None
+        before = target.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return None
+    front, closing = memspec.split_frontmatter(before)
+    if front is None or closing is None or expired(started_at):
+        return None
+
+    from epitype import card_lint
+
+    vault, relative = card
+    kinds = [card_lint.card_type_of(relative, before)[0]]
+    if prospective is not None:
+        kinds.append(card_lint.card_type_of(relative, prospective)[0])
+    card_type = next((kind for kind in kinds if kind in memspec.RECURRENCE_GATE_CARD_TYPES), None)
+    if card_type is None:
+        return None
+
+    exempt_fields = memspec.RECURRENCE_GATE_EXEMPT_FIELDS
+    old_lines = _card_lines(before)
+    old_blocks, old_inside = _field_spans(before, exempt_fields)
+    uncertain = False
+    removed_free = []
+    if prospective is not None:
+        new_lines = _card_lines(prospective)
+        new_blocks, new_inside = _field_spans(prospective, exempt_fields)
+        # 只有新增或改動算武裝；把欄位刪掉是拆防線，不是裝防線。
+        arming = any(
+            new_blocks.get(field) and new_blocks[field] != old_blocks.get(field)
+            for field in memspec.RECURRENCE_GATE_ARMING_FIELDS
+        )
+        added_free, removed_free = _line_delta(
+            [line for index, line in enumerate(old_lines) if index not in old_inside],
+            [line for index, line in enumerate(new_lines) if index not in new_inside],
+        )
+        added_exempt, _removed = _line_delta(
+            [line for index, line in enumerate(old_lines) if index in old_inside],
+            [line for index, line in enumerate(new_lines) if index in new_inside],
+        )
+    else:
+        armed_on_disk = any(field in old_blocks for field in memspec.RECURRENCE_GATE_ARMING_FIELDS)
+        added_free, added_exempt, arming, uncertain = _envelope_card_lines(
+            additions, armed_on_disk)
+
+    incidents = [line for line in added_free if _incident_line(line)]
+    # 淨增才算：改一個錯字的舊事故行是一刪一增，不是又記了一次。
+    if len(incidents) <= sum(1 for line in removed_free if _incident_line(line)):
+        if any(_incident_line(line) for line in added_exempt):
+            _best_effort_audit(
+                _append_recurrence_allow, vault, memspec.RECURRENCE_GATE_OUTCOME_EXEMPT_FIELDS,
+                relative, target, started_at, session_id)
+        return None
+    if arming or uncertain:
+        outcome = (memspec.RECURRENCE_GATE_OUTCOME_ARMING if arming
+                   else memspec.RECURRENCE_GATE_OUTCOME_ARMING_UNCERTAIN)
+        _best_effort_audit(
+            _append_recurrence_allow, vault, outcome, relative, target, started_at, session_id)
+        return None
+    if not _write_marker(session_id, memspec.RECURRENCE_GATE_RULE, target, new_text):
+        _best_effort_audit(
+            _append_recurrence_allow, vault, memspec.RECURRENCE_GATE_OUTCOME_REPEAT,
+            relative, target, started_at, session_id)
+        return None
+    _best_effort_audit(
+        _append_write_block,
+        vault,
+        memspec.RECURRENCE_GATE_RULE,
+        {"card_path": relative},
+        target,
+        started_at,
+        session_id,
+    )
+    armed = memspec.SLASH_JOINER.join((
+        memspec.FORBIDDEN_FIELD,
+        memspec.REQUIRE_WHEN_FIELD + "+" + memspec.REQUIRE_TEXT_FIELD,
+        memspec.ACTION_GUARD_TOOL_FIELD + "+" + memspec.ACTION_GUARD_ALL_OF_FIELD,
+        memspec.TURN_CHECK_FIELD,
+    ))
+    reason = memspec.RECURRENCE_GATE_REASON.format(
+        path=relative,
+        card_type=card_type,
+        fragment=incidents[0].strip()[: memspec.WRITE_GATE_FRAGMENT_MAX_CHARS],
+        armed=armed,
+        unenforceable=memspec.UNENFORCEABLE_FIELD,
+    )
+    return _deny_value(reason[: memspec.WRITE_GATE_REASON_MAX_CHARS])
+
+
 _Guard = namedtuple("_Guard", "card tool substrings advice path requires unless when")
 
 
@@ -853,15 +1084,18 @@ def _guard_review(event, tool_name, tool_input, config, started_at, defects):
     return None
 
 
-def _review_one_target(event, config, target, additions, prospective, started_at, session_id):
+def _review_one_target(event, config, target, additions, prospective, started_at, session_id,
+                       envelope=False):
     """(deny value, advice lines) for one file this call would change.
 
     Rule A: new content that re-states what the owner already ruled out is blocked
-    against the Stop gate's decision cards. Rule B: a card written into a registered
-    vault must satisfy card_lint's contract for its own type — FAIL blocks, WARN only
-    advises. `prospective` is None whenever the post-write text cannot be known
-    exactly, and then Rule B does not judge: a guessed result would block a card
-    nobody wrote."""
+    against the Stop gate's decision cards. Rule R: a recurrence narrated into an
+    existing behaviour card that is not being armed is blocked (`_recurrence_review`).
+    Rule B: a card written into a registered vault must satisfy card_lint's contract
+    for its own type — FAIL blocks, WARN only advises. `prospective` is None whenever
+    the post-write text cannot be known exactly, and then Rule B does not judge: a
+    guessed result would block a card nobody wrote. `envelope` marks additions that
+    are a patch's added lines, the only text Rule R judges without `prospective`."""
 
     def oversized(text):
         return len(text.encode("utf-8", errors="replace")) > memspec.WRITE_GATE_MAX_CONTENT_BYTES
@@ -892,10 +1126,22 @@ def _review_one_target(event, config, target, additions, prospective, started_at
         )
         return _deny_value(reason[: memspec.WRITE_GATE_REASON_MAX_CHARS]), []
 
-    if prospective is None or expired(started_at):
+    if expired(started_at):
         return None, notices
     card = _vault_card_path(target, resolve_vaults(config, event))
     if card is None:
+        return None, notices
+    # 這條自己壞掉，不能連帶讓卡片契約那條也不判，所以單獨接住。
+    try:
+        recurrence = _recurrence_review(
+            card, target, additions, prospective, envelope, started_at, session_id
+        )
+    except Exception:
+        recurrence = None
+    if recurrence is not None:
+        return recurrence, []
+
+    if prospective is None or expired(started_at):
         return None, notices
     vault, relative = card
     reason, advice = _card_review(relative, prospective)
@@ -959,6 +1205,7 @@ def _envelope_review(event, tool_input, config, started_at):
         deny, advice = _review_one_target(
             event, config, target, list(entry.additions),
             patch_envelope.full_content(entry), started_at, session_id,
+            envelope=True,
         )
         notices.extend(advice)
         if deny is not None:
@@ -1764,6 +2011,219 @@ def _selftest():
                 and bare_write_out.get("permissionDecision") == "deny",
             ))
 
+            # 規則再犯（2026-09-25 titan）：往已存在的行為卡追加事故敘述、卻沒動任何武裝欄位，擋；
+            # 同時在武裝、新卡、非行為卡、一般用語與判不準的輸入，全部放行。
+            recurrence_line = "**再犯（2026-09-25，titan 台指期休市事故）**：Run 區塊又拆成兩條指令。"
+            recurrence_body = "Run 按鈕區塊必須是一條完整的 PowerShell 指令。\n"
+
+            def recurrence_card(name, card_type="feedback", extra=""):
+                return (
+                    f"---\nname: {name}\n"
+                    "description: 2026-09-01 Run 按鈕區塊只能是一條指令\n"
+                    "aliases:\n  - Run 按鈕\n"
+                    "unenforceable: 判斷型，訊息裡沒有可比對的字面訊號\n"
+                    f"{extra}metadata:\n  type: {card_type}\n---\n{recurrence_body}"
+                )
+
+            def recurrence_rows():
+                return [
+                    json.loads(line)
+                    for line in write_log.read_text(encoding="utf-8").splitlines()
+                    if line.strip()
+                ] if write_log.is_file() else []
+
+            def append_incident(path, text=recurrence_line, session=None):
+                return write_call(
+                    "Edit",
+                    {
+                        "file_path": os.fspath(path),
+                        "old_string": recurrence_body,
+                        "new_string": recurrence_body + "\n" + text + "\n",
+                    },
+                    session=session,
+                )
+
+            run_card = write_vault / "feedback-run-button.md"
+            run_card.write_text(recurrence_card("feedback-run-button"), encoding="utf-8")
+            recurrence_denied, recurrence_out = append_incident(run_card)
+            recurrence_reason = recurrence_out.get("permissionDecisionReason", "")
+            checks.append((
+                "往擋不住的 feedback 卡追加「再犯（日期）…」就擋，理由寫出三種處理與事故經過不進卡",
+                recurrence_denied.returncode == 0
+                and recurrence_out.get("permissionDecision") == "deny"
+                and "feedback-run-button.md" in recurrence_reason
+                and memspec.FORBIDDEN_FIELD in recurrence_reason
+                and memspec.UNENFORCEABLE_FIELD in recurrence_reason
+                and "修 Epitype 本身" in recurrence_reason
+                and "不寫進卡片" in recurrence_reason
+                and "台指期休市" in recurrence_reason
+                and recurrence_body in run_card.read_text(encoding="utf-8")
+                and recurrence_line not in run_card.read_text(encoding="utf-8"),
+            ))
+            checks.append((
+                "再犯擋下以 write_block 入帳，只記規則與卡名，不記內容",
+                any(
+                    row.get("kind") == memspec.WRITE_GATE_LOG_KIND
+                    and row.get("rule") == memspec.RECURRENCE_GATE_RULE
+                    and row.get("card_path") == "feedback-run-button.md"
+                    and "台指期" not in json.dumps(row, ensure_ascii=False)
+                    for row in recurrence_rows()
+                ),
+            ))
+
+            armed_card = write_vault / "feedback-armed.md"
+            armed_card.write_text(recurrence_card("feedback-armed"), encoding="utf-8")
+            armed_result, armed_out = write_call(
+                "MultiEdit",
+                {
+                    "file_path": os.fspath(armed_card),
+                    "edits": [
+                        {
+                            "old_string": "metadata:\n",
+                            "new_string": "forbidden:\n  - 'Run 區塊.{0,20}兩條指令'\nmetadata:\n",
+                        },
+                        {
+                            "old_string": recurrence_body,
+                            "new_string": recurrence_body + "\n" + recurrence_line + "\n",
+                        },
+                    ],
+                },
+            )
+            checks.append((
+                "同一段追加但同時新增 forbidden（正在武裝）就放行，並以 write_allow 入帳",
+                armed_result.returncode == 0
+                and armed_out.get("permissionDecision") != "deny"
+                and any(
+                    row.get("kind") == memspec.RECURRENCE_GATE_ALLOW_LOG_KIND
+                    and row.get("card_path") == "feedback-armed.md"
+                    and row.get("outcome") == memspec.RECURRENCE_GATE_OUTCOME_ARMING
+                    and "台指期" not in json.dumps(row, ensure_ascii=False)
+                    for row in recurrence_rows()
+                ),
+            ))
+
+            fresh_card = write_vault / "feedback-fresh.md"
+            fresh_result, fresh_out = write_call(
+                "Write",
+                {
+                    "file_path": os.fspath(fresh_card),
+                    "content": recurrence_card("feedback-fresh") + "\n" + recurrence_line + "\n",
+                },
+            )
+            project_card = write_vault / "project-titan.md"
+            project_card.write_text(recurrence_card("project-titan", "project"), encoding="utf-8")
+            project_result, project_out = append_incident(project_card)
+            checks.append((
+                "新建的卡含「再犯」、以及 project 卡追加再犯敘述，都放行",
+                fresh_result.returncode == 0
+                and fresh_out.get("permissionDecision") != "deny"
+                and project_result.returncode == 0
+                and project_out.get("permissionDecision") != "deny",
+            ))
+
+            envelope_card = write_vault / "feedback-codex.md"
+            envelope_card.write_text(recurrence_card("feedback-codex"), encoding="utf-8")
+            envelope_command = "\n".join((
+                "apply_patch <<'EOF'",
+                patch_envelope.BEGIN_MARKER,
+                f"*** Update File: {os.fspath(envelope_card)}",
+                "@@",
+                " " + recurrence_body.rstrip("\n"),
+                "+",
+                "+" + recurrence_line,
+                patch_envelope.END_MARKER,
+                "EOF",
+            ))
+            envelope_result, envelope_out = write_call("Bash", {"command": envelope_command})
+            checks.append((
+                "Codex 形狀（exec 夾 patch 封套）往同一種卡追加再犯敘述，同樣擋",
+                envelope_result.returncode == 0
+                and envelope_out.get("permissionDecision") == "deny"
+                and "feedback-codex.md" in envelope_out.get("permissionDecisionReason", "")
+                and "不寫進卡片" in envelope_out.get("permissionDecisionReason", ""),
+            ))
+
+            ordinary = []
+            for index, text in enumerate((
+                "owner 2026-06-18：「驗證程式片段太大問題，免得以後再犯。」",
+                "## 我最大的錯（永遠別再犯）",
+                "這是行為層的防再犯規則，2026-09-20 起適用。",
+                "- 不要再犯沒有對於各商品有不同判斷方式（2026-07-12）",
+            )):
+                ordinary_card = write_vault / f"feedback-ordinary-{index}.md"
+                ordinary_card.write_text(
+                    recurrence_card(f"feedback-ordinary-{index}"), encoding="utf-8")
+                ordinary.append(append_incident(ordinary_card, text))
+            checks.append((
+                "「免得以後再犯」「永遠別再犯」「防再犯」「不要再犯」是一般用語，不是事故敘述，放行",
+                all(
+                    result.returncode == 0 and out.get("permissionDecision") != "deny"
+                    for result, out in ordinary
+                ),
+            ))
+
+            exempt_card = write_vault / "feedback-exempt.md"
+            exempt_card.write_text(recurrence_card("feedback-exempt"), encoding="utf-8")
+            exempt_result, exempt_out = write_call(
+                "Edit",
+                {
+                    "file_path": os.fspath(exempt_card),
+                    "old_string": "unenforceable: 判斷型，訊息裡沒有可比對的字面訊號\n",
+                    "new_string": (
+                        "unenforceable: 判斷型；2026-09-25 又犯一次，字面訊號仍然抓不到\n"
+                    ),
+                },
+            )
+            checks.append((
+                "新增的再犯字樣只在 unenforceable 欄位裡就放行，並記 exempt_fields_only",
+                exempt_result.returncode == 0
+                and exempt_out.get("permissionDecision") != "deny"
+                and any(
+                    row.get("card_path") == "feedback-exempt.md"
+                    and row.get("outcome") == memspec.RECURRENCE_GATE_OUTCOME_EXEMPT_FIELDS
+                    for row in recurrence_rows()
+                ),
+            ))
+
+            repeat_card = write_vault / "feedback-repeat.md"
+            repeat_card.write_text(recurrence_card("feedback-repeat"), encoding="utf-8")
+            repeat_session = f"recurrence-{uuid.uuid4().hex}"
+            _first_result, first_repeat = append_incident(repeat_card, session=repeat_session)
+            second_result, second_repeat = append_incident(repeat_card, session=repeat_session)
+            checks.append((
+                "同一場同一份內容第二次送來照既有寫檔閘的逃生口放行，但以 repeat 入帳看得見",
+                first_repeat.get("permissionDecision") == "deny"
+                and second_result.returncode == 0
+                and second_repeat.get("permissionDecision") != "deny"
+                and any(
+                    row.get("card_path") == "feedback-repeat.md"
+                    and row.get("outcome") == memspec.RECURRENCE_GATE_OUTCOME_REPEAT
+                    for row in recurrence_rows()
+                ),
+            ))
+
+            broken_card = write_vault / "feedback-broken.md"
+            broken_card.write_bytes(b"---\nname: broken\n\xff\xfe\n---\nbody\n")
+            broken_inputs = (
+                ("Edit", {"file_path": os.fspath(broken_card), "old_string": "body\n",
+                          "new_string": "body\n" + recurrence_line + "\n"}),
+                ("Edit", {"file_path": os.fspath(run_card), "old_string": recurrence_body,
+                          "new_string": 7}),
+                ("Edit", {"file_path": os.fspath(run_card), "old_string": "不存在的原文",
+                          "new_string": recurrence_line}),
+                ("Bash", {"command": patch_envelope.BEGIN_MARKER + "\n*** Update File: "
+                          + os.fspath(run_card) + "\n+" + recurrence_line}),
+                ("Edit", [recurrence_line]),
+            )
+            broken_results = [write_call(name, tool_input) for name, tool_input in broken_inputs]
+            checks.append((
+                "判不準的輸入（壞編碼的卡、非字串、原文不在檔裡、沒收尾的封套、非物件輸入）一律放行",
+                all(
+                    result.returncode == 0 and out.get("permissionDecision") != "deny"
+                    for result, out in broken_results
+                ),
+            ))
+
             # 用量計：放行路徑跨過 0.97T 附一行含交接檔路徑的提醒，同一個壓縮週期只說一次；
             # 子代理的呼叫不說、不寫標記，之後主線照樣收得到。
             from epitype import compact_map
@@ -1839,7 +2299,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 33
+    total = 42
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
