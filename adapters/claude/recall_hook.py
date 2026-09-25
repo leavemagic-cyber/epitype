@@ -41,6 +41,7 @@ from _hook_common import (
     scoped_vaults,
     run_synthetic,
     session_component,
+    write_codex_fixture,
     write_config,
 )
 
@@ -1736,6 +1737,37 @@ def _selftest():
                 and os.fspath(compact_map.handoff_destination(
                     meter_vault, "meter-s2", meter_transcript)) in retry_context,
             ))
+
+            # Codex 形狀的 UserPromptSubmit：到了壓縮點－H 附 Codex 的那一行並寫標記，下一則不附。
+            codex_rollout, codex_env = write_codex_fixture(root, "meter-cx", 170000)
+
+            def codex_prompt():
+                result = run_synthetic(
+                    Path(__file__),
+                    {"hook_event_name": "UserPromptSubmit", "prompt": "zzqx unrelated question",
+                     "session_id": "meter-cx", "turn_id": "t1", "cwd": os.fspath(root),
+                     "transcript_path": os.fspath(codex_rollout), "model": "gpt-x",
+                     "permission_mode": "default"},
+                    roomy, environment=codex_env,
+                )
+                context = ""
+                if result.stdout.strip():
+                    context = json.loads(result.stdout)["hookSpecificOutput"].get("additionalContext", "")
+                return result, context
+
+            codex_line = memspec.CONTEXT_METER_CODEX_NOTICE.format(
+                cur=170, left=40,
+                path=os.fspath(compact_map.handoff_destination(meter_vault, "meter-cx", codex_rollout)))
+            codex_first, codex_first_context = codex_prompt()
+            codex_second, codex_second_context = codex_prompt()
+            checks.append((
+                "a Codex-shaped prompt at limit-H carries Codex's line and claims it; the next one does not",
+                codex_first.returncode == 0
+                and codex_line in codex_first_context.splitlines()
+                and (recall_marker_directory("meter-cx") / memspec.CONTEXT_METER_MARKER).is_file()
+                and codex_second.returncode == 0
+                and codex_line not in codex_second_context,
+            ))
     except Exception as exc:
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
     finally:
@@ -1743,7 +1775,7 @@ def _selftest():
             shutil.rmtree(marker_directory, ignore_errors=True)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 51
+    total = 52
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

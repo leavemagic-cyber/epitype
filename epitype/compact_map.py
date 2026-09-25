@@ -1,13 +1,11 @@
 import sys; [getattr(stream, 'reconfigure', lambda **_: None)(encoding='utf-8', errors='replace') for stream in (sys.stdout, sys.stderr)]
 
-import argparse
 from datetime import datetime
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
-import tempfile
 
 try:
     from .transcript import message_text as _text_content, source_record
@@ -114,6 +112,8 @@ def handoff_notice(destination):
 
 
 def _positive_int(value):
+    import argparse
+
     number = int(value)
     if number <= 0:
         raise argparse.ArgumentTypeError('must be greater than zero')
@@ -268,6 +268,8 @@ def _json_line(value):
 
 
 def _selftest():
+    import tempfile
+
     checks = []
     try:
         with tempfile.TemporaryDirectory(prefix='compact-map-') as temp_dir:
@@ -437,6 +439,9 @@ def _selftest():
 
 
 def _parser():
+    # CLI 才用得到；hook 每次載入這個模組，不該替它付 argparse 的載入時間。
+    import argparse
+
     parser = argparse.ArgumentParser(description='Build a bounded compact recovery map')
     parser.add_argument('--selftest', action='store_true')
     commands = parser.add_subparsers(dest='command')

@@ -169,6 +169,8 @@ COMPACT_HANDOFF_DELIVERED_SUFFIX = ".handoff.delivered"
 # 看不出視窗大小，拿 200k／1M 公式猜，猜錯時 1M 的使用者會在 100k 就被叫。
 CONTEXT_METER_CONFIG_FIELD = "context_meter"
 CONTEXT_METER_ENABLED_FIELD = "enabled"
+# 只給 Claude：Codex 的壓縮點從 Codex 自己的設定算（下面 Codex 段），這個覆寫不套上去，
+# Codex 的數字也不會學進 Claude 的狀態檔（PreCompact --codex 不學）。
 CONTEXT_METER_OVERRIDE_FIELD = "autocompact_tokens"
 CONTEXT_METER_PCT_ENV = "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"
 CONTEXT_METER_STATE_FILENAME = "context_meter.json"
@@ -211,6 +213,61 @@ CONTEXT_METER_NOTICE = (
 )
 # 壓縮續場交回交接檔的那一行。跟地圖那行同一個 240 B 上限：超過整行不注，路徑絕不截斷。
 CONTEXT_METER_HANDOFF_NOTICE = "壓縮前交接：{path}；先讀它再接續。"
+# 同一個 hook 呼叫可能來自兩種宿主：看檔尾的列長什麼樣決定，不看路徑。
+CONTEXT_METER_HOST_CLAUDE = "claude"
+CONTEXT_METER_HOST_CODEX = "codex"
+
+# Codex 的用量計（2026-09-25 owner：「Codex App 自動壓縮前要自動落檔」，而且不能照抄
+# Claude 的設計——Codex 用自己的規則算用量與壓縮點）。依 Codex 原始碼 rust-v0.155.0-alpha.16.4：
+# - 用量＝最新 token_count 的 last_token_usage.total_tokens＋最後一個模型產出項之後各項的
+#   估計（模型看得到的位元組 ÷4 無條件進位；core/src/context_manager/history.rs
+#   get_total_token_usage、estimate_item_token_count）。
+# - 壓縮點＝min(自動門檻, 硬上限)。視窗＝設定 model_context_window（夾在目錄
+#   max_context_window 之下）或目錄 context_window／max_context_window；自動門檻＝
+#   min(設定 model_auto_compact_token_limit 或目錄 auto_compact_token_limit, 視窗×9//10)；
+#   硬上限＝視窗×effective_context_window_percent//100（protocol openai_models.rs、
+#   core session/context_window.rs、models-manager model_info.rs）。
+# - model_auto_compact_token_limit_scope 不是 total、features.token_budget 有開、設了
+#   profile、找不到模型目錄——任何一項都當「不知道」，不提醒，不猜。
+# Codex 一步就可能跨過好幾萬 tokens（重播：餘裕只留 10k 時，只有 30% 的自動壓縮在壓縮前
+# 還來得及看到提醒），所以提醒點是固定的餘裕 H，不是比例。
+CONTEXT_METER_CODEX_HOME_ENV = "CODEX_HOME"
+CONTEXT_METER_CODEX_CONFIG_FILENAME = "config.toml"
+CONTEXT_METER_CODEX_CATALOG_FILENAME = "models_cache.json"
+# Codex rollout 一列的行首：`{"timestamp":…,("ordinal":N,)"type":"<列型別>","payload":{"type":"<項型別>"`。
+# Rust 的 RolloutLine 序列化順序固定；Claude transcript 的列不會長這樣。
+CONTEXT_METER_CODEX_ROW_HEAD = (
+    rb'\{"timestamp":"[^"]{0,64}",(?:"ordinal":\d{1,20},)?"type":"([a-z_]{1,64})",'
+    rb'"payload":\{(?:"type":"([a-z_]{1,64})")?'
+)
+# 模型自己產出的項（history.rs is_model_generated_item）；message 另看 role=assistant。
+CONTEXT_METER_CODEX_MODEL_ITEM_TYPES = frozenset((
+    "reasoning", "function_call", "custom_tool_call", "tool_search_call", "web_search_call",
+    "image_generation_call", "local_shell_call", "compaction", "context_compaction",
+))
+CONTEXT_METER_CODEX_BYTES_PER_TOKEN = 4
+# 不觸發 PreToolUse 的工具（write_stdin 是既有 exec 的傳輸、code-mode 的 wait 是等待迴圈；
+# core/src/tools/handlers/unified_exec/write_stdin.rs、code_mode/wait_handler.rs）。只用在重播。
+CONTEXT_METER_CODEX_UNHOOKED_TOOLS = frozenset(("write_stdin", "wait"))
+# 子代理的 rollout：session_meta 的 source 是 {"subagent": …}。只用在重播。
+CONTEXT_METER_CODEX_SUBAGENT_MARKER = b'"source":{"subagent"'
+# 一張非原尺寸圖片的估計位元組（history.rs RESIZED_IMAGE_BYTES_ESTIMATE）；原尺寸圖片 Codex
+# 要解碼算格數，這裡取它的上限 10,000 格 ×4 位元組，寧可早提醒。
+CONTEXT_METER_CODEX_IMAGE_BYTES = 7373
+CONTEXT_METER_CODEX_ORIGINAL_IMAGE_BYTES = 10000 * 4
+# 算好的壓縮點記在這一場的標記目錄裡（壓縮時跟著清掉）；鍵含設定檔與模型目錄的狀態。
+CONTEXT_METER_CODEX_LIMIT_CACHE = "ctx-codex-limit.json"
+CONTEXT_METER_CODEX_AUTO_NUMERATOR = 9
+CONTEXT_METER_CODEX_AUTO_DENOMINATOR = 10
+# 提醒點＝壓縮點－H。2026-09-25 `epitype context-meter codex-calibrate --limit 210000 --hard-cap 228000`
+# 重播 ~/.codex/sessions 385 份 rollout：H=44k 是讓主線 244 次自動壓縮 ≥95%（233 次）在壓縮前
+# 至少還有一次取樣收到提醒的最小值（42k 94.7%）；用量不含 Codex 另加的舊回合推理估計，H 已吸收。
+CONTEXT_METER_CODEX_HEADROOM_TOKENS = 44000
+CONTEXT_METER_CODEX_NOTICE = (
+    "context 約 {cur}k，距 Codex 自動壓縮約 {left}k。現在就把交接寫進 {path}：仍有效的使用者指示"
+    "（原話）、目標、決定與理由、進度、確切路徑／指令／數字、下一步、已排除的路；之後每到"
+    "里程碑就更新，直到壓縮。"
+)
 GATE_LOG_FILENAME = "_GATE_LOG.jsonl"
 RECALL_MARKER_DIRECTORY = "epitype_markers"
 RECALL_MARKER_TTL_SECONDS = 7 * 24 * 3600
@@ -2800,6 +2857,12 @@ _EN = {
         "and the paths already ruled out); continue only after it is written."
     ),
     "CONTEXT_METER_HANDOFF_NOTICE": "Pre-compaction handoff: {path}; read it before you continue.",
+    "CONTEXT_METER_CODEX_NOTICE": (
+        "context is about {cur}k, about {left}k before Codex auto-compacts. Write the handoff to {path} "
+        "now: the user's instructions still in force (verbatim), the goal, decisions and why, progress, "
+        "exact paths/commands/numbers, the next step, dead ends; then update it at each milestone "
+        "until compaction."
+    ),
     "CONTEXT_METER_CALIBRATE_REPORT_ONLY": (
         "calibrate: report only, nothing is written. The compaction point is learned only from this "
         "machine's actual auto-compactions (PreCompact sees its own pct at that moment), never back-filled "

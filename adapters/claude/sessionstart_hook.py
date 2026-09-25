@@ -10,13 +10,12 @@ import json
 import os
 from pathlib import Path
 import re
-import tempfile
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from epitype import card_lint, compact_map, memspec
+from epitype import compact_map, memspec
 from _hook_common import (
     isolated_temp_root,
     bounded_context,
@@ -336,6 +335,60 @@ def _record_deliveries(deliveries):
             pass
 
 
+def _startup_segments(pieces, vaults, resolved, governance, started_at):
+    """開場（非壓縮續場）才跑的三段：卡片檢查、守衛快取暖機、重複擋人提醒。
+
+    每段各拿自己的時間預算，撥不到就整段省略。card_lint 用到才載入：光載入就要 0.3 s，
+    壓縮續場走不到這裡就不該付。"""
+    # A card missing its type's required fields is a card the recall side will
+    # hand over half-true. One line, only when something actually FAILs, and only
+    # when the scan finished inside its own budget: half a vault's numbers are
+    # worse than no numbers.
+    # 同一趟掃描也餵下面那行順手任務：掃兩次就是同一份預算付兩次。
+    seconds = _segment_budget(started_at, memspec.CARD_LINT_HOOK_BUDGET_SECONDS)
+    if seconds is not None:
+        from epitype import card_lint
+
+        reports = card_lint.scan_vaults(vaults, time_budget=seconds)
+        malformed = card_lint.summary_line(vaults, reports=reports)
+        if malformed:
+            pieces.append(malformed)
+
+        # owner 2026-09-06 裁定：卡沒有中文別名不是給 owner 的決定題，是本場 AI 順手
+        # 補的事。
+        try:
+            translate = card_lint.no_chinese_line(reports, governance)
+        except Exception:
+            translate = None
+        if translate:
+            pieces.append(translate)
+
+    # 動作閘的守衛快取在這裡暖：工具呼叫每次只讀得動一小片，冷快取時排在後面的守衛
+    # 卡等於還沒生效，而閘少擋是不會出聲的。開場付一次，之後每次呼叫都讀暖的。
+    # 純副作用：暖不起來就算了，不影響這場要注入什麼——所以它只拿固定的一小段，撥不到
+    # 就整段省略；被截斷的部分照樣由工具呼叫的逐次補讀收斂，擋不擋得住不因此改變。
+    warm_seconds = _segment_budget(started_at, memspec.SESSIONSTART_WARM_GUARD_BUDGET_SECONDS)
+    if warm_seconds is not None:
+        try:
+            import pretooluse_gate
+
+            pretooluse_gate.warm_guard_cache(
+                resolved, started_at, deadline=time.monotonic() + warm_seconds
+            )
+        except Exception:
+            pass
+
+    # 最近一直擋人的守衛，開場先說。擋得對但每次都要撞一輪，是這個機制自己的浪費。
+    notice_seconds = _segment_budget(started_at, memspec.SESSIONSTART_GUARD_NOTICE_BUDGET_SECONDS)
+    if notice_seconds is not None:
+        try:
+            pieces.extend(_repeat_guard_notices(
+                resolved, started_at, deadline=time.monotonic() + notice_seconds
+            ))
+        except Exception:
+            pass
+
+
 def _handle(event, started_at, deliveries=None):
     config = load_config(started_at)
     if config is None:
@@ -382,52 +435,12 @@ def _handle(event, started_at, deliveries=None):
         except Exception:
             pass  # 夢起不來絕不影響開場注入
 
-    # A card missing its type's required fields is a card the recall side will
-    # hand over half-true. One line, only when something actually FAILs, and only
-    # when the scan finished inside its own budget: half a vault's numbers are
-    # worse than no numbers.
-    # 同一趟掃描也餵下面那行順手任務：掃兩次就是同一份預算付兩次。
-    seconds = _segment_budget(started_at, memspec.CARD_LINT_HOOK_BUDGET_SECONDS)
-    if seconds is not None:
-        reports = card_lint.scan_vaults(vaults, time_budget=seconds)
-        malformed = card_lint.summary_line(vaults, reports=reports)
-        if malformed:
-            pieces.append(malformed)
-
-        # owner 2026-09-06 裁定：卡沒有中文別名不是給 owner 的決定題，是本場 AI 順手
-        # 補的事。壓縮續場不印——那不是新的一場，翻譯任務也不該在同一場派兩次。
-        if source != "compact":
-            try:
-                translate = card_lint.no_chinese_line(reports, governance)
-            except Exception:
-                translate = None
-            if translate:
-                pieces.append(translate)
-
-    # 動作閘的守衛快取在這裡暖：工具呼叫每次只讀得動一小片，冷快取時排在後面的守衛
-    # 卡等於還沒生效，而閘少擋是不會出聲的。開場付一次，之後每次呼叫都讀暖的。
-    # 純副作用：暖不起來就算了，不影響這場要注入什麼——所以它只拿固定的一小段，撥不到
-    # 就整段省略；被截斷的部分照樣由工具呼叫的逐次補讀收斂，擋不擋得住不因此改變。
-    warm_seconds = _segment_budget(started_at, memspec.SESSIONSTART_WARM_GUARD_BUDGET_SECONDS)
-    if warm_seconds is not None:
-        try:
-            import pretooluse_gate
-
-            pretooluse_gate.warm_guard_cache(
-                resolved, started_at, deadline=time.monotonic() + warm_seconds
-            )
-        except Exception:
-            pass
-
-    # 最近一直擋人的守衛，開場先說。擋得對但每次都要撞一輪，是這個機制自己的浪費。
-    notice_seconds = _segment_budget(started_at, memspec.SESSIONSTART_GUARD_NOTICE_BUDGET_SECONDS)
-    if notice_seconds is not None:
-        try:
-            pieces.extend(_repeat_guard_notices(
-                resolved, started_at, deadline=time.monotonic() + notice_seconds
-            ))
-        except Exception:
-            pass
+    # 壓縮續場只交回地圖與交接，下面三段重活（卡片檢查、守衛快取、重複擋人提醒）一律
+    # 不跑：它們在這一場開場時已經跑過，而宿主有硬逾時（Codex 10 秒、hooks.json 不能改）——
+    # 2026-09-25 實測壓縮續場 3.2 s 裡三段占 2 s 以上，機器一忙就整段被砍，地圖那行跟著
+    # 消失。少的是壞卡那一行與重複擋人提醒；它們下一場開場照常出現。
+    if source != "compact":
+        _startup_segments(pieces, vaults, resolved, governance, started_at)
 
     # 夢的一行跟其他一行摘要放在一起：它是狀態，不是規則。
     if _soft_remaining(started_at) > 0:
@@ -456,6 +469,8 @@ def _selftest():
     broken_card = "---\nname: {name}\ndescription: english only and undated\n---\nbody\n"
 
     try:
+        import tempfile
+
         with tempfile.TemporaryDirectory(prefix="epitype-sessionstart-") as temp_dir:
             root = Path(temp_dir).resolve()
             vault = root / "vault"
@@ -813,7 +828,9 @@ def _selftest():
                         and "我等一下會補上" not in promise_context
                         and "殭屍待辦" not in promise_context
                         and "promise index detail" not in promise_context
-                        and "🧾" in promise_context,
+                        # 壓縮續場不跑卡片檢查（地圖與交接不能等它），所以 🧾 只在開場出現。
+                        and (("🧾" in promise_context) if promise_source == "startup"
+                             else ("🧾" not in promise_context)),
                     )
                 )
 
@@ -1205,6 +1222,94 @@ def _selftest():
                 and expected_line in absent_context,
             ))
 
+            # Codex 形狀：transcript 是 `.codex/sessions/.../rollout-*.jsonl`（rollout 列），PreCompact
+            # 帶 --codex。壓縮續場交回地圖與交接的方式必須跟 Claude 一模一樣：同兩行、同順序。
+            codex_session = "codex-thread-1"
+            rollout = (root / ".codex" / "sessions" / "2026" / "09" / "25"
+                       / f"rollout-2026-09-25T00-00-00-{codex_session}.jsonl")
+            rollout.parent.mkdir(parents=True)
+            rollout_rows = (
+                {"timestamp": "2026-09-25T00:00:00.000Z", "ordinal": 0, "type": "session_meta",
+                 "payload": {"id": codex_session}},
+                {"timestamp": "2026-09-25T00:00:01.000Z", "ordinal": 1, "type": "response_item",
+                 "payload": {"type": "message", "role": "user",
+                             "content": [{"type": "input_text", "text": "壓縮前說過的那句話（Codex）"}]}},
+                {"timestamp": "2026-09-25T00:00:02.000Z", "ordinal": 2, "type": "event_msg",
+                 "payload": {"type": "token_count", "info": {
+                     "last_token_usage": {"total_tokens": 205000}, "model_context_window": 228000}}},
+            )
+            rollout.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rollout_rows) + "\n",
+                               encoding="utf-8")
+            codex_precompact = run_synthetic(
+                precompact,
+                {"hook_event_name": "PreCompact", "session_id": codex_session,
+                 "transcript_path": os.fspath(rollout), "cwd": os.fspath(root), "trigger": "auto"},
+                map_config, arguments=("--codex",))
+            codex_map = compact_map.map_destination(map_vault, codex_session, rollout)
+            codex_handoff = compact_map.handoff_destination(map_vault, codex_session, rollout)
+            codex_handoff.write_text("使用者原話：…\n下一步：…\n", encoding="utf-8")
+            codex_map_line = compact_map.map_notice(codex_map)
+            codex_handoff_line = compact_map.handoff_notice(codex_handoff)
+            codex_event = {
+                "hook_event_name": "SessionStart", "session_id": codex_session,
+                "transcript_path": os.fspath(rollout), "cwd": os.fspath(root),
+                "model": "gpt-6-sol", "permission_mode": "default", "source": "compact",
+            }
+            codex_run, codex_context = map_run(codex_event)
+            checks.append((
+                "Codex 形狀（rollout 路徑、PreCompact --codex）：壓縮續場交回地圖與交接，同兩行、同順序",
+                codex_precompact.returncode == 0
+                and codex_map.is_file()
+                and bool(codex_map_line) and bool(codex_handoff_line)
+                and codex_run.returncode == 0
+                and codex_context.splitlines() == [codex_map_line, codex_handoff_line],
+            ))
+
+            # 壓縮續場不跑卡片檢查、守衛快取暖機與重複擋人提醒：宿主有硬逾時，這三段曾占掉
+            # 壓縮續場 2 s 以上，整段被砍時地圖那行跟著消失。開場照跑（同一個呼叫端對照）。
+            import pretooluse_gate as _gate
+            from epitype import card_lint as _card_lint
+
+            spied = []
+
+            def spy(name, original):
+                def wrapper(*args, **kwargs):
+                    spied.append(name)
+                    return original(*args, **kwargs)
+                return wrapper
+
+            originals = (_card_lint.scan_vaults, _gate.warm_guard_cache, _repeat_guard_notices)
+            saved_env = {name: os.environ.get(name)
+                         for name in (memspec.EPITYPE_CONFIG_ENV, memspec.DREAM_MODE_ENV)}
+            stamp = codex_handoff.stat().st_mtime_ns + 10 * 1_000_000_000
+            os.utime(codex_handoff, ns=(stamp, stamp))  # 讓交接再有資格交回一次
+            try:
+                os.environ[memspec.EPITYPE_CONFIG_ENV] = os.fspath(map_config)
+                os.environ[memspec.DREAM_MODE_ENV] = memspec.DREAM_MODE_OFF
+                _card_lint.scan_vaults = spy("lint", originals[0])
+                _gate.warm_guard_cache = spy("warm", originals[1])
+                globals()["_repeat_guard_notices"] = spy("notices", originals[2])
+                compact_value = _handle(codex_event, time.monotonic())
+                compact_spied = list(spied)
+                spied.clear()
+                _handle({**codex_event, "source": "startup"}, time.monotonic())
+                startup_spied = list(spied)
+            finally:
+                _card_lint.scan_vaults, _gate.warm_guard_cache = originals[0], originals[1]
+                globals()["_repeat_guard_notices"] = originals[2]
+                for name, value in saved_env.items():
+                    if value is None:
+                        os.environ.pop(name, None)
+                    else:
+                        os.environ[name] = value
+            compact_text = (compact_value or {}).get("hookSpecificOutput", {}).get("additionalContext", "")
+            checks.append((
+                "壓縮續場不呼叫卡片檢查、守衛快取暖機、重複擋人提醒，地圖與交接照樣交回；開場三段都跑",
+                compact_spied == []
+                and compact_text.splitlines() == [codex_map_line, codex_handoff_line]
+                and {"lint", "warm", "notices"} <= set(startup_spied),
+            ))
+
             # 240 B（UTF-8）是整行的上限：超限整行不注，路徑一個字元都不截。
             probe = compact_map.map_destination(root / "long", map_session, map_transcript)
             probe_line = compact_map.MAP_NOTICE_TEMPLATE.format(path=os.fspath(probe))
@@ -1377,7 +1482,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 35
+    total = 37
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

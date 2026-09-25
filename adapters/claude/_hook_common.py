@@ -699,6 +699,34 @@ def run_synthetic(script, event, config_path, arguments=(), environment=None, ti
                 pass
 
 
+def write_codex_fixture(root, session_id, total, auto_limit=210000):
+    """自測用：一份 Codex rollout（落在 `.codex/sessions/…/rollout-*.jsonl`、最後是一筆
+    token_count）與一個 CODEX_HOME（config.toml＋models_cache.json，壓縮點＝auto_limit）。
+    回 (rollout 路徑, 要帶給子行程的環境變數)。重寫同一份 rollout 就改用量。"""
+    root = Path(root)
+    home = root / "codex-home"
+    home.mkdir(parents=True, exist_ok=True)
+    (home / memspec.CONTEXT_METER_CODEX_CONFIG_FILENAME).write_text(
+        f'model = "gpt-x"\nmodel_context_window = 240000\nmodel_auto_compact_token_limit = {auto_limit}\n',
+        encoding="utf-8")
+    (home / memspec.CONTEXT_METER_CODEX_CATALOG_FILENAME).write_text(json.dumps({"models": [{
+        "slug": "gpt-x", "context_window": 272000, "max_context_window": 872000,
+        "auto_compact_token_limit": None, "effective_context_window_percent": 95}]}), encoding="utf-8")
+    rollout = root / ".codex" / "sessions" / "2026" / "09" / "25" / f"rollout-2026-09-25T00-00-00-{session_id}.jsonl"
+    rollout.parent.mkdir(parents=True, exist_ok=True)
+    rows = (
+        ("session_meta", {"id": session_id, "source": "vscode"}),
+        ("response_item", {"type": "function_call", "name": "exec_command", "arguments": "{}", "call_id": "c1"}),
+        ("event_msg", {"type": "token_count", "info": {
+            "last_token_usage": {"total_tokens": total}, "model_context_window": 228000}}),
+    )
+    rollout.write_text("".join(
+        json.dumps({"timestamp": "2026-09-25T00:00:00.000Z", "ordinal": index, "type": kind, "payload": body},
+                   separators=(",", ":")) + "\n"
+        for index, (kind, body) in enumerate(rows)), encoding="utf-8")
+    return rollout, {memspec.CONTEXT_METER_CODEX_HOME_ENV: os.fspath(home)}
+
+
 def write_config(path, vaults, budget=memspec.HOOK_DEFAULT_BUDGET_BYTES):
     value = {
         memspec.CONFIG_VAULTS_FIELD: [os.fspath(item) for item in vaults],
