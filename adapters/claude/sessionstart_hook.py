@@ -296,6 +296,24 @@ def _compact_map_line(event, governance):
     return compact_map.map_notice(destination)
 
 
+def _handoff_line(event, governance):
+    """壓縮續場交回模型自己寫的交接檔：用量計提醒它寫到哪，這裡就從哪讀。
+
+    跟地圖同一套純函式算路徑；檔不在或是空的就什麼都不加——空檔是「提醒到了、還沒寫」，
+    叫下一段去讀一個空檔只是多付一次讀檔。"""
+    transcript = event.get("transcript_path") if isinstance(event, dict) else None
+    if not isinstance(transcript, str) or not transcript.strip():
+        return None
+    session_id = event.get("session_id", event.get("sessionId", ""))
+    try:
+        destination = compact_map.handoff_destination(governance, session_id, transcript)
+        if not destination.is_file() or destination.stat().st_size <= 0:
+            return None
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return compact_map.handoff_notice(destination)
+
+
 def _handle(event, started_at):
     config = load_config(started_at)
     if config is None:
@@ -320,7 +338,14 @@ def _handle(event, started_at):
 
     # 壓縮續場先放地圖那一行：續場丟掉的是原文，而其餘幾行在別的場次還會再出現一次；
     # 預算裁不下時，先保住唯一一份回得去原文的指標。其他 source 一個字都不加。
+    # 交接檔那一行排在地圖前面：它是模型自己整理過的接續點，地圖只是回撈原文的索引。
     if source == "compact":
+        try:
+            handoff_line = _handoff_line(event, governance)
+        except Exception:
+            handoff_line = None
+        if handoff_line:
+            pieces.append(handoff_line)
         try:
             map_line = _compact_map_line(event, governance)
         except Exception:
@@ -1068,6 +1093,37 @@ def _selftest():
                 and "壓縮前原文地圖" not in resume_context,
             ))
 
+            # 用量計：壓縮前交接檔存在且非空，壓縮續場就在地圖那行之前交回；不在或空的就不加。
+            handoff_file = compact_map.handoff_destination(map_vault, map_session, map_transcript)
+            handoff_expected = compact_map.handoff_notice(handoff_file)
+            handoff_file.write_text("使用者原話：…\n下一步：…\n", encoding="utf-8")
+            handoff_run, handoff_context = map_run(claude_shape)
+            handoff_startup, handoff_startup_context = map_run({**claude_shape, "source": "startup"})
+            handoff_lines = handoff_context.splitlines()
+            checks.append((
+                "交接檔存在且非空：壓縮續場多一行、排在地圖那行之前；startup 不加",
+                handoff_run.returncode == 0
+                and bool(handoff_expected)
+                and handoff_lines.count(handoff_expected) == 1
+                and expected_line in handoff_lines
+                and handoff_lines.index(handoff_expected) < handoff_lines.index(expected_line)
+                and handoff_startup.returncode == 0
+                and handoff_expected not in handoff_startup_context,
+            ))
+            handoff_file.write_text("", encoding="utf-8")
+            empty_run, empty_context = map_run(claude_shape)
+            handoff_file.unlink()
+            absent_run, absent_context = map_run(claude_shape)
+            checks.append((
+                "交接檔是空的或不在：一個字都不加，地圖那行照舊",
+                empty_run.returncode == 0
+                and absent_run.returncode == 0
+                and handoff_expected not in empty_context
+                and handoff_expected not in absent_context
+                and expected_line in empty_context
+                and expected_line in absent_context,
+            ))
+
             # 240 B（UTF-8）是整行的上限：超限整行不注，路徑一個字元都不截。
             probe = compact_map.map_destination(root / "long", map_session, map_transcript)
             probe_line = compact_map.MAP_NOTICE_TEMPLATE.format(path=os.fspath(probe))
@@ -1240,7 +1296,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 29
+    total = 31
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

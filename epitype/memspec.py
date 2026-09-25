@@ -150,6 +150,43 @@ WORK_LEDGER_FILENAME = "_WORK_LEDGER.md"
 COMPACT_MAP_DIRECTORY = "_COMPACT_MAPS"
 COMPACT_MAP_TTL_SECONDS = 30 * 24 * 3600
 COMPACT_MAP_MAX_FILES = 64
+# 壓縮前交接檔跟地圖放同一個目錄、同一套檔名算法，只差這個尾巴。清理時兩種分開計數：
+# 交接檔是模型自己寫的、一場可能只有一份地圖卻留好幾份交接，混在一起數會把地圖提早擠掉。
+COMPACT_HANDOFF_SUFFIX = ".handoff.md"
+
+# Context 用量計（Claude Code，2026-09-25 owner 授權）。
+# 宿主在 context 到 CLAUDE_AUTOCOMPACT_PCT_OVERRIDE 時自動壓縮，模型看不到自己的用量、
+# 也無法自己觸發壓縮，PreCompact 的文字又到不了模型（2026-08-19 實證）。所以由 hook 在
+# 還沒壓縮前、跨門檻的那一次呼叫附一行：先寫交接，再建議使用者在段落結束時手動壓縮。
+# 門檻不猜：設定覆寫 → 學到的自動壓縮用量 → 都沒有就完全不提醒。模型名稱與 hook 輸入都
+# 看不出視窗大小，拿 200k／1M 公式猜，猜錯時 1M 的使用者會在 100k 就被叫。
+CONTEXT_METER_CONFIG_FIELD = "context_meter"
+CONTEXT_METER_ENABLED_FIELD = "enabled"
+CONTEXT_METER_OVERRIDE_FIELD = "autocompact_tokens"
+CONTEXT_METER_PCT_ENV = "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"
+CONTEXT_METER_STATE_FILENAME = "context_meter.json"
+CONTEXT_METER_STATE_KEEP = 10
+CONTEXT_METER_STATE_MEDIAN_OF = 5
+CONTEXT_METER_STAGE_A_RATIO = 0.65
+CONTEXT_METER_STAGE_B_RATIO = 0.90
+CONTEXT_METER_MARKER_A = "ctx-A"
+CONTEXT_METER_MARKER_B = "ctx-B"
+CONTEXT_METER_TAIL_FIRST_BYTES = 64 * 1024
+CONTEXT_METER_TAIL_MAX_BYTES = 8 * 1024 * 1024
+CONTEXT_METER_CALIBRATE_DAYS = 30
+CONTEXT_METER_SOURCE_OVERRIDE = "override"
+CONTEXT_METER_SOURCE_LEARNED = "learned"
+CONTEXT_METER_SOURCE_SCALED = "scaled"
+CONTEXT_METER_USAGE_FIELDS = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
+CONTEXT_METER_SCALED_MARK = "（換算）"
+CONTEXT_METER_STAGE_A_NOTICE = (
+    "context 約 {cur}k／自動壓縮約 {thr}k{mark}。做完目前這一步：把交接寫進 {path}"
+    "（使用者原話、做到哪、下一步、未決事項與已排除的路），然後告訴使用者現在適合手動壓縮；"
+    "之後大量讀檔改派子代理。"
+)
+CONTEXT_METER_STAGE_B_NOTICE = "context 約 {cur}k，距自動壓縮約 {left}k{mark}。現在就更新交接 {path}，還沒寫就先寫。"
+# 壓縮續場交回交接檔的那一行。跟地圖那行同一個 240 B 上限：超過整行不注，路徑絕不截斷。
+CONTEXT_METER_HANDOFF_NOTICE = "壓縮前交接：{path}；先讀它再接續。"
 GATE_LOG_FILENAME = "_GATE_LOG.jsonl"
 RECALL_MARKER_DIRECTORY = "epitype_markers"
 RECALL_MARKER_TTL_SECONDS = 7 * 24 * 3600
@@ -2638,6 +2675,18 @@ _EN = {
     "CAPTURE_PENDING_HOLD_REASON": "a proposal with verified: false; a human reviews it, sets verified: true and fills verified_by/verified_at before it moves",
     "CAPTURE_PENDING_REVIEW_COMMAND": 'Review "{path}" by hand: for each card you keep, set verified: true plus verified_by/verified_at and move it into <vault>/<grants|corrections|rulings>/; leave the rest where they are',
     "CONTEXT_TRUNCATED_SUFFIX": "…(over budget; {dropped} more segment(s) not injected)",
+    "CONTEXT_METER_SCALED_MARK": " (scaled)",
+    "CONTEXT_METER_STAGE_A_NOTICE": (
+        "context is about {cur}k / auto-compaction at about {thr}k{mark}. Finish the current step, "
+        "then write a handoff to {path} (the user's verbatim words, where you are, the next step, "
+        "open items and the paths already ruled out), then tell the user now is a good time to "
+        "compact manually; after that, delegate bulk file reading to subagents."
+    ),
+    "CONTEXT_METER_STAGE_B_NOTICE": (
+        "context is about {cur}k, about {left}k{mark} before auto-compaction. Update the handoff "
+        "{path} now; if you have not written it yet, write it first."
+    ),
+    "CONTEXT_METER_HANDOFF_NOTICE": "Pre-compaction handoff: {path}; read it before you continue.",
     "DECISION_PREFIX": "⚖ ruling: ",
     "VAULT_MISSING_REASON": "No such vault: {vault}\n(Scanning a folder that does not exist reports 0 problems, which looks exactly like \"clean\"; so this reports an error instead of 0.)",
     "RULE_HOSTS_REASON": "{value} in {field} is not one of {allowed}",

@@ -11,7 +11,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from epitype import compact_map, memspec
+from epitype import compact_map, context_meter, memspec
 from _hook_common import (
     isolated_temp_root,
     clear_recall_markers,
@@ -33,25 +33,48 @@ def _map_destination(vault, event, transcript):
 
 
 def _sweep_maps(directory, keep):
+    """30 天過期，其餘各留最新 COMPACT_MAP_MAX_FILES 份。
+
+    地圖與壓縮前交接檔（`*.handoff.md`）同目錄、同樣過期，但上限分開數：交接檔是模型
+    寫的，一場可能留好幾份，跟地圖混著數會把還有用的地圖提早擠掉。代價是這個目錄最多
+    可以有兩倍上限的檔。`keep` 是這一場的地圖與交接檔，永遠不刪。"""
+    keep = set(keep) if isinstance(keep, (tuple, list, set, frozenset)) else {keep}
     try:
         now = time.time()
-        retained = []
+        groups = {False: [], True: []}
         for path in directory.glob("*.md"):
             try:
-                if path != keep and now - path.stat().st_mtime > memspec.COMPACT_MAP_TTL_SECONDS:
+                if path in keep:
+                    continue
+                if now - path.stat().st_mtime > memspec.COMPACT_MAP_TTL_SECONDS:
                     path.unlink()
-                elif path != keep:
-                    retained.append(path)
+                else:
+                    groups[path.name.endswith(memspec.COMPACT_HANDOFF_SUFFIX)].append(path)
             except OSError:
                 continue
-        retained.sort(key=lambda path: path.stat().st_mtime, reverse=True)
-        for path in retained[memspec.COMPACT_MAP_MAX_FILES - 1 :]:
-            path.unlink(missing_ok=True)
+        for retained in groups.values():
+            retained.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+            for path in retained[memspec.COMPACT_MAP_MAX_FILES - 1 :]:
+                path.unlink(missing_ok=True)
     except OSError:
         pass
 
 
-def _handle(event, started_at):
+def _learn_threshold(event, vault, transcript):
+    """自動壓縮的這一刻就是門檻：記下當下用量給用量計學。手動壓縮不記（時點是人選的）。
+
+    兩種欄位名都讀（`trigger`／`triggered_by`）。記不了就算了——這是學習，不是關卡，
+    不能讓它擋掉地圖。"""
+    trigger = event.get("trigger") or event.get("triggered_by")
+    if trigger != "auto":
+        return
+    try:
+        context_meter.record_autocompact(vault, transcript)
+    except Exception:
+        pass
+
+
+def _handle(event, started_at, learn=True):
     transcript_value = event.get("transcript_path")
     if not isinstance(transcript_value, str) or not transcript_value.strip():
         return None
@@ -65,13 +88,19 @@ def _handle(event, started_at):
     # Compaction invalidates recall dedupe even if the recovery-map write fails.
     clear_recall_markers(event.get("session_id", event.get("sessionId", "")))
     vault = governance_vault(config, for_write=True)
+    # 用量計只做 Claude 側：Codex 的 rollout 沒有同形狀的用量列，學到的會是空的。
+    if learn:
+        _learn_threshold(event, vault, transcript)
     destination = _map_destination(vault, event, transcript)
     compact_map.build_map(
         transcript,
         destination,
         memspec.COMPACT_MAP_DEFAULT_BUDGET_BYTES,
     )
-    _sweep_maps(destination.parent, destination)
+    handoff = compact_map.handoff_destination(
+        vault, event.get("session_id", event.get("sessionId", "")), transcript
+    )
+    _sweep_maps(destination.parent, (destination, handoff))
     # 這裡曾經回一句「地圖已落於…」。它在兩邊宿主都到不了模型：Claude Code 的
     # PreCompact 不能注入（2026-08-19 實證），Codex 0.153 的 PreCompactOutcome 只有
     # Continue／Stopped。印一句沒有人收得到的話，只會讓下一個讀碼的人以為鏈是通的。
@@ -228,6 +257,84 @@ def _selftest():
                 and "Synthetic recovery request" in promise_map,
             ))
 
+            # 用量計：自動壓縮記下當下用量（壞檔重建）、清掉提醒標記讓兩段重新武裝；
+            # 手動壓縮與 Codex 不記。
+            usage_row = {"type": "assistant", "message": {"usage": {
+                "input_tokens": 100000, "cache_creation_input_tokens": 20000,
+                "cache_read_input_tokens": 30000}}}
+            auto_transcript = root / "transcript-auto.jsonl"
+            auto_transcript.write_text(json.dumps(usage_row) + "\n", encoding="utf-8")
+            state = context_meter.state_path(vault)
+            state.parent.mkdir(parents=True, exist_ok=True)
+            state.write_text("{broken", encoding="utf-8")
+            auto_markers = recall_marker_directory("session-auto")
+            auto_markers.mkdir(parents=True, exist_ok=True)
+            for name in (memspec.CONTEXT_METER_MARKER_A, memspec.CONTEXT_METER_MARKER_B):
+                (auto_markers / name).write_text(name + "\n", encoding="ascii")
+            pct_env = {memspec.CONTEXT_METER_PCT_ENV: "92"}
+            auto_event = {"transcript_path": str(auto_transcript), "session_id": "session-auto"}
+            auto_result = run_synthetic(
+                Path(__file__), {**auto_event, "trigger": "auto"}, config, environment=pct_env)
+            learned = context_meter.read_samples(state)
+            checks.append((
+                "an auto compaction re-arms the context reminders and rebuilds the broken state with one sample",
+                auto_result.returncode == 0
+                and not auto_result.stdout
+                and not auto_markers.exists()
+                and len(learned) == 1
+                and learned[0]["tokens"] == 150000
+                and learned[0]["pct"] == "92",
+            ))
+            triggered_by = run_synthetic(
+                Path(__file__), {**auto_event, "triggered_by": "auto"}, config, environment=pct_env)
+            checks.append((
+                "triggered_by=auto is read too and adds one sample",
+                triggered_by.returncode == 0 and len(context_meter.read_samples(state)) == 2,
+            ))
+            manual = run_synthetic(
+                Path(__file__), {**auto_event, "trigger": "manual"}, config, environment=pct_env)
+            codex_auto = run_synthetic(
+                Path(__file__), {**auto_event, "trigger": "auto"}, config, ("--codex",),
+                environment=pct_env)
+            checks.append((
+                "a manual compaction and a Codex run record nothing",
+                manual.returncode == 0 and codex_auto.returncode == 0
+                and len(context_meter.read_samples(state)) == 2,
+            ))
+
+            # 交接檔跟地圖同目錄、同樣 30 天過期，但上限分開數：一堆交接檔不得把地圖擠掉；
+            # 這一場的交接檔就算過期也留著。
+            maps_dir = destination.parent
+            maps_before = sorted(
+                path.name for path in maps_dir.glob("*.md")
+                if not path.name.endswith(memspec.COMPACT_HANDOFF_SUFFIX))
+            week_ago = time.time() - 7 * 24 * 3600
+            for index in range(memspec.COMPACT_MAP_MAX_FILES + 6):
+                extra = maps_dir / f"other-{index:03d}{memspec.COMPACT_HANDOFF_SUFFIX}"
+                extra.write_text("handoff\n", encoding="utf-8")
+                os.utime(extra, (week_ago + index, week_ago + index))
+            expired_handoff = maps_dir / f"expired{memspec.COMPACT_HANDOFF_SUFFIX}"
+            expired_handoff.write_text("old\n", encoding="utf-8")
+            month_ago = time.time() - 31 * 24 * 3600
+            os.utime(expired_handoff, (month_ago, month_ago))
+            own_handoff = compact_map.handoff_destination(
+                vault, "session-auto", auto_transcript.resolve())
+            own_handoff.write_text("mine\n", encoding="utf-8")
+            os.utime(own_handoff, (month_ago, month_ago))
+            run_synthetic(Path(__file__), auto_event, config)
+            maps_after = sorted(
+                path.name for path in maps_dir.glob("*.md")
+                if not path.name.endswith(memspec.COMPACT_HANDOFF_SUFFIX))
+            handoffs_after = list(maps_dir.glob("*" + memspec.COMPACT_HANDOFF_SUFFIX))
+            checks.append((
+                "handoffs expire with the maps but are capped separately, and this session's is kept",
+                set(maps_before) <= set(maps_after)
+                and own_handoff.is_file()
+                and not expired_handoff.exists()
+                and len(handoffs_after) == memspec.COMPACT_MAP_MAX_FILES
+                and not (maps_dir / f"other-000{memspec.COMPACT_HANDOFF_SUFFIX}").exists(),
+            ))
+
             bad_config = root / "bad-config.json"
             bad_config.write_text("{broken", encoding="utf-8")
             bad_result = run_synthetic(
@@ -247,7 +354,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 8
+    total = 12
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
@@ -265,7 +372,7 @@ def main():
     try:
         # 只寫檔，永遠不輸出：`--codex` 仍被接受（Codex 的 hooks.json 這樣掛），
         # 但兩邊宿主的輸出路徑都已經退役，所以兩條路徑跑的是同一段程式。
-        _handle(read_event(sys.stdin), _STARTED_AT)
+        _handle(read_event(sys.stdin), _STARTED_AT, learn="--codex" not in arguments)
     except Exception:
         pass
     return 0

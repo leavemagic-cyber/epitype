@@ -1,5 +1,32 @@
 # Changelog
 
+## Unreleased
+
+### Claude Code 的 context 用量計＋壓縮前交接
+
+**做了什麼。** Claude Code 在 context 到 `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` 時自動壓縮，但模型看不到
+自己的用量、也無法自己觸發壓縮，而 `PreCompact` 印的字到不了模型（2026-08-19 實證）。所以改在壓縮
+**之前**提醒：`PreToolUse` 的放行路徑與 `UserPromptSubmit` 從 transcript 檔尾讀最後一筆主鏈
+assistant 的用量（`input_tokens`＋`cache_creation_input_tokens`＋`cache_read_input_tokens`），跨過
+門檻的 65% 時附一行「做完這一步把交接寫進某檔、告訴使用者現在適合手動壓縮」，跨過 90% 時再附一行
+「現在就更新交接」。每段每個壓縮週期只說一次；直接跳過 65% 就只說 90% 那一段；子代理的呼叫不說
+（提醒被子代理吃掉，主線就永遠收不到）。預算放不下時這行最先讓位、不寫標記，下次再試。壓縮後
+`SessionStart` 若看到那份交接檔存在且非空，就在地圖那行之前交回路徑。交接檔與地圖同放
+`_COMPACT_MAPS`、同樣 30 天過期，但 64 份上限分開數，不會把地圖擠掉。沒有新增任何 hook 事件。
+
+**門檻怎麼決定。** 依序：設定檔 `context_meter.autocompact_tokens`（覆寫）→ 學到的值：治理庫
+`.epitype/context_meter.json` 裡最近 5 次自動壓縮用量的中位數（`PreCompact` 在 `trigger=auto` 時記一筆，
+手動壓縮不記）。紀錄當時的 `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` 與現在不同、且兩邊都是數字時按比例換算，
+提醒裡的數字標「（換算）」；有一邊不是數字就不用那一筆。`context_meter.enabled: false` 全部關掉。
+
+**不知道就不提醒。** 模型名稱與 hook 輸入都看不出視窗是 200k 還是 1M；拿公式猜，猜錯時 1M 的使用者
+會在 100k 就被叫，學會忽略這一行比沒有這一行更糟。
+
+**限制。** 只做 Claude Code；Codex 側沒有做。第一次要先跑一次 `epitype context-meter calibrate --apply`
+（從近 30 天的自動壓縮紀錄學），或等一次自動壓縮，之前完全不會提醒。`calibrate` 從終端機跑時若環境
+變數沒有 pct，會退到 `~/.claude/settings.json` 的 `env`，也可用 `--pct` 指定；它必須跟 hook 行程看到的
+值一致，否則學到的樣本會被當成換算不了而不用。`epitype context-meter status` 可以看目前門檻與來源。
+
 ## v1.7.0 (2026-09-22)
 
 ### 這一版做完的一件事：同一套規則，以前只有一邊真的被看守

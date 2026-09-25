@@ -14,21 +14,25 @@ try:
     from .memspec import (
         COMPACT_MAP_ASSISTANT_MAX_CHARS,
         COMPACT_MAP_DEFAULT_BUDGET_BYTES,
+        COMPACT_HANDOFF_SUFFIX,
         COMPACT_MAP_DIRECTORY,
         COMPACT_MAP_MAX_LINE_BYTES,
         COMPACT_MAP_TAIL_BYTES,
         COMPACT_MAP_USER_MAX_CHARS,
     )
+    from . import memspec as _memspec
 except ImportError:  # Direct script execution keeps the U1 CLI contract.
     from transcript import message_text as _text_content, source_record
     from memspec import (
         COMPACT_MAP_ASSISTANT_MAX_CHARS,
         COMPACT_MAP_DEFAULT_BUDGET_BYTES,
+        COMPACT_HANDOFF_SUFFIX,
         COMPACT_MAP_DIRECTORY,
         COMPACT_MAP_MAX_LINE_BYTES,
         COMPACT_MAP_TAIL_BYTES,
         COMPACT_MAP_USER_MAX_CHARS,
     )
+    import memspec as _memspec
 
 
 # 2026-09-01 實測事故：對話壓縮時未落檔的結論會遺失，導致後續無法可靠續接；
@@ -57,21 +61,45 @@ def session_component(session_id, limit=128):
     return _SESSION_COMPONENT_UNSAFE.sub('_', text).strip('._-')[:limit] or 'nosession'
 
 
+def _destination_stem(session_id, transcript_path):
+    component = session_component(session_id, limit=80)
+    transcript = Path(transcript_path).expanduser().resolve()
+    digest = hashlib.sha256(os.fspath(transcript).encode('utf-8')).hexdigest()[:12]
+    return f'{component}-{digest}'
+
+
 def map_destination(vault, session_id, transcript_path):
     """Where this session's recovery map lives: one file per (session, transcript).
 
     Pure function on purpose — PreCompact writes here and SessionStart reads here,
     and the two must land on the same path without sharing any state but the event.
     """
-    component = session_component(session_id, limit=80)
-    transcript = Path(transcript_path).expanduser().resolve()
-    digest = hashlib.sha256(os.fspath(transcript).encode('utf-8')).hexdigest()[:12]
-    return (Path(vault) / COMPACT_MAP_DIRECTORY / f'{component}-{digest}.md').resolve()
+    stem = _destination_stem(session_id, transcript_path)
+    return (Path(vault) / COMPACT_MAP_DIRECTORY / f'{stem}.md').resolve()
+
+
+def handoff_destination(vault, session_id, transcript_path):
+    """Where the model writes its pre-compaction handoff for this session.
+
+    Same stem as `map_destination`, so the reminder that names it (PreToolUse /
+    UserPromptSubmit) and the compact resume that hands it back (SessionStart) land
+    on one file without sharing any state but the event.
+    """
+    stem = _destination_stem(session_id, transcript_path)
+    return (Path(vault) / COMPACT_MAP_DIRECTORY / f'{stem}{COMPACT_HANDOFF_SUFFIX}').resolve()
 
 
 def map_notice(destination):
     """The one line, or None when the absolute path makes it exceed the byte cap."""
     line = MAP_NOTICE_TEMPLATE.format(path=os.fspath(destination))
+    if len(line.encode('utf-8')) > MAP_NOTICE_MAX_BYTES:
+        return None
+    return line
+
+
+def handoff_notice(destination):
+    """The compact-resume line for the handoff, or None over the same byte cap."""
+    line = _memspec.CONTEXT_METER_HANDOFF_NOTICE.format(path=os.fspath(destination))
     if len(line.encode('utf-8')) > MAP_NOTICE_MAX_BYTES:
         return None
     return line
@@ -367,11 +395,30 @@ def _selftest():
                 and len(short_notice.encode('utf-8')) <= MAP_NOTICE_MAX_BYTES
                 and map_notice(long_path) is None,
             ))
+
+            # 交接檔跟地圖同一套檔名算法、同一個目錄：提醒寫進哪裡、壓縮續場就從哪裡讀。
+            handoff = handoff_destination(vault, 'sess-1', transcript)
+            checks.append((
+                'the handoff sits beside the map with the same stem and its own suffix',
+                handoff.parent == same_a.parent
+                and handoff.name == same_a.stem + COMPACT_HANDOFF_SUFFIX
+                and handoff != same_a
+                and handoff_destination(vault, 'sess-2', transcript).name
+                != handoff.name,
+            ))
+            handoff_line = handoff_notice(handoff)
+            checks.append((
+                'the handoff notice keeps the whole path under the cap and is dropped whole over it',
+                handoff_line is not None
+                and os.fspath(handoff) in handoff_line
+                and len(handoff_line.encode('utf-8')) <= MAP_NOTICE_MAX_BYTES
+                and handoff_notice(long_path) is None,
+            ))
     except Exception as exc:
         print(f'SELFTEST ERROR {type(exc).__name__}: {exc}', file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 12
+    total = 14
     status = 'PASS' if passed == total and len(checks) == total else 'FAIL'
     print(f'SELFTEST {status} {passed}/{total}')
     if status != 'PASS':
