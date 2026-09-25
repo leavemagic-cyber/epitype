@@ -20,7 +20,6 @@ import json
 import os
 from pathlib import Path
 import re
-import tempfile
 import time
 
 try:
@@ -454,6 +453,9 @@ def _selftest():
         from . import capture
     except ImportError:  # Direct script execution keeps the CLI contract.
         import capture
+
+    # 自測才用：每一支 hook 都經 _hook_common 載入這個模組，不該替 tempfile 付載入時間。
+    import tempfile
 
     checks = []
     try:

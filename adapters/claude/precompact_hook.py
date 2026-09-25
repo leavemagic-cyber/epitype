@@ -4,14 +4,16 @@ import sys, time; sys.dont_write_bytecode = True; _STARTED_AT = time.monotonic()
 import json
 import os
 from pathlib import Path
-import tempfile
 import time
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from epitype import compact_map, context_meter, memspec
+# context_meter 與 tempfile 用到才載入：Codex 的壓縮（--codex）不學門檻，而 hook 每一次
+# 都要重新編譯載入的模組（dont_write_bytecode）；Codex 在 10 秒硬逾時砍掉 PreCompact 時，
+# 還沒跑到清標記那一步，下一個壓縮週期的交接提醒就不會重新武裝。
+from epitype import compact_map, memspec
 from _hook_common import (
     isolated_temp_root,
     clear_recall_markers,
@@ -83,6 +85,8 @@ def _learn_threshold(event, vault, transcript):
     if trigger != "auto" or _is_subagent(event):
         return
     try:
+        from epitype import context_meter
+
         if not context_meter.enabled(memspec.config_options()):
             return
         context_meter.record_autocompact(vault, transcript)
@@ -133,6 +137,10 @@ def _handle(event, started_at, learn=True):
 
 
 def _selftest():
+    import tempfile
+
+    from epitype import context_meter
+
     checks = []
     try:
         with tempfile.TemporaryDirectory(prefix="epitype-precompact-") as temp_dir:
