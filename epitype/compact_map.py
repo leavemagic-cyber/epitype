@@ -59,10 +59,28 @@ def session_component(session_id, limit=128):
     return _SESSION_COMPONENT_UNSAFE.sub('_', text).strip('._-')[:limit] or 'nosession'
 
 
+_EXTENDED_UNC_PREFIX = '\\\\?\\UNC\\'
+_EXTENDED_PREFIX = '\\\\?\\'
+
+
+def _transcript_identity(transcript_path):
+    """The transcript path as one fixed string, whatever form the OS handed back.
+
+    Windows can report the same file as `\\\\?\\C:\\…` or `C:\\…`: while the host keeps
+    the transcript open, `resolve()` may keep the extended-length prefix. The two
+    strings hash differently, so the reminder named one handoff file and the compact
+    resume looked for another. Strip the prefix before hashing."""
+    text = os.fspath(Path(transcript_path).expanduser().resolve())
+    if text.startswith(_EXTENDED_UNC_PREFIX):
+        return '\\\\' + text[len(_EXTENDED_UNC_PREFIX):]
+    if text.startswith(_EXTENDED_PREFIX):
+        return text[len(_EXTENDED_PREFIX):]
+    return text
+
+
 def _destination_stem(session_id, transcript_path):
     component = session_component(session_id, limit=80)
-    transcript = Path(transcript_path).expanduser().resolve()
-    digest = hashlib.sha256(os.fspath(transcript).encode('utf-8')).hexdigest()[:12]
+    digest = hashlib.sha256(_transcript_identity(transcript_path).encode('utf-8')).hexdigest()[:12]
     return f'{component}-{digest}'
 
 

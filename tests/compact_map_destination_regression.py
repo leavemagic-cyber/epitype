@@ -95,6 +95,16 @@ class DestinationTests(unittest.TestCase):
             os.fspath(compact_map.map_destination(self.vault, "s", indirect)),
         )
 
+    @unittest.skipUnless(os.name == "nt", "the extended-length prefix only exists on Windows")
+    def test_the_windows_extended_prefix_lands_on_the_same_files(self):
+        plain = os.fspath(self.transcript)
+        extended = "\\\\?\\" + plain
+        for build in (compact_map.map_destination, compact_map.handoff_destination):
+            self.assertEqual(
+                os.fspath(build(self.vault, "s", plain)),
+                os.fspath(build(self.vault, "s", extended)),
+            )
+
 
 class NoticeTests(unittest.TestCase):
     def setUp(self):
