@@ -1980,8 +1980,12 @@ A write is refused when all of these hold:
 - the text the write adds has more incident lines than the text it removes;
 - no arming field (`memspec.RECURRENCE_GATE_ARMING_FIELDS`) is added or changed.
 
-"Added" means the lines the file gains: the post-write text compared with the text on disk
-for Write, Edit and MultiEdit, and the `+` lines for a Codex patch envelope.
+"Added" means the lines the file gains: the post-write text compared with the text on disk.
+For Write, Edit and MultiEdit that text is known exactly. For a Codex Update File the patch
+is applied to the card on disk (`patch_envelope.apply_update`, using Codex's own rule for
+locating a hunk), so the same content gets the same verdict on every path. If the patch
+cannot be applied, Codex cannot apply it either. The gate then falls back to the `+` lines
+alone and judges every line whose field it cannot see as body.
 
 An incident line is narrower than a keyword. Real vaults use the same words as ordinary
 vocabulary: 「免得以後再犯」, 「永遠別再犯」, 「防再犯規則」. Across four vaults, about half of the
@@ -1989,7 +1993,9 @@ behaviour cards containing such a word were not narrating an incident. A line co
 when a recurrence marker (`memspec.RECURRENCE_GATE_MARKER_PATTERN`: 再犯, 又犯, 第二次犯,
 recurred, happened again, and similar) appears together with a date on the same line, or
 opens a bold or heading line. A marker right after a preventive word (別, 不要, 防, 免得…)
-never counts.
+never counts. Neither does a conditional one: 「2026-09-25 起的處理規則：再犯時先補
+forbidden」 is the rule's own text about next time. A marker followed by 時, 的話, 就 or 則, or
+preceded in the same clause by 若, 如果, 一旦, 萬一, 假如, `if` or `when`, is a condition.
 
 The following pass: a new card, a project, reference or decision card (those record
 history), a write that arms the card in the same edit, and incident words that appear only
@@ -1999,16 +2005,14 @@ hatch every write-gate rule has.
 
 Every pass and refusal is audited. A refusal is a `write_block` row with rule `recurrence`.
 A pass after the rule fired is a `write_allow` row whose `outcome` is `arming_changed`,
-`arming_uncertain`, `exempt_fields_only` or `repeat`. Rows carry the rule and the card
-path, never the text.
+`exempt_fields_only` or `repeat`. Rows carry the rule and the card path, never the text.
 
 What this does not do: the gate cannot tell whether a new `forbidden` pattern would
-actually have caught the incident. That is the job of card_lint's two-way examples. A
-patch envelope shows only the lines it adds, so an indented added line on a card that is
-already armed might be a new item under an arming field. That case passes as
-`arming_uncertain` instead of being guessed.
+actually have caught the incident. That is the job of card_lint's two-way examples.
 
 Regression: `adapters/claude/pretooluse_gate.py --selftest` covers each of these: a refusal
 for an appended incident, the audit row, arming in the same write, a new card, a project
-card, the Codex envelope shape, ordinary vocabulary, the exempt field, a repeat, and
-malformed input.
+card, the Codex envelope shape, ordinary vocabulary, conditional rule text, the same content
+reaching the same verdict through Write, Edit and a patch, BOM, CRLF and quoted-value cards,
+the exempt field, a repeat, and malformed input. `epitype/patch_envelope.py --selftest`
+covers hunk capture and application.

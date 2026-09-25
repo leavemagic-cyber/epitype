@@ -2933,6 +2933,16 @@ RECURRENCE_GATE_PREVENTIVE_PATTERN = (
     r"|(?:\b(?:prevent\w*|avoid\w*|never|not|stop)|n't)\W+(?:\w+\W+){0,2}$"
 )
 RECURRENCE_GATE_PREVENTIVE_WINDOW = 24
+# 條件句是規則正文，不是事故：「2026-09-25 起的處理規則：再犯時先補 forbidden」寫的是
+# 以後怎麼做（2026-09-25 交叉審查實測被誤擋）。標記後面緊接「時／的話／就／則」，或同
+# 一個子句裡前面有「若／如果／一旦／萬一／假如」、if／when，都不算。
+# 這條與下面的 RECURRENCE_GATE_LEAD_PATTERN 都是拿 `match(line, pos)` 從行中間接著比，
+# 不能寫 `^`：`^` 只認整行開頭，帶 pos 的 match 永遠比不到。
+RECURRENCE_GATE_CONDITIONAL_AFTER_PATTERN = r"\s*(?:時|的話|就|則)"
+RECURRENCE_GATE_CONDITIONAL_BEFORE_PATTERN = (
+    r"(?:若|如果|一旦|萬一|假如)[^，。；;,.!?！？：:]*$"
+    r"|\b(?:if|when|whenever)\b[^,.;:!?]*$"
+)
 RECURRENCE_GATE_DATE_PATTERN = (
     r"(?<!\d)(?:\d{4}[-/.]\d{1,2}[-/.]\d{1,2}|\d{1,2}[-/]\d{1,2}|\d{1,2}\s*月\s*\d{1,2}\s*日)(?!\d)"
     r"|今天"
@@ -2940,14 +2950,13 @@ RECURRENCE_GATE_DATE_PATTERN = (
 # 粗體或標題行：清單記號之後是 `#` 標題或 `**`／`__` 粗體。標記要落在開頭（可以先有日期）。
 RECURRENCE_GATE_EMPHASIS_PATTERN = r"^\s*(?:(?:[-*+]|\d+[.)])\s+)?(?:#{1,6}\s+|\*\*|__)"
 RECURRENCE_GATE_LEAD_PATTERN = (
-    r"^(?:[\s*_#~:：,，.、()（）\[\]【】\-/]|\d{4}[-/.]\d{1,2}[-/.]\d{1,2}|\d{1,2}[-/]\d{1,2})*"
+    r"(?:[\s*_#~:：,，.、()（）\[\]【】\-/]|\d{4}[-/.]\d{1,2}[-/.]\d{1,2}|\d{1,2}[-/]\d{1,2})*"
 )
 RECURRENCE_GATE_RULE = "recurrence"
 # 放行也入帳：規則響了、因為正在武裝而放過，或是同一份內容第二次送來而放過——後者是
 # 所有寫檔閘共用的逃生口，沒有這一列，繞過去的那一次在稽核裡就看不見。
 RECURRENCE_GATE_ALLOW_LOG_KIND = "write_allow"
 RECURRENCE_GATE_OUTCOME_ARMING = "arming_changed"
-RECURRENCE_GATE_OUTCOME_ARMING_UNCERTAIN = "arming_uncertain"
 RECURRENCE_GATE_OUTCOME_EXEMPT_FIELDS = "exempt_fields_only"
 RECURRENCE_GATE_OUTCOME_REPEAT = "repeat"
 RECURRENCE_GATE_REASON = (
@@ -2974,6 +2983,10 @@ _LAZY_REGEX.update({
     "RECURRENCE_GATE_PREVENTIVE_REGEX": lambda: re.compile(
         RECURRENCE_GATE_PREVENTIVE_PATTERN, re.IGNORECASE),
     "RECURRENCE_GATE_DATE_REGEX": lambda: re.compile(RECURRENCE_GATE_DATE_PATTERN),
+    "RECURRENCE_GATE_CONDITIONAL_AFTER_REGEX": lambda: re.compile(
+        RECURRENCE_GATE_CONDITIONAL_AFTER_PATTERN),
+    "RECURRENCE_GATE_CONDITIONAL_BEFORE_REGEX": lambda: re.compile(
+        RECURRENCE_GATE_CONDITIONAL_BEFORE_PATTERN, re.IGNORECASE),
     "RECURRENCE_GATE_EMPHASIS_REGEX": lambda: re.compile(RECURRENCE_GATE_EMPHASIS_PATTERN),
     "RECURRENCE_GATE_LEAD_REGEX": lambda: re.compile(RECURRENCE_GATE_LEAD_PATTERN),
 })
