@@ -620,7 +620,10 @@ def claim_meter(value, event_name, pending):
     `pending` 是 [(標記目錄, 標記名, 用量, 那一行)]，預算在放進來之前已經算過（含這一行）。
     Codex 一次並行好幾個工具呼叫，每個 hook 行程都看到「還沒說過」；先輸出再寫標記，同一秒
     就會說好幾次。搶到之後沒送出去（逾時、輸出失敗）的，呼叫端一定要 `release_meter`，
-    否則這個週期再也不說。"""
+    否則這個週期再也不說。
+
+    危害（不修，只記）：搶到標記之後、印出去之前（微秒級）宿主把行程砍掉，這個週期的提醒
+    就丟了；下一個週期由用量下跌／低於壓縮點 40% 的重新武裝救回來（context_meter._rearm_if_stale）。"""
     from epitype import context_meter
 
     won, lost = [], []

@@ -274,6 +274,10 @@ CONTEXT_METER_CODEX_NOTICE = (
 # 兩次壓縮之間 last_token_usage 沒有任何一筆下跌。提醒只在壓縮點附近搶（Codex 壓縮點－44k、
 # Claude 0.97T），所以壓縮後的用量離「跌 40%」還有一大段；而週期內的起伏到不了 40%。
 CONTEXT_METER_REARM_DROP_RATIO = 0.4
+# 第二條（不管標記格式，舊格式標記沒有記用量、上面那條永遠不成立）：壓縮點已知時，用量低於
+# 壓縮點的這個比例就重新武裝。同一份 rollout 壓縮後是 24k–32k、壓縮點 210k（0.11–0.15）；
+# 提醒點是壓縮點－44k（約 0.79）或 0.97T，同一週期裡搶過標記之後不會掉回 0.4 以下。
+CONTEXT_METER_REARM_LIMIT_RATIO = 0.4
 # 標記檔只讀開頭這麼多：它是一行 JSON，讀多了只是把別人放進來的大檔讀進每一次工具呼叫。
 CONTEXT_METER_MARKER_MAX_BYTES = 256
 # 壓縮前後掛鉤的追蹤：每次一行 JSON，放在設定檔旁（~/.epitype）。追查「壓縮後地圖與交接

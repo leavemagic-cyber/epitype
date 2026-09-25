@@ -757,10 +757,17 @@ def notice(event, vault, marker_directory, options=None, environ=None, home=None
         reading = measure(transcript, clock=clock)
         if reading is None:
             return None
-        stored = _rearm_if_stale(marker_directory, memspec.CONTEXT_METER_MARKER, reading.tokens)
-        if stored is not None:
-            _trace_rearm(event, stored, reading.tokens)
-        if reading.host == memspec.CONTEXT_METER_HOST_CODEX:
+        codex = reading.host == memspec.CONTEXT_METER_HOST_CODEX
+        if codex:
+            model = event.get("model") if isinstance(event.get("model"), str) and event.get("model") else reading.model
+            limit_now = lambda: _codex_limit_cached(model, marker_directory, environ, home)  # noqa: E731
+        else:
+            limit, source = threshold(options, state_path(vault), environ, home)
+            limit_now = limit
+        rearmed = _rearm_if_stale(marker_directory, memspec.CONTEXT_METER_MARKER, reading.tokens, limit_now)
+        if rearmed is not None:
+            _trace_rearm(event, rearmed[0], reading.tokens, rearmed[1])
+        if codex:
             due = codex_due(reading, marker_directory, environ, home, event.get("model"))
             if due is None:
                 return None
@@ -769,7 +776,6 @@ def notice(event, vault, marker_directory, options=None, environ=None, home=None
                 cur=_k(current), left=_k(limit - current),
                 path=os.fspath(_handoff(vault, session_id, transcript)))
             return line, memspec.CONTEXT_METER_MARKER, current
-        limit, source = threshold(options, state_path(vault), environ, home)
         if limit is None:
             return None
         current = reading.tokens
@@ -795,36 +801,51 @@ def _marker_tokens(path):
     return tokens if _positive_int(tokens) else None
 
 
-def _rearm_if_stale(marker_directory, marker, current):
-    """標記在、但現在的用量比標記記的跌了 REARM_DROP_RATIO 以上：移掉標記，回標記記的用量；
-    否則回 None。
+def _rearm_if_stale(marker_directory, marker, current, limit=None):
+    """標記在、而且已經壓縮過（兩條任一）：移掉標記，回 (標記記的用量或 None, 原因)；否則 None。
+
+    - drop：現在的用量比標記記的跌了 REARM_DROP_RATIO 以上。
+    - limit：壓縮點已知、用量低於壓縮點的 REARM_LIMIT_RATIO——舊格式標記沒有記用量，只靠這條。
+    `limit` 是數字或回數字的函式：Codex 的壓縮點要算，只在標記在、drop 不成立時才算。
 
     PreCompact 是清標記的主路，但它沒跑完（宿主逾時砍掉）的話，下一個週期就永遠不提醒。
     這裡要在「低點」就移掉：到了下一次提醒點，用量又爬回標記記的那一帶，就看不出來了。
-    移不掉就當它還在——寧可這一次不說，也不要每次都說。"""
+    移不掉就當它還在——寧可這一次不說，也不要每次都說。
+    危害（不修，只記）：讀完標記到刪掉之間若有別的行程剛搶到新標記，會刪到新的那個——只會
+    多說一次；而要同時讀到低用量與高用量，只有壓縮那一刻，那時 hook 不跑。"""
     if marker_directory is None or not _nonnegative_int(current):
         return None
     path = Path(marker_directory) / marker
-    stored = _marker_tokens(path)
-    if stored is None or current > stored * (1 - memspec.CONTEXT_METER_REARM_DROP_RATIO):
+    if not path.is_file():
         return None
+    stored = _marker_tokens(path)
+    if stored is not None and current <= stored * (1 - memspec.CONTEXT_METER_REARM_DROP_RATIO):
+        reason = "drop"
+    else:
+        try:
+            limit = limit() if callable(limit) else limit
+        except Exception:
+            limit = None
+        if not _positive_int(limit) or current >= limit * memspec.CONTEXT_METER_REARM_LIMIT_RATIO:
+            return None
+        reason = "limit"
     try:
         path.unlink()
     except FileNotFoundError:
         return None  # 同時間別的行程已經移掉了；由它記。
     except OSError:
         return None
-    return stored
+    return stored, reason
 
 
-def _trace_rearm(event, stored, current):
+def _trace_rearm(event, stored, current, reason):
     try:
         try:
             from . import meter_trace
         except ImportError:
             import meter_trace
         meter_trace.record(event.get("hook_event_name") or "meter", event, None,
-                           outcome="meter-rearmed", stored=stored, tokens=current)
+                           outcome="meter-rearmed", stored=stored, tokens=current, reason=reason)
     except Exception:
         pass
 
@@ -864,7 +885,10 @@ def claim(marker_directory, marker, tokens=None):
 
 
 def release(marker_directory, marker):
-    """放掉自己搶到、卻沒送出去的標記，讓下一次再試。只刪自己行程寫的那一份；永不丟例外。"""
+    """放掉自己搶到、卻沒送出去的標記，讓下一次再試。只刪自己行程寫的那一份；永不丟例外。
+
+    危害（不修，只記）：讀內容與刪檔之間不是原子的；那段時間裡標記只可能被 PreCompact 清掉，
+    最壞是刪到別人剛搶的標記、多說一次。"""
     try:
         path = Path(marker_directory) / marker
         with open(path, "rb") as stream:
@@ -1520,7 +1544,7 @@ def _selftest():
                            and not (broken_claim_dir / memspec.CONTEXT_METER_MARKER).exists()))
 
             # 8c. PreCompact 沒清到標記（Claude）：跌 ≥40% 才重新武裝、並記一行追蹤；舊格式
-            # 標記（沒有用量）不自己武裝，照舊等 PreCompact。
+            # 標記（沒有用量）靠第二條：用量低於門檻的 40% 才重新武裝。
             stale = root / "stale"
             stale_first = call(97500, stale)
             stale_dip = call(60000, stale)  # 60000 > 0.6×97500
@@ -1533,18 +1557,24 @@ def _selftest():
             legacy.mkdir()
             (legacy / memspec.CONTEXT_METER_MARKER).write_text(memspec.CONTEXT_METER_MARKER + "\n",
                                                                 encoding="ascii")
-            call(10000, legacy)
+            call(41000, legacy)  # ≥ 0.4×100000：不動
             legacy_kept = (legacy / memspec.CONTEXT_METER_MARKER).is_file() and call(98000, legacy) is None
+            call(39000, legacy)  # < 0.4×100000：重新武裝
+            legacy_rearmed = (not (legacy / memspec.CONTEXT_METER_MARKER).exists()
+                              and call(98000, legacy) is not None)
             trace_file = root / memspec.CONTEXT_METER_TRACE_FILENAME
             rearm_rows = [json.loads(line) for line in trace_file.read_text(encoding="utf-8").splitlines()
                           if '"meter-rearmed"' in line] if trace_file.is_file() else []
             checks.append(("Claude: a marker PreCompact left behind re-arms after a >=40% drop (traced), "
-                           "not after a smaller dip; a legacy marker without usage waits for PreCompact",
+                           "not after a smaller dip; a legacy marker re-arms only below 40% of the threshold",
                            stale_first is not None and stale_dip is None and stale_dip_kept
                            and stale_back is None and stale_drop is None and stale_cleared
-                           and stale_again is not None and legacy_kept
+                           and stale_again is not None and legacy_kept and legacy_rearmed
                            and any(row.get("stored") == 97500 and row.get("tokens") == 58000
-                                   and row.get("session") == "s1" for row in rearm_rows)))
+                                   and row.get("reason") == "drop"
+                                   and row.get("session") == "s1" for row in rearm_rows)
+                           and any(row.get("stored") is None and row.get("tokens") == 39000
+                                   and row.get("reason") == "limit" for row in rearm_rows)))
 
             # 8d. 唯讀 CLI：印檔在哪、開到哪一天，再印最後 N 行。
             printed = []
@@ -1862,12 +1892,23 @@ def _selftest():
             codex_low = codex_call(28000, directory=codex_stale)
             codex_low_cleared = not (codex_stale / memspec.CONTEXT_METER_MARKER).exists()
             codex_rearmed = codex_call(codex_point, directory=codex_stale)
+            codex_legacy = root / "codex-legacy"
+            codex_legacy.mkdir()
+            (codex_legacy / memspec.CONTEXT_METER_MARKER).write_text(
+                memspec.CONTEXT_METER_MARKER + "\n", encoding="ascii")
+            codex_call(85000, directory=codex_legacy)  # ≥ 0.4×210000 = 84000：不動
+            codex_legacy_kept = (codex_legacy / memspec.CONTEXT_METER_MARKER).is_file()
+            codex_call(83000, directory=codex_legacy)  # < 84000：重新武裝
+            codex_legacy_cleared = not (codex_legacy / memspec.CONTEXT_METER_MARKER).exists()
+            codex_legacy_again = codex_call(codex_point, directory=codex_legacy)
             checks.append(("Codex: a marker PreCompact left behind re-arms after a >=40% drop, "
-                           "not after a smaller dip",
+                           "not after a smaller dip; a legacy marker re-arms only below 40% of the limit",
                            codex_claimed is not None and codex_claimed[2] == codex_point
                            and codex_dip is None and codex_dip_kept and codex_back is None
                            and codex_low is None and codex_low_cleared
-                           and codex_rearmed is not None and codex_rearmed[0] == codex_claimed[0]))
+                           and codex_rearmed is not None and codex_rearmed[0] == codex_claimed[0]
+                           and codex_legacy_kept and codex_legacy_cleared
+                           and codex_legacy_again is not None))
 
             # C7. 壓縮點記在標記目錄：設定沒變就沿用，設定一變就重算。
             cache_dir = root / "codex-cache"

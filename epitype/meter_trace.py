@@ -65,17 +65,25 @@ def _clip(value):
     return str(value)[:_FIELD_MAX_CHARS]
 
 
-def _rotate(target, incoming):
-    """寫進去會超過上限就先把現檔換名成 `.1`（蓋掉更舊的那份）。換不了就照寫：多幾行無妨。"""
+def _room(target, incoming):
+    """這一行寫得下嗎。寫進去會超過上限就先把現檔換名成 `.1`（蓋掉更舊的那份）；換名失敗、
+    或這一行本身就比上限大，回 False——上限是硬的，寧可不記。"""
+    cap = memspec.CONTEXT_METER_TRACE_MAX_BYTES
+    if incoming > cap:
+        return False
     try:
-        if target.stat().st_size + incoming <= memspec.CONTEXT_METER_TRACE_MAX_BYTES:
-            return
+        size = target.stat().st_size
+    except FileNotFoundError:
+        return True
     except OSError:
-        return
+        return False
+    if size + incoming <= cap:
+        return True
     try:
         os.replace(target, target.with_name(target.name + ".1"))
     except OSError:
-        pass
+        return False
+    return True
 
 
 def record(event_name, event=None, started_at=None, codex=False, path=None, now=None, options=None,
@@ -84,8 +92,8 @@ def record(event_name, event=None, started_at=None, codex=False, path=None, now=
 
     設定檔所在的目錄不在就不寫（不替沒裝 Epitype 的機器建目錄）。換名與追加在同一把短鎖
     裡：Windows 的 O_APPEND 是「先移到檔尾再寫」，並行的幾個 hook 會寫在同一個位移、互相
-    蓋掉（2026-09-26 實測 6 個並行行程只留下 5 行）。拿不到鎖照樣寫——少一行比卡住掛鉤好，
-    而且只會在很多 hook 同時寫時發生。
+    蓋掉（2026-09-26 實測 6 個並行行程只留下 5 行）。等不到鎖就不寫這一行：少一行比寫出
+    交錯、壞掉的 JSON 好。上限是硬的：換名失敗而檔已經放不下這一行，也不寫。
 
     鎖是旁邊一個不刪的 `.mutex` 檔上的作業系統鎖（Windows 位元組鎖、POSIX flock），不用
     memspec.file_lock：那把鎖每次建檔＋fsync＋刪檔，實測一次 16 ms，是這一行本身的上百倍。
@@ -110,17 +118,18 @@ def record(event_name, event=None, started_at=None, codex=False, path=None, now=
         binary = getattr(os, "O_BINARY", 0)
         mutex = os.open(target.with_name(target.name + ".mutex"), os.O_RDWR | os.O_CREAT | binary, 0o600)
         try:
-            locked = _acquire(mutex, time.monotonic() + memspec.CONTEXT_METER_TRACE_LOCK_SECONDS)
+            if not _acquire(mutex, time.monotonic() + memspec.CONTEXT_METER_TRACE_LOCK_SECONDS):
+                return False
             try:
-                _rotate(target, len(line))
+                if not _room(target, len(line)):
+                    return False
                 descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_APPEND | binary, 0o600)
                 try:
                     os.write(descriptor, line)
                 finally:
                     os.close(descriptor)
             finally:
-                if locked:
-                    _release(mutex)
+                _release(mutex)
         finally:
             os.close(mutex)
         return True
@@ -288,6 +297,32 @@ def _selftest():
                            and record("x", "not-a-dict", path=target, now="not-a-time", options={}) is False))
             checks.append(("last() on a missing file is empty", last(5, root / "absent.jsonl") == []))
 
+            # 等不到鎖就不寫（不換名、不追加）；換名失敗而放不下，也不寫——上限是硬的。
+            held = root / "held.jsonl"
+            held.write_bytes(b'{"kept":1}\n')
+            holder = os.open(held.with_name(held.name + ".mutex"), os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0))
+            try:
+                held_lock = _acquire(holder, time.monotonic() + 1)
+                started = time.monotonic()
+                skipped = record("x", event, path=held, now=now, options={})
+                waited = time.monotonic() - started
+            finally:
+                if held_lock:
+                    _release(holder)
+                os.close(holder)
+            stuck = root / "stuck.jsonl"
+            stuck_bytes = b"z" * (memspec.CONTEXT_METER_TRACE_MAX_BYTES - 10) + b"\n"
+            stuck.write_bytes(stuck_bytes)
+            stuck.with_name(stuck.name + ".1").mkdir()  # 換名目標是目錄：換名一定失敗
+            over_cap = record("x", event, path=stuck, now=now, options={})
+            checks.append(("no lock within the wait means no line; a failed rotation over the cap writes nothing",
+                           held_lock and skipped is False
+                           and waited >= memspec.CONTEXT_METER_TRACE_LOCK_SECONDS * 0.9
+                           and held.read_bytes() == b'{"kept":1}\n'
+                           and not held.with_name(held.name + ".1").exists()
+                           and over_cap is False and stuck.read_bytes() == stuck_bytes
+                           and record("x", event, path=held, now=now, options={}) is True))
+
             # 配對：同一個 run 的開始與結束併成一列；只有開始的醒目標出；只有結束的、其他行照印。
             sample = [
                 json.dumps({"event": "PreCompact", "phase": "start", "run": "a1"}),
@@ -329,7 +364,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 8
+    total = 9
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
