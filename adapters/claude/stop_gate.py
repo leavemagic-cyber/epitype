@@ -40,6 +40,7 @@ from _hook_common import (
     native_cwd_vaults,
     read_event,
     recall_marker_directory,
+    remaining_seconds,
     run_synthetic,
     sequence_fields,
     with_session,
@@ -56,7 +57,8 @@ _DECISION_CACHE_FILENAME = "stop_decisions.json"
 # The cached entry is discovery only — whether this card declares a ruling at all.
 # Every authority the gate acts on is re-read from this turn's bytes below, so a
 # ruling that gained fields (require_when/require_text/advice) needs no version bump.
-_DECISION_CACHE_VERSION = 6
+# 7：fence_shell 成為武裝欄位——舊快取把只帶它的卡記成「不是裁定」，不換版就要等輪替才認得。
+_DECISION_CACHE_VERSION = 7
 _KEY = "key"
 _DECIDED_AT = "decided_at"
 _QUOTE = "quote"
@@ -81,9 +83,10 @@ def _turn(texts=(), prompt="", dispatch="", calls_after_dispatch=0):
 _Decision = namedtuple(
     "_Decision",
     "key decided_at quote forbidden aliases path decided_by require_when require_text advice"
-    " applies_to turn_check turn_check_limit on_hit",
-    # 只有最後一欄有預設值：沒標處置的卡就是「照擋」，既有的建構處不必跟著改。
-    defaults=("",),
+    " applies_to turn_check turn_check_limit on_hit fence_shell fence_langs",
+    # 只有最後幾欄有預設值：沒標處置的卡就是「照擋」，沒宣告殼層的卡不查圍籬區塊；
+    # 既有的建構處不必跟著改。
+    defaults=("", "", ()),
 )
 
 
@@ -116,6 +119,7 @@ def _decision_frontmatter(path):
         memspec.FORBIDDEN_FIELD,
         memspec.REQUIRE_WHEN_FIELD,
         memspec.TURN_CHECK_FIELD,
+        memspec.FENCE_SHELL_FIELD,
     ):
         lines = declared_frontmatter(
             path, field, memspec.STOP_GATE_FRONTMATTER_MAX_BYTES
@@ -150,7 +154,8 @@ def _read_decision(path):
         key = _one_line(fields.get(memspec.NAME_FIELD))
         if not key or status in memspec.STOP_GATE_SILENT_STATUSES:
             return None
-    sequences = sequence_fields(front_lines, (memspec.ALIASES_FIELD, memspec.FORBIDDEN_FIELD))
+    sequences = sequence_fields(
+        front_lines, (memspec.ALIASES_FIELD, memspec.FORBIDDEN_FIELD, memspec.FENCE_LANGS_FIELD))
     decided_by = _one_line(fields.get(memspec.DECIDED_BY_FIELD))
     quote = _one_line(fields.get(memspec.OWNER_QUOTE_FIELD))
     if not quote and decided_by != memspec.OWNER_EXPLICIT_DECIDER:
@@ -174,6 +179,10 @@ def _read_decision(path):
         memspec.TURN_CHECK_FIELD: _one_line(fields.get(memspec.TURN_CHECK_FIELD)).casefold(),
         memspec.TURN_CHECK_LIMIT_FIELD: _one_line(fields.get(memspec.TURN_CHECK_LIMIT_FIELD)),
         memspec.ON_HIT_FIELD: _one_line(fields.get(memspec.ON_HIT_FIELD)).casefold(),
+        memspec.FENCE_SHELL_FIELD: _one_line(fields.get(memspec.FENCE_SHELL_FIELD)).casefold(),
+        memspec.FENCE_LANGS_FIELD: [
+            _one_line(item).casefold() for item in sequences[memspec.FENCE_LANGS_FIELD]
+        ],
     }
 
 
@@ -200,6 +209,9 @@ def _decision_from_ruling(vault, card_path, ruling):
         _one_line(ruling.get(memspec.TURN_CHECK_FIELD)).casefold(),
         _one_line(ruling.get(memspec.TURN_CHECK_LIMIT_FIELD)),
         _one_line(ruling.get(memspec.ON_HIT_FIELD)).casefold(),
+        fence_shell=_one_line(ruling.get(memspec.FENCE_SHELL_FIELD)).casefold(),
+        fence_langs=tuple(
+            item.casefold() for item in _strings(ruling.get(memspec.FENCE_LANGS_FIELD))),
     )
 
 
@@ -963,6 +975,194 @@ def _verdict(event, message, config, started_at, defects, turn=None):
     return {"decision": "block", "reason": reason + memspec.STOP_GATE_REWRITE_HINT}
 
 
+# 開頭圍籬：行首（可縮排，清單裡的區塊會縮）三個以上反引號或波浪號，後面第一個詞是語言
+# 標記。反引號圍籬的標記裡不能再有反引號（CommonMark），所以一行裡的 ```bash``` 不算。
+_FENCE_OPEN_REGEX = re.compile(r"^([ \t]*)(`{3,}|~{3,})[ \t]*([^\s`]*)[^`]*$")
+_SHELL_ERROR_LINE_REGEX = re.compile(r"\bline (\d+)|:\s*(\d+):")
+# 一個 powershell.exe 解析全部區塊，只解析、不執行。輸入是 stdin 上的 JSON（全 ASCII，
+# 中文走 \u 跳脫），輸出每區塊一行；錯誤訊息轉成 UTF-8 的 base64，避開主控台字碼頁。
+_POWERSHELL_PARSE_SCRIPT = r"""
+$ProgressPreference = 'SilentlyContinue'
+$raw = [Console]::In.ReadToEnd()
+$blocks = @((ConvertFrom-Json -InputObject $raw).blocks)
+$lines = @()
+for ($i = 0; $i -lt $blocks.Count; $i++) {
+  $tokens = $null; $errors = $null
+  [void][System.Management.Automation.Language.Parser]::ParseInput([string]$blocks[$i], [ref]$tokens, [ref]$errors)
+  if ($errors.Count -gt 0) {
+    $message = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$errors[0].Message))
+    $lines += "$i`t$($errors[0].Extent.StartLineNumber)`t$message"
+  } else {
+    $lines += "$i`tok"
+  }
+}
+[Console]::Out.Write(($lines -join "`n"))
+"""
+# 同一回合、同一殼層、同一批區塊只解析一次：兩張卡都宣告 powershell 時不起兩個行程。
+_FENCE_RESULTS = {}
+
+
+def _shell_fences(message):
+    """[(第幾個圍籬區塊, 語言標記, 內容)]，只收有語言標記的；未閉合的一路到結尾。"""
+    lines = str(message or "").splitlines()
+    fences = []
+    ordinal = 0
+    index = 0
+    while index < len(lines):
+        opening = _FENCE_OPEN_REGEX.match(lines[index])
+        index += 1
+        if opening is None:
+            continue
+        indent, marker, lang = opening.groups()
+        ordinal += 1
+        body = []
+        while index < len(lines):
+            line = lines[index]
+            index += 1
+            stripped = line.strip()
+            if stripped and set(stripped) == {marker[0]} and len(stripped) >= len(marker):
+                break
+            body.append(line[len(indent):] if line.startswith(indent) else line.lstrip())
+        if lang:
+            fences.append((ordinal, lang.casefold(), "\n".join(body)))
+    return fences
+
+
+def _powershell_executable():
+    # 指名 Windows PowerShell 5.1 本尊：PATH 上的 powershell 可能被別的東西蓋掉，而 owner
+    # 按執行跑的是這一支。找不到才交給 PATH，那裡也沒有就是 FileNotFoundError → 放行。
+    root = os.environ.get("SystemRoot") or os.environ.get("SYSTEMROOT")
+    if root:
+        candidate = Path(root) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+        if candidate.is_file():
+            return os.fspath(candidate)
+    return "powershell.exe"
+
+
+def _parse_powershell(blocks, timeout, executable=None):
+    import base64
+    import subprocess
+
+    encoded = base64.b64encode(_POWERSHELL_PARSE_SCRIPT.encode("utf-16-le")).decode("ascii")
+    result = subprocess.run(
+        [executable or _powershell_executable(), "-NoLogo", "-NoProfile", "-NonInteractive",
+         "-EncodedCommand", encoded],
+        input=json.dumps({"blocks": blocks}, ensure_ascii=True),
+        capture_output=True, text=True, encoding="ascii", errors="replace",
+        timeout=timeout, check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"powershell exit {result.returncode}")
+    parsed = {}
+    for line in result.stdout.splitlines():
+        parts = line.strip().split("\t")
+        if len(parts) == 2 and parts[1] == "ok":
+            parsed[int(parts[0])] = None
+        elif len(parts) == 3:
+            text = base64.b64decode(parts[2]).decode("utf-8", errors="replace")
+            parsed[int(parts[0])] = (int(parts[1]), _one_line(text))
+    if sorted(parsed) != list(range(len(blocks))):
+        raise ValueError("parser output malformed")
+    return [parsed[position] for position in range(len(blocks))]
+
+
+def _parse_posix(shell, blocks, timeout, executable=None):
+    import shutil
+    import subprocess
+
+    executable = executable or shutil.which(shell)
+    if not executable:
+        raise FileNotFoundError(shell)
+    deadline = time.monotonic() + timeout
+    results = []
+    for body in blocks:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(shell)
+        result = subprocess.run(
+            [executable, "-n"], input=body, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=remaining, check=False,
+        )
+        if result.returncode == 0:
+            results.append(None)
+            continue
+        first = next((line for line in result.stderr.splitlines() if line.strip()), "")
+        # 只有殼層自己說「語法錯」才算數。非零結束也可能是殼層本身壞了（Windows 上
+        # PATH 裡的 bash 可能是沒裝發行版的 WSL 啟動器）——那要放行，不能當成語法錯擋人。
+        if "syntax error" not in first.casefold():
+            raise RuntimeError(f"{shell} exit {result.returncode}")
+        found = _SHELL_ERROR_LINE_REGEX.search(first)
+        line_number = int(next(group for group in found.groups() if group)) if found else 1
+        results.append((line_number, _one_line(first)))
+    return results
+
+
+def _parse_shell_blocks(shell, blocks, timeout, executable=None):
+    """每個區塊的第一個語法錯誤 (行號, 訊息)，沒錯回 None。解析器出事一律丟例外。"""
+    if shell == memspec.FENCE_SHELL_POWERSHELL:
+        return _parse_powershell(blocks, timeout, executable)
+    return _parse_posix(shell, blocks, timeout, executable)
+
+
+def _fence_shell_gap(decision, message, event, started_at, defects, parser=None):
+    """宣告了 fence_shell 的卡：這回合的指令區塊能不能被那個殼層解析。能擋就回理由。
+
+    只驗語法、不執行。解析器不存在、逾時、出例外一律放行，並在 stderr 留一行。"""
+    shell = decision.fence_shell
+    if not shell:
+        return None
+    # 子代理的回報是給主線讀的，owner 不會在那裡按執行。
+    if isinstance(event, dict) and event.get("hook_event_name") == memspec.SUBAGENT_STOP_EVENT:
+        return None
+    if shell not in memspec.FENCE_SHELL_VALUES:
+        defects.append(memspec.STOP_GATE_FENCE_SHELL_SKIPPED_DEFECT.format(
+            decision=decision.key,
+            reason=memspec.STOP_GATE_FENCE_SHELL_UNKNOWN_REASON.format(
+                value=shell, allowed="/".join(memspec.FENCE_SHELL_VALUES))))
+        return None
+    langs = frozenset(decision.fence_langs or memspec.FENCE_SHELL_DEFAULT_LANGS)
+    fences = [fence for fence in _shell_fences(message) if fence[1] in langs]
+    if not fences:
+        return None
+    if len(fences) > memspec.FENCE_SHELL_MAX_BLOCKS:
+        defects.append(memspec.STOP_GATE_FENCE_SHELL_TRUNCATED_DEFECT.format(
+            decision=decision.key, checked=memspec.FENCE_SHELL_MAX_BLOCKS, total=len(fences)))
+        fences = fences[: memspec.FENCE_SHELL_MAX_BLOCKS]
+    blocks = [body for _ordinal, _lang, body in fences]
+    cache_key = (shell, tuple(blocks))
+    results = _FENCE_RESULTS.get(cache_key)
+    if results is None:
+        timeout = min(memspec.FENCE_SHELL_TIMEOUT_SECONDS, remaining_seconds(started_at))
+        try:
+            if timeout <= 0:
+                raise TimeoutError("hook deadline reached")
+            results = (parser or _parse_shell_blocks)(shell, blocks, timeout)
+        except Exception as exc:
+            reason = type(exc).__name__
+            defects.append(memspec.STOP_GATE_FENCE_SHELL_SKIPPED_DEFECT.format(
+                decision=decision.key, reason=reason))
+            _FENCE_RESULTS[cache_key] = reason
+            return None
+        _FENCE_RESULTS[cache_key] = results
+    if isinstance(results, str):
+        return None
+    display = memspec.FENCE_SHELL_DISPLAY[shell]
+    for (ordinal, lang, body), error in zip(fences, results):
+        if error is None:
+            continue
+        line_number, text = error
+        body_lines = body.splitlines()
+        snippet = body_lines[line_number - 1] if 0 < line_number <= len(body_lines) else ""
+        return memspec.STOP_GATE_FENCE_SHELL_REASON.format(
+            index=ordinal, lang=lang, shell=display, line=line_number,
+            snippet=_one_line(snippet)[: memspec.FENCE_SHELL_SNIPPET_MAX_CHARS],
+            # 解析器訊息自帶句點，句子的收尾交給樣板。
+            error=text.rstrip("。. ")[: memspec.FENCE_SHELL_ERROR_MAX_CHARS],
+            decision=_named(decision),
+        )
+    return None
+
+
 def _first_violation(decisions, event, message, config, started_at, defects, turn=None):
     """這批裁定裡第一個被違反的：(裁定, 哪一類, 要說的話, 命中的字)；都沒有回 None。"""
     verdicts = []
@@ -1019,6 +1219,16 @@ def _first_violation(decisions, event, message, config, started_at, defects, tur
             if reason is None:
                 continue
             verdicts.append((decision, _TURN_CHECK_RULE, reason, ""))
+            break
+    if not verdicts:
+        # 圍籬區塊在上面的字面比對裡是遮掉的（2026-09-19）；這一道不看字面，直接問 owner
+        # 按執行時會跑它的那個殼層「這段合不合法」。沒有卡宣告殼層、或沒有相符的區塊時，
+        # 一個行程都不起。
+        for decision in decisions:
+            reason = _fence_shell_gap(decision, message, event, started_at, defects)
+            if reason is None:
+                continue
+            verdicts.append((decision, memspec.FENCE_SHELL_RULE, reason, ""))
             break
     if not verdicts:
         for decision in decisions:
@@ -1447,6 +1657,201 @@ def _selftest():
                 and before == after,
             ))
 
+            # ---- fence_shell：指令區塊交給 owner 實際的殼層解析器驗語法 ----
+            fence_vault = root / "fence-vault"
+            fence_vault.mkdir()
+            (fence_vault / "run-button.md").write_text(
+                "---\n"
+                "name: 執行鍵區塊\n"
+                "description: 2026-09-25 給 owner 的指令區塊要能在 Windows PowerShell 5.1 直接跑\n"
+                f"{memspec.ALIASES_FIELD}: [執行鍵]\n"
+                f"{memspec.FENCE_SHELL_FIELD}: {memspec.FENCE_SHELL_POWERSHELL}\n"
+                "metadata:\n  type: feedback\n"
+                "---\nbody\n",
+                encoding="utf-8",
+            )
+            fence_config = root / "fence-config.json"
+            write_config(fence_config, [fence_vault])
+            home = {"HOME": os.fspath(root), "USERPROFILE": os.fspath(root)}
+
+            def fence_run(message):
+                session_id = f"stopgate-fence-{uuid.uuid4().hex}"
+                sessions.append(session_id)
+                result = synthetic(
+                    {"session_id": session_id, "hook_event_name": "Stop",
+                     "stop_hook_active": False, "last_assistant_message": message},
+                    fence_config, environment=home,
+                )
+                value = json.loads(result.stdout) if result.stdout.strip() else {}
+                return result, value, session_id
+
+            # 2026-09-25 原句：宿主要求標 bash，owner 按下去是 PowerShell 5.1 → ParserError。
+            original = 'cd C:/titan && PYTHONIOENCODING=utf-8 "...python.exe" "...py"'
+            bad_result, bad_value, bad_session = fence_run(
+                "好，直接跑這個：\n```bash\n" + original + "\n```\n")
+            bad_reason = bad_value.get("reason", "")
+            fence_log = fence_vault / memspec.GATE_LOG_FILENAME
+            fence_rows = [
+                json.loads(line)
+                for line in (fence_log.read_text(encoding="utf-8").splitlines()
+                             if fence_log.exists() else ())
+                if line.strip()
+            ]
+            checks.append((
+                "fence_shell: 09-25 原句放在 ```bash 區塊 → 擋，點名卡、第幾個區塊、行號與解析器訊息",
+                bad_result.returncode == 0
+                and bad_value.get("decision") == "block"
+                and "執行鍵區塊" in bad_reason
+                and "第 1 個程式碼區塊（bash）" in bad_reason
+                and "Windows PowerShell 5.1" in bad_reason
+                and "第 1 行" in bad_reason
+                and "&&" in bad_reason
+                and "owner 按執行會直接失敗" in bad_reason
+                and any(
+                    row.get("kind") == memspec.STOP_GATE_LOG_KIND
+                    and row.get("decision") == "執行鍵區塊"
+                    and row.get("rule") == memspec.FENCE_SHELL_RULE
+                    and row.get("session_id") == bad_session
+                    for row in fence_rows
+                ),
+            ))
+            good_result, good_value, _ = fence_run(
+                "兩個都可以直接按：\n```powershell\n"
+                '$env:PYTHONIOENCODING = "utf-8"; & "C:\\python.exe" "C:\\a.py"\n'
+                "```\n以及\n```bash\ngit -C C:\\repo log --oneline -5\n```\n")
+            checks.append((
+                "fence_shell: $env: 寫法與 git -C 都是合法 PowerShell → 放行，stderr 乾淨",
+                good_result.returncode == 0
+                and not good_result.stdout.strip()
+                and not good_result.stderr.strip(),
+            ))
+            prose_result, _prose_value, _ = fence_run(
+                "先 cd C:/titan && python a.py 再看結果；沒標語言的區塊不查：\n"
+                "```\ncd C:/titan && python a.py\n```\n")
+            checks.append((
+                "fence_shell: 區塊外的 && 與未標語言的區塊都不受影響",
+                prose_result.returncode == 0
+                and not prose_result.stdout.strip()
+                and not prose_result.stderr.strip(),
+            ))
+
+            fence_decision = _Decision(
+                key="執行鍵區塊", decided_at="", quote="", forbidden=(), aliases=(),
+                path=fence_vault / "run-button.md", decided_by="", require_when="",
+                require_text="", advice="", applies_to="", turn_check="",
+                turn_check_limit="", fence_shell=memspec.FENCE_SHELL_POWERSHELL,
+            )
+            bad_block = "```bash\n" + original + "\n```\n"
+            calls = []
+
+            def recording(shell, blocks, timeout):
+                calls.append((shell, list(blocks)))
+                return [None] * len(blocks)
+
+            _FENCE_RESULTS.clear()
+            skipped = [
+                _fence_shell_gap(fence_decision, "先 cd a && b，再看。", {}, time.monotonic(), [],
+                                 parser=recording),
+                _fence_shell_gap(fence_decision, "```\ncd a && b\n```", {}, time.monotonic(), [],
+                                 parser=recording),
+                _fence_shell_gap(fence_decision._replace(fence_langs=("powershell",)), bad_block,
+                                 {}, time.monotonic(), [], parser=recording),
+                _fence_shell_gap(fence_decision, bad_block,
+                                 {"hook_event_name": memspec.SUBAGENT_STOP_EVENT},
+                                 time.monotonic(), [], parser=recording),
+            ]
+            checks.append((
+                "fence_shell: 沒有相符區塊（散文、未標語言、不在 fence_langs、子代理）時解析器一次都不起",
+                skipped == [None, None, None, None] and calls == [],
+            ))
+
+            saved_parser = globals()["_parse_shell_blocks"]
+            globals()["_parse_shell_blocks"] = recording
+            try:
+                _FENCE_RESULTS.clear()
+                plain_decisions = _decisions(vault, time.monotonic(), [])
+                no_fence_verdict = _first_violation(
+                    plain_decisions, {}, "照這樣跑：\n" + bad_block,
+                    {memspec.CONFIG_VAULTS_FIELD: [vault], "_unavailable_vaults": []},
+                    time.monotonic(), [],
+                )
+            finally:
+                globals()["_parse_shell_blocks"] = saved_parser
+            checks.append((
+                "fence_shell: 沒有任何卡宣告 fence_shell 時，即使有壞的 bash 區塊也完全不啟動解析器",
+                plain_decisions
+                and not any(decision.fence_shell for decision in plain_decisions)
+                and no_fence_verdict is None
+                and calls == [],
+            ))
+
+            _FENCE_RESULTS.clear()
+            late_defects = []
+            late = _fence_shell_gap(
+                fence_decision, bad_block, {}, time.monotonic(), late_defects,
+                parser=lambda shell, blocks, timeout: _parse_powershell(blocks, 0.001))
+            _FENCE_RESULTS.clear()
+            missing_defects = []
+            missing = _fence_shell_gap(
+                fence_decision, bad_block, {}, time.monotonic(), missing_defects,
+                parser=lambda shell, blocks, timeout: _parse_powershell(
+                    blocks, timeout, executable=os.fspath(root / "no-such" / "powershell.exe")))
+            checks.append((
+                "fence_shell: 解析器逾時或不存在 → 放行，stderr 留一行點名卡與原因",
+                late is None
+                and len(late_defects) == 1
+                and "執行鍵區塊" in late_defects[0]
+                and ("TimeoutExpired" in late_defects[0] or "FileNotFoundError" in late_defects[0])
+                and missing is None
+                and len(missing_defects) == 1
+                and "FileNotFoundError" in missing_defects[0],
+            ))
+
+            _FENCE_RESULTS.clear()
+            unknown_defects = []
+            unknown = _fence_shell_gap(fence_decision._replace(fence_shell="pwsh"), bad_block, {},
+                                       time.monotonic(), unknown_defects, parser=recording)
+            checks.append((
+                "fence_shell: 值不在允許集合 → 不猜殼層、放行並點名",
+                unknown is None and calls == []
+                and len(unknown_defects) == 1 and "pwsh" in unknown_defects[0],
+            ))
+
+            _FENCE_RESULTS.clear()
+            counted = []
+
+            def counting(shell, blocks, timeout):
+                counted.append(len(blocks))
+                return _parse_shell_blocks(shell, blocks, timeout)
+
+            second_bad = _fence_shell_gap(
+                fence_decision,
+                "```powershell\ngit status\n```\n說明文字\n```ps1\nif ($x) {\n  Write-Host a\n```\n",
+                {}, time.monotonic(), [], parser=counting)
+            checks.append((
+                "fence_shell: 全部區塊一個行程一次解析；錯在第 2 個區塊就點名第 2 個",
+                counted == [2]
+                and second_bad is not None
+                and "第 2 個程式碼區塊（ps1）" in second_bad,
+            ))
+
+            import shutil as _shutil
+
+            _FENCE_RESULTS.clear()
+            bash_decision = fence_decision._replace(fence_shell=memspec.FENCE_SHELL_BASH)
+            bash_defects = []
+            bash_ok = _fence_shell_gap(bash_decision, bad_block, {}, time.monotonic(), bash_defects)
+            bash_bad = _fence_shell_gap(bash_decision, "```sh\nif [ -f a ]; then\n  echo a\n```",
+                                        {}, time.monotonic(), bash_defects)
+            checks.append((
+                "fence_shell: bash 用 -n 驗——09-25 原句在 bash 合法、少了 fi 的 if 擋下（沒有 bash 則放行並點名）",
+                (bash_ok is None and bash_bad is not None and "bash" in bash_bad
+                 and "syntax error" in bash_bad and not bash_defects)
+                if _shutil.which("bash")
+                else (bash_ok is None and bash_bad is None and bash_defects),
+            ))
+            _FENCE_RESULTS.clear()
+
             # 逾時放行是設計，但它必須跟「判斷沒擋」分得開：同一句禁語在期限已過的時鐘下
             # 不擋、不記帳，而且 stderr 明說這一回合沒檢查。
             late_session = f"stopgate-late-{uuid.uuid4().hex}"
@@ -1484,7 +1889,7 @@ def _selftest():
             clear_recall_markers(session_id)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 23
+    total = 32
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

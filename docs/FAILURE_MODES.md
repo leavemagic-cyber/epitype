@@ -587,6 +587,15 @@ ASCII 直引號 `'…'` 沿用 `RULING_QUOTED_TEXT_PATTERN` 既有的排除，�
 的稽核列來。以前繞過去之後，閘、稽核、夜報三個地方同時看不到；現在分不出來的東西
 至少數得出來。
 
+**2026-09-25 圍籬區塊另走一條路。** 回合閘 2026-09-19 起把圍籬程式碼區塊整塊遮掉再比對
+（一天誤擋八次），這道遮罩不變，代價是字面規則在圍籬裡看不見東西。但「owner 按執行就
+失敗」這一類不必靠字面猜：卡片宣告 `fence_shell`（`powershell`＝Windows PowerShell 5.1
+的 `powershell.exe`、`bash`、`sh`）時，閘把有語言標記的圍籬區塊交給那個殼層的解析器
+只驗語法、不執行（PowerShell 用 `Parser::ParseInput`，一個行程驗全部區塊；bash／sh 用
+`-n`），解析失敗就擋。解析器不存在、逾時（5 秒）或出例外一律放行，stderr 留一行；沒有
+卡宣告、或沒有相符區塊時一個行程都不起。`unenforceable` 的理由若是「閘門看不到／只比對
+純文字」，card_lint 給 WARN：那是 Epitype 的缺口，不是規則綁不住。
+
 ### Self-verification
 
 ```powershell

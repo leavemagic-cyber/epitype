@@ -20,6 +20,32 @@ PASS、PASS、FAIL 20/22、FAIL 20/22），每次失敗的題目都不同。根�
 - 時鐘凍住後子行程不再在 9 秒自己收手，原本跟期限綁在一起的 19 秒子行程上限改成 120 秒，只用來
   抓卡死（96 個忙迴圈下單次實測 18 秒）。沒有刪題、沒有放寬任何斷言；分母 22→23。
 
+### 指令區塊用使用者實際的殼層解析器驗語法（`fence_shell`）
+
+2026-09-25 模型給了 `cd C:/titan && PYTHONIOENCODING=utf-8 "...python.exe" "...py"`（標 `bash`），
+owner 按下執行鍵，跑在 Windows PowerShell 5.1，ParserError、什麼都沒跑。對應的卡寫著
+`unenforceable: …Stop 閘比對的是純文字`——那不是規則綁不住，是閘門看不到。
+
+- **2026-09-19 的圍籬遮罩不變**：字面規則（forbidden 等）照舊看不到程式碼區塊裡的字。
+  新的是另一條路：不猜字面，直接用真的解析器驗語法。
+- 新卡片欄位 `fence_shell`（`powershell`＝Windows PowerShell 5.1 的 `powershell.exe`、不是
+  pwsh；`bash`；`sh`），選填 `fence_langs`（要查的語言標記，預設 bash、sh、shell、zsh、console、
+  powershell、pwsh、ps1、ps、cmd、bat，不分大小寫；未標語言的區塊不查）。
+- 回合閘：有現行卡宣告 `fence_shell` 時，取出這一回合相符標記的圍籬區塊，只解析、不執行——
+  PowerShell 用 `[System.Management.Automation.Language.Parser]::ParseInput`，一個
+  `powershell.exe -NoProfile -NonInteractive` 行程經 stdin 的 JSON 一次驗全部區塊；bash／sh 用
+  `-n`，而且只有殼層自己說 syntax error 才算數。解析失敗就擋，理由點名卡、第幾個區塊、行號、
+  那一行與解析器的第一個錯誤，並提示 owner 按執行會直接失敗。稽核列照舊只記規則（`fence_shell`）
+  與卡名。解析器不存在、逾時（5 秒，且不超過掛鉤剩餘期限）、出例外 → 放行並在 stderr 留一行。
+  沒有卡宣告、或沒有相符區塊時一個行程都不起；子代理結束（SubagentStop）不查——那段話是給主線
+  讀的，owner 不會在那裡按執行。Codex 的 `stop.py` 是同一支 `stop_gate.py` 的轉接，判斷共用。
+- 決策快取版本 6→7：舊快取把只帶 `fence_shell` 的卡記成「不是裁定」，不換版要等輪替才認得。
+- `card_lint`：`fence_shell` 算武裝欄位；值不在 `powershell|bash|sh` → FAIL；包進下一層 →
+  FAIL（disarmed-field）；只有 `fence_langs` → FAIL。`unenforceable` 的理由若是「閘門看不到／
+  比對純文字／gate can't see」一類 → WARN「這是 Epitype 的缺口不是做不到：修 Epitype 讓閘門看得到，
+  或改用能擋的欄位」。夜間重放（compliance）與夢的武裝判定也把 `fence_shell` 算成武裝。
+- 自測：stop_gate 23→32、card_lint 47→50、compliance 29→30。
+
 ### Claude Code 的 context 用量計＋壓縮前交接
 
 這個功能取代 owner 2026-09-17 的「上下文快滿提醒廢除，不重做」裁定（`decision-no-context-pressure-reminder-20260917`；依 owner 2026-09-25 的指示）。

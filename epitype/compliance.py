@@ -85,6 +85,9 @@ def armed_rules(vault):
             # 它們數成「沒武裝」，而它們每一回合都在擋。
             if _one_line(ruling.get(memspec.TURN_CHECK_FIELD)) in memspec.TURN_CHECK_NAMES:
                 rules.append(Rule(name, "turn_check", path, mtime, [], "", "", "", ()))
+            # 圍籬區塊的殼層語法檢查同理：要起解析器，重放不做，但它是武裝。
+            if _one_line(ruling.get(memspec.FENCE_SHELL_FIELD)) in memspec.FENCE_SHELL_VALUES:
+                rules.append(Rule(name, memspec.FENCE_SHELL_RULE, path, mtime, [], "", "", "", ()))
         try:
             guard = pretooluse_gate._read_guard(path)
         except Exception:
@@ -262,7 +265,7 @@ def replay(rules, transcripts, epoch=None, since=None):
                             hits.append(Hit(rule.card, "guard", session, stamp,
                                             "＋".join(rule.fragments), _digest(payload), True, payload))
                     continue
-                if rule.kind == "turn_check":
+                if rule.kind in ("turn_check", memspec.FENCE_SHELL_RULE):
                     # 內建檢查重放不了：長度要看 owner 那一次有沒有要求完整，引用要看
                     # 那一場的工具往來附記，兩樣都不在這裡的文字裡。夜間要知道它們擋了
                     # 幾次，讀閘門紀錄，不要從文字重猜——猜出來的數字比沒有數字更糟。
@@ -847,6 +850,18 @@ def _selftest():
                 "三種武裝欄位都被讀成規則",
                 kinds == ["forbidden", "guard", "require"],
             ))
+            fence_vault = root / "fence-vault"
+            fence_vault.mkdir()
+            (fence_vault / "run-button.md").write_text(
+                "---\nname: 執行鍵\ndescription: 2026-09-25 指令區塊\naliases: [執行鍵]\n"
+                f"{memspec.FENCE_SHELL_FIELD}: {memspec.FENCE_SHELL_POWERSHELL}\n"
+                "metadata:\n  type: feedback\n---\nbody\n",
+                encoding="utf-8",
+            )
+            checks.append((
+                "只帶 fence_shell 的卡也算武裝，不會被夜間報表數成沒武裝",
+                [rule.kind for rule in armed_rules(fence_vault)] == [memspec.FENCE_SHELL_RULE],
+            ))
 
             session = "s-" + uuid.uuid4().hex
 
@@ -1143,7 +1158,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 29
+    total = 30
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
