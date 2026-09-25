@@ -887,8 +887,8 @@ def claim(marker_directory, marker, tokens=None):
 def release(marker_directory, marker):
     """放掉自己搶到、卻沒送出去的標記，讓下一次再試。只刪自己行程寫的那一份；永不丟例外。
 
-    危害（不修，只記）：讀內容與刪檔之間不是原子的；那段時間裡標記只可能被 PreCompact 清掉，
-    最壞是刪到別人剛搶的標記、多說一次。"""
+    危害（不修，只記）：讀內容與刪檔之間不是原子的；那段時間裡標記可能被 PreCompact 或
+    另一個行程的重新武裝（_rearm_if_stale）刪掉、再被別人搶到，最壞是刪到別人剛搶的標記、多說一次。"""
     try:
         path = Path(marker_directory) / marker
         with open(path, "rb") as stream:
