@@ -91,10 +91,10 @@ Epitype 把同一組原生 vault 接到五個 host 事件：
 
 | 事件 | Epitype 的動作 |
 |---|---|
-| `SessionStart` | 只出「有事要做」的行（卡片型別 FAIL、順手補中文別名、夢報錯／有待審候選／到期沒跑）。壓縮之後那一場，另外把下面那份地圖的路徑交回去，讓它自己去讀壓縮前的原話。沒事要做的那一場整段不注入；常駐內容一律不重送，短入口索引也一樣，那由宿主自己從 `CLAUDE.md`／`AGENTS.md` 載入。 |
+| `SessionStart` | 只出「有事要做」的行（卡片型別 FAIL、順手補中文別名、夢報錯／有待審候選／到期沒跑）。壓縮之後那一場，另外把下面那份地圖的路徑交回去，讓它自己去讀壓縮前的原話；壓縮前模型寫了交接檔、而且同一份還沒交回過的話，交接檔那行排在地圖之後，預算只放得下一行時被裁掉的是它。沒事要做的那一場整段不注入；常駐內容一律不重送，短入口索引也一樣，那由宿主自己從 `CLAUDE.md`／`AGENTS.md` 載入。 |
 | `UserPromptSubmit` | 在共用輸出預算內，從每個已解析的 vault 取回最多五張相關卡片——只端卡片，逐字捕捉的原話檔搜得到但不注入。簡短的 owner 授權語句會逐字保存、去重並立即進索引；捕捉當下不替原話加上解釋。 |
-| `PreToolUse` | 寫檔閘：檔案寫入落盤前，先用現行裁定與卡片型別合約檢查要寫進去的內容。擋下時回傳那條裁定與一列稽核紀錄。 |
-| `PreCompact` | 在 context 壓縮前，從 transcript 尾端製作小型復原地圖。 |
+| `PreToolUse` | 寫檔閘：檔案寫入落盤前，先用現行裁定與卡片型別合約檢查要寫進去的內容。擋下時回傳那條裁定與一列稽核紀錄。用量計（僅 Claude Code）：context 跨過學到的自動壓縮點的 97% 時，放行的那次呼叫（與 `UserPromptSubmit`）附一行（每個壓縮週期一次），提醒模型下一步就寫交接檔；壓縮照宿主自己的自動門檻，壓縮後把交接交回。門檻不知道就不說。 |
+| `PreCompact` | 在 context 壓縮前，從 transcript 尾端製作小型復原地圖；自動壓縮時順便記下當下用量，給用量計學門檻。 |
 | `Stop` | 回合結束決策閘：回覆若再提已否決選項或再問已裁定的事就擋下。 |
 
 注入的記憶只是參考資料，不能推翻 system 或 developer 指令、繞過 host 權限，也不能自行授予工具操作權。每次 hook 輸出最多 10 KiB，執行超過十秒就 fail open，避免記憶層卡住宿主流程。
@@ -235,6 +235,7 @@ epitype search recall "自然語言提示" --vault C:\path\to\vault
 | `epitype capture-route <vault> [--audit] [--apply] [--home HOME] [--json]` | 用落點規則盤點一個庫裡自動捕捉的事件卡：卡屬於它 `cwd` 指到的專案庫，所以治理庫裡其實屬於別的庫的卡會列成 `MISROUTED <卡> -> <庫>`。`--audit` 唯讀；`--apply` 才真的搬（`os.replace`、同名加 `-2`、永不刪），並在卡的正文補一行歸戶註記。 |
 | `epitype harvest [--inventory] [--docs DOCS] [--since SINCE] [--drafts-only] [--reevaluate DIR [--apply]] [--quarantine-drops [DIR]]` | 零模型回放捕捉規則到歷史 transcript 與文件，做第一次大整理的補課；也能用現行規則重新評斷草稿或 vault 自己的事件卡。 `--drafts-only` 時，找到的東西一律留在待審草稿區。 |
 | `epitype token-meter [rollout] [--selftest]` | 讀 Codex rollout JSONL，印出最後一筆當前與累計 token 用量對照視窗大小。 |
+| `epitype context-meter calibrate [--root DIR]`／`status [--transcript PATH]` | Claude Code 用量計：`calibrate` 是唯讀報告，列出近 30 天自動壓縮最近 5 筆的中位數、樣本數與時間範圍，不寫任何東西——門檻只從這台機器實際的自動壓縮學，首次提醒要等第一次自動壓縮之後；`status` 印目前門檻、來源與（給 transcript 時）當前用量落在哪一段。 |
 | `epitype scar-census build` | 建立四層傷疤普查的機器生成視圖。 |
 | `epitype compact-map build` | 建立有界的壓縮復原地圖，與 `PreCompact` 每場自動寫的是同一種。 |
 | `epitype source SOURCE.jsonl [--find TEXT] [--role user\|assistant\|all] [--line N] [--offset BYTES] [--limit 1..8]` | 唯讀查原始訊息，列出角色、實體行號、雜湊及截斷／涵蓋範圍。指定 offset 時行號相對該位元位置。逐字查找不等於現行裁定或前提已受證據支持。 |

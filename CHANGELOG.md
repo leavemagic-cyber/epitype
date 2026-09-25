@@ -1,5 +1,42 @@
 # Changelog
 
+## Unreleased
+
+### Claude Code 的 context 用量計＋壓縮前交接
+
+這個功能取代 owner 2026-09-17 的「上下文快滿提醒廢除，不重做」裁定（`decision-no-context-pressure-reminder-20260917`；依 owner 2026-09-25 的指示）。
+差別在對象與時點：提醒的是模型自己去寫交接，不是叫使用者做什麼，而且只在快要壓縮前說一次。owner 原話：
+「不用提醒使用者啊！應該是提醒Epitype 吧，使用者知道又不知道怎麼做」
+
+**做了什麼。** Claude Code 在 context 到 `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` 時自動壓縮，但模型看不到
+自己的用量、也無法自己觸發壓縮，而 `PreCompact` 印的字到不了模型（2026-08-19 實證）。所以改在壓縮
+**之前**提醒：`PreToolUse` 的放行路徑與 `UserPromptSubmit` 從 transcript 檔尾讀最後一筆主鏈
+assistant 的用量（`input_tokens`＋`cache_creation_input_tokens`＋`cache_read_input_tokens`），跨過
+學到的自動壓縮點的 97% 時附一行「下一步就把交接寫進某檔，寫完再繼續」。只有這一段：owner 2026-09-25
+原話「自動壓縮你又做不到！應該是97%提醒epitype去完成落檔吧」。97% 的依據是 2026-09-25 實測 60 個
+transcript：用量 ≥800k 時相鄰兩筆主鏈用量的增幅 p99=11.2k、最大 22.6k，而 0.97T 距 T 約 27k，夠模型用
+一步寫完交接。提醒只給模型自己採取行動，不轉告使用者；壓縮照宿主自己的自動門檻，壓縮後把交接交回。
+每個壓縮週期只說一次；子代理的呼叫不說
+（提醒被子代理吃掉，主線就永遠收不到）。預算放不下時這行最先讓位、不寫標記，下次再試。壓縮後
+`SessionStart` 若看到那份交接檔存在且非空，就在地圖那行之後交回路徑（預算只放得下一行時保地圖、丟交接）；
+真的送出去之後才在旁邊記一份已交付紀錄（`*.handoff.delivered`，內容是當時交接檔的 mtime）：之後的壓縮續場看到同一份沒重寫過的交接就不再交回，重寫過照常交回，被預算裁掉的下次照樣交回；交接檔本身從不刪。交接檔與地圖同放
+`_COMPACT_MAPS`、同樣 30 天過期，但 64 份上限分開數，不會把地圖擠掉。沒有新增任何 hook 事件。
+
+**門檻怎麼決定。** 依序：設定檔 `context_meter.autocompact_tokens`（覆寫）→ 學到的值：治理庫
+`.epitype/context_meter.json` 裡最近 5 次自動壓縮用量的中位數（`PreCompact` 在 `trigger=auto` 時記一筆，
+手動壓縮、子代理自己的壓縮都不記；多個場次同時寫由鎖檔排隊，拿不到鎖就放棄那一筆）。紀錄當時的 `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` 與現在不同、且兩邊都是數字時按比例換算，
+提醒裡的數字標「（換算）」；有一邊不是數字就不用那一筆。`context_meter.enabled: false` 全部關掉。
+
+**不知道就不提醒。** 模型名稱與 hook 輸入都看不出視窗是 200k 還是 1M；拿公式猜，猜錯時 1M 的使用者
+會在 100k 就被叫，學會忽略這一行比沒有這一行更糟。
+
+**限制。** 只做 Claude Code；Codex 側沒有做。壓縮點只從這台機器實際的自動壓縮學（`PreCompact` 當下看得到
+自己的 pct），不從歷史紀錄回填，所以**首次提醒要等這台機器第一次自動壓縮之後**，在那之前完全不會提醒（要
+提早就在設定寫 `context_meter.autocompact_tokens`）。`epitype context-meter calibrate` 只是唯讀報告：列出近
+30 天自動壓縮最近 5 筆的中位數、樣本數與時間範圍，不寫任何東西——歷史樣本當時用的 pct 證明不了（行程環境
+變數優先於設定檔），證明不了就不學。hook 端比對 pct 時，行程沒有這個環境變數會退到 `~/.claude/settings.json`
+的 `env`。`epitype context-meter status` 可以看目前門檻與來源。
+
 ## v1.7.0 (2026-09-22)
 
 ### 這一版做完的一件事：同一套規則，以前只有一邊真的被看守

@@ -47,9 +47,11 @@ def notice_marker_directory(session_id):
     return temp_root() / memspec.NOTICE_MARKER_DIRECTORY / session_component(session_id)
 
 
-def _clear_marker_directory(directory):
+def _clear_marker_directory(directory, keep=()):
     try:
         for marker in directory.iterdir():
+            if marker.name in keep:
+                continue
             if marker.is_file() and not marker.is_symlink():
                 marker.unlink()
         directory.rmdir()
@@ -57,10 +59,13 @@ def _clear_marker_directory(directory):
         pass
 
 
-def clear_recall_markers(session_id):
+def clear_recall_markers(session_id, keep=()):
     """Compaction drops the injected context, so the same-session dedupe is
-    dropped with it: a correction injected before compaction must return after."""
-    _clear_marker_directory(recall_marker_directory(session_id))
+    dropped with it: a correction injected before compaction must return after.
+
+    `keep` names markers that survive in place (never removed and rewritten, so no
+    reader sees them missing in between); with markers kept the directory stays."""
+    _clear_marker_directory(recall_marker_directory(session_id), frozenset(keep))
 
 
 def clear_notice_markers(session_id):

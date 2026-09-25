@@ -15,7 +15,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from epitype import memsearch, memspec, recall_quiet
+from epitype import context_meter, memsearch, memspec, recall_quiet
 # 捕捉核心住在 epitype.capture，讓離線回放（harvest）套用同一份觸發與遮罩規則；
 # 這裡保留原本的私名，呼叫端與 selftest 不因搬移而改。
 from epitype.capture import (
@@ -31,6 +31,7 @@ from _hook_common import (
     capture_vault as _capture_vault,
     emit,
     expired,
+    governance_vault,
     load_config,
     payload,
     take_notes,
@@ -236,7 +237,35 @@ def _handle(event, started_at, delivery_markers=None):
     value = _recall(event, started_at, config, delivery_markers)
     if expired(started_at):
         return None
-    return _with_notes(value, config, event)
+    value = _with_notes(value, config, event)
+    return _with_context_meter(value, config, event, started_at, delivery_markers)
+
+
+def _with_context_meter(value, config, event, started_at, delivery_markers):
+    """用量計那一行排在最後、優先度最低：整段放不進預算就不附，也不寫標記，下次再試。
+
+    標記跟喚回的標記走同一條「先輸出、後寫」（main 裡的 _claim_marker），放在喚回標記
+    目錄，PreCompact 清掉時一起重新武裝。行程內呼叫（delivery_markers 為 None）
+    寫不了標記，一律不附——否則同一段會每次都說。"""
+    if delivery_markers is None or expired(started_at):
+        return value
+    session_id = event.get("session_id", event.get("sessionId", ""))
+    if not isinstance(session_id, str) or not session_id:
+        return value
+    try:
+        found = context_meter.notice(
+            event, governance_vault(config), recall_marker_directory(session_id))
+    except Exception:
+        return value
+    if found is None:
+        return value
+    line, marker = found
+    context = value.get("hookSpecificOutput", {}).get("additionalContext", "") if value else ""
+    combined = (context + "\n" + line) if context else line
+    if not payload_fits("UserPromptSubmit", combined, config[memspec.CONFIG_BUDGET_BYTES_FIELD]):
+        return value
+    delivery_markers.append((session_id, marker))
+    return payload("UserPromptSubmit", combined)
 
 
 def _with_notes(value, config, event):
@@ -1650,6 +1679,63 @@ def _selftest():
                     and not timeout_stderr.getvalue(),
                 )
             )
+
+            # 用量計：跨過 0.97T 的那一則提問附一行（含交接檔路徑）、先輸出後寫標記，下一則不再附；
+            # 預算放不下時不附也不寫標記，放得下的下一則再試。
+            from epitype import compact_map
+
+            meter_vault = root / "meter-vault"
+            meter_vault.mkdir()
+            meter_transcript = root / "meter.jsonl"
+            meter_transcript.write_text(json.dumps({"type": "assistant", "message": {"usage": {
+                "input_tokens": 92000, "cache_creation_input_tokens": 1000,
+                "cache_read_input_tokens": 5000}}}) + "\n", encoding="utf-8")
+
+            def meter_config(budget):
+                path = root / f"meter-config-{budget}.json"
+                write_config(path, [meter_vault], budget=budget)
+                options = json.loads(path.read_text(encoding="utf-8"))
+                options[memspec.CONTEXT_METER_CONFIG_FIELD] = {
+                    memspec.CONTEXT_METER_OVERRIDE_FIELD: 100000}
+                path.write_text(json.dumps(options), encoding="utf-8")
+                return path
+
+            def meter_prompt(session_id, config_path):
+                result = run_synthetic(
+                    Path(__file__),
+                    {"prompt": "zzqx unrelated question", "session_id": session_id,
+                     "transcript_path": os.fspath(meter_transcript)},
+                    config_path,
+                )
+                context = ""
+                if result.stdout.strip():
+                    context = json.loads(result.stdout)["hookSpecificOutput"].get("additionalContext", "")
+                return result, context
+
+            roomy = meter_config(memspec.HOOK_DEFAULT_BUDGET_BYTES)
+            handoff = os.fspath(compact_map.handoff_destination(meter_vault, "meter-s1", meter_transcript))
+            first_prompt, first_context = meter_prompt("meter-s1", roomy)
+            second_prompt, second_context = meter_prompt("meter-s1", roomy)
+            checks.append((
+                "the prompt that crosses 0.97T carries the handoff line and claims it; the next one does not",
+                first_prompt.returncode == 0
+                and handoff in first_context
+                and (recall_marker_directory("meter-s1") / memspec.CONTEXT_METER_MARKER).is_file()
+                and second_prompt.returncode == 0
+                and handoff not in second_context,
+            ))
+            tight_prompt, tight_context = meter_prompt("meter-s2", meter_config(40))
+            tight_marker = (recall_marker_directory("meter-s2") / memspec.CONTEXT_METER_MARKER).exists()
+            retry_prompt, retry_context = meter_prompt("meter-s2", roomy)
+            checks.append((
+                "a line the budget cannot hold is not sent and not claimed, so the next prompt sends it",
+                tight_prompt.returncode == 0
+                and not tight_context
+                and not tight_marker
+                and retry_prompt.returncode == 0
+                and os.fspath(compact_map.handoff_destination(
+                    meter_vault, "meter-s2", meter_transcript)) in retry_context,
+            ))
     except Exception as exc:
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
     finally:
@@ -1657,7 +1743,7 @@ def _selftest():
             shutil.rmtree(marker_directory, ignore_errors=True)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 49
+    total = 51
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

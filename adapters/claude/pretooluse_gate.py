@@ -24,6 +24,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from epitype import context_meter
 from epitype import memspec
 from epitype import patch_envelope
 from _hook_common import (
@@ -38,7 +39,9 @@ from _hook_common import (
     governance_vault,
     load_config,
     notice_marker_directory,
+    payload_fits,
     read_event,
+    recall_marker_directory,
     resolve_vaults,
     run_synthetic,
     sequence_fields,
@@ -987,16 +990,48 @@ def _write_review(event, tool_name, tool_input, config, started_at):
     return _envelope_review(event, tool_input, config, started_at)
 
 
-def _allow_context(event, notices=()):
+def _context_meter_line(event, config, started_at):
+    """(用量計那一行, (標記目錄, 標記名))，或 None。
+
+    標記放在喚回標記目錄：PreCompact 清喚回標記時一起清掉，壓縮後重新武裝。
+    子代理的呼叫由 context_meter.notice 擋掉——提醒被子代理吃掉，主線就永遠收不到。"""
+    if config is None or expired(started_at):
+        return None
+    session_id = event.get("session_id")
+    if not isinstance(session_id, str) or not session_id:
+        return None
+    try:
+        directory = recall_marker_directory(session_id)
+        found = context_meter.notice(event, governance_vault(config), directory)
+    except Exception:
+        return None
+    if found is None:
+        return None
+    return found[0], (directory, found[1])
+
+
+def _allow_context(event, notices=(), config=None, started_at=None, meter_claims=None):
     """Context for a call the gate lets through: the write gate's own advice and
     the rulings whose `forbidden` pattern could not be compiled, each named once
     per session — a ruling that silently stopped being enforced is the failure the
-    gate exists to prevent."""
+    gate exists to prevent.
+
+    The context meter's line rides last and only when the whole context still fits
+    the budget; its marker is claimed by the caller after the output is written, so
+    a line that was dropped or never printed is tried again on the next call.
+    `meter_claims` is None for in-process callers, which get no meter line."""
     lines = []
     session_id = event.get("session_id")
     for notice in list(dict.fromkeys(notices))[: memspec.GATE_DEFECT_MAX_LINES]:
         if _notice_marker(session_id, notice):
             lines.append(notice)
+    if meter_claims is not None:
+        meter = _context_meter_line(event, config, started_at)
+        if meter is not None and payload_fits(
+                "PreToolUse", "\n".join([*lines, meter[0]]),
+                config[memspec.CONFIG_BUDGET_BYTES_FIELD]):
+            lines.append(meter[0])
+            meter_claims.append(meter[1])
     if not lines:
         return None
     return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": "\n".join(lines)}}
@@ -1078,7 +1113,7 @@ def _waste_review(event, tool_name, tool_input, config, started_at):
     return None, None
 
 
-def _handle(event, started_at, defects=None):
+def _handle(event, started_at, defects=None, meter_claims=None):
     """The gate's whole decision, in two parts.
 
     A call about to write file content is judged against the owner's settled rulings
@@ -1119,7 +1154,7 @@ def _handle(event, started_at, defects=None):
         return waste_value
     if waste_notice:
         notices = tuple(notices) + (waste_notice,)
-    return _allow_context(event, notices)
+    return _allow_context(event, notices, config, started_at, meter_claims)
 
 
 def _selftest():
@@ -1729,6 +1764,63 @@ def _selftest():
                 and bare_write_out.get("permissionDecision") == "deny",
             ))
 
+            # 用量計：放行路徑跨過 0.97T 附一行含交接檔路徑的提醒，同一個壓縮週期只說一次；
+            # 子代理的呼叫不說、不寫標記，之後主線照樣收得到。
+            from epitype import compact_map
+
+            meter_vault = root / "meter-vault"
+            meter_vault.mkdir()
+            meter_config = root / "meter-config.json"
+            write_config(meter_config, [meter_vault])
+            meter_options = json.loads(meter_config.read_text(encoding="utf-8"))
+            meter_options[memspec.CONTEXT_METER_CONFIG_FIELD] = {
+                memspec.CONTEXT_METER_OVERRIDE_FIELD: 100000}
+            meter_config.write_text(json.dumps(meter_options), encoding="utf-8")
+            meter_transcript = root / "meter.jsonl"
+            meter_transcript.write_text(json.dumps({"type": "assistant", "message": {"usage": {
+                "input_tokens": 92000, "cache_creation_input_tokens": 1000,
+                "cache_read_input_tokens": 5000}}}) + "\n", encoding="utf-8")
+
+            def meter_call(session_id, **extra):
+                result = run_synthetic(
+                    Path(__file__),
+                    {"tool_name": "Bash", "tool_input": {"command": "echo hi"},
+                     "session_id": session_id, "transcript_path": str(meter_transcript), **extra},
+                    meter_config,
+                )
+                context = ""
+                if result.stdout.strip():
+                    context = json.loads(result.stdout)["hookSpecificOutput"].get("additionalContext", "")
+                return result, context
+
+            main_handoff = os.fspath(
+                compact_map.handoff_destination(meter_vault, "meter-main", meter_transcript))
+            first_meter, first_context = meter_call("meter-main")
+            second_meter, second_context = meter_call("meter-main")
+            checks.append((
+                "at 0.98 of the threshold the first allowed call carries the handoff line, the next one nothing",
+                first_meter.returncode == 0
+                and "permissionDecision" not in first_meter.stdout
+                and main_handoff in first_context
+                and "98k" in first_context
+                and second_meter.returncode == 0
+                and not second_meter.stdout.strip()
+                and not second_context,
+            ))
+            sub_handoff = os.fspath(
+                compact_map.handoff_destination(meter_vault, "meter-sub", meter_transcript))
+            by_agent, agent_context = meter_call("meter-sub", agent_id="agent-1")
+            agent_left_no_marker = not (
+                recall_marker_directory("meter-sub") / memspec.CONTEXT_METER_MARKER).exists()
+            after_agent, after_context = meter_call("meter-sub")
+            checks.append((
+                "a subagent's call says nothing and claims nothing, so the main thread still gets the line",
+                by_agent.returncode == 0
+                and not by_agent.stdout.strip()
+                and agent_left_no_marker
+                and sub_handoff in after_context,
+            ))
+
             missing_config = root / "missing-config.json"
             missing = run_synthetic(
                 Path(__file__),
@@ -1747,7 +1839,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 31
+    total = 33
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
@@ -1794,9 +1886,10 @@ def main():
         with isolated_temp_root():
             return _selftest()
     defects = []
+    meter_claims = []
     try:
         event = read_event(sys.stdin)
-        value = _handle(event, _STARTED_AT, defects)
+        value = _handle(event, _STARTED_AT, defects, meter_claims)
         # 這一次呼叫碰到哪些檔，附記給回合閘用：說「我查過某個檔」的時候，那個檔名
         # 必須在這裡出現過。擋下的呼叫不記——那個檔根本沒被打開。
         if value is None or value.get("hookSpecificOutput", {}).get(
@@ -1811,6 +1904,10 @@ def main():
             is_deny = output.get("permissionDecision") == "deny"
             if is_deny or not expired(_STARTED_AT):
                 emit(value)
+                sys.stdout.flush()
+                # 先輸出、後寫標記：沒印出去的用量提醒不得被標成「說過了」。
+                for directory, marker in meter_claims:
+                    context_meter.claim(directory, marker)
     except Exception as exc:
         # 這裡是最後一道：設定檔壞了、記憶庫讀不到、程式本身有 bug，全都走這一圈。
         # 仍然 fail-open（不擋住工作），但裝了卻用不了的時候一定要講一句——安靜退場

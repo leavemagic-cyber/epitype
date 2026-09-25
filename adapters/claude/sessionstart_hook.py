@@ -296,7 +296,47 @@ def _compact_map_line(event, governance):
     return compact_map.map_notice(destination)
 
 
-def _handle(event, started_at):
+def _handoff_line(event, governance):
+    """壓縮續場交回模型自己寫的交接檔：(那一行, 已交付紀錄路徑, 交接檔 mtime_ns)，或 None。
+
+    跟地圖同一套純函式算路徑；檔不在或是空的就什麼都不加——空檔是「提醒到了、還沒寫」，
+    叫下一段去讀一個空檔只是多付一次讀檔。已交付紀錄記著上次真的送出去時交接檔的
+    mtime_ns：一樣就代表這份已經交回過、之後沒重寫，不再交回第二次（下一段會照著一份
+    過期的「下一步」做）；重寫過就照常交回。檔案本身從不刪。"""
+    transcript = event.get("transcript_path") if isinstance(event, dict) else None
+    if not isinstance(transcript, str) or not transcript.strip():
+        return None
+    session_id = event.get("session_id", event.get("sessionId", ""))
+    try:
+        destination = compact_map.handoff_destination(governance, session_id, transcript)
+        if not destination.is_file():
+            return None
+        info = destination.stat()
+        if info.st_size <= 0:
+            return None
+        record = compact_map.handoff_delivered_path(destination)
+        try:
+            delivered = int(record.read_text(encoding="ascii").strip())
+        except (OSError, ValueError):
+            delivered = None
+        if delivered == info.st_mtime_ns:
+            return None
+    except (OSError, RuntimeError, ValueError):
+        return None
+    line = compact_map.handoff_notice(destination)
+    return (line, record, info.st_mtime_ns) if line else None
+
+
+def _record_deliveries(deliveries):
+    """送出去之後才記「已交付」：被預算裁掉、或根本沒印出去的交接，下一次照樣交回。"""
+    for record, mtime_ns in deliveries:
+        try:
+            record.write_text(f"{mtime_ns}\n", encoding="ascii")
+        except OSError:
+            pass
+
+
+def _handle(event, started_at, deliveries=None):
     config = load_config(started_at)
     if config is None:
         return None
@@ -316,10 +356,13 @@ def _handle(event, started_at):
         vaults = [vault for vault in resolved if vault in native or vault == governance]
 
     source = event.get("source") if isinstance(event, dict) else None
+    handoff = None
     dream = config.get(memspec.DREAM_CONFIG_FIELD) or {}
 
     # 壓縮續場先放地圖那一行：續場丟掉的是原文，而其餘幾行在別的場次還會再出現一次；
     # 預算裁不下時，先保住唯一一份回得去原文的指標。其他 source 一個字都不加。
+    # 交接檔那一行排在地圖之後：預算只裁得下一行時，留下的必須是地圖——它是唯一回得去
+    # 原文的指標；交接是模型自己整理過的接續點，可以從地圖回撈的原文重建。
     if source == "compact":
         try:
             map_line = _compact_map_line(event, governance)
@@ -327,6 +370,12 @@ def _handle(event, started_at):
             map_line = None
         if map_line:
             pieces.append(map_line)
+        try:
+            handoff = _handoff_line(event, governance)
+        except Exception:
+            handoff = None
+        if handoff:
+            pieces.append(handoff[0])
     if _soft_remaining(started_at) > 0:
         try:
             _dream_spawn(dream, governance_vault(config, for_write=True), started_at, source=source)
@@ -395,6 +444,8 @@ def _handle(event, started_at):
     if expired(started_at):
         return None
     context = bounded_context("SessionStart", pieces, budget)
+    if context and handoff and deliveries is not None and handoff[0] in context.splitlines():
+        deliveries.append(handoff[1:])
     return payload("SessionStart", context) if context else None
 
 
@@ -1068,6 +1119,92 @@ def _selftest():
                 and "壓縮前原文地圖" not in resume_context,
             ))
 
+            # 用量計：壓縮前交接檔存在且非空，壓縮續場就在地圖那行之後交回；不在或空的就不加。
+            handoff_file = compact_map.handoff_destination(map_vault, map_session, map_transcript)
+            handoff_expected = compact_map.handoff_notice(handoff_file)
+            handoff_file.write_text("使用者原話：…\n下一步：…\n", encoding="utf-8")
+            handoff_run, handoff_context = map_run(claude_shape)
+            handoff_startup, handoff_startup_context = map_run({**claude_shape, "source": "startup"})
+            handoff_lines = handoff_context.splitlines()
+            checks.append((
+                "交接檔存在且非空：壓縮續場多一行、排在地圖那行之後；startup 不加",
+                handoff_run.returncode == 0
+                and bool(handoff_expected)
+                and handoff_lines.count(handoff_expected) == 1
+                and expected_line in handoff_lines
+                and handoff_lines.index(expected_line) < handoff_lines.index(handoff_expected)
+                and handoff_startup.returncode == 0
+                and handoff_expected not in handoff_startup_context,
+            ))
+
+            # 已交付紀錄：兩次壓縮之間沒重寫就不再交回；重寫過（mtime 變了）就照常交回。
+            handoff_record = compact_map.handoff_delivered_path(handoff_file)
+            first_mtime = handoff_file.stat().st_mtime_ns
+            recorded_first = handoff_record.read_text(encoding="ascii").strip() == str(first_mtime)
+            again_run, again_context = map_run(claude_shape)
+            checks.append((
+                "兩次壓縮之間交接檔沒重寫：第二次不再交回，地圖那行照舊，交接檔本身不刪",
+                recorded_first
+                and again_run.returncode == 0
+                and handoff_expected not in again_context
+                and expected_line in again_context.splitlines()
+                and handoff_file.is_file(),
+            ))
+
+            def rewrite_handoff(step_seconds):
+                stamp = handoff_file.stat().st_mtime_ns + step_seconds * 1_000_000_000
+                os.utime(handoff_file, ns=(stamp, stamp))
+                return stamp
+
+            rewritten_mtime = rewrite_handoff(10)
+            rewritten_run, rewritten_context = map_run(claude_shape)
+            checks.append((
+                "交接檔在兩次壓縮之間重寫過：照常交回，並記下新的 mtime",
+                rewritten_run.returncode == 0
+                and handoff_expected in rewritten_context.splitlines()
+                and handoff_record.read_text(encoding="ascii").strip() == str(rewritten_mtime),
+            ))
+
+            # 預算只放得下一行：留地圖、丟交接（先重寫一次，讓交接確實有資格被交回）。
+            cut_mtime = rewrite_handoff(10)
+            one_line_budget = (len(expected_line.encode("utf-8"))
+                               + len(memspec.CONTEXT_TRUNCATED_SUFFIX.format(dropped=1).encode("utf-8"))
+                               + 8)
+            one_line_config = root / "one-line-config.json"
+            write_config(one_line_config, [map_vault], budget=one_line_budget)
+            one_line_run, one_line_context = map_run(claude_shape, one_line_config)
+            checks.append((
+                "預算只放得下一行時，留下的是地圖那一行，被裁掉的是交接",
+                one_line_run.returncode == 0
+                and one_line_budget < len(expected_line.encode("utf-8"))
+                + len(handoff_expected.encode("utf-8")) + 1
+                and expected_line in one_line_context.splitlines()
+                and handoff_expected not in one_line_context,
+            ))
+            # 被預算裁掉的不算交付：紀錄不動，下一次壓縮續場照樣交回。
+            cut_left_record = handoff_record.read_text(encoding="ascii").strip() == str(rewritten_mtime)
+            retry_run, retry_context = map_run(claude_shape)
+            checks.append((
+                "第一次因預算被裁掉的交接不記為已交付，下一次仍會交回",
+                cut_left_record
+                and retry_run.returncode == 0
+                and handoff_expected in retry_context.splitlines()
+                and handoff_record.read_text(encoding="ascii").strip() == str(cut_mtime),
+            ))
+            handoff_file.write_text("", encoding="utf-8")
+            empty_run, empty_context = map_run(claude_shape)
+            handoff_file.unlink()
+            absent_run, absent_context = map_run(claude_shape)
+            checks.append((
+                "交接檔是空的或不在：一個字都不加，地圖那行照舊",
+                empty_run.returncode == 0
+                and absent_run.returncode == 0
+                and handoff_expected not in empty_context
+                and handoff_expected not in absent_context
+                and expected_line in empty_context
+                and expected_line in absent_context,
+            ))
+
             # 240 B（UTF-8）是整行的上限：超限整行不注，路徑一個字元都不截。
             probe = compact_map.map_destination(root / "long", map_session, map_transcript)
             probe_line = compact_map.MAP_NOTICE_TEMPLATE.format(path=os.fspath(probe))
@@ -1240,7 +1377,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 29
+    total = 35
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
@@ -1256,10 +1393,12 @@ def main():
             return _selftest()
     try:
         event = read_event(sys.stdin)
-        value = _handle(event, _STARTED_AT)
+        deliveries = []
+        value = _handle(event, _STARTED_AT, deliveries)
         if value is not None and not expired(_STARTED_AT):
             emit(value)
             sys.stdout.flush()
+            _record_deliveries(deliveries)
     except Exception:
         pass
     return 0

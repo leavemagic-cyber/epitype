@@ -150,6 +150,67 @@ WORK_LEDGER_FILENAME = "_WORK_LEDGER.md"
 COMPACT_MAP_DIRECTORY = "_COMPACT_MAPS"
 COMPACT_MAP_TTL_SECONDS = 30 * 24 * 3600
 COMPACT_MAP_MAX_FILES = 64
+# 壓縮前交接檔跟地圖放同一個目錄、同一套檔名算法，只差這個尾巴。清理時兩種分開計數：
+# 交接檔是模型自己寫的、一場可能只有一份地圖卻留好幾份交接，混在一起數會把地圖提早擠掉。
+COMPACT_HANDOFF_SUFFIX = ".handoff.md"
+# 交接檔「已交回過」的紀錄（內容＝交回當下交接檔的 mtime_ns）。同一份沒重寫過的交接不再
+# 交回第二次；檔案本身不刪——只有真的送出去才算交付，被預算裁掉的下次照樣交回。
+COMPACT_HANDOFF_DELIVERED_SUFFIX = ".handoff.delivered"
+
+# Context 用量計（Claude Code，2026-09-25 owner 授權）。
+# 宿主在 context 到 CLAUDE_AUTOCOMPACT_PCT_OVERRIDE 時自動壓縮，模型看不到自己的用量、
+# 也無法自己觸發壓縮，PreCompact 的文字又到不了模型（2026-08-19 實證）。所以由 hook 在
+# 還沒壓縮前、跨過學到的壓縮點 97% 的那一次呼叫附一行，提醒模型自己把交接落檔；壓縮照
+# 宿主自己的自動門檻，壓縮後由 SessionStart 把交接交回。提醒只給模型、不轉告使用者，
+# 而且只有一段（owner 2026-09-25：「自動壓縮你又做不到！應該是97%提醒epitype去完成落檔吧」）。
+# 97% 的依據（2026-09-25 實測 60 個 transcript）：用量 ≥800k 時相鄰兩筆主鏈用量的增幅
+# p99=11.2k、最大 22.6k；0.97T 距 T 約 27k，夠模型用一步寫完交接。
+# 門檻不猜：設定覆寫 → 學到的自動壓縮用量 → 都沒有就完全不提醒。模型名稱與 hook 輸入都
+# 看不出視窗大小，拿 200k／1M 公式猜，猜錯時 1M 的使用者會在 100k 就被叫。
+CONTEXT_METER_CONFIG_FIELD = "context_meter"
+CONTEXT_METER_ENABLED_FIELD = "enabled"
+CONTEXT_METER_OVERRIDE_FIELD = "autocompact_tokens"
+CONTEXT_METER_PCT_ENV = "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"
+CONTEXT_METER_STATE_FILENAME = "context_meter.json"
+CONTEXT_METER_STATE_KEEP = 10
+CONTEXT_METER_STATE_MEDIAN_OF = 5
+CONTEXT_METER_STAGE_RATIO = 0.97
+# 「這個壓縮週期已經提醒過」的標記名，放在喚回標記目錄（PreCompact 清掉時重新武裝）。
+CONTEXT_METER_MARKER = "ctx-handoff"
+CONTEXT_METER_TAIL_FIRST_BYTES = 64 * 1024
+# 檔尾反向讀的三道上限：總量、單塊大小、時間。記憶體只跟單塊與單行上限走——超過單行
+# 上限還找不到換行的那一行（幾 MB 的工具結果）整行丟掉、繼續往前找，不累積。
+CONTEXT_METER_TAIL_MAX_BYTES = 64 * 1024 * 1024
+CONTEXT_METER_TAIL_MAX_BLOCK_BYTES = 1024 * 1024
+CONTEXT_METER_LINE_MAX_BYTES = 1024 * 1024
+CONTEXT_METER_TAIL_SECONDS = 0.15
+# 超過單行上限的那一行要先認出是不是 assistant 列：真實 transcript（2026-09-25 抽 40 份、
+# 25,663 列）assistant 列的頂層 "type" 排在 message 之後、離行尾約 300–420 B；user 列的
+# "type" 排在 message 之前（48 列 ≥200 KB 的 user 列，行尾 64 KiB 內都沒有 assistant 型別）。
+# 所以用已讀進來的行尾這一段判斷：是 assistant 列就回 None，不拿更早的用量頂替。
+CONTEXT_METER_OVERSIZED_TAIL_BYTES = 64 * 1024
+# 宿主寫的是緊湊 JSON；帶空白的寫法也認，免得換一種序列化就整條失效。
+CONTEXT_METER_ASSISTANT_TYPE_MARKERS = (b'"type":"assistant"', b'"type": "assistant"')
+# 學習狀態檔的讀–追加–換名在同一把鎖裡；拿不到就放棄這一筆（學習不是關卡）。
+CONTEXT_METER_LOCK_SECONDS = 0.5
+CONTEXT_METER_CALIBRATE_DAYS = 30
+# calibrate 只報告、不寫：歷史樣本當時用的 pct 證明不了（行程環境變數優先於設定檔，設定檔
+# 的修改時間也證明不了哪個行程用了什麼），證明不了就不學。學習只剩 PreCompact 那一條路。
+CONTEXT_METER_CALIBRATE_REPORT_ONLY = (
+    "calibrate：只是報告，不寫入。壓縮點只從這台機器實際的自動壓縮學（PreCompact 當下看得到自己的 pct），"
+    "不從歷史紀錄回填；首次提醒要等這台機器第一次自動壓縮之後。"
+)
+CONTEXT_METER_SOURCE_OVERRIDE = "override"
+CONTEXT_METER_SOURCE_LEARNED = "learned"
+CONTEXT_METER_SOURCE_SCALED = "scaled"
+CONTEXT_METER_USAGE_FIELDS = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
+CONTEXT_METER_SCALED_MARK = "（換算）"
+CONTEXT_METER_NOTICE = (
+    "context 約 {cur}k，約 {left}k 後自動壓縮{mark}。下一步就把交接寫進 {path}"
+    "（使用者原話、做到哪、下一步、未決事項與已排除的路），寫完再繼續。"
+)
+# 壓縮續場交回交接檔的那一行。跟地圖那行同一個 240 B 上限：超過整行不注，路徑絕不截斷。
+CONTEXT_METER_HANDOFF_NOTICE = "壓縮前交接：{path}；先讀它再接續。"
 GATE_LOG_FILENAME = "_GATE_LOG.jsonl"
 RECALL_MARKER_DIRECTORY = "epitype_markers"
 RECALL_MARKER_TTL_SECONDS = 7 * 24 * 3600
@@ -2638,6 +2699,18 @@ _EN = {
     "CAPTURE_PENDING_HOLD_REASON": "a proposal with verified: false; a human reviews it, sets verified: true and fills verified_by/verified_at before it moves",
     "CAPTURE_PENDING_REVIEW_COMMAND": 'Review "{path}" by hand: for each card you keep, set verified: true plus verified_by/verified_at and move it into <vault>/<grants|corrections|rulings>/; leave the rest where they are',
     "CONTEXT_TRUNCATED_SUFFIX": "…(over budget; {dropped} more segment(s) not injected)",
+    "CONTEXT_METER_SCALED_MARK": " (scaled)",
+    "CONTEXT_METER_NOTICE": (
+        "context is about {cur}k; auto-compaction in about {left}k{mark}. Your next step is to write "
+        "the handoff to {path} (the user's verbatim words, where you are, the next step, open items "
+        "and the paths already ruled out); continue only after it is written."
+    ),
+    "CONTEXT_METER_HANDOFF_NOTICE": "Pre-compaction handoff: {path}; read it before you continue.",
+    "CONTEXT_METER_CALIBRATE_REPORT_ONLY": (
+        "calibrate: report only, nothing is written. The compaction point is learned only from this "
+        "machine's actual auto-compactions (PreCompact sees its own pct at that moment), never back-filled "
+        "from history; the first reminder waits for this machine's first auto-compaction."
+    ),
     "DECISION_PREFIX": "⚖ ruling: ",
     "VAULT_MISSING_REASON": "No such vault: {vault}\n(Scanning a folder that does not exist reports 0 problems, which looks exactly like \"clean\"; so this reports an error instead of 0.)",
     "RULE_HOSTS_REASON": "{value} in {field} is not one of {allowed}",

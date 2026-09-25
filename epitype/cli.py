@@ -19,6 +19,7 @@ _COMMANDS = {
     "scar-census": ("epitype.scar_census", "main", ()),
     "pending": ("epitype.pending_lint", "main", ()),
     "token-meter": ("epitype.token_meter", "main", ()),
+    "context-meter": ("epitype.context_meter", "main", ()),
     "gates": ("epitype.gates_report", "main", ()),
     "exam": ("exam.exam_runner", "main", ()),
     "trust": ("adapters.codex.hook_trust", "main", ("check",)),
