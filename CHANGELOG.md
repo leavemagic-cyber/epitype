@@ -90,6 +90,28 @@ transcript：用量 ≥800k 時相鄰兩筆主鏈用量的增幅 p99=11.2k、最
 變數優先於設定檔），證明不了就不學。hook 端比對 pct 時，行程沒有這個環境變數會退到 `~/.claude/settings.json`
 的 `env`。`epitype context-meter status` 可以看目前門檻與來源。
 
+### 規則再犯時：往行為卡追加事故敘述、卻沒讓它擋得住，寫檔閘擋下
+
+2026-09-25 titan 那場違反了一張早就存在的 feedback 卡，處理方式是在卡尾追加「**再犯（2026-09-25，…）**：…」。
+那張卡本來就是 `unenforceable`，追加完還是擋不住，只是變長、每次喚回多花 token。owner 原話：
+「我截圖給你看得原因是因為epitype根本不應該這樣記憶跟處理」「我要的一直都是根本性處理」。
+
+原則：再犯＝這張卡擋不住的證據。處理只有三種：①替卡加上擋得住的欄位；②閘門表達不了就修 Epitype 本身；
+③真的做不到就寫 `unenforceable: <理由>`，不再在它身上花 token。事故經過留在對話紀錄與場次日誌，不寫進卡片。
+
+寫檔閘新增一條規則（`_recurrence_review`，Claude 的 Write／Edit／MultiEdit 與 Codex 的 patch 封套同一條路）：
+目標是已登記庫裡已存在、有 frontmatter 的行為卡（feedback／correction／scar／habit／rule，型別判定沿用
+card_lint），這次新增的行比刪掉的行多出事故敘述，而且武裝欄位（`forbidden`、`guard_*`、`require_*`、
+`turn_check*`）沒有新增或改動，就擋下。事故敘述的判定刻意收窄：再犯標記要跟日期同一行，或開頭就是標記的
+粗體／標題行；「免得以後再犯」「永遠別再犯」「防再犯規則」這類一般用語放行（4 個真庫約一半的命中是這種），
+「再犯時先補 forbidden」這類條件句是規則正文，也放行（條件只認標記後的「時／的話」或同一子句前面的條件詞；
+日期緊貼標記一律算事故）。Codex 的 Update File 會先套在磁碟上的卡再判（`patch_envelope.apply_update`，照 Codex
+`seek_sequence.rs` 的逐級寬鬆比對，含標點正規化；`*** End of File` 只比檔尾），同一段內容走 Write、Edit、patch
+三條路結論一致；補丁套不上時 Codex 也寫不出東西，放行並記 `patch_unappliable`。
+新卡、project／reference／decision 卡、同一次寫入正在武裝、再犯字樣只在武裝／例句／unenforceable 欄位裡，
+一律放行。擋下記 `write_block`（rule `recurrence`），放行記 `write_allow`（`outcome` 標原因），都只記規則與卡名。
+沒有新增 hook 事件，全部 fail-open。說明見 `docs/FAILURE_MODES.md` §45。
+
 ## v1.7.0 (2026-09-22)
 
 ### 這一版做完的一件事：同一套規則，以前只有一邊真的被看守

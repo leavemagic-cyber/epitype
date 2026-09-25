@@ -1952,3 +1952,82 @@ Regression: `tests/action_guard_regression.py` (a mid-turn claim is blocked whil
 last-message-only reading passes it; evidence earlier in the turn satisfies the
 requirement; an earlier turn does not count; an unreadable transcript falls back; the
 gate and the replay record the same digest), `epitype/compliance.py --selftest`.
+
+## 45. 規則再犯時: the card grew and still could not block (2026-09-25)
+
+On 2026-09-25 a session broke a rule that already had a card,
+`feedback-run-button-blocks-must-be-one-powershell-command`. The response was to read the
+card and append a paragraph to it, `**再犯（2026-09-25，titan 台指期休市事故）**：…`. That
+changed nothing. The card was `unenforceable` before and after, so the next session could
+break it exactly the same way. The only effect was a longer card and more tokens every
+time it is recalled. Neither the memory protocol nor Epitype said what to do when a rule
+recurs, so the agent fell back on its reflex: write the incident down.
+
+### The rule
+
+A recurrence is evidence that the card cannot stop the behaviour. There are only three
+correct responses:
+
+1. **Arm the card.** Add a field the gates enforce: `forbidden`, `require_when` +
+   `require_text`, `guard_tool` + `guard_all_of`, or `turn_check`.
+2. **Fix Epitype.** If no field can express the rule, change the gates so that the whole
+   class of rules benefits, not just this card.
+3. **Say it cannot be enforced.** Only when neither is possible, write
+   `unenforceable: <reason>` and stop spending tokens on the card.
+
+The incident itself stays in the transcript and the session log. It does not go into the
+card.
+
+### The gate
+
+The write gate (`adapters/claude/pretooluse_gate.py`, `_recurrence_review`) enforces this.
+A write is refused when all of these hold:
+
+- the target is an existing card with frontmatter in a registered vault;
+- the card is a behaviour card (`memspec.RECURRENCE_GATE_CARD_TYPES`: feedback, correction,
+  scar, habit, rule), typed the same way card_lint does it;
+- the text the write adds has more incident lines than the text it removes;
+- no arming field (`memspec.RECURRENCE_GATE_ARMING_FIELDS`) is added or changed.
+
+"Added" means the lines the file gains: the post-write text compared with the text on disk.
+For Write, Edit and MultiEdit that text is known exactly. For a Codex Update File the patch
+is applied to the card on disk (`patch_envelope.apply_update`), so the same content gets the
+same verdict on every path. It locates hunks the way Codex's `seek_sequence.rs` does: exact,
+then without trailing whitespace, then trimmed, then with dashes, quotes and special spaces
+folded to ASCII, and an `*** End of File` hunk only at the end of the file. A patch that
+cannot be applied writes nothing in Codex either, so it passes, with a `patch_unappliable`
+audit row when its added lines narrate a recurrence.
+
+An incident line is narrower than a keyword. Real vaults use the same words as ordinary
+vocabulary: 「免得以後再犯」, 「永遠別再犯」, 「防再犯規則」. Across four vaults, about half of the
+behaviour cards containing such a word were not narrating an incident. A line counts only
+when a recurrence marker (`memspec.RECURRENCE_GATE_MARKER_PATTERN`: 再犯, 又犯, 第二次犯,
+recurred, happened again, and similar) appears together with a date on the same line, or
+opens a bold or heading line. A marker right after a preventive word (別, 不要, 防, 免得…)
+never counts. Neither does a conditional one: 「2026-09-25 起的處理規則：再犯時先補
+forbidden」 is the rule's own text about next time. A marker followed by 時 or 的話, or
+preceded in the same clause by 若, 如果, 一旦, 萬一, 假如, `if` or `when`, is a condition. A
+trailing 就 or 則 alone proves nothing: 「2026-09-25 又犯就表示閘門失效」 is an incident. A date
+right before the marker always makes it one.
+
+The following pass: a new card, a project, reference or decision card (those record
+history), a write that arms the card in the same edit, and incident words that appear only
+inside the arming, example or `unenforceable` fields. The last of these is where option 3
+writes its reason. Resending the same content in the same session passes too, the escape
+hatch every write-gate rule has.
+
+Every pass and refusal is audited. A refusal is a `write_block` row with rule `recurrence`.
+A pass after the rule fired is a `write_allow` row whose `outcome` is `arming_changed`,
+`exempt_fields_only`, `patch_unappliable` or `repeat`. Rows carry the rule and the card path,
+never the text.
+
+What this does not do: the gate cannot tell whether a new `forbidden` pattern would
+actually have caught the incident. That is the job of card_lint's two-way examples.
+
+Regression: `adapters/claude/pretooluse_gate.py --selftest` covers each of these: a refusal
+for an appended incident, the audit row, arming in the same write, a new card, a project
+card, the Codex envelope shape, ordinary vocabulary, conditional rule text and a dated
+「又犯就」, the same content reaching the same verdict through Write, Edit and a patch
+(including an en dash the patch spells as a hyphen), an unappliable patch and an
+`*** End of File` hunk, BOM, CRLF and quoted-value cards, the exempt field, a repeat, and
+malformed input. `epitype/patch_envelope.py --selftest` covers hunk capture and application.

@@ -32,9 +32,14 @@ _HEADERS = (
 _STRUCTURE_PREFIXES = ("*** Move to:", "*** End of File")
 MAX_FILES = 40
 
-PatchFile = namedtuple("PatchFile", "op path additions complete")
+PatchFile = namedtuple("PatchFile", "op path additions complete hunks", defaults=(None,))
 """op: add/update/delete；path: 封套寫的原字串；additions: 連續新增行切成的文字塊；
-complete: additions 合起來是否就是寫入後的完整內容（只有 Add File 才可能為真）。"""
+complete: additions 合起來是否就是寫入後的完整內容（只有 Add File 才可能為真）；
+hunks: Update File 的各段（`Hunk`），讀不準或不是 Update File 就是 None。"""
+
+Hunk = namedtuple("Hunk", "header old new eof")
+"""header: `@@` 後面那一行定位字（沒有就是空字串）；old／new: 這一段套用前後的行；
+eof: 這一段標了 `*** End of File`，要貼著檔尾找。"""
 
 
 def _flush(runs, current):
@@ -44,9 +49,21 @@ def _flush(runs, current):
     return current
 
 
-def _finish(op, path, runs, current, exact):
+def _finish(op, path, runs, current, exact, hunks=None):
+    """hunks: 解析中的各段（dict），None 代表這個檔的段落讀不準。"""
     current = _flush(runs, current)
-    return PatchFile(op, path, tuple(runs), bool(exact and op == "add"))
+    frozen = None
+    if op == "update" and hunks:
+        frozen = tuple(
+            Hunk(hunk["header"], tuple(hunk["old"]), tuple(hunk["new"]), hunk["eof"])
+            for hunk in hunks
+            if hunk["old"] or hunk["new"]
+        ) or None
+    return PatchFile(op, path, tuple(runs), bool(exact and op == "add"), frozen)
+
+
+def _new_hunk(header=""):
+    return {"header": header, "old": [], "new": [], "eof": False}
 
 
 def parse(text):
@@ -71,6 +88,9 @@ def parse(text):
         closed = False
         op = path = None
         runs, current, exact = [], [], True
+        # Update File 的各段：上下文與刪除行只留在這裡，給 `apply_update` 定位用，
+        # 不會混進 additions。None＝這個檔的段落讀不準，不准拿去套。
+        hunks = []
         # 先收在這裡：封套沒有收尾就整個不算，所以中途拆出來的檔不能直接進 found。
         batch = []
         index += 1
@@ -84,7 +104,7 @@ def parse(text):
             if stripped == BEGIN_MARKER:
                 # 封套裡又開一個封套：形狀已經不對，這一段不當數。
                 op = path = None
-                runs, current, batch = [], [], []
+                runs, current, batch, hunks = [], [], [], []
                 exact = True
                 continue
             header = next(
@@ -93,7 +113,7 @@ def parse(text):
             )
             if header is not None:
                 if op is not None:
-                    batch.append(_finish(op, path, runs, current, exact))
+                    batch.append(_finish(op, path, runs, current, exact, hunks))
                     if len(found) + len(batch) >= MAX_FILES:
                         # 上限是延遲護欄，不是形狀判定：到這裡就收手，交出已經拆好的。
                         op = path = None
@@ -101,12 +121,16 @@ def parse(text):
                         break
                 prefix, op = header
                 path = stripped[len(prefix):].strip()
-                runs, current, exact = [], [], True
+                runs, current, exact, hunks = [], [], True, []
                 continue
             if op is None:
                 continue
             if line.startswith("+"):
                 current.append(line[1:])
+                if hunks is not None:
+                    if not hunks:
+                        hunks.append(_new_hunk())
+                    hunks[-1]["new"].append(line[1:])
                 continue
             current = _flush(runs, current)
             if line.startswith(("-", " ")) or not stripped:
@@ -114,16 +138,34 @@ def parse(text):
                 if op == "add":
                     # Add File 的內容應該整段都是 `+`；出現別的東西就代表這一段讀不準。
                     exact = False
+                elif hunks is not None:
+                    if not hunks:
+                        hunks.append(_new_hunk())
+                    # 全空的一行照 Codex 的寬鬆讀法當成空的上下文行。
+                    body = line[1:] if line.startswith(("-", " ")) else ""
+                    if not line.startswith("+"):
+                        hunks[-1]["old"].append(body)
+                    if not line.startswith("-"):
+                        hunks[-1]["new"].append(body)
+                continue
+            if stripped.startswith("*** End of File"):
+                if hunks:
+                    hunks[-1]["eof"] = True
                 continue
             if any(stripped.startswith(prefix) for prefix in _STRUCTURE_PREFIXES):
+                # 改名只換落點，段落照樣套在原檔上：套出來的全文就是新路徑上的內容。
+                # 把它當成套不上會讓「改名＋追加事故」整個不判。
                 continue
             if stripped.startswith("@@"):
+                if hunks is not None:
+                    hunks.append(_new_hunk(stripped[2:].strip()))
                 continue
             # 認不得的行：不猜它是內容還是雜訊，只記「這個檔判不準」。
             exact = False
+            hunks = None
         if closed:
             if op is not None:
-                batch.append(_finish(op, path, runs, current, exact))
+                batch.append(_finish(op, path, runs, current, exact, hunks))
             found.extend(batch[: MAX_FILES - len(found)])
         if len(found) >= MAX_FILES:
             break
@@ -135,6 +177,79 @@ def full_content(entry):
     if entry.op != "add" or not entry.complete:
         return None
     return "\n".join(entry.additions)
+
+
+# Codex seek_sequence.rs 最寬鬆的那一輪：各種破折號、彎引號、特殊空白當成 ASCII 比。
+# 少了這一輪，Codex 套得上的補丁在這裡套不上，閘門就會判到一份沒有人寫過的檔。
+_PUNCTUATION_FOLD = str.maketrans({
+    **dict.fromkeys("‐‑‒–—―−", "-"),
+    **dict.fromkeys("‘’‚‛", "'"),
+    **dict.fromkeys("“”„‟", '"'),
+    **dict.fromkeys(
+        "            　", " "),
+})
+
+
+def _fold(value):
+    return value.strip().translate(_PUNCTUATION_FOLD)
+
+
+def _seek(lines, pattern, start, at_end):
+    """照 Codex seek_sequence.rs：逐字 → 去行尾空白 → 去兩端空白 → 標點正規化，
+    每一輪都從頭找，第一個對得上的位置勝出。
+
+    `*** End of File` 的段落只准落在檔尾：Codex 從檔尾那個位置開始找，而那也是
+    最後一個可能的位置，所以檔尾對不上就是套不上，不會回頭去比前面的行。"""
+    if not pattern:
+        return start
+    if len(pattern) > len(lines):
+        return None
+    last = len(lines) - len(pattern)
+    first = max(last, start) if at_end else start
+    for normalise in (lambda value: value, str.rstrip, str.strip, _fold):
+        wanted = [normalise(item) for item in pattern]
+        for index in range(first, last + 1):
+            if [normalise(item) for item in lines[index:index + len(pattern)]] == wanted:
+                return index
+    return None
+
+
+def apply_update(entry, text):
+    """Update File 套在 `text` 上之後的全文；套不上就回 None。
+
+    只當文字處理，照 Codex apply_patch 的定位規則：`@@` 後的定位字先往下找，再從那裡
+    找這一段的舊行；沒有舊行的段落接在檔尾。任何一段找不到就整個不算——那個補丁在
+    Codex 那邊一樣套不上，猜一個位置出來會判到一份沒有人寫過的檔。
+    """
+    if entry.op != "update" or not entry.hunks or not isinstance(text, str):
+        return None
+    lines = text.lstrip("﻿").replace("\r\n", "\n").split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    position = 0
+    replacements = []
+    for hunk in entry.hunks:
+        if hunk.header:
+            anchor = _seek(lines, [hunk.header], position, False)
+            if anchor is None:
+                return None
+            position = anchor + 1
+        if not hunk.old:
+            replacements.append((len(lines), 0, list(hunk.new)))
+            continue
+        old, new = list(hunk.old), list(hunk.new)
+        found = _seek(lines, old, position, hunk.eof)
+        if found is None and old[-1] == "":
+            old = old[:-1]
+            new = new[:-1] if new and new[-1] == "" else new
+            found = _seek(lines, old, position, hunk.eof)
+        if found is None:
+            return None
+        replacements.append((found, len(old), new))
+        position = found + len(old)
+    for start, length, new in sorted(replacements, key=lambda item: item[0], reverse=True):
+        lines[start:start + length] = new
+    return "\n".join(lines) + "\n"
 
 
 def _selftest():
@@ -161,6 +276,33 @@ def _selftest():
                    and all("removed" not in text and "context" not in text
                            for text in files[1].additions)))
     checks.append(("Delete File 沒有新增行", files[2].additions == ()))
+    checks.append(("Update File 的段落留著上下文與刪除行，只給定位用",
+                   files[1].hunks == (Hunk("def thing():", ("context line", "removed line"),
+                                           ("context line", "added line"), False),)
+                   and files[0].hunks is None and files[2].hunks is None))
+    before = "top\ndef thing():\ncontext line\nremoved line\ntail\n"
+    checks.append(("套得上就交出寫入後全文，CRLF 與 BOM 不影響定位",
+                   apply_update(files[1], before) == "top\ndef thing():\ncontext line\nadded line\ntail\n"
+                   and apply_update(files[1], "﻿" + before.replace("\n", "\r\n"))
+                   == "top\ndef thing():\ncontext line\nadded line\ntail\n"))
+    checks.append(("套不上、Add File 一律回 None",
+                   apply_update(files[1], "nothing here\n") is None
+                   and apply_update(files[0], before) is None))
+    moved = parse("\n".join((BEGIN_MARKER, "*** Update File: a.md", "*** Move to: b.md",
+                             "@@", " x", "+y", END_MARKER)))[0]
+    checks.append(("改名只換落點，段落照樣套在原檔上", apply_update(moved, "x\n") == "x\ny\n"))
+    dashed = parse("\n".join((BEGIN_MARKER, "*** Update File: a.md", "@@",
+                              "-  - 'run-two'", "+  - 'run-three'", END_MARKER)))[0]
+    checks.append(("補丁寫 ASCII 連字號，檔裡是 en dash／彎引號也對得上（Codex 最寬鬆那一輪）",
+                   apply_update(dashed, "a\n  - 'run–two'\n") == "a\n  - 'run-three'\n"
+                   and apply_update(dashed, "a\n  - ‘run-two’\n") == "a\n  - 'run-three'\n"))
+    tail = parse("\n".join((BEGIN_MARKER, "*** Update File: a.md", "@@", " keep", "+new",
+                            "*** End of File", END_MARKER)))[0]
+    checks.append(("End of File 的段落只准落在檔尾，前面對得上也不算",
+                   apply_update(tail, "x\nkeep\n") == "x\nkeep\nnew\n"
+                   and apply_update(tail, "keep\nx\n") is None))
+    appended = parse("\n".join((BEGIN_MARKER, "*** Update File: a.md", "+tail line", END_MARKER)))[0]
+    checks.append(("沒有舊行的段落接在檔尾", apply_update(appended, "a\nb\n") == "a\nb\ntail line\n"))
     checks.append(("路徑照原字串留著", [item.path for item in files] == ["new.md", "old.md", "gone.md"]))
 
     broken = sample.replace(END_MARKER, "")

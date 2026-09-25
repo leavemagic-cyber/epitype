@@ -2988,6 +2988,121 @@ _EN = {
     },
 }
 
+# ---- recurrence gate -----------------------------------------------------
+# 2026-09-25 titan 那場違反了一張早就存在的 feedback 卡，處理方式是讀卡、在卡尾追加一段
+# 「再犯（日期，事故）」。那張卡本來就擋不住，追加什麼都沒改變，只讓它變長、每次喚回多花
+# token。記憶協定沒有規定再犯時怎麼處理，AI 就照預設反射把事故寫進卡裡。
+#
+# 再犯＝這張卡擋不住的證據。正確的處理只有三種：替卡加上擋得住的欄位；閘門表達不了就修
+# Epitype 本身；真的做不到就寫 unenforceable 與理由，不再在它身上花 token。事故經過留在
+# 對話紀錄與場次日誌。所以：往一張已存在的行為卡新增一行事故敘述、卻沒新增或改動任何
+# 武裝欄位，寫檔閘就擋下。
+#
+# 只收行為卡：專案、參考、決策這幾種本來就在記歷史。規則卡（rule）雖然不在
+# CARD_ARMING_TYPES 裡，它同樣是「以後要怎麼做」，事故一樣不該寫進去。
+RECURRENCE_GATE_CARD_TYPES = CARD_ARMING_TYPES + (CARD_TYPE_RULE,)
+# 「武裝」要算上讓主欄位真的咬得到的搭配欄位：替既有的 guard_tool 多補一個
+# guard_all_of 片段、替 require_when 改一句 require_text，都是在讓這張卡擋得住。
+RECURRENCE_GATE_ARMING_FIELDS = tuple(dict.fromkeys(CARD_ARMING_FIELDS + (
+    ACTION_GUARD_ALL_OF_FIELD,
+    ACTION_GUARD_REQUIRES_FIELD,
+    ACTION_GUARD_UNLESS_FIELD,
+    ACTION_GUARD_WHEN_FIELD,
+    REQUIRE_TEXT_FIELD,
+    TURN_CHECK_LIMIT_FIELD,
+)))
+# 這幾個欄位裡出現再犯字樣是它們的本分：武裝欄位本身就是規則、例句必須寫得出那句話、
+# unenforceable 的理由正是「為什麼擋不住」該寫的地方（上面第三種處理）。
+RECURRENCE_GATE_EXEMPT_FIELDS = RECURRENCE_GATE_ARMING_FIELDS + (
+    EXAMPLE_BLOCKS_FIELD, EXAMPLE_ALLOWS_FIELD, UNENFORCEABLE_FIELD)
+# 只有關鍵字不算事故敘述。2026-09-25 掃 4 個真庫：20 張行為卡含這類字樣，約一半是一般
+# 用語——「免得以後再犯」「永遠別再犯」「防再犯規則」。事故敘述的形狀是「標記＋日期」
+# 在同一行，或是以標記開頭的粗體／標題（`**再犯（…）**`、`## 第二次犯同一件事`）。
+# 「第一次」不是再犯，所以序數從二起算。
+RECURRENCE_GATE_MARKER_PATTERN = (
+    r"再犯|又犯|再次犯|再次發生|又發生|又出現"
+    r"|第\s*(?:[2-9]|\d{2,}|[二兩三四五六七八九十][一二兩三四五六七八九十]*)\s*次\s*(?:犯|發生)"
+    r"|\brecur(?:s|red|rence|rences)?\b|\bhappen(?:ed|s)?\s+again\b"
+)
+# 標記前面的預防語：命中的是「別讓它再發生」，不是「它又發生了」。預防詞與標記之間
+# 最多隔幾個字（「免得以後再犯」「預防這件事再次發生」）；單獨一個「不」只認緊貼的
+# 「不再犯」——隔了字的「不小心又犯」正是事故。「以後」本身不算預防語：「修好以後又犯」
+# 是事故。
+RECURRENCE_GATE_PREVENTIVE_PATTERN = (
+    r"(?:(?:別|不要|不會|不能|不可|不准|勿|防|避免|免得|以免|杜絕|禁止)"
+    r"[^\s，。,.；;：:！!？?）)」]{0,4}|不)\s*$"
+    r"|(?:\b(?:prevent\w*|avoid\w*|never|not|stop)|n't)\W+(?:\w+\W+){0,2}$"
+)
+RECURRENCE_GATE_PREVENTIVE_WINDOW = 24
+# 條件句是規則正文，不是事故：「2026-09-25 起的處理規則：再犯時先補 forbidden」寫的是
+# 以後怎麼做（2026-09-25 交叉審查實測被誤擋）。只認兩種證據：標記後面緊接「時／的話」，
+# 或同一個子句裡前面有「若／如果／一旦／萬一／假如」、if／when。後面單獨接「就／則」
+# 證明不了什麼——「2026-09-25 又犯就表示閘門失效」是事故（第二輪審查實測被放過）。
+# 這條與下面的 RECURRENCE_GATE_LEAD_PATTERN 都是拿 `match(line, pos)` 從行中間接著比，
+# 不能寫 `^`：`^` 只認整行開頭，帶 pos 的 match 永遠比不到。
+RECURRENCE_GATE_CONDITIONAL_AFTER_PATTERN = r"\s*(?:時|的話)"
+# 日期緊貼在標記前面（「2026-09-25 又犯」）就是在記某一天發生的事，前置條件詞與後接「就／則」
+# 救不了它；只有標記後緊接「時／的話」（「2026-09-25 再犯時先補…」）先判成條件句。
+RECURRENCE_GATE_DATED_MARKER_PATTERN = (
+    r"(?:\d{4}[-/.]\d{1,2}[-/.]\d{1,2}|(?<!\d)\d{1,2}[-/]\d{1,2}|\d{1,2}\s*月\s*\d{1,2}\s*日|今天)"
+    r"[\s,，:：]*$"
+)
+RECURRENCE_GATE_CONDITIONAL_BEFORE_PATTERN = (
+    r"(?:若|如果|一旦|萬一|假如)[^，。；;,.!?！？：:]*$"
+    r"|\b(?:if|when|whenever)\b[^,.;:!?]*$"
+)
+RECURRENCE_GATE_DATE_PATTERN = (
+    r"(?<!\d)(?:\d{4}[-/.]\d{1,2}[-/.]\d{1,2}|\d{1,2}[-/]\d{1,2}|\d{1,2}\s*月\s*\d{1,2}\s*日)(?!\d)"
+    r"|今天"
+)
+# 粗體或標題行：清單記號之後是 `#` 標題或 `**`／`__` 粗體。標記要落在開頭（可以先有日期）。
+RECURRENCE_GATE_EMPHASIS_PATTERN = r"^\s*(?:(?:[-*+]|\d+[.)])\s+)?(?:#{1,6}\s+|\*\*|__)"
+RECURRENCE_GATE_LEAD_PATTERN = (
+    r"(?:[\s*_#~:：,，.、()（）\[\]【】\-/]|\d{4}[-/.]\d{1,2}[-/.]\d{1,2}|\d{1,2}[-/]\d{1,2})*"
+)
+RECURRENCE_GATE_RULE = "recurrence"
+# 放行也入帳：規則響了、因為正在武裝而放過，或是同一份內容第二次送來而放過——後者是
+# 所有寫檔閘共用的逃生口，沒有這一列，繞過去的那一次在稽核裡就看不見。
+RECURRENCE_GATE_ALLOW_LOG_KIND = "write_allow"
+RECURRENCE_GATE_OUTCOME_ARMING = "arming_changed"
+RECURRENCE_GATE_OUTCOME_EXEMPT_FIELDS = "exempt_fields_only"
+RECURRENCE_GATE_OUTCOME_REPEAT = "repeat"
+# 補丁套不上磁碟上的卡：Codex 自己也會失敗、什麼都不會寫出去，只憑新增行去擋一份
+# 不會存在的內容是誤擋。
+RECURRENCE_GATE_OUTCOME_UNAPPLIABLE = "patch_unappliable"
+RECURRENCE_GATE_REASON = (
+    "🔁 再犯不是往卡上加一段：{path} 是行為卡（{card_type}），這次新增的文字在記一次再犯"
+    "（「{fragment}」），可是卡上能擋的欄位一個都沒新增或改動。再犯＝這張卡擋不住的證據，"
+    "處理只有三種：①替它加上擋得住的欄位（{armed}）；②閘門表達不了，就修 Epitype 本身，"
+    "整類規則一起受益；③真的做不到，寫 {unenforceable}: <理由>，之後不再在它身上花 token。"
+    "事故經過留在對話紀錄與場次日誌，不寫進卡片。"
+)
+_EN.update({
+    "RECURRENCE_GATE_REASON": (
+        "🔁 a recurrence is not a paragraph to add: {path} is a behaviour card ({card_type}); "
+        'the text being added records the rule being broken again ("{fragment}"), yet no field '
+        "that can block anything was added or changed. A recurrence is evidence that this card "
+        "cannot stop the behaviour, and there are only three responses: (1) give it a field that "
+        "blocks ({armed}); (2) if the gates cannot express it, fix Epitype itself so the whole "
+        "class of rules benefits; (3) if it truly cannot be enforced, write {unenforceable}: "
+        "<reason> and stop spending tokens on it. The incident itself stays in the transcript "
+        "and the session log, not in the card."
+    ),
+})
+_LAZY_REGEX.update({
+    "RECURRENCE_GATE_MARKER_REGEX": lambda: re.compile(RECURRENCE_GATE_MARKER_PATTERN, re.IGNORECASE),
+    "RECURRENCE_GATE_PREVENTIVE_REGEX": lambda: re.compile(
+        RECURRENCE_GATE_PREVENTIVE_PATTERN, re.IGNORECASE),
+    "RECURRENCE_GATE_DATE_REGEX": lambda: re.compile(RECURRENCE_GATE_DATE_PATTERN),
+    "RECURRENCE_GATE_DATED_MARKER_REGEX": lambda: re.compile(RECURRENCE_GATE_DATED_MARKER_PATTERN),
+    "RECURRENCE_GATE_CONDITIONAL_AFTER_REGEX": lambda: re.compile(
+        RECURRENCE_GATE_CONDITIONAL_AFTER_PATTERN),
+    "RECURRENCE_GATE_CONDITIONAL_BEFORE_REGEX": lambda: re.compile(
+        RECURRENCE_GATE_CONDITIONAL_BEFORE_PATTERN, re.IGNORECASE),
+    "RECURRENCE_GATE_EMPHASIS_REGEX": lambda: re.compile(RECURRENCE_GATE_EMPHASIS_PATTERN),
+    "RECURRENCE_GATE_LEAD_REGEX": lambda: re.compile(RECURRENCE_GATE_LEAD_PATTERN),
+})
+
 # 最後才套用：上面每一個名字都必須已經存在，套用之後定義的常數不會被換掉。
 # 樣式全部留在原位不翻——__getattr__ 底下的延後編譯讀的就是那些名字。
 if LANGUAGE != DEFAULT_LANGUAGE:
