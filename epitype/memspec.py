@@ -153,6 +153,9 @@ COMPACT_MAP_MAX_FILES = 64
 # 壓縮前交接檔跟地圖放同一個目錄、同一套檔名算法，只差這個尾巴。清理時兩種分開計數：
 # 交接檔是模型自己寫的、一場可能只有一份地圖卻留好幾份交接，混在一起數會把地圖提早擠掉。
 COMPACT_HANDOFF_SUFFIX = ".handoff.md"
+# 交接檔「已交回過」的紀錄（內容＝交回當下交接檔的 mtime_ns）。同一份沒重寫過的交接不再
+# 交回第二次；檔案本身不刪——只有真的送出去才算交付，被預算裁掉的下次照樣交回。
+COMPACT_HANDOFF_DELIVERED_SUFFIX = ".handoff.delivered"
 
 # Context 用量計（Claude Code，2026-09-25 owner 授權）。
 # 宿主在 context 到 CLAUDE_AUTOCOMPACT_PCT_OVERRIDE 時自動壓縮，模型看不到自己的用量、
@@ -181,12 +184,22 @@ CONTEXT_METER_TAIL_MAX_BYTES = 64 * 1024 * 1024
 CONTEXT_METER_TAIL_MAX_BLOCK_BYTES = 1024 * 1024
 CONTEXT_METER_LINE_MAX_BYTES = 1024 * 1024
 CONTEXT_METER_TAIL_SECONDS = 0.15
+# 超過單行上限的那一行要先認出是不是 assistant 列：真實 transcript（2026-09-25 抽 40 份、
+# 25,663 列）assistant 列的頂層 "type" 排在 message 之後、離行尾約 300–420 B；user 列的
+# "type" 排在 message 之前（48 列 ≥200 KB 的 user 列，行尾 64 KiB 內都沒有 assistant 型別）。
+# 所以用已讀進來的行尾這一段判斷：是 assistant 列就回 None，不拿更早的用量頂替。
+CONTEXT_METER_OVERSIZED_TAIL_BYTES = 64 * 1024
+# 宿主寫的是緊湊 JSON；帶空白的寫法也認，免得換一種序列化就整條失效。
+CONTEXT_METER_ASSISTANT_TYPE_MARKERS = (b'"type":"assistant"', b'"type": "assistant"')
 # 學習狀態檔的讀–追加–換名在同一把鎖裡；拿不到就放棄這一筆（學習不是關卡）。
 CONTEXT_METER_LOCK_SECONDS = 0.5
 CONTEXT_METER_CALIBRATE_DAYS = 30
 # calibrate 的最近幾筆差太多（最大／最小超過這個比例）＝多半混了不同 pct 或不同視窗，
 # 寫進去就是拿別的設定下的數字當門檻；要寫得 --force。
 CONTEXT_METER_CALIBRATE_MAX_SPREAD = 1.10
+# 能歸屬 pct 的樣本少於這個數就不寫（要寫得 --force）。
+CONTEXT_METER_CALIBRATE_MIN_SAMPLES = 3
+CONTEXT_METER_CALIBRATE_PCT_UNPROVEN = "calibrate：無法證實各樣本當時的 pct（pct={pct}，來自 {source}，套用到每一筆樣本）"
 CONTEXT_METER_SOURCE_OVERRIDE = "override"
 CONTEXT_METER_SOURCE_LEARNED = "learned"
 CONTEXT_METER_SOURCE_SCALED = "scaled"
@@ -2693,6 +2706,7 @@ _EN = {
         "and the paths already ruled out); continue only after it is written."
     ),
     "CONTEXT_METER_HANDOFF_NOTICE": "Pre-compaction handoff: {path}; read it before you continue.",
+    "CONTEXT_METER_CALIBRATE_PCT_UNPROVEN": "calibrate: the pct each sample was taken under cannot be verified (pct={pct}, from {source}, applied to every sample)",
     "DECISION_PREFIX": "⚖ ruling: ",
     "VAULT_MISSING_REASON": "No such vault: {vault}\n(Scanning a folder that does not exist reports 0 problems, which looks exactly like \"clean\"; so this reports an error instead of 0.)",
     "RULE_HOSTS_REASON": "{value} in {field} is not one of {allowed}",

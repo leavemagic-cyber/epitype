@@ -73,13 +73,24 @@ def _scan_lines(lines):
     return False, None
 
 
+def _oversized_assistant(tail):
+    """一行超過單行上限、開頭還沒讀到時，用已讀進來的行尾判斷它是不是 assistant 列。
+
+    真實 transcript 的 assistant 列把頂層 "type" 排在 message 之後、貼近行尾；user 列
+    （工具結果）排在 message 之前。認得出是 assistant 列就代表最新用量讀不到——這時回
+    None（不提醒），而不是往前拿一筆更早、更小的用量頂替，那會漏掉該發的提醒。"""
+    window = tail[-memspec.CONTEXT_METER_OVERSIZED_TAIL_BYTES:]
+    return any(marker in window for marker in memspec.CONTEXT_METER_ASSISTANT_TYPE_MARKERS)
+
+
 def current_tokens(transcript_path, time_limit=None):
     """這場目前的 context 用量（最後一筆主鏈 assistant 的三欄加總）；找不到回 None。
 
     從檔尾反向分塊讀：首塊 64 KiB、逐次加倍到 1 MiB 為止，總共最多 64 MiB，而且有
     時間上限（預設 150 ms，到了就回 None：hook 每次工具呼叫都要付這一份）。最後一行
-    可能是好幾 MB 的工具結果：一行超過單行上限還沒看到開頭，就把累積的片段丟掉、只
-    繼續往前找換行——那一行本來就不是用量列，記憶體不跟著它長。任何讀檔錯誤都回 None。"""
+    可能是好幾 MB 的工具結果：一行超過單行上限還沒看到開頭，先用行尾認它是不是
+    assistant 列——是就回 None；不是就把累積的片段丟掉、只繼續往前找換行，記憶體不跟著
+    它長。任何讀檔錯誤都回 None。"""
     line_max = memspec.CONTEXT_METER_LINE_MAX_BYTES
     limit = memspec.CONTEXT_METER_TAIL_SECONDS if time_limit is None else time_limit
     deadline = time.monotonic() + limit
@@ -111,6 +122,8 @@ def current_tokens(transcript_path, time_limit=None):
                     if not oversized:
                         pending = chunk + pending
                         if len(pending) > line_max:
+                            if _oversized_assistant(pending):
+                                return None
                             pending, oversized = b"", True
                     continue
                 body = chunk[cut + 1:]
@@ -125,6 +138,8 @@ def current_tokens(transcript_path, time_limit=None):
                 pending = chunk[:cut] if start > 0 else b""
                 oversized = len(pending) > line_max
                 if oversized:
+                    if _oversized_assistant(pending):
+                        return None
                     pending = b""
         except OSError:
             return None
@@ -414,11 +429,17 @@ def scan_autocompactions(root, days=memspec.CONTEXT_METER_CALIBRATE_DAYS, now=No
     return found
 
 
+PCT_SOURCE_SETTINGS = "~/.claude/settings.json env"
+
+
+def _settings_path(home=None):
+    return Path(home or Path.home()) / ".claude" / "settings.json"
+
+
 def _settings_pct(home=None):
     """宿主設定裡的 CLAUDE_AUTOCOMPACT_PCT_OVERRIDE（終端機跑 CLI 時環境變數通常沒有）。"""
-    path = Path(home or Path.home()) / ".claude" / "settings.json"
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        value = json.loads(_settings_path(home).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     env = value.get("env") if isinstance(value, dict) else None
@@ -427,17 +448,26 @@ def _settings_pct(home=None):
 
 
 def _resolve_pct(explicit, environ=None, home=None):
-    """(pct 字串, 來源說明)。hook 讀的是宿主行程的環境變數；終端機裡沒有時退到宿主設定。"""
+    """(pct 字串, 來源說明, 設定檔最後修改時間或 None)。
+
+    hook 讀的是宿主行程的環境變數；終端機裡沒有時退到宿主設定。來自設定檔時一併回傳它的
+    最後修改時間：在那之後的自動壓縮，才證得出是在這個 pct 底下發生的。"""
+    from datetime import datetime, timezone
+
     environ = os.environ if environ is None else environ
     if explicit is not None:
-        return explicit.strip(), "--pct"
+        return explicit.strip(), "--pct", None
     value = environ.get(memspec.CONTEXT_METER_PCT_ENV)
     if value is not None:
-        return value.strip(), "env"
+        return value.strip(), "env", None
     value = _settings_pct(home)
     if value is not None:
-        return value.strip(), "~/.claude/settings.json env"
-    return "", "unset"
+        try:
+            since = datetime.fromtimestamp(_settings_path(home).stat().st_mtime, timezone.utc)
+        except OSError:
+            since = None
+        return value.strip(), PCT_SOURCE_SETTINGS, since
+    return "", "unset", None
 
 
 def _governance(vault_argument, options):
@@ -454,19 +484,37 @@ def _governance(vault_argument, options):
     return governance_vault([Path(item).expanduser().resolve() for item in vaults if isinstance(item, str)])
 
 
-def calibrate(root, apply=False, vault=None, pct="", now=None, out=print, force=False):
+def calibrate(root, apply=False, vault=None, pct="", now=None, out=print, force=False,
+              pct_source="--pct", settings_since=None):
+    """從近 30 天的自動壓縮學門檻。只寫得出能歸屬 pct 的樣本：
+
+    - pct 來自宿主設定檔：只收設定檔最後修改時間之後的樣本（那段期間設定沒變過）；
+    - pct 來自環境變數或 --pct：證實不了每筆當時的 pct，照收但明講。
+    合格樣本少於 3 筆、或最近幾筆差超過 10%，拒寫；--force 才寫。寫入跟 PreCompact 的
+    學習用同一把鎖：拿不到鎖就不寫，不會蓋掉同時進來的新樣本。"""
     found = scan_autocompactions(root, now=now)
-    recent = found[-memspec.CONTEXT_METER_STATE_MEDIAN_OF:]
+    if pct_source == PCT_SOURCE_SETTINGS:
+        eligible = [item for item in found if settings_since is not None and item[0] > settings_since]
+    else:
+        eligible = found
+    recent = eligible[-memspec.CONTEXT_METER_STATE_MEDIAN_OF:]
     if not recent:
-        out(f"calibrate: no auto-compaction in the last {memspec.CONTEXT_METER_CALIBRATE_DAYS} days "
-            f"under {root}; nothing to learn")
+        out(f"calibrate: no attributable auto-compaction in the last {memspec.CONTEXT_METER_CALIBRATE_DAYS} "
+            f"days under {root} ({len(found)} found, pct from {pct_source}); nothing to learn")
         return None
-    candidate = int(_median([tokens for _when, tokens in recent]))
+    values = [tokens for _when, tokens in recent]
+    candidate = int(_median(values))
     first = recent[0][0].strftime("%Y-%m-%dT%H:%M:%SZ")
     last = recent[-1][0].strftime("%Y-%m-%dT%H:%M:%SZ")
     out(f"calibrate: candidate={candidate} tokens samples={len(recent)} "
         f"(of {len(found)} found) range={first}..{last} pct={pct or '(unset)'}")
-    values = [tokens for _when, tokens in recent]
+    if pct_source == PCT_SOURCE_SETTINGS:
+        stamp = settings_since.strftime("%Y-%m-%dT%H:%M:%SZ") if settings_since else "?"
+        out(f"calibrate: pct {pct} comes from {pct_source}, unchanged since {stamp}; "
+            f"{len(eligible)} of {len(found)} sample(s) are after it and count")
+    else:
+        out(memspec.CONTEXT_METER_CALIBRATE_PCT_UNPROVEN.format(pct=pct or "(unset)", source=pct_source))
+    refused = []
     spread = max(values) / min(values)
     if spread > memspec.CONTEXT_METER_CALIBRATE_MAX_SPREAD:
         # 差這麼多多半是混了不同 pct 或不同視窗：寫進去就是拿別的設定下的數字當門檻。
@@ -475,9 +523,14 @@ def calibrate(root, apply=False, vault=None, pct="", now=None, out=print, force=
             f"they probably mix different {memspec.CONTEXT_METER_PCT_ENV} values or context windows. "
             f"Set {memspec.CONTEXT_METER_CONFIG_FIELD}.{memspec.CONTEXT_METER_OVERRIDE_FIELD} in the config, "
             "or re-run with the right --pct once the recent compactions share one setting; --force writes them anyway")
-        if apply and not force:
-            out("calibrate: refused to write; nothing written")
-            return None
+        refused.append("spread")
+    if len(recent) < memspec.CONTEXT_METER_CALIBRATE_MIN_SAMPLES:
+        out(f"calibrate: only {len(recent)} attributable sample(s), fewer than "
+            f"{memspec.CONTEXT_METER_CALIBRATE_MIN_SAMPLES}; --force writes them anyway")
+        refused.append("too few")
+    if apply and refused and not force:
+        out(f"calibrate: refused to write ({', '.join(refused)}); nothing written")
+        return None
     if not apply:
         out("calibrate: dry run; pass --apply to write the learned state")
         return candidate
@@ -487,8 +540,13 @@ def calibrate(root, apply=False, vault=None, pct="", now=None, out=print, force=
     samples = [{"tokens": tokens, "pct": pct, "at": when.strftime("%Y-%m-%dT%H:%M:%SZ")}
                for when, tokens in recent]
     path = state_path(vault)
-    replaced = len(read_samples(path))
-    write_samples(path, samples)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with memspec.file_lock(path, memspec.CONTEXT_METER_LOCK_SECONDS) as locked:
+        if not locked:
+            out(f"calibrate: {path} is locked by another writer; nothing written")
+            return None
+        replaced = len(read_samples(path))
+        write_samples(path, samples)
     out(f"calibrate: wrote {len(samples)} sample(s) to {path} (replaced {replaced})")
     return candidate
 
@@ -580,13 +638,34 @@ def _selftest():
                            and current_tokens(None) is None))
 
             # 3b. 最後一行是 9 MiB 的工具結果（超過單行上限、也超過舊的 8 MiB 總量）：丟掉
-            # 那一行的片段、繼續往前找，前一行的用量照樣讀得到；時間上限到了回 None。
+            # 那一行的片段、繼續往前找，前一行的用量照樣讀得到（預設 150 ms 上限內）；
+            # 時間上限到了回 None。
             huge = root / "huge.jsonl"
             write(huge, [assistant(1000), assistant(345678), tool_result(9 * 1024 * 1024)])
-            checks.append(("a 9 MiB last line is skipped whole and the usage before it is read; "
-                           "an exhausted time limit gives None",
-                           current_tokens(huge, time_limit=10.0) == 345678
+            checks.append(("a 9 MiB tool-result last line is skipped whole and the usage before it is read "
+                           "within the default limit; an exhausted time limit gives None",
+                           current_tokens(huge) == 345678
                            and current_tokens(huge, time_limit=0) is None))
+
+            # 3c. 最後一行是超過單行上限的 assistant 列（欄位順序照真實 transcript：頂層
+            # type 排在 message 之後）：最新用量讀不到就回 None，不拿前一筆 50,000 頂替。
+            oversized_row = {
+                "parentUuid": "p", "isSidechain": False,
+                "message": {"role": "assistant",
+                            "content": [{"type": "text", "text": "z" * (3 * 1024 * 1024)}],
+                            "usage": {"input_tokens": 97700, "cache_creation_input_tokens": 100,
+                                      "cache_read_input_tokens": 200}},
+                "requestId": "r", "type": "assistant", "uuid": "u", "timestamp": "2026-09-25T00:00:00Z",
+            }
+            oversized = root / "oversized-assistant.jsonl"
+            oversized_results = []
+            for separators in ((",", ":"), (", ", ": ")):  # 宿主的緊湊寫法，以及帶空白的寫法
+                encoded = json.dumps(oversized_row, separators=separators)
+                write(oversized, [assistant(50000), encoded])
+                oversized_results.append(
+                    len(encoded) > memspec.CONTEXT_METER_LINE_MAX_BYTES and current_tokens(oversized) is None)
+            checks.append(("an oversized assistant last line gives None instead of the older usage",
+                           oversized_results == [True, True]))
 
             # 4. 三層門檻：覆寫 > 學到 > 未知；pct 換算。
             vault = root / "vault"
@@ -798,6 +877,50 @@ def _selftest():
                            and forced == 183000
                            and len(read_samples(state_path(spread_vault))) == 5))
 
+            # 10c. pct 歸屬：來自宿主設定檔時只收設定檔最後修改之後的樣本；合格少於 3 筆
+            # 拒寫、--force 才寫；來自 --pct／環境變數時照收，但印明證實不了每筆的 pct。
+            since_three = now - timedelta(days=6, hours=12)
+            since_two = now - timedelta(days=5, hours=12)
+            three_vault, two_vault = root / "attr-three", root / "attr-two"
+            attr_lines = []
+            three = calibrate(tight, apply=True, vault=three_vault, pct="92", now=now,
+                              out=attr_lines.append, pct_source=PCT_SOURCE_SETTINGS,
+                              settings_since=since_three)
+            two_refused = calibrate(tight, apply=True, vault=two_vault, pct="92", now=now,
+                                    out=attr_lines.append, pct_source=PCT_SOURCE_SETTINGS,
+                                    settings_since=since_two)
+            two_nothing = not state_path(two_vault).exists()
+            two_forced = calibrate(tight, apply=True, vault=two_vault, pct="92", now=now,
+                                   out=attr_lines.append, pct_source=PCT_SOURCE_SETTINGS,
+                                   settings_since=since_two, force=True)
+            resolved = _resolve_pct(None, {}, settings_home)
+            checks.append(("calibrate keeps only samples it can attribute a pct to, refuses fewer than 3 "
+                           "unless forced, and says when the pct is unproven",
+                           three == 184000
+                           and sorted(sample["tokens"] for sample in read_samples(state_path(three_vault)))
+                           == [183000, 184000, 186000]
+                           and two_refused is None and two_nothing
+                           and sorted(sample["tokens"] for sample in read_samples(state_path(two_vault)))
+                           == [184000, 186000]
+                           and two_forced is not None
+                           and any("3 of 6 sample(s)" in line for line in attr_lines)
+                           and any("fewer than 3" in line for line in attr_lines)
+                           and memspec.CONTEXT_METER_CALIBRATE_PCT_UNPROVEN.format(pct="92", source="--pct")
+                           in lines
+                           and resolved[0] == "92" and resolved[1] == PCT_SOURCE_SETTINGS
+                           and resolved[2] is not None))
+
+            # 10d. calibrate --apply 跟學習用同一把鎖：鎖被別人拿著時一筆都不寫。
+            locked_vault = root / "locked"
+            state_path(locked_vault).parent.mkdir(parents=True)
+            lock_lines = []
+            with memspec.file_lock(state_path(locked_vault), 5) as held:
+                blocked = calibrate(tight, apply=True, vault=locked_vault, pct="92", now=now,
+                                    out=lock_lines.append)
+            checks.append(("calibrate --apply writes under the learning lock and writes nothing while it is held",
+                           held and blocked is None and not state_path(locked_vault).exists()
+                           and any("locked" in line for line in lock_lines)))
+
             # 11. 效能：50 MB transcript、最後一列是 2 MB 工具結果，hook 只讀檔尾。
             large = root / "large.jsonl"
             filler = (assistant(1234) + "\n").encode("utf-8") * 1
@@ -808,18 +931,25 @@ def _selftest():
                 stream.write((assistant(222222) + "\n").encode("utf-8"))
                 stream.write((tool_result(2 * 1024 * 1024) + "\n").encode("utf-8"))
             started = time.perf_counter()
-            measured = current_tokens(large)
+            measured = current_tokens(large)  # 預設的 150 ms 上限：逾時就不會是 222222
             elapsed = time.perf_counter() - started
             print(f"context_meter: current_tokens on a {large.stat().st_size / 1e6:.1f} MB "
                   f"transcript took {elapsed * 1000:.1f} ms")
-            checks.append(("current_tokens on a 50 MB transcript ending in a 2 MB tool result is under 300 ms",
+            saved_limit = memspec.CONTEXT_METER_TAIL_SECONDS
+            memspec.CONTEXT_METER_TAIL_SECONDS = 0
+            try:
+                exhausted = current_tokens(large)
+            finally:
+                memspec.CONTEXT_METER_TAIL_SECONDS = saved_limit
+            checks.append(("current_tokens on a 50 MB transcript ending in a 2 MB tool result answers inside the "
+                           "default 150 ms limit and under 300 ms; an exhausted default limit gives None",
                            measured == 222222 and large.stat().st_size >= 50 * 1000 * 1000
-                           and elapsed < 0.3))
+                           and elapsed < 0.3 and exhausted is None))
     except Exception as exc:
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 15
+    total = 18
     status_word = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status_word} {passed}/{total}")
     if status_word != "PASS":
@@ -859,10 +989,11 @@ def main(argv=None):
     options = memspec.config_options()
     vault = _governance(args.vault, options)
     if args.command == "calibrate":
-        pct, pct_source = _resolve_pct(args.pct)
+        pct, pct_source, since = _resolve_pct(args.pct)
         print(f"calibrate: pct source={pct_source}")
         root = Path(args.root).expanduser() if args.root else Path.home() / ".claude" / "projects"
-        calibrate(root, apply=args.apply, vault=vault, pct=pct, force=args.force)
+        calibrate(root, apply=args.apply, vault=vault, pct=pct, force=args.force,
+                  pct_source=pct_source, settings_since=since)
         return 0
     status(options, vault, args.transcript)
     return 0

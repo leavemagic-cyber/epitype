@@ -97,6 +97,14 @@ def map_notice(destination):
     return line
 
 
+def handoff_delivered_path(handoff):
+    """交接檔的已交付紀錄：同目錄、同主檔名，`.handoff.md` 換成 `.handoff.delivered`。"""
+    handoff = Path(handoff)
+    name = handoff.name
+    stem = name[: -len(COMPACT_HANDOFF_SUFFIX)] if name.endswith(COMPACT_HANDOFF_SUFFIX) else handoff.stem
+    return handoff.with_name(stem + _memspec.COMPACT_HANDOFF_DELIVERED_SUFFIX)
+
+
 def handoff_notice(destination):
     """The compact-resume line for the handoff, or None over the same byte cap."""
     line = _memspec.CONTEXT_METER_HANDOFF_NOTICE.format(path=os.fspath(destination))

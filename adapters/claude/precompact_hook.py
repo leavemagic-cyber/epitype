@@ -37,7 +37,8 @@ def _sweep_maps(directory, keep):
 
     地圖與壓縮前交接檔（`*.handoff.md`）同目錄、同樣過期，但上限分開數：交接檔是模型
     寫的，一場可能留好幾份，跟地圖混著數會把還有用的地圖提早擠掉。代價是這個目錄最多
-    可以有兩倍上限的檔。`keep` 是這一場的地圖與交接檔，永遠不刪。"""
+    可以有兩倍上限的檔。交接的已交付紀錄（`*.handoff.delivered`）只按 30 天過期，不算進
+    任何一種上限。`keep` 是這一場的地圖、交接檔與已交付紀錄，永遠不刪。"""
     keep = set(keep) if isinstance(keep, (tuple, list, set, frozenset)) else {keep}
     try:
         now = time.time()
@@ -50,6 +51,12 @@ def _sweep_maps(directory, keep):
                     path.unlink()
                 else:
                     groups[path.name.endswith(memspec.COMPACT_HANDOFF_SUFFIX)].append(path)
+            except OSError:
+                continue
+        for path in directory.glob("*" + memspec.COMPACT_HANDOFF_DELIVERED_SUFFIX):
+            try:
+                if path not in keep and now - path.stat().st_mtime > memspec.COMPACT_MAP_TTL_SECONDS:
+                    path.unlink()
             except OSError:
                 continue
         for retained in groups.values():
@@ -82,31 +89,6 @@ def _learn_threshold(event, vault, transcript):
         pass
 
 
-def _meter_markers(session_id):
-    """主線這個壓縮週期是否已經說過用量計那一行。"""
-    directory = recall_marker_directory(session_id)
-    names = (memspec.CONTEXT_METER_MARKER,)
-    try:
-        return directory, [name for name in names if (directory / name).is_file()]
-    except OSError:
-        return directory, []
-
-
-def _retire_stale_handoff(map_path, handoff):
-    """同一場第二次以後的壓縮：交接檔從上一次壓縮後都沒重寫，就不再交回。
-
-    上一份地圖的 mtime 就是上一次壓縮的時刻；交接檔不比它新，代表它已經在上一次續場
-    交回過、這一段沒更新——再交回一次，下一段會照著一份過期的「下一步」做。這是已經
-    交付過的暫存檔，不是使用者的資料。第一次壓縮（還沒有地圖）照舊保留。"""
-    try:
-        if not map_path.is_file() or not handoff.is_file():
-            return
-        if handoff.stat().st_mtime <= map_path.stat().st_mtime:
-            handoff.unlink()
-    except OSError:
-        pass
-
-
 def _handle(event, started_at, learn=True):
     transcript_value = event.get("transcript_path")
     if not isinstance(transcript_value, str) or not transcript_value.strip():
@@ -119,28 +101,28 @@ def _handle(event, started_at, learn=True):
     if not transcript.is_file():
         return None
     session_id = event.get("session_id", event.get("sessionId", ""))
-    subagent = _is_subagent(event)
     # 子代理跟主線共用 session_id：它自己的壓縮不代表主線的 context 變小了，所以主線
-    # 已經說過的用量計那一行要留著，不能跟著喚回標記一起清掉而重新武裝。
-    meter_directory, meter_kept = _meter_markers(session_id) if subagent else (None, [])
+    # 已經說過的用量計那一行要留著——清喚回標記時直接跳過它，不先清再補。
     # Compaction invalidates recall dedupe even if the recovery-map write fails.
-    clear_recall_markers(session_id)
-    for name in meter_kept:
-        context_meter.claim(meter_directory, name)
+    if _is_subagent(event):
+        clear_recall_markers(session_id, keep=(memspec.CONTEXT_METER_MARKER,))
+    else:
+        clear_recall_markers(session_id)
     vault = governance_vault(config, for_write=True)
     # 用量計只做 Claude 側：Codex 的 rollout 沒有同形狀的用量列，學到的會是空的。
     if learn:
         _learn_threshold(event, vault, transcript)
     destination = _map_destination(vault, event, transcript)
     handoff = compact_map.handoff_destination(vault, session_id, transcript)
-    if not subagent:
-        _retire_stale_handoff(destination, handoff)
     compact_map.build_map(
         transcript,
         destination,
         memspec.COMPACT_MAP_DEFAULT_BUDGET_BYTES,
     )
-    _sweep_maps(destination.parent, (destination, handoff))
+    _sweep_maps(
+        destination.parent,
+        (destination, handoff, compact_map.handoff_delivered_path(handoff)),
+    )
     # 這裡曾經回一句「地圖已落於…」。它在兩邊宿主都到不了模型：Claude Code 的
     # PreCompact 不能注入（2026-08-19 實證），Codex 0.153 的 PreCompactOutcome 只有
     # Continue／Stopped。印一句沒有人收得到的話，只會讓下一個讀碼的人以為鏈是通的。
@@ -414,7 +396,8 @@ def _selftest():
                 and len(context_meter.read_samples(state)) == before_subagent,
             ))
 
-            # 同一場兩次壓縮：交接檔在上一次壓縮後沒重寫就不再交回；重寫過的留著。
+            # 同一場兩次壓縮：PreCompact 不刪交接檔（就算比上一份地圖舊）——交不交回歸
+            # SessionStart 的已交付紀錄。已交付紀錄只按 30 天過期、不算進上限，這一場的留著。
             twice_transcript = root / "transcript-twice.jsonl"
             twice_transcript.write_text(json.dumps(usage_row) + "\n", encoding="utf-8")
             twice_event = {"transcript_path": str(twice_transcript), "session_id": "session-twice"}
@@ -423,18 +406,27 @@ def _selftest():
                 vault, "session-twice", twice_transcript.resolve())
             twice_handoff.write_text("第一段的交接\n", encoding="utf-8")
             run_synthetic(Path(__file__), twice_event, config)
-            kept_first = twice_handoff.is_file() and twice_map.is_file()
             stamp = twice_map.stat().st_mtime
             os.utime(twice_handoff, (stamp - 10, stamp - 10))
-            run_synthetic(Path(__file__), twice_event, config)
-            retired_second = not twice_handoff.exists()
-            twice_handoff.write_text("第二段重寫的交接\n", encoding="utf-8")
-            stamp = twice_map.stat().st_mtime
-            os.utime(twice_handoff, (stamp + 10, stamp + 10))
+            own_record = compact_map.handoff_delivered_path(twice_handoff)
+            own_record.write_text("1\n", encoding="ascii")
+            os.utime(own_record, (month_ago, month_ago))
+            stale_record = maps_dir / f"stale{memspec.COMPACT_HANDOFF_DELIVERED_SUFFIX}"
+            stale_record.write_text("1\n", encoding="ascii")
+            os.utime(stale_record, (month_ago, month_ago))
+            fresh_records = []
+            for index in range(memspec.COMPACT_MAP_MAX_FILES + 6):
+                record = maps_dir / f"fresh-{index:03d}{memspec.COMPACT_HANDOFF_DELIVERED_SUFFIX}"
+                record.write_text("1\n", encoding="ascii")
+                fresh_records.append(record)
             run_synthetic(Path(__file__), twice_event, config)
             checks.append((
-                "a handoff not rewritten since the last compaction is retired; a rewritten one is kept",
-                kept_first and retired_second and twice_handoff.is_file(),
+                "PreCompact never deletes a handoff; delivered records expire at 30 days, "
+                "are not capped, and this session's is kept",
+                twice_handoff.is_file()
+                and own_record.is_file()
+                and not stale_record.exists()
+                and all(record.is_file() for record in fresh_records),
             ))
 
             bad_config = root / "bad-config.json"
