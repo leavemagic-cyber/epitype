@@ -8,8 +8,8 @@ Epitype 的說明是英文出貨的，擋下來的那一句以前寫死繁中—
    出來，而那一刻沒有人在看 traceback。
 2. `EPITYPE_LANG=en` 時，出貨卡在**真的掛鉤行程**裡擋出來的理由不含任何中日韓字。行程內
    呼叫 `_handle` 量不到真實行為：語言是匯入時解析的。
-3. 不設語言時，同樣兩個案例的理由逐字等於這個檔裡釘住的繁中原文。這幾串是 owner 機器
-   上現在看到的那一句；改動任何接縫字都會讓它紅。
+3. 不設語言時，同樣兩個案例的理由逐字等於這個檔裡釘住的繁中原文。使用者畫面上的文字
+   改動時必須同步更新這個明確快照，避免非預期漂移。
 
 起子行程的題目刻意留到最少：run_all 是平行跑的，這個檔多起一個 Python 就等於在
 SessionStart 的 5 秒預算上多壓一份負載，把別人的題目壓紅。解析規則那一族改用同一支
@@ -57,7 +57,7 @@ ZH_GUARD_REASON = (
 ZH_STOP_REASON = (
     "⚖ 不要說「that should fix it」，請改寫。"
     "（No hedged completion：should work now is a guess wearing the clothes of a result）"
-    "（剛才那一段 owner 已經看到了：只補缺的部分，不要整段重貼。）"
+    "只補缺少的內容，不用重貼前文。"
 )
 
 
@@ -276,8 +276,8 @@ class EnglishHooksSayNothingInChinese(_HookCase):
         self.assertIsNone(CJK.search(reason), reason)
 
 
-class DefaultLanguageOutputIsUnchanged(_HookCase):
-    """不設語言＝owner 現在看到的那一句，逐字。"""
+class DefaultLanguageOutputIsPinned(_HookCase):
+    """不設語言＝使用者現在看到的那一句，逐字。"""
 
     def test_the_guard_block_is_byte_identical(self):
         self.assertEqual(self.guard_reason(), ZH_GUARD_REASON)

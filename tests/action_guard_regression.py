@@ -763,7 +763,12 @@ class RequireWhenThen(unittest.TestCase):
     def test_a_completion_claim_without_evidence_is_blocked(self):
         value = self.block("這批已完成，可以進下一步。")
         self.assertIsNotNone(value)
-        self.assertIn("completion-carries-evidence", value.get("reason", ""))
+        reason = value.get("reason", "")
+        self.assertIn("「已完成」還缺必要說明", reason)
+        self.assertIn("實測", reason)
+        self.assertIn("只補缺少的內容，不用重貼前文", reason)
+        self.assertNotIn("completion-carries-evidence", reason)
+        self.assertNotIn("owner", reason)
 
     def test_the_same_claim_with_evidence_passes(self):
         self.assertIsNone(self.block("這批已完成：實測 8/8，卡片體檢 FAIL 0。"))

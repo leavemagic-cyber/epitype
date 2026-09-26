@@ -1245,11 +1245,12 @@ GUARD_REPEAT_NOTICE = "⚠ 這道守衛最近一天擋了 {count} 次（{card}�
 REQUIRE_WHEN_FIELD = "require_when"
 REQUIRE_TEXT_FIELD = "require_text"
 STOP_GATE_REQUIRE_REASON = (
-    "📌 說了「{trigger}」，同一則要一起寫出{expected}。（{decision}）{advice}"
+    "📌 「{trigger}」還缺必要說明。請補一句，包含{expected}。{advice}"
 )
-# 擋下來的理由 owner 也看得到（宿主把它顯示成一則回饋），而且每擋一次這段字就進一次
+# 擋下來的理由使用者也看得到（宿主把它顯示成一則回饋），而且每擋一次這段字就進一次
 # 上下文。2026-09-20 owner 貼圖問「為什麼有這種東西，看不懂也感覺無意義，並且應該很浪費
-# token」——當時那一則把整條正規表示式原樣印出來，後面再接一百多字的卡片描述。
+# token」——當時那一則把整條正規表示式原樣印出來，後面再接一百多字的卡片描述。2026-09-27
+# 再確認內部裁定代號與 `owner` 稱呼也不該出現在使用者畫面；它們只留稽核。
 #
 # 改成：把樣式裡的字面選項列幾個出來給人看；列得出來就不再附描述（那是同一句話講兩次）。
 REQUIRE_HINT_MAX_ITEMS = 5
@@ -1528,7 +1529,7 @@ BLOCKED_ECHO_REASON = (
     "被擋之後那一段跟原本的有 {overlap:.0%} 一樣，owner 等於同一段話看了兩次。"
     "下次被擋只補缺的那部分。"
 )
-STOP_GATE_REWRITE_HINT = "（剛才那一段 owner 已經看到了：只補缺的部分，不要整段重貼。）"
+STOP_GATE_REWRITE_HINT = "只補缺少的內容，不用重貼前文。"
 # 宿主是「先把我的話顯示給 owner、再跑回合閘」。所以擋下一則回覆收不回任何一個字，只會
 # 逼出第二輪。第二輪對「缺了東西」的規則有用（補上證據、補上查證）；對只管用詞與篇幅的
 # 規則沒有用——客套話已經被看到了、太長的那一段也已經被看完了，重寫只是再多一段。
@@ -2957,13 +2958,13 @@ _EN = {
     "READ_WASTE_REPEAT_REASON": "🛑 Save tokens: this session has already read this range {count} times and the file has not changed ({path}). The copy you have is the current one; if you really need it again, say why first (for example it was lost in a compaction), or read a different range, or search for the place instead.",
     "READ_WASTE_BIG_FILE_REASON": "🛑 Save tokens: {path} is {size} bytes, and most of a whole-file read is never used. Search for the place first, or pass offset/limit and read only the part you need.",
     "GUARD_REPEAT_NOTICE": "⚠ this guard blocked {count} time(s) in the last day ({card}): {advice}",
-    "STOP_GATE_REQUIRE_REASON": '📌 you said "{trigger}", so the same message must also state {expected}. ({decision}){advice}',
+    "STOP_GATE_REQUIRE_REASON": '📌 "{trigger}" still needs context. Add one sentence containing {expected}. {advice}',
     "REQUIRE_HINT_TEMPLATE": "one of: {items}",
     "TURN_CHECK_UNKNOWN_DEFECT": '⚠ Epitype stop gate: turn_check "{name}" on ruling {decision} is not a built-in check (available: {known}), so this one did not apply.',
     "TURN_LENGTH_REASON": '📌 this turn is {chars} characters, over the {limit} limit from "{decision}", and the owner did not ask for the full version this time. Put the detail in a file; keep the reply to the conclusion, the numbers and the file links.{advice}',
     "TURN_CITED_UNREAD_REASON": '📌 this turn said "{claim}", but no tool call in this session ever opened {path}. Per "{decision}": read it, or change the claim to say it was not read.{advice}',
     "BLOCKED_ECHO_REASON": "the message after the block was {overlap:.0%} the same as the first one, so the owner read the same text twice. Next time you are blocked, add only the part that was missing.",
-    "STOP_GATE_REWRITE_HINT": " (The owner has already seen that text: add only the part that was missing, do not repaste it.)",
+    "STOP_GATE_REWRITE_HINT": "Add only the missing content; do not repeat the previous text.",
     "STOP_NOTE_FORBIDDEN": 'do not say "{fragment}" ({decision})',
     "STOP_NOTE_DELIVERY": "Reminders from the previous reply (what was sent is sent — do not rewrite it, do not apologise, just follow them from here): {notes}",
     "TURN_UNVERIFIED_DELEGATION_REASON": '📌 this turn took a delegated result ({source}) and said "{claim}" without checking one thing first. Per "{decision}": verify one item yourself, or say plainly that this is an unverified relay — delegating the work does not delegate the responsibility.{advice}',

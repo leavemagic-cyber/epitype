@@ -668,7 +668,7 @@ def _require_reason(decision, trigger):
         expected = memspec.REQUIRE_HINT_FALLBACK
         advice = decision.advice[: memspec.STOP_GATE_REASON_QUOTE_MAX_CHARS]
     return memspec.STOP_GATE_REQUIRE_REASON.format(
-        trigger=trigger, expected=expected, decision=decision.key, advice=advice)
+        trigger=trigger, expected=expected, advice=advice)
 
 
 def _is_question(sentence):
