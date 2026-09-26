@@ -511,6 +511,12 @@ CAPTURE_SUMMARY_CHARS = 80           # captured cards carry the owner's words in
 # 實測每句注入 3.6KB／11 行，其中絕對路徑佔 32%、描述佔 54%，且每庫固定 5 條不論相關。
 # 規則：路徑用圖例別名（V1/相對路徑）、描述截斷、只命中正文的弱卡每庫最多 2 條、總行數封頂。
 RECALL_DESCRIPTION_MAX_CHARS = 120
+# Prompt recall opens a small number of matched cards and carries a literal body
+# passage.  Keep this separate from the eight-card pointer window: a long card
+# must not displace every other relevant source.
+RECALL_SOURCE_MAX_CARDS = 2
+RECALL_SOURCE_MAX_CHARS = 420
+RECALL_SOURCE_SCAN_BYTES = 64 * 1024
 # 專案卡記的是「某個時間點的狀態」。端出來只有一行摘要，三個月前的狀態跟昨天寫的長得一模一樣。
 # 2026-09-19～21 實際發生：一張 97 天前的卡寫著「等 owner 一句話」，被當成現況，連錯五次——
 # 說它被排除、問要不要開、規劃去接一個其實早就在跑的東西。常駐規則寫著「先讀現行版」，但那只是

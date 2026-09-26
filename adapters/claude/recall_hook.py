@@ -184,15 +184,15 @@ def _merge_ordinary(groups):
     queue = []
     for vault_index, group in enumerate(groups):
         if group:
-            coverage, line = group[0]
-            heapq.heappush(queue, (-coverage, 0, vault_index, line))
+            coverage, value = group[0]
+            heapq.heappush(queue, (-coverage, 0, vault_index, value))
     while queue:
-        _coverage, rank, vault_index, line = heapq.heappop(queue)
-        yield line
+        _coverage, rank, vault_index, value = heapq.heappop(queue)
+        yield value
         rank += 1
         if rank < len(groups[vault_index]):
-            coverage, line = groups[vault_index][rank]
-            heapq.heappush(queue, (-coverage, rank, vault_index, line))
+            coverage, value = groups[vault_index][rank]
+            heapq.heappush(queue, (-coverage, rank, vault_index, value))
 
 
 def _bounded_recall(pieces, budget, required_count, header_count):
@@ -230,6 +230,76 @@ def _card_identity(line, aliases):
     text, separator, located = line.rpartition(" | ")
     alias, slash, rest = located.partition("/")
     return f"{text}{separator}{aliases.get(alias, alias)}{slash}{rest}"
+
+
+def _source_passage(path, vault, terms, expected_name=None):
+    """Read the current card, then return a bounded, literal passage relevant to this prompt.
+
+    The index selects candidates; it is not the source of the words delivered here.
+    A missing, replaced, or non-card file stays a pointer rather than masquerading
+    as a successful read.  Captured event cards are filtered by the caller.
+    """
+    source = Path(path)
+    try:
+        if (source.is_symlink() or getattr(source, "is_junction", lambda: False)()
+                or not source.resolve(strict=True).is_relative_to(vault.resolve())):
+            return ""
+        with source.open("rb") as stream:
+            raw = stream.read(memspec.RECALL_SOURCE_SCAN_BYTES)
+    except (OSError, RuntimeError):
+        return ""
+    lines = raw.decode("utf-8-sig", errors="replace").splitlines()
+    if not lines or lines[0].strip() != "---":
+        return ""
+    closing = next((i for i, line in enumerate(lines[1:], 1)
+                    if line.strip() in ("---", "...")), None)
+    if closing is None:
+        return ""
+    front = memsearch._parse_frontmatter("\n".join(lines[1:closing]))
+    if (not (front.get("name") or front.get("description"))
+            or (expected_name and front.get("name") != expected_name)
+            or front.get(memspec.DECISION_STATUS_FIELD) == memspec.SUPERSEDED_DECISION_STATUS):
+        return ""
+    strong = memsearch._strong_terms(terms)
+    if not strong:
+        return ""
+    ranked = []
+    fenced = False
+    for index in range(closing + 1, len(lines)):
+        line = lines[index].strip()
+        if line.startswith("```"):
+            fenced = not fenced
+            continue
+        if fenced or not line or line.startswith(("#", "<!--")):
+            continue
+        folded = line.casefold()
+        matched = sum(term in folded for term in strong)
+        if matched:
+            ranked.append((-matched, index))
+    if not ranked:
+        return ""
+    _score, index = min(ranked)
+    chosen = [_one_line(lines[index])]
+    end = index + 1
+    while end < len(lines):
+        continuation = lines[end].strip()
+        if (not continuation or continuation.startswith(("#", "- ", "* ", "```"))
+                or len(" ".join([*chosen, continuation])) > memspec.RECALL_SOURCE_MAX_CHARS):
+            break
+        chosen.append(_one_line(continuation))
+        end += 1
+    # Adjacent list items commonly form one rule's two cases (for example,
+    # completed versus submitted tasks).  Include the next item when it fits.
+    if end < len(lines) and lines[index].lstrip().startswith("- "):
+        following = lines[end].strip()
+        if (following.startswith("- ")
+                and len(" ".join([*chosen, following])) <= memspec.RECALL_SOURCE_MAX_CHARS):
+            chosen.append(_one_line(following))
+            end += 1
+    passage = " ".join(chosen)
+    if len(passage) > memspec.RECALL_SOURCE_MAX_CHARS:
+        passage = passage[:memspec.RECALL_SOURCE_MAX_CHARS].rstrip() + "…"
+    return f"原文節錄 L{index + 1}" + (f"-{end}" if end > index + 1 else "") + f"：{passage}"
 
 
 def _handle(event, started_at, delivery_markers=None, meter_pending=None):
@@ -308,7 +378,7 @@ def _recall(event, started_at, config, delivery_markers=None):
     # somebody curated from what the owner said, so it takes the first seats and is
     # never dropped by the budget. The verbatim capture it was curated from stays
     # out of the turn entirely (U-H) — see _event_card.
-    pinned = []
+    pinned_entries = []
     ordinary_groups = []
     legend = []
     shown_names = set()  # 同檔名跨庫（專案的指路卡與通用庫正本）一則只端一張，先到的庫優先
@@ -385,22 +455,52 @@ def _recall(event, started_at, config, delivery_markers=None):
             prefix = memspec.DECISION_PREFIX if decision is not None else ""
             line = "- " + prefix + " | ".join(part for part in parts if part)
             if decision is not None:
-                pinned.append(line)
+                pinned_entries.append((line, path, vault, result.get("terms", ()), name))
             else:
-                ordinary_lines.append((hit.get("matched_term_count", 0), line))
+                ordinary_lines.append((hit.get("matched_term_count", 0),
+                                       (line, path, vault, result.get("terms", ()), name)))
             shown_names.add(card_name)
             used = True
+        ordinary_lines.sort(key=lambda item: -item[0])
         ordinary_groups.append(ordinary_lines)
         if used:
             legend.append(f"{alias}={vault}")
-    others = list(_merge_ordinary(ordinary_groups))
+    other_entries = list(_merge_ordinary(ordinary_groups))
     # The legend is what makes V1/... resolvable, so it shares the required first
     # piece with the advisory instead of being droppable on its own.
-    if not pinned and not others:
+    if not pinned_entries and not other_entries:
         return None
     head = memspec.UNTRUSTED_ADVISORY
     if legend:
         head += "\n" + memspec.RECALL_LEGEND_PREFIX + " ".join(legend)
+    pinned = []
+    source_reads = 0
+    for position, (line, path, vault, terms, name) in enumerate(pinned_entries):
+        if source_reads == 0 and not expired(started_at):
+            passage = _source_passage(path, vault, terms, name)
+            if passage:
+                front, separator, located = line.rpartition(" | ")
+                expanded = f"{front} | {passage} | {located}" if separator else line
+                required = [head, *pinned, expanded,
+                            *(entry[0] for entry in pinned_entries[position + 1:])]
+                if payload_fits("UserPromptSubmit", "\n".join(required),
+                                config[memspec.CONFIG_BUDGET_BYTES_FIELD]):
+                    line = expanded
+                    source_reads += 1
+        pinned.append(line)
+    others = []
+    for index, (line, path, vault, terms, name) in enumerate(other_entries):
+        if index < memspec.RECALL_SOURCE_MAX_CARDS - source_reads and not expired(started_at):
+            passage = _source_passage(path, vault, terms, name)
+            if passage:
+                front, separator, located = line.rpartition(" | ")
+                expanded = f"{front} | {passage} | {located}" if separator else line
+                # A small configured budget still gets a usable pointer.  Never
+                # consume the whole delivery with a passage that cannot fit.
+                if payload_fits("UserPromptSubmit", "\n".join([head, *pinned, expanded]),
+                                config[memspec.CONFIG_BUDGET_BYTES_FIELD]):
+                    line = expanded
+        others.append(line)
     session_id = event.get("session_id", event.get("sessionId", ""))
     if not isinstance(session_id, str):
         session_id = ""

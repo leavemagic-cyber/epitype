@@ -119,6 +119,89 @@ class RecallSelectionRegression(unittest.TestCase):
             recall._card_identity("- sameneedle | V2/same.md", {"V2": "C:/vault-a"}),
         )
 
+    def test_prompt_recall_reads_relevant_source_words_not_just_the_pointer(self):
+        vault = self.vaults[0]
+        (vault / "noise.md").write_text(
+            "---\nname: noise\ndescription: 賞金規則\n---\n無關的帳號條件。\n",
+            encoding="utf-8",
+        )
+        (vault / "case.md").write_text(
+            "---\nname: case\ndescription: 案件執行規則\n---\n"
+            + ("- 其他已驗證事項。\n" * 100)
+            + "- 改名時須區分已送件與待回覆的賞金案件。\n"
+            + "- 已付款才能標成實收；未核獎不得冒充收入。\n",
+            encoding="utf-8",
+        )
+        memsearch.build_index(vault)
+        delivered = self.invoke(session="source", prompt="賞金案件改名規則")
+        self.assertIn("改名時須區分已送件與待回覆的賞金案件", delivered)
+        self.assertIn("已付款才能標成實收", delivered)
+        self.assertIn("V1/case.md", delivered)
+        self.assertIn("V1/case.md", self.lines(delivered)[0])
+        self.assertLessEqual(delivered.count("原文節錄 L"), memspec.RECALL_SOURCE_MAX_CARDS)
+        self.assertEqual(self.invoke(session="source", prompt="賞金案件改名規則"), "")
+
+    def test_active_decision_and_ordinary_card_both_get_current_source_passages(self):
+        vault = self.vaults[0]
+        (vault / "decision.md").write_text(
+            "---\nname: decision\ndescription: rulingneedle current\n"
+            "decision_key: source-read\nstatus: active\n"
+            "current_decision_at: 2026-09-07\ndecided_by: owner-explicit\n"
+            "owner_quote: Use the current rule\n---\n"
+            "rulingneedle applies to every new case.\n",
+            encoding="utf-8",
+        )
+        (vault / "ordinary.md").write_text(
+            "---\nname: ordinary\ndescription: rulingneedle ordinary\n---\n"
+            "rulingneedle records the current case stage.\n",
+            encoding="utf-8",
+        )
+        memsearch.build_index(vault)
+        delivered = self.invoke(session="decision-source", prompt="rulingneedle")
+        self.assertIn("applies to every new case", delivered)
+        self.assertIn("records the current case stage", delivered)
+        self.assertEqual(delivered.count("原文節錄 L"), 2)
+
+    def test_source_read_stays_inside_vault_and_does_not_claim_a_missing_file(self):
+        vault = self.vaults[0]
+        outside = self.root / "outside.md"
+        outside.write_text("---\nname: outside\n---\n賞金改名不得讀到這裡\n", encoding="utf-8")
+        self.assertEqual(recall._source_passage(outside, vault, ["賞金", "改名"]), "")
+        self.assertEqual(recall._source_passage(vault / "missing.md", vault, ["賞金"]), "")
+        retired = vault / "retired.md"
+        retired.write_text("---\nname: retired\nstatus: superseded\n---\n賞金改名\n",
+                           encoding="utf-8")
+        self.assertEqual(recall._source_passage(retired, vault, ["賞金", "改名"]), "")
+        current = vault / "current.md"
+        current.write_text("---\nname: replacement\n---\n賞金改名\n", encoding="utf-8")
+        self.assertEqual(recall._source_passage(current, vault, ["賞金", "改名"], "current"), "")
+
+    def test_small_budget_falls_back_to_pointer_and_both_host_events_get_source(self):
+        vault = self.vaults[0]
+        (vault / "rule.md").write_text(
+            "---\nname: rule\ndescription: caseword policy\n---\n"
+            "- caseword before a title change, read the current case status. "
+            + ("Relevant detail. " * 18) + "\n",
+            encoding="utf-8",
+        )
+        memsearch.build_index(vault)
+        common.write_config(self.config, [vault], budget=500)
+        small = self.invoke(session="small", prompt="caseword title")
+        self.assertIn("V1/rule.md", small)
+        self.assertNotIn("原文節錄", small)
+        common.write_config(self.config, [vault])
+        for key in ("session_id", "sessionId"):
+            with self.subTest(key=key):
+                result = common.run_synthetic(
+                    Path(recall.__file__),
+                    {"prompt": "caseword title", key: "source-" + key},
+                    self.config,
+                )
+                self.assertEqual(result.returncode, 0)
+                context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+                self.assertIn("原文節錄", context)
+                self.assertIn("read the current case status", context)
+
     def native_vault(self, cwd):
         from epitype import capture_route
 
