@@ -3,10 +3,12 @@
 import sys
 sys.dont_write_bytecode = True
 
+from contextlib import closing
 from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
+import sqlite3
 import subprocess
 import tempfile
 import unittest
@@ -208,6 +210,36 @@ class ControlLifecycleRegression(unittest.TestCase):
             list(pool.map(one, range(8)))
         pending = lifecycle.status(self.path, "parallel")["pending"]
         self.assertEqual(len([row for row in pending if row["kind"] == "cua-tab:iab"]), 8)
+
+    def test_unversioned_ledger_keeps_existing_calls(self):
+        with closing(sqlite3.connect(self.path)) as db:
+            db.execute(
+                "CREATE TABLE calls (session TEXT NOT NULL, call_id TEXT NOT NULL, "
+                "seen REAL NOT NULL, PRIMARY KEY(session, call_id))"
+            )
+            db.execute("INSERT INTO calls VALUES('legacy', 'old', 1.0)")
+            db.commit()
+        lifecycle.observe(post(
+            "legacy", "new", "mcp__cua_repl__js",
+            {"code": 'await cua.createBrowserTab("iab", "about:blank");'},
+            mcp("Browser tab: new")
+        ), self.path)
+        with closing(sqlite3.connect(self.path)) as db:
+            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0],
+                             lifecycle.SCHEMA_VERSION)
+            self.assertEqual(db.execute(
+                "SELECT call_id FROM calls WHERE session='legacy' ORDER BY call_id"
+            ).fetchall(), [("new",), ("old",)])
+
+    def test_failed_schema_open_releases_database_file(self):
+        self.path.write_bytes(b"invalid sqlite file")
+        with self.assertRaises(sqlite3.DatabaseError):
+            lifecycle.observe(post(
+                "broken", "1", "mcp__cua_repl__js",
+                {"code": 'await cua.createBrowserTab("iab", "about:blank");'},
+                mcp("Browser tab: 1")
+            ), self.path)
+        self.path.unlink()
 
     def test_tight_hook_budget_keeps_reminder_for_next_call(self):
         session = "budget-" + uuid.uuid4().hex

@@ -17,6 +17,7 @@ import time
 
 
 DB_FILENAME = "control_lifecycle.sqlite3"
+SCHEMA_VERSION = 1
 CHROME = "mcp__claude-in-chrome__"
 CUA_JS = frozenset(("mcp__cua_repl__js", "mcp__cua_repl.js"))
 CUA_RESET = frozenset(("mcp__cua_repl__js_reset", "mcp__cua_repl.js_reset"))
@@ -43,27 +44,42 @@ def is_control_tool(name: str) -> bool:
 
 def _connect(path: Path):
     path.parent.mkdir(parents=True, exist_ok=True)
-    db = sqlite3.connect(path, timeout=1.0)
-    db.execute("PRAGMA busy_timeout=1000")
-    db.executescript(
-        "CREATE TABLE IF NOT EXISTS calls ("
-        "session TEXT NOT NULL, call_id TEXT NOT NULL, seen REAL NOT NULL,"
-        "PRIMARY KEY(session, call_id));"
-        "CREATE TABLE IF NOT EXISTS resources ("
-        "session TEXT NOT NULL, kind TEXT NOT NULL, resource_id TEXT NOT NULL,"
-        "status TEXT NOT NULL, opened REAL NOT NULL, changed REAL NOT NULL,"
-        "PRIMARY KEY(session, kind, resource_id));"
-        "CREATE TABLE IF NOT EXISTS events ("
-        "id INTEGER PRIMARY KEY, session TEXT NOT NULL, call_id TEXT NOT NULL,"
-        "action TEXT NOT NULL, kind TEXT NOT NULL, resource_id TEXT NOT NULL,"
-        "seen REAL NOT NULL);"
-        "CREATE TABLE IF NOT EXISTS session_state ("
-        "session TEXT PRIMARY KEY, data TEXT NOT NULL);"
-        "CREATE TABLE IF NOT EXISTS alerts ("
-        "session TEXT NOT NULL, stage TEXT NOT NULL, fingerprint TEXT NOT NULL,"
-        "seen REAL NOT NULL, PRIMARY KEY(session, stage, fingerprint));"
-    )
-    return db
+    db = sqlite3.connect(path, timeout=5.0)
+    try:
+        db.execute("PRAGMA busy_timeout=5000")
+        if db.execute("PRAGMA user_version").fetchone()[0] < SCHEMA_VERSION:
+            # One writer initializes a new or pre-versioned ledger; other callers wait.
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                if db.execute("PRAGMA user_version").fetchone()[0] < SCHEMA_VERSION:
+                    for statement in (
+                        "CREATE TABLE IF NOT EXISTS calls ("
+                        "session TEXT NOT NULL, call_id TEXT NOT NULL, seen REAL NOT NULL,"
+                        "PRIMARY KEY(session, call_id))",
+                        "CREATE TABLE IF NOT EXISTS resources ("
+                        "session TEXT NOT NULL, kind TEXT NOT NULL, resource_id TEXT NOT NULL,"
+                        "status TEXT NOT NULL, opened REAL NOT NULL, changed REAL NOT NULL,"
+                        "PRIMARY KEY(session, kind, resource_id))",
+                        "CREATE TABLE IF NOT EXISTS events ("
+                        "id INTEGER PRIMARY KEY, session TEXT NOT NULL, call_id TEXT NOT NULL,"
+                        "action TEXT NOT NULL, kind TEXT NOT NULL, resource_id TEXT NOT NULL,"
+                        "seen REAL NOT NULL)",
+                        "CREATE TABLE IF NOT EXISTS session_state ("
+                        "session TEXT PRIMARY KEY, data TEXT NOT NULL)",
+                        "CREATE TABLE IF NOT EXISTS alerts ("
+                        "session TEXT NOT NULL, stage TEXT NOT NULL, fingerprint TEXT NOT NULL,"
+                        "seen REAL NOT NULL, PRIMARY KEY(session, stage, fingerprint))",
+                    ):
+                        db.execute(statement)
+                    db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+                db.commit()
+            except Exception:
+                db.rollback()
+                raise
+        return db
+    except Exception:
+        db.close()
+        raise
 
 
 @contextmanager
