@@ -9,5 +9,6 @@
   },
   "homepage": "https://github.com/leavemagic-cyber/epitype/tree/master/claude-plugin",
   "repository": "https://github.com/leavemagic-cyber/epitype",
+  "privacyPolicyUrl": "https://github.com/leavemagic-cyber/epitype/blob/master/claude-plugin/PRIVACY.md",
   "license": "MIT"
 }
