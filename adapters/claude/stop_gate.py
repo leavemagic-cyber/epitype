@@ -636,6 +636,19 @@ def _unverified_delegation_gap(decision, message, turn):
         advice=decision.advice)
 
 
+def _prompt_block_gap(decision, message, turn):
+    """A requested pasteable prompt must be present in the chat message."""
+    if not re.search(memspec.TURN_PROMPT_REQUEST_PATTERN, turn.prompt or "", re.IGNORECASE):
+        return None
+    for opening in re.finditer(r"(?m)^[ \t]*(`{3,})[^\n]*\n", message):
+        marker = opening.group(1)
+        tail = message[opening.end():]
+        closing = re.search(r"(?m)^[ \t]*" + re.escape(marker) + r"[ \t]*$", tail)
+        if closing and tail[:closing.start()].strip():
+            return None
+    return memspec.TURN_PROMPT_BLOCK_REASON.format(advice=decision.advice)
+
+
 def _turn_check_gap(decision, message, turn, opened_names, defects):
     """卡片指名的內建檢查。字面比對看不到的事實，由這裡判。"""
     name = decision.turn_check
@@ -650,6 +663,8 @@ def _turn_check_gap(decision, message, turn, opened_names, defects):
         return _length_gap(decision, message, turn)
     if name == memspec.TURN_CHECK_UNVERIFIED_DELEGATION:
         return _unverified_delegation_gap(decision, message, turn)
+    if name == memspec.TURN_CHECK_PROMPT_BLOCK:
+        return _prompt_block_gap(decision, message, turn)
     return _cited_unread_gap(decision, message, turn, opened_names)
 
 

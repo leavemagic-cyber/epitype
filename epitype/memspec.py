@@ -1300,8 +1300,18 @@ TURN_CHECK_LIMIT_FIELD = "turn_check_limit"
 TURN_CHECK_LENGTH = "length"
 TURN_CHECK_CITED_UNREAD = "cited_unread"
 TURN_CHECK_UNVERIFIED_DELEGATION = "unverified_delegation"
+TURN_CHECK_PROMPT_BLOCK = "prompt_code_block"
 TURN_CHECK_NAMES = (
-    TURN_CHECK_LENGTH, TURN_CHECK_CITED_UNREAD, TURN_CHECK_UNVERIFIED_DELEGATION)
+    TURN_CHECK_LENGTH, TURN_CHECK_CITED_UNREAD, TURN_CHECK_UNVERIFIED_DELEGATION,
+    TURN_CHECK_PROMPT_BLOCK)
+TURN_PROMPT_REQUEST_PATTERN = (
+    r"(?:給我|給一份|寫一份|幫我寫|產生|提供|撰寫).{0,24}(?:prompt|提示詞)"
+    r"|(?:write|give|create).{0,24}\bprompt\b"
+)
+TURN_PROMPT_BLOCK_REASON = (
+    "📌 owner 要可直接貼到新對話的 PROMPT；請把完整提示詞放在聊天訊息的非空 code block，"
+    "不要只給檔案路徑。{advice}"
+)
 TURN_CHECK_UNKNOWN_DEFECT = (
     "⚠ Epitype 回合閘：裁定 {decision} 的 turn_check「{name}」不是內建檢查"
     "（可用的是 {known}），這一項暫不生效。"

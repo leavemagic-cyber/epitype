@@ -184,17 +184,20 @@ def _section_missing_aliases(vaults, today, since_date, config):
 def _section_card_lint(vaults, today, since_date, config):
     results, errors = _bounded(vaults, lambda v: card_lint.scan_vault(v, today))
     fail = warn = fail_cards = 0
+    native_docs_skipped = 0
     cards = []
     for vault, report in results:
         fail += report["fail"]
         warn += report["warn"]
         fail_cards += report["fail_cards"]
+        native_docs_skipped += report.get("native_docs_skipped", 0)
         for card in report["cards"]:
             cards.append({"vault": str(vault), "path": card["path"], "fail": card["fail"], "warn": card["warn"]})
     cards.sort(key=lambda item: (-item["fail"], -item["warn"], item["path"]))
     commands = [f'epitype cards "{vault}"' for vault in vaults] if (fail or warn) else []
     return {
-        "counts": {"fail": fail, "warn": warn, "fail_cards": fail_cards},
+        "counts": {"fail": fail, "warn": warn, "fail_cards": fail_cards,
+                   "native_docs_skipped": native_docs_skipped},
         "examples": cards[:EXAMPLE_LIMIT],
         "commands": commands,
         "errors": errors,

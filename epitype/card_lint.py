@@ -940,6 +940,16 @@ def scan_vault(vault, today=None, deadline=None, deep=False):
     全庫走訪，開場那一行付不起，所以 hook 走的 `scan_vaults` 維持不開。
     """
     vault = Path(vault).resolve()
+    # Native Codex memory is a searchable source of notes and SKILL.md files.
+    # Those documents use their own schema; none are Epitype governance cards.
+    # Treating them as cards fabricated 180 frontmatter FAILs in Dream.
+    if vault.name.casefold() == "memories" and vault.parent.name.casefold() == ".codex":
+        return {
+            "vault": str(vault), "total": 0, "fail": 0, "warn": 0, "info": 0,
+            "fail_cards": 0, "by_type": {}, "oversized_skipped": 0,
+            "native_docs_skipped": len(memsearch.card_files(vault)),
+            "timed_out": False, "cards": [], "vault_findings": [],
+        }
     today = today or datetime.now(timezone.utc).date()
     raw_cards = []
     by_type = {}
@@ -1002,6 +1012,7 @@ def scan_vault(vault, today=None, deadline=None, deep=False):
         "fail_cards": sum(1 for item in cards if item["fail"]),
         "by_type": {name: by_type[name] for name in memspec.CARD_TYPES if by_type.get(name)},
         "oversized_skipped": oversized,
+        "native_docs_skipped": 0,
         "timed_out": timed_out,
         "cards": cards,
         "vault_findings": [
@@ -1132,6 +1143,8 @@ def _print_report(report, output, verbose=False):
             print(f"  {item['level']} {item['rule']}: {item['reason']}", file=output)
     by_type = ",".join(f"{name}:{count}" for name, count in report["by_type"].items()) or "-"
     note = f" oversized={report['oversized_skipped']}" if report["oversized_skipped"] else ""
+    note += (f" native_docs_skipped={report['native_docs_skipped']}"
+             if report.get("native_docs_skipped") else "")
     note += f" info={report['info']}" if report["info"] else ""
     note += " timed_out=1" if report["timed_out"] else ""
     print(
@@ -1285,6 +1298,18 @@ def _selftest():
                 target.write_bytes(text.encode("utf-8"))
             today = date(2026, 9, 6)
             report = scan_vault(vault, today=today)
+            codex_vault = vault.parent / ".codex" / "memories"
+            codex_vault.mkdir(parents=True)
+            (codex_vault / "free-form-note.md").write_text("No Epitype frontmatter.\n", encoding="utf-8")
+            (codex_vault / "SKILL.md").write_text(
+                "---\nname: native-skill\ndescription: Native Codex skill\n---\nBody\n",
+                encoding="utf-8")
+            native = scan_vault(codex_vault, today=today)
+            checks.append((
+                "Codex 原生記憶與技能只供搜尋，不冒充 Epitype 卡片造 frontmatter FAIL",
+                native["total"] == native["fail"] == native["warn"] == 0
+                and native["native_docs_skipped"] == 2,
+            ))
 
             rules, card = _findings_of(report, "decision-bad.md")
             checks.append((
@@ -1745,7 +1770,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 52
+    total = 53
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
