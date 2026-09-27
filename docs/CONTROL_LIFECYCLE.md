@@ -25,11 +25,18 @@ missing result hooks, hosts without installed/trusted hooks, and operations
 outside these interfaces cannot be claimed as observed. Epitype never closes a
 tab or a controller itself and never targets tabs that were already open.
 
-The next non-control `PreToolUse` call can receive a one-time reminder for the
-current outstanding set. `Stop` can block once with the same reminder. A later
-reopening is a new episode and gets a new reminder. If the owner has already
-ordered the agent to stop, the reminder directs it to report the open resource
-instead of making another UI call.
+The next non-control `PreToolUse` call can receive a one-time, model-directed
+reminder for the current outstanding set. `Stop` no longer emits a lifecycle
+continuation: Codex renders a blocking `Stop` reason as a user-facing Hook
+feedback card. The next `UserPromptSubmit` reads the current ledger and sends
+any outstanding reminder as model context. It retries on later prompts until
+closure is verified, including when an earlier hook output could not fit its
+budget. A later reopening is a new episode and gets a new reminder. If the
+owner has already ordered the agent to stop, the reminder directs it to report
+the open resource instead of making another UI call. A resource left open at
+the end of a turn remains visible in the ledger until a verified closure
+arrives; the host provides no hidden `Stop` continuation that could force
+cleanup in that same turn.
 
 Inspect one session with:
 

@@ -15,7 +15,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from epitype import context_meter, memsearch, memspec, recall_quiet
+from epitype import context_meter, control_lifecycle, memsearch, memspec, recall_quiet
 # 捕捉核心住在 epitype.capture，讓離線回放（harvest）套用同一份觸發與遮罩規則；
 # 這裡保留原本的私名，呼叫端與 selftest 不因搬移而改。
 from epitype.capture import (
@@ -30,6 +30,7 @@ from _hook_common import (
     isolated_temp_root,
     capture_vault as _capture_vault,
     claim_meter,
+    config_path,
     emit,
     expired,
     governance_vault,
@@ -313,6 +314,7 @@ def _handle(event, started_at, delivery_markers=None, meter_pending=None):
     if expired(started_at):
         return None
     value = _with_notes(value, config, event)
+    value = _with_lifecycle(value, config, event)
     return _with_context_meter(value, config, event, started_at, meter_pending)
 
 
@@ -359,6 +361,27 @@ def _with_notes(value, config, event):
         return payload("UserPromptSubmit", line)
     context = value.get("hookSpecificOutput", {}).get("additionalContext", "")
     return payload("UserPromptSubmit", (context + "\n" + line) if context else line)
+
+
+def _with_lifecycle(value, config, event):
+    """Carry outstanding browser cleanup to the model without a visible Stop prompt."""
+    try:
+        note = control_lifecycle.reminder(
+            event, control_lifecycle.database_path(config_path()),
+            "prompt", claim=False,
+        )
+        if not note:
+            return value
+        context = value.get("hookSpecificOutput", {}).get("additionalContext", "") if value else ""
+        combined = (context + "\n" + note) if context else note
+        if payload_fits("UserPromptSubmit", combined,
+                        config[memspec.CONFIG_BUDGET_BYTES_FIELD]):
+            return payload("UserPromptSubmit", combined)
+    except Exception as exc:
+        if config_path().exists():
+            print(memspec.GATE_DEGRADED_NOTICE.format(
+                gate="control lifecycle", reason=type(exc).__name__), file=sys.stderr)
+    return value
 
 
 def _recall(event, started_at, config, delivery_markers=None):

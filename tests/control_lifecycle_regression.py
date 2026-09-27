@@ -241,11 +241,29 @@ class ControlLifecycleRegression(unittest.TestCase):
         self.assertEqual(first.returncode, 0, first.stderr)
         self.assertIn("收尾提醒超出", first.stderr)
         self.assertNotIn("budget-tab", first.stdout)
+        prompt = {"hook_event_name": "UserPromptSubmit", "session_id": session,
+                  "prompt": "繼續"}
+        tight_prompt = subprocess.run(
+            [sys.executable, str(ROOT / "adapters" / "claude" / "recall_hook.py")],
+            input=json.dumps(prompt), capture_output=True, text=True,
+            encoding="utf-8", errors="replace", env=environment,
+            cwd=ROOT, timeout=15, check=False,
+        )
+        self.assertEqual(tight_prompt.returncode, 0, tight_prompt.stderr)
+        self.assertNotIn("budget-tab", tight_prompt.stdout)
         config.write_text(json.dumps({"vaults": [str(vault)], "budget_bytes": 4096}),
                           encoding="utf-8")
         second = invoke()
         self.assertEqual(second.returncode, 0, second.stderr)
         self.assertIn("budget-tab", second.stdout)
+        recovered_prompt = subprocess.run(
+            [sys.executable, str(ROOT / "adapters" / "claude" / "recall_hook.py")],
+            input=json.dumps(prompt), capture_output=True, text=True,
+            encoding="utf-8", errors="replace", env=environment,
+            cwd=ROOT, timeout=15, check=False,
+        )
+        self.assertEqual(recovered_prompt.returncode, 0, recovered_prompt.stderr)
+        self.assertIn("budget-tab", recovered_prompt.stdout)
 
     def test_actual_post_pre_and_stop_adapters(self):
         session = "adapter-" + uuid.uuid4().hex
@@ -288,8 +306,19 @@ class ControlLifecycleRegression(unittest.TestCase):
             "hook_event_name": "Stop", "session_id": session,
             "stop_hook_active": False, "last_assistant_message": "完成。",
         })
-        self.assertEqual(stop["decision"], "block")
-        self.assertIn("test-tab", stop["reason"])
+        self.assertIsNone(stop)
+        self.assertIn({"kind": "cua-tab:iab", "id": "test-tab"},
+                      lifecycle.status(self.path, session)["pending"])
+        next_prompt = invoke("recall_hook.py", {
+            "hook_event_name": "UserPromptSubmit", "session_id": session,
+            "prompt": "繼續",
+        })
+        self.assertIn("test-tab", next_prompt["hookSpecificOutput"]["additionalContext"])
+        repeated_prompt = invoke("recall_hook.py", {
+            "hook_event_name": "UserPromptSubmit", "session_id": session,
+            "prompt": "再看看",
+        })
+        self.assertIn("test-tab", repeated_prompt["hookSpecificOutput"]["additionalContext"])
         self.assertIsNone(invoke("pretooluse_gate.py", post(
             session, "b", "mcp__cua_repl__js",
             {"code": 'await cua.listTabs({browser:"iab"});'}, mcp("[]")
@@ -302,6 +331,12 @@ class ControlLifecycleRegression(unittest.TestCase):
             "hook_event_name": "Stop", "session_id": session,
             "stop_hook_active": False, "last_assistant_message": "完成。",
         }))
+        closed_prompt = invoke("recall_hook.py", {
+            "hook_event_name": "UserPromptSubmit", "session_id": session,
+            "prompt": "下一件事",
+        })
+        context = (closed_prompt or {}).get("hookSpecificOutput", {}).get("additionalContext", "")
+        self.assertNotIn("test-tab", context)
 
 
 if __name__ == "__main__":
