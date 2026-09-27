@@ -211,7 +211,8 @@ class DreamLockRegression(unittest.TestCase):
         self.assertIn("--lock-token", captured[0][0])
         self.assertFalse(self.path.exists())
         state = self.path.parent / memspec.DREAM_STATE_FILENAME
-        self.assertTrue(json.loads(state.read_text(encoding="utf-8"))["complete"])
+        recorded = json.loads(state.read_text(encoding="utf-8"))
+        self.assertTrue(recorded["complete"], recorded)
 
     def test_unverified_lock_held_flag_cannot_run_or_release_another_lease(self):
         token = dream.acquire_lock(self.vault)

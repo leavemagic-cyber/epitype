@@ -130,15 +130,19 @@ class CaptureRecallRegression(unittest.TestCase):
         # The card layer shows the card's description; the verbatim quote stays one level down.
         self.assertNotIn("fixturehistory 一律照這條走", context)
 
-    def test_budget_drops_whole_card_without_delivery_marker(self):
+    def test_budget_preserves_pointer_then_drops_whole_card_without_marker(self):
         path = self.plain_card()
         full, _ = self.invoke()
         size = len(full["hookSpecificOutput"]["additionalContext"].encode("utf-8"))
-        for budget in (size - 1, 100):
-            value, markers = self.invoke("budget", budget)
-            context = value["hookSpecificOutput"]["additionalContext"] if value else ""
-            self.assertNotIn(path.name, context)
-            self.assertFalse(any(digest.startswith("card-") for _session, digest in markers))
+        value, markers = self.invoke("pointer", size - 1)
+        context = value["hookSpecificOutput"]["additionalContext"] if value else ""
+        self.assertIn(path.name, context)
+        self.assertNotIn("原文節錄", context)
+        self.assertTrue(any(digest.startswith("card-") for _session, digest in markers))
+        value, markers = self.invoke("tiny", 100)
+        context = value["hookSpecificOutput"]["additionalContext"] if value else ""
+        self.assertNotIn(path.name, context)
+        self.assertFalse(any(digest.startswith("card-") for _session, digest in markers))
         self.assertIn(path.stem, self.context())
 
 

@@ -1702,6 +1702,15 @@ CARD_ARMING_TYPES = ("feedback", "correction", "scar", "habit")
 CARD_ARMING_REQUIRED_FROM = "2026-09-16"
 CARD_ARMING_FIELDS = (
     FORBIDDEN_FIELD, ACTION_GUARD_TOOL_FIELD, REQUIRE_WHEN_FIELD, TURN_CHECK_FIELD)
+WRITE_CHECK_FIELD = "write_check"
+WRITE_CHECK_PS51_UTF8_BOM = "ps51_utf8_bom"
+WRITE_CHECK_VALUES = (WRITE_CHECK_PS51_UTF8_BOM,)
+CARD_ARMING_FIELDS = CARD_ARMING_FIELDS + (WRITE_CHECK_FIELD,)
+CARD_GATE_FIELDS = CARD_GATE_FIELDS + (WRITE_CHECK_FIELD,)
+WRITE_CHECK_REASON = (
+    "🛑 {card}：{path} 寫入後沒有 UTF-8 BOM。PowerShell 5.1 可能用系統 ANSI 解讀；"
+    "請先補 BOM，再修改腳本並以 PowerShell 5.1 驗證。"
+)
 # 規則直接上線（owner 2026-09-19：「直接上線給我用，我就是試用品」），所以誤擋的保護
 # 只剩兩道，這是第一道：寫卡當下就用閘門自己的程式碼跑兩向例句。
 #

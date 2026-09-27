@@ -632,7 +632,7 @@ def _recurrence_review(card, target, additions, prospective, patch, started_at, 
     return _deny_value(reason[: memspec.WRITE_GATE_REASON_MAX_CHARS])
 
 
-_Guard = namedtuple("_Guard", "card tool substrings advice path requires unless when")
+_Guard = namedtuple("_Guard", "card tool substrings advice path requires unless when write_check")
 
 
 def _read_guard(path):
@@ -646,15 +646,35 @@ def _read_guard(path):
         path, memspec.ACTION_GUARD_TOOL_FIELD, memspec.STOP_GATE_FRONTMATTER_MAX_BYTES
     )
     if front is None:
+        front = declared_frontmatter(
+            path, memspec.WRITE_CHECK_FIELD, memspec.STOP_GATE_FRONTMATTER_MAX_BYTES
+        )
+    if front is None:
         return None
     fields, _problem = memspec.frontmatter_text("---\n" + "\n".join(front) + "\n---\n")
+    if fields.get(memspec.DECISION_STATUS_FIELD, "").strip() in memspec.STOP_GATE_SILENT_STATUSES:
+        return None
 
     def one_line(value):
         return " ".join(str(value or "").split())
 
     name = one_line(fields.get(memspec.NAME_FIELD)) or path.stem
     tool = one_line(fields.get(memspec.ACTION_GUARD_TOOL_FIELD))
+    write_check = one_line(fields.get(memspec.WRITE_CHECK_FIELD))
+    if write_check and write_check not in memspec.WRITE_CHECK_VALUES:
+        return memspec.ACTION_GUARD_DEFECT.format(
+            card=name, field=memspec.WRITE_CHECK_FIELD,
+            reason=f"不支援 {write_check!r}",
+        )
     if not tool:
+        if write_check:
+            return {
+                "card": name, "tool": "", "substrings": [], "advice": "",
+                "requires": [], "unless": [], "when": [], "write_check": write_check,
+                "expires": one_line(
+                    fields.get(memspec.VALID_UNTIL_FIELD) or fields.get(memspec.GRANT_EXPIRES_FIELD)
+                ),
+            }
         return memspec.ACTION_GUARD_DEFECT.format(
             card=name, field=memspec.ACTION_GUARD_TOOL_FIELD,
             reason=memspec.ACTION_GUARD_TOOL_EMPTY_REASON,
@@ -747,6 +767,7 @@ def _read_guard(path):
             "requires": [str(item).strip() for item in requires],
             "unless": [list(pair) for pair in unless],
             "when": [[pair[0], list(pair[1])] for pair in when],
+            "write_check": write_check,
             # 到期日只存不判（同下）。漏了這一行的話，欄位型守衛的 valid_until 會被
             # 靜靜忽略——卡片寫了期限、閘永遠不會停。
             "expires": one_line(
@@ -787,6 +808,7 @@ def _read_guard(path):
         # 那一支序列化了 when，於是一張同時寫了字面與欄位條件的卡，欄位那半在讀卡時就
         # 消失，結果變成「只要文字命中就擋」——比作者寫的寬。
         "when": [[pair[0], list(pair[1])] for pair in when],
+        "write_check": write_check,
         # 到期日只存不判：卡片不動也會過期，而這裡的結果會進快取。
         "expires": one_line(
             fields.get(memspec.VALID_UNTIL_FIELD) or fields.get(memspec.GRANT_EXPIRES_FIELD)
@@ -831,8 +853,8 @@ def warm_guard_cache(vaults, started_at, deadline=None):
 
 
 _WARM_CAP = 1 << 30
-# 2：守衛的項目多了必填欄位、逃生口與到期日；版本不對就整份重讀。
-_GUARD_CACHE_VERSION = 4
+# 欄位形狀增加 write_check；版本不對就整份重讀。
+_GUARD_CACHE_VERSION = 5
 
 
 def _guards(vault, started_at, defects, cap=None, deadline=None):
@@ -935,6 +957,7 @@ def _guards(vault, started_at, defects, cap=None, deadline=None):
             defects.append(entry)
         elif isinstance(entry, dict) and (
             entry.get("substrings") or entry.get("requires") or entry.get("when")
+            or entry.get("write_check")
         ):
             if memspec.card_expired(entry.get("expires")):
                 # 過期的守衛不再攔人；時限型的規則要自己停下來，不能靠人記得去拔。
@@ -958,6 +981,7 @@ def _guards(vault, started_at, defects, cap=None, deadline=None):
                         if isinstance(pair, (list, tuple)) and len(pair) == 2
                         and isinstance(pair[1], (list, tuple)) and pair[1]
                     ),
+                    entry.get("write_check", ""),
                 )
             )
     return found
@@ -1008,6 +1032,8 @@ def _guard_review(event, tool_name, tool_input, config, started_at, defects):
         # 永遠回空集合，而為了拿一個空集合，每一次工具呼叫都要多載 8.3 ms 的模組。
         demoted = frozenset()
         for guard in _guards(vault, started_at, defects):
+            if not guard.tool:
+                continue
             if not memspec.action_guard_tool_matches(guard.tool, folded_tool) or guard.card in demoted:
                 continue
             if guard.substrings and not all(
@@ -1077,6 +1103,68 @@ def _guard_review(event, tool_name, tool_input, config, started_at, defects):
     return None
 
 
+def _write_check_review(event, config, target, prospective, patch, started_at):
+    """Check a card-declared file invariant before a structured .ps1 write."""
+    if target.suffix.casefold() != ".ps1":
+        return None
+    rules = []
+    for vault in resolve_vaults(config, event):
+        if expired(started_at):
+            return None
+        rules.extend(
+            (vault, guard) for guard in _guards(vault, started_at, [])
+            if guard.write_check == memspec.WRITE_CHECK_PS51_UTF8_BOM
+        )
+    if not rules:
+        return None
+
+    try:
+        with target.open("rb") as stream:
+            existing_bom = stream.read(3) == b"\xef\xbb\xbf"
+    except FileNotFoundError:
+        existing_bom = False
+    except OSError:
+        return None  # The host write will report an unreadable target itself.
+
+    if prospective is None and patch is not None and patch.op == "update" and existing_bom:
+        # Codex apply_patch preserves an existing BOM when changing a later line.
+        # patch_envelope.apply_update strips that BOM for text matching, so using
+        # its result here would reject safe edits. An explicit first-line BOM
+        # removal is different and must still be denied.
+        removes_bom = any(
+            hunk.old and hunk.old[0].startswith("\ufeff")
+            and (not hunk.new or not hunk.new[0].startswith("\ufeff"))
+            for hunk in (patch.hunks or ())
+        )
+        if not removes_bom:
+            return None
+        prospective = ""
+    if prospective is None and patch is not None and patch.op == "update":
+        try:
+            if target.stat().st_size <= memspec.WRITE_GATE_MAX_CONTENT_BYTES:
+                before = target.read_text(encoding="utf-8")
+                prospective = patch_envelope.apply_update(patch, before)
+        except (OSError, UnicodeError):
+            pass
+    if prospective is not None:
+        safe = prospective.startswith("\ufeff")
+    else:
+        # When the post-write text is unknown, a file already carrying the BOM
+        # keeps its existing safety evidence. A BOM-less file cannot claim it.
+        safe = existing_bom
+    if safe:
+        return None
+    vault, guard = rules[0]
+    reason = memspec.WRITE_CHECK_REASON.format(card=guard.card, path=target)
+    _best_effort_audit(
+        append_gate_log, vault,
+        with_session({"kind": "write_block", "rule": "write_check", "card": guard.card,
+                      "target": str(target)}, event.get("session_id")),
+        started_at,
+    )
+    return _deny_value(reason[: memspec.WRITE_GATE_REASON_MAX_CHARS])
+
+
 def _review_one_target(event, config, target, additions, prospective, started_at, session_id,
                        patch=None):
     """(deny value, advice lines) for one file this call would change.
@@ -1099,6 +1187,9 @@ def _review_one_target(event, config, target, additions, prospective, started_at
         prospective = None
 
     notices = []
+    write_check = _write_check_review(event, config, target, prospective, patch, started_at)
+    if write_check is not None:
+        return write_check, notices
     found = _forbidden_write(
         event, config, target, additions, prospective, started_at, notices
     )
@@ -1193,7 +1284,9 @@ def _envelope_review(event, tool_input, config, started_at):
         if expired(started_at):
             break
         target = _resolve_target(entry.path, cwd)
-        if target is None or not entry.additions:
+        if target is None or entry.op == "delete":
+            continue
+        if not entry.additions and target.suffix.casefold() != ".ps1":
             continue
         deny, advice = _review_one_target(
             event, config, target, list(entry.additions),

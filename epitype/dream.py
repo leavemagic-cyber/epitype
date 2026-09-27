@@ -1973,7 +1973,10 @@ def _section_host_sync(vaults, today, since_date, config, context=None):
     卡片是規則的正本，但代理讀的是 `CLAUDE.md`／`AGENTS.md`。中間這一步只要靠人記得，
     就會有「規則改了但代理讀的還是舊的」那段空窗，而且空窗期間完全沒有徵兆。
     """
-    from epitype import host_sync
+    try:
+        from . import host_sync
+    except ImportError:  # The scheduled child also runs this file directly.
+        import host_sync
 
     # 取代了認不出的內容時，原文已存進宿主檔旁的紀錄檔並寫明是夜間同步換的；夜報照樣
     # 列出這件事（examples 與計數），但不算這一晚沒跑乾淨。
@@ -2738,9 +2741,11 @@ def _selftest():
             report = build_report([vault], today=today)
             by_id = {section["id"]: section for section in report["sections"]}
 
-            checks.append(("all 14 deterministic sections present with no error", all(
-                by_id[i]["error"] is None for i in range(1, 15)
-            )))
+            section_errors = {i: by_id[i]["error"] for i in range(1, 15)
+                              if by_id[i]["error"] is not None}
+            if section_errors:
+                print(f"selftest section errors: {section_errors}", file=sys.stderr)
+            checks.append(("all 14 deterministic sections present with no error", not section_errors))
             checks.append((
                 "section 13 replays the day and reports zero misses on a fixture with no transcripts",
                 by_id[13]["counts"]["missed"] == 0 and by_id[13]["counts"]["hits"] == 0,

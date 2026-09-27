@@ -9,8 +9,8 @@
 
 2026-09-20 同日需求變更（不是為了讓測試過而放寬）：原本重貼會被「再擋一次」，但觸發的那一刻
 重複的那一段 owner 早就看到了，再擋只是第三輪。owner 原話：「我們本意設定那個原則是為了節省
-token，反而為了這個原則浪費token 就完全本末倒置」。所以改成：「不要整段重貼」這句話放進第一次
-擋下的理由裡（那是唯一來得及的時機）；真的重貼了只記帳、下一則提醒，不擋。
+token，反而為了這個原則浪費token 就完全本末倒置」。所以在第一次擋下的理由裡提醒
+只補缺少的內容、不用重貼前文（那是唯一來得及的時機）；真的重貼了只記帳、下一則提醒，不擋。
 """
 import sys
 
@@ -119,7 +119,8 @@ class RepeatingABlockedTurn(unittest.TestCase):
             {"session_id": "echo-first", "cwd": str(self.root),
              "last_assistant_message": "這樣應該可以。"}, __import__("time").monotonic(), [])
         self.assertIsNotNone(value)
-        self.assertIn("不要整段重貼", value["reason"])
+        self.assertIn("只補缺少的內容", value["reason"])
+        self.assertIn("不用重貼前文", value["reason"])
 
 
 def _selftest():

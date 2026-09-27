@@ -268,6 +268,18 @@ def _fence_shell_findings(fields, counts):
     return findings
 
 
+def _write_check_findings(fields):
+    check = fields.get(memspec.WRITE_CHECK_FIELD, "").strip()
+    if check and check not in memspec.WRITE_CHECK_VALUES:
+        return [(
+            FAIL,
+            "write-check",
+            f"{memspec.WRITE_CHECK_FIELD}={check!r} 未支援；允許值："
+            + "|".join(memspec.WRITE_CHECK_VALUES),
+        )]
+    return []
+
+
 def _unenforceable_gap_findings(fields):
     """「閘門看不到」不是綁不住的理由，是 Epitype 的缺口；點出來，不要讓它被當成定論放著。"""
     reason = fields.get(memspec.UNENFORCEABLE_FIELD, "").strip()
@@ -744,6 +756,7 @@ def _check_card(path, relative, today):
     findings.extend(_pattern_findings(fields, front_lines))
     findings.extend(_require_findings(fields))
     findings.extend(_fence_shell_findings(fields, counts))
+    findings.extend(_write_check_findings(fields))
     findings.extend(_arming_findings(fields, counts, card_type, today, relative))
     findings.extend(_unenforceable_gap_findings(fields))
     findings.extend(_example_findings(path, fields, front_lines, counts, today))
