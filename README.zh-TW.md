@@ -87,7 +87,7 @@ epitype doctor
 
 ## 運作方式
 
-Epitype 把同一組原生 vault 接到五個 host 事件：
+Epitype 把同一組原生 vault 接到六個 host 事件：
 
 | 事件 | Epitype 的動作 |
 |---|---|
@@ -95,9 +95,12 @@ Epitype 把同一組原生 vault 接到五個 host 事件：
 | `UserPromptSubmit` | 在共用輸出預算內，從每個已解析的 vault 取回最多五張相關卡片——只端卡片，逐字捕捉的原話檔搜得到但不注入。簡短的 owner 授權語句會逐字保存、去重並立即進索引；捕捉當下不替原話加上解釋。 |
 | `PreToolUse` | 寫檔閘：檔案寫入落盤前，先用現行裁定與卡片型別合約檢查要寫進去的內容。擋下時回傳那條裁定與一列稽核紀錄。用量計：context 接近自動壓縮時，放行的那次呼叫（與 `UserPromptSubmit`）附一行（每個壓縮週期一次），提醒模型寫交接檔；壓縮照宿主自己的自動門檻，壓縮後把交接交回。Claude Code：學到的自動壓縮點的 97%。Codex（從 rollout 的列認出來）：照 Codex 自己的用量算法與壓縮點（它的 `config.toml` 與模型目錄），在壓縮點前固定 44k tokens 提醒——Codex 一步就可能跳好幾萬。門檻或壓縮點不知道就不說。 |
 | `PreCompact` | 在 context 壓縮前，從 transcript 尾端製作小型復原地圖；自動壓縮時順便記下當下用量，給用量計學門檻。 |
+| `PostToolUse` | 記錄代理自建的瀏覽器分頁、操控工作階段，以及工具結果證實的關閉。仍有未關資源時，在下一次提問或非瀏覽器工具呼叫提醒代理；Epitype 本身不替代理關閉。 |
 | `Stop` | 回合結束決策閘：回覆若再提已否決選項或再問已裁定的事就擋下。 |
 
 注入的記憶只是參考資料，不能推翻 system 或 developer 指令、繞過 host 權限，也不能自行授予工具操作權。每次 hook 輸出最多 10 KiB，執行超過十秒就 fail open，避免記憶層卡住宿主流程。
+
+瀏覽器查漏只記資源識別碼，不記網址、標題或頁面內容；只有本場記錄為代理自建的資源才算它的。所有權不明就標成未驗證，詳見[瀏覽器資源查漏](docs/CONTROL_LIFECYCLE.md)。
 
 ### 捕捉：入庫，或只是提案
 
@@ -236,6 +239,8 @@ epitype search recall "自然語言提示" --vault C:\path\to\vault
 | `epitype harvest [--inventory] [--docs DOCS] [--since SINCE] [--drafts-only] [--reevaluate DIR [--apply]] [--quarantine-drops [DIR]]` | 零模型回放捕捉規則到歷史 transcript 與文件，做第一次大整理的補課；也能用現行規則重新評斷草稿或 vault 自己的事件卡。 `--drafts-only` 時，找到的東西一律留在待審草稿區。 |
 | `epitype token-meter [rollout] [--selftest]` | 讀 Codex rollout JSONL，印出最後一筆當前與累計 token 用量對照視窗大小。 |
 | `epitype context-meter calibrate [--root DIR]`／`status [--transcript PATH]` | Claude Code 用量計：`calibrate` 是唯讀報告，列出近 30 天自動壓縮最近 5 筆的中位數、樣本數與時間範圍，不寫任何東西——門檻只從這台機器實際的自動壓縮學，首次提醒要等第一次自動壓縮之後；`status` 印目前門檻、來源與（給 transcript 時）當前用量落在哪一段（Codex rollout 則印 Codex 的用量、壓縮點與提醒點）；`codex-calibrate --limit N --hard-cap N` 唯讀重播 Codex rollout，報告每個候選餘裕下，有多少次自動壓縮能提早至少一次模型取樣收到提醒。 |
+| `epitype lifecycle --session SESSION_ID --json` | 唯讀查本場瀏覽器資源紀錄；`pending` 列出關閉尚未驗證的資源。 |
+| `epitype starter [--list\|--remove\|--dry-run]` | 加入五張通用起手卡、列出狀態，或只移除仍未修改的起手卡。 |
 | `epitype scar-census build` | 建立四層傷疤普查的機器生成視圖。 |
 | `epitype compact-map build` | 建立有界的壓縮復原地圖，與 `PreCompact` 每場自動寫的是同一種。 |
 | `epitype source SOURCE.jsonl [--find TEXT] [--role user\|assistant\|all] [--line N] [--offset BYTES] [--limit 1..8]` | 唯讀查原始訊息，列出角色、實體行號、雜湊及截斷／涵蓋範圍。指定 offset 時行號相對該位元位置。逐字查找不等於現行裁定或前提已受證據支持。 |
@@ -254,7 +259,7 @@ python tests/privacy_lint.py
 python exam/exam_runner.py --strict
 ```
 
-`tests/run_all.py` 目前執行 50 組元件 selftest，涵蓋核心工具、hook adapter、套件介面、安裝器、筆試引擎與隱私閘。repo 內的筆試題庫是小型合成樣本。本次發布另以嚴格模式通過 330 題行為題庫與兩份種子回顧；這些發布材料不包含在本 repo。
+`tests/run_all.py` 執行元件 selftest，涵蓋核心工具、hook adapter、套件介面、安裝器、筆試引擎與隱私閘。repo 內的筆試題庫是小型合成樣本。本次發布另以嚴格模式通過 330 題行為題庫與兩份種子回顧；這些發布材料不包含在本 repo。
 
 這些結果是防回歸證據，不代表未來每個 host 版本或每一種記憶失效都已涵蓋。
 
@@ -303,9 +308,10 @@ HTTP 客戶端，也沒有任何回傳、帳號或金鑰。卡片是你自己目
 ## 文件
 
 - [架構說明](docs/ARCHITECTURE.md)：記憶分層、四條檢索路、決策卡、傷疤生命週期與權威規則。
+- [瀏覽器資源查漏](docs/CONTROL_LIFECYCLE.md)：Epitype 記錄、提醒及保留未驗證狀態的範圍。
 - [失敗模式](docs/FAILURE_MODES.md)：病象、對治與驗證邊界。
 - [解除安裝](docs/UNINSTALL.md)：依所有權移除與備份指引。
 
 ## 專案狀態
 
-目前 v1.7.0，2026-09-22 發布。發布時機看一批修正什麼時候齊，不是固定日期。Issue 都會看，開 issue 是讓修正往前排最快的方式。
+目前 v1.8.0，2026-09-28 發布。發布時機看一批修正什麼時候齊，不是固定日期。Issue 都會看，開 issue 是讓修正往前排最快的方式。

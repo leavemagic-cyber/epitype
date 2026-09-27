@@ -87,7 +87,7 @@ Probably not yet if you are new to CLI agents and have no accumulated rules to g
 
 ## How it works
 
-Epitype hangs off five host events and reads the same vaults your host already uses.
+Epitype hangs off six host events and reads the same vaults your host already uses.
 
 | Event | What Epitype does |
 |---|---|
@@ -95,9 +95,12 @@ Epitype hangs off five host events and reads the same vaults your host already u
 | `UserPromptSubmit` | Pulls up to five relevant cards from each resolved vault, inside a shared output budget. Cards only. Verbatim capture files stay searchable but are never injected. Short owner statements are stored word for word, deduplicated and indexed; nothing infers what they meant. |
 | `PreToolUse` | Write gate. Checks the content a file write is about to commit against settled rulings and the card contract. It also refuses a recurrence narrated into an existing behaviour card when the same write does not arm that card (`docs/FAILURE_MODES.md` §45). A block hands back the ruling and writes an audit row. Context meter: when the context nears auto-compaction, the allowed call (and `UserPromptSubmit`) carries one line, once per compaction cycle, telling the agent to write its handoff; compaction still happens at the host's own automatic threshold, and the handoff is handed back afterwards. Claude Code: 97% of the learned auto-compaction point. Codex (recognised from the rollout rows): Codex's own count and limit (its `config.toml` and model catalog), reminding a fixed 44k tokens before the limit, because one Codex step can jump tens of thousands of tokens. An unknown threshold or limit means no line at all. |
 | `PreCompact` | Writes a small recovery map from the tail of the transcript before the context is compacted. On an automatic compaction it also records the usage at that moment, which is how the context meter learns the threshold. |
+| `PostToolUse` | Records browser tabs and control sessions created by the agent, plus closures confirmed by successful tool results. A later prompt or non-browser tool call reminds the agent about anything still open. It never closes the resource itself. |
 | `Stop` | Round-end decision gate. Blocks a reply that re-proposes a rejected option or re-asks a question you already ruled on. |
 
 Injected memory is advisory. It cannot override system or developer instructions, bypass host permissions, or hand a tool any authority by itself. Hook output is capped at 10 KiB, and every hook has a ten-second deadline that fails open.
+
+Browser tracking stores resource IDs, not URLs, titles or page content. It only treats resources recorded as created by this agent session as its own; unclear ownership stays unverified. See [Browser resource leak detection](docs/CONTROL_LIFECYCLE.md).
 
 ### Capture: filed, or waiting for you
 
@@ -241,6 +244,8 @@ The database lives at `<vault>/.epitype/memory_fts.sqlite3` and Git ignores it. 
 | `epitype harvest [--inventory] [--docs DOCS] [--since SINCE] [--drafts-only] [--reevaluate DIR [--apply]] [--quarantine-drops [DIR]]` | Zero-model replay of the capture rules over old transcripts and documents, for a first backfill. Also re-judges drafts, or a vault's own event cards, against today's rules. `--drafts-only` keeps everything it finds in the pending drafts area. |
 | `epitype token-meter [rollout] [--selftest]` | Reads a Codex rollout JSONL and prints its last current and cumulative token usage against the context window. |
 | `epitype context-meter calibrate [--root DIR]` / `status [--transcript PATH]` | Claude Code context meter. `calibrate` is a read-only report of the last 5 automatic compactions in the past 30 days (median, sample count, time range); it writes nothing, because the threshold is learned only from this machine's own automatic compactions, so the first reminder waits for the first one. `status` prints the threshold, its source and, given a transcript, where the current usage sits (for a Codex rollout: Codex's count, limit and reminder point). `codex-calibrate --limit N --hard-cap N` replays Codex rollouts read-only and reports, per candidate headroom, how many automatic compactions would have been warned at least one model step ahead. |
+| `epitype lifecycle --session SESSION_ID --json` | Reads the browser-resource ledger for one session. `pending` lists resources whose closure is still unverified. |
+| `epitype starter [--list\|--remove\|--dry-run]` | Adds five general starter cards to your vault, lists them, or removes only untouched cards installed by this command. |
 | `epitype scar-census build` | Builds the machine-generated view of the four-layer scar census. |
 | `epitype compact-map build` | Builds a bounded compact-recovery map, the same kind `PreCompact` writes per session. |
 | `epitype source SOURCE.jsonl [--find TEXT] [--role user\|assistant\|all] [--line N] [--offset BYTES] [--limit 1..8]` | Reads original messages back with roles, physical lines, hashes and explicit truncation and coverage. Line numbers are relative when you supply an offset. Finding a sentence is not proof that it is the current decision. |
@@ -259,7 +264,7 @@ python tests/privacy_lint.py
 python exam/exam_runner.py --strict
 ```
 
-`tests/run_all.py` runs 50 component selftests across the core tools, hook adapters, package surface, installer, exam engine and privacy gate. The exam corpus in this repository is a small synthetic sample. The release gate for this version also passed a strict 330-case behavior corpus and two seed reviews, which are not part of this repository.
+`tests/run_all.py` runs component selftests across the core tools, hook adapters, package surface, installer, exam engine and privacy gate. The exam corpus in this repository is a small synthetic sample. The release gate for this version also passed a strict 330-case behavior corpus and two seed reviews, which are not part of this repository.
 
 These checks are regression evidence. They are not proof that every future host version, or every way memory can fail you, is covered.
 
@@ -311,9 +316,10 @@ They compose: nothing here stops you running a memory summariser alongside it.
 ## Documentation
 
 - [Architecture](docs/ARCHITECTURE.md): memory blocks, retrieval routes, decision cards, scar lifecycle, authority rules.
+- [Browser resource tracking](docs/CONTROL_LIFECYCLE.md): what Epitype records, reminds about and leaves unverified.
 - [Failure modes](docs/FAILURE_MODES.md): symptoms, countermeasures, verification boundaries.
 - [Uninstall](docs/UNINSTALL.md): ownership-aware removal and backup guidance.
 
 ## Status
 
-v1.7.0, released 2026-09-22. Releases are cut when a batch of fixes is ready rather than on a fixed date. Issues get read, and an issue is the fastest way to move a fix up the queue.
+v1.8.0, released 2026-09-28. Releases are cut when a batch of fixes is ready rather than on a fixed date. Issues get read, and an issue is the fastest way to move a fix up the queue.
