@@ -134,7 +134,7 @@ def _disarmed_findings(fields, nested):
     return findings
 
 
-def _arming_findings(fields, counts, card_type, today):
+def _arming_findings(fields, counts, card_type, today, relative=""):
     """feedback 卡必須武裝，或明講它綁不住。
 
     2026-09-16 實查：通用庫 400 張卡只有 11 張帶 forbidden，而那 11 張全是產品自己的
@@ -145,6 +145,21 @@ def _arming_findings(fields, counts, card_type, today):
     # 只認 feedback 的話，兩行 `metadata: type: habit` 就整條繞過去了，而文件寫的是
     # 「與卡片型別無關」。行為卡的型別不只一種，所以按型別收窄的那一份名單才是正本。
     if card_type not in memspec.CARD_ARMING_TYPES:
+        return []
+    # A redirected source card is retained as historical evidence. Its live
+    # successors carry the rules, so arming the retired source would revive it.
+    if (fields.get(memspec.DECISION_STATUS_FIELD, "").strip()
+            == memspec.SUPERSEDED_DECISION_STATUS
+            and (fields.get("superseded_by", "").strip()
+                 or counts.get("superseded_by"))):
+        return []
+    # corrections/ contains verbatim owner events, not rules authored for the gates.
+    # The event must have its provenance fields; a hand-written behavioural card
+    # cannot evade arming merely by declaring metadata.type: correction.
+    if (card_type == memspec.CARD_TYPE_CORRECTION
+            and relative.startswith("corrections/")
+            and fields.get(memspec.CAPTURED_AT_FIELD)
+            and fields.get(memspec.SESSION_FIELD)):
         return []
     if fields.get(memspec.UNENFORCEABLE_FIELD, "").strip():
         return []
@@ -545,7 +560,7 @@ def _has_value(field, fields, nested, counts):
     return bool(fields.get(field, "").strip())
 
 
-def _expiry_warnings(fields, today):
+def _expiry_warnings(fields, today, card_type=None):
     """到期欄位不綁型別：協定 §3.5 允許任何卡自己寫 expires_at。"""
     for field in memspec.CARD_EXPIRY_FIELDS:
         raw = fields.get(field, "").strip()
@@ -553,7 +568,11 @@ def _expiry_warnings(fields, today):
             continue
         stamped = _as_date(raw)
         if stamped is not None and stamped < today:
-            yield WARN, "expired", memspec.CARD_LINT_EXPIRED_REASON.format(
+            # A superseded decision and a historical grant cannot become newly
+            # actionable by ageing further. Keep the fact visible as INFO.
+            level = (INFO if fields.get(memspec.DECISION_STATUS_FIELD) == memspec.SUPERSEDED_DECISION_STATUS
+                     or card_type == memspec.CARD_TYPE_GRANT else WARN)
+            yield level, "expired", memspec.CARD_LINT_EXPIRED_REASON.format(
                 field=field, value=raw)
 
 
@@ -725,7 +744,7 @@ def _check_card(path, relative, today):
     findings.extend(_pattern_findings(fields, front_lines))
     findings.extend(_require_findings(fields))
     findings.extend(_fence_shell_findings(fields, counts))
-    findings.extend(_arming_findings(fields, counts, card_type, today))
+    findings.extend(_arming_findings(fields, counts, card_type, today, relative))
     findings.extend(_unenforceable_gap_findings(fields))
     findings.extend(_example_findings(path, fields, front_lines, counts, today))
 
@@ -803,7 +822,7 @@ def _check_card(path, relative, today):
                 memspec.CARD_LINT_NO_CHINESE_REASON,
             ))
 
-    findings.extend(_expiry_warnings(fields, today))
+    findings.extend(_expiry_warnings(fields, today, card_type))
     scope_value = fields.get(memspec.APPLIES_TO_FIELD, "").strip().casefold()
     if scope_value and scope_value not in memspec.APPLIES_TO_VALUES:
         # 打錯這個值的後果是「這張卡在某一道閘上安靜地不生效」，跟沒寫規則一樣，
@@ -1348,14 +1367,35 @@ def _selftest():
             ))
             rules, card = _findings_of(report, "grants/grant-bad.md")
             checks.append((
-                "grant FAIL 缺 session_id；已過期的 expires_at 是 WARN 不是 FAIL",
-                card is not None and rules == {(FAIL, "required"), (WARN, "expired")},
+                "grant FAIL 缺 session_id；已過期的一次性授權留作 INFO，不會再啟用",
+                card is not None and rules == {(FAIL, "required"), (INFO, "expired")},
             ))
             rules, card = _findings_of(report, "corrections/correction-bad.md")
             checks.append((
-                "correction FAIL: 缺 description",
+                "逐字捕捉 correction 缺 description 仍 FAIL，但不冒充待武裝的規則",
                 card is not None and card["type"] == memspec.CARD_TYPE_CORRECTION
-                and rules == {(FAIL, "required"), (WARN, "unarmed")},
+                and rules == {(FAIL, "required")},
+            ))
+            checks.append((
+                "手寫 correction 仍須武裝；superseded 決策的過期只留資訊",
+                any(rule == "unarmed" for _level, rule, _reason in _arming_findings(
+                    {memspec.CAPTURED_AT_FIELD: "2026-09-02", memspec.SESSION_FIELD: "s"},
+                    {}, memspec.CARD_TYPE_CORRECTION, today, "manual.md"))
+                and all(level == INFO for level, _rule, _reason in _expiry_warnings(
+                    {memspec.DECISION_STATUS_FIELD: memspec.SUPERSEDED_DECISION_STATUS,
+                     memspec.VALID_UNTIL_FIELD: "2026-08-01"}, today,
+                    memspec.CARD_TYPE_DECISION)),
+            ))
+            checks.append((
+                "有繼任卡的 superseded 歷史卡不重啟舊規則；active 同型卡仍須武裝",
+                not _arming_findings(
+                    {memspec.DECISION_STATUS_FIELD: memspec.SUPERSEDED_DECISION_STATUS,
+                     "superseded_by": "[next.md]"}, {},
+                    memspec.CARD_TYPE_FEEDBACK, today, "old.md")
+                and any(rule == "unarmed" for _level, rule, _reason in _arming_findings(
+                    {memspec.DECISION_STATUS_FIELD: "active",
+                     "superseded_by": "[next.md]"}, {},
+                    memspec.CARD_TYPE_FEEDBACK, today, "live.md")),
             ))
             checks.append((
                 "ruling 欄位齊備即無 finding，且不因缺 aliases 被點名",
@@ -1705,7 +1745,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 50
+    total = 52
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

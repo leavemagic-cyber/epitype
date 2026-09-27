@@ -530,7 +530,7 @@ def noop_blocks(blocked, finals):
         # 閘。差別在改動的幅度——照規則改要重寫一整句，誤擋只換兩三個字。
         ratio = SequenceMatcher(None, before, after).ratio()
         if ratio >= NOOP_SIMILARITY:
-            found.append((hit.card, hit.digest, round(ratio, 3)))
+            found.append((hit.card, hit.digest, round(ratio, 3), hit.session, hit.at))
     return found
 
 
@@ -646,6 +646,7 @@ def load_health(vault, defects=None):
             ("demoted_since", str), ("demoted_until", str), ("broadened_at", str),
             ("pattern_digest", str), ("recent", dict), ("exceptions", dict),
             ("noop_evidence", dict), ("rehearsed", dict),
+            ("seen_hits", dict), ("seen_noops", dict),
         ):
             if field not in entry:
                 continue
@@ -699,10 +700,21 @@ def _fold_exceptions(entry, card, noops, today):
 
     evidence = dict(entry.get("noop_evidence") or {})
     exceptions = dict(entry.get("exceptions") or {})
+    seen = dict(entry.get("seen_noops") or {})
+    cutoff = (today - timedelta(days=EXCEPTION_TTL_DAYS)).isoformat()
+    seen = {key: day for key, day in seen.items()
+            if isinstance(key, str) and isinstance(day, str) and day >= cutoff}
     added = []
-    for name, fragment, ratio in noops:
+    for record in noops:
+        name, fragment, ratio = record[:3]
         if name != card or not fragment:
             continue
+        # Replaying the same transcript after a partial Dream must not provide a
+        # second piece of evidence that silently grants an exception.
+        identity = _digest("|".join(str(item) for item in record))
+        if identity in seen:
+            continue
+        seen[identity] = today.isoformat()
         rows = list(evidence.get(fragment) or [])
         rows.append(ratio)
         evidence[fragment] = rows[-8:]
@@ -721,6 +733,7 @@ def _fold_exceptions(entry, card, noops, today):
         }
         added.append(fragment)
     entry["noop_evidence"] = evidence
+    entry["seen_noops"] = seen
     entry["exceptions"] = {
         fragment: meta for fragment, meta in exceptions.items()
         if isinstance(meta, dict) and str(meta.get("until", "")) >= today.isoformat()
@@ -759,19 +772,30 @@ def update_health(vault, rules, hits, today, noops=(), rehearsed=None):
     """
     cards = dict(load_health(vault))
     stamp = today.isoformat()
-    counted = {}
+    by_card = {}
     for hit in hits:
-        counted[hit.card] = counted.get(hit.card, 0) + 1
+        by_card.setdefault(hit.card, []).append(hit)
     for rule in rules:
         entry = dict(cards.get(rule.card) or {})
         entry.setdefault("first_seen", stamp)
-        today_hits = counted.get(rule.card, 0)
+        seen = dict(entry.get("seen_hits") or {})
+        cutoff = (today - timedelta(days=HEALTH_WINDOW_DAYS)).isoformat()
+        seen = {key: day for key, day in seen.items()
+                if isinstance(key, str) and isinstance(day, str) and day >= cutoff}
+        today_hits = 0
+        for hit in by_card.get(rule.card, ()):
+            identity = _digest("|".join(str(item) for item in (
+                hit.kind, hit.session, hit.at, hit.fragment, hit.digest)))
+            if identity in seen:
+                continue
+            seen[identity] = stamp
+            today_hits += 1
+        entry["seen_hits"] = seen
         recent = entry.get("recent")
         recent = dict(recent) if isinstance(recent, dict) else {}
         if today_hits:
             recent[stamp] = recent.get(stamp, 0) + today_hits
             entry["last_hit"] = stamp
-        cutoff = (today - timedelta(days=HEALTH_WINDOW_DAYS)).isoformat()
         recent = {day: count for day, count in recent.items() if day >= cutoff}
         entry["recent"] = recent
         entry["hits_30d"] = sum(recent.values())
@@ -993,6 +1017,17 @@ def _selftest():
                 and cards["needs"]["hits_30d"] == 1
                 and cards["測試守衛"]["hits_30d"] == 1,
             ))
+            dedupe_vault = root / "dedupe-vault"
+            dedupe_vault.mkdir()
+            update_health(dedupe_vault, rules, hits, day)
+            repeated = update_health(dedupe_vault, rules, hits, day)
+            checks.append((
+                "同一批命中重播不重複累計健康度，新的事件仍可新增",
+                repeated["probe"]["hits_30d"] == 2
+                and update_health(dedupe_vault, rules,
+                                  [next(hit for hit in hits if hit.card == "probe")._replace(
+                                      session="new-session")], day)["probe"]["hits_30d"] == 3,
+            ))
             update_health(vault, rules, [], day + timedelta(days=1))
             aged = load_health(vault)
             checks.append((
@@ -1018,6 +1053,13 @@ def _selftest():
             ))
             update_health(vault, rules, [], day, noops)
             update_health(vault, rules, [], day, noops)
+            checks.append((
+                "重播同一則誤擋證據不會憑空湊到自動放行門檻",
+                probe_hit.digest not in exceptions_for(vault).get("probe", set())
+                and len(load_health(vault)["probe"]["seen_noops"]) == 1,
+            ))
+            second_noop = (*noops[0][:3], "distinct-session", "2026-09-17T12:00:00Z")
+            update_health(vault, rules, [], day, [second_noop])
             checks.append((
                 "累積到門檻就自動放行，而且放行的是那一則訊息、不是那串字",
                 exceptions_for(vault).get("probe") == {probe_hit.digest}
@@ -1158,7 +1200,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 30
+    total = 32
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

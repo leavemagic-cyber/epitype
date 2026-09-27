@@ -48,6 +48,8 @@ except ImportError:  # Direct script execution keeps the CLI contract.
 EXAMPLE_LIMIT = 10
 TIME_BUDGET_ERROR = "time budget exhausted before this section ran"
 DEFAULT_EVENT_AGING_DAYS = 90
+COMPLIANCE_INITIAL_LOOKBACK_SECONDS = 24 * 60 * 60
+COMPLIANCE_CHECKPOINT_FIELD = "last_compliance_started"
 RECENT_WINDOW_DAYS = 7
 DRAFT_DIRNAME = "_drafts"
 _EVENT_TYPE_BY_DIR = dict(memspec.EVENT_CARD_DIRECTORIES)  # {"grants": "grant", ...}
@@ -1798,7 +1800,7 @@ def shape_index(vault, today, apply=True, stamp=None):
 # --------------------------------------------------------------------------- section 13
 
 
-def _section_compliance(vaults, today, since_date, config):
+def _section_compliance(vaults, today, since_date, config, context=None):
     """白天的閘到底有沒有在擋：重放對話，跟閘自己的稽核帳對帳。
 
     閘在 owner 等回話的當下跑，有期限、有讀卡上限、出錯放行——它注定會漏，而且漏的時候
@@ -1857,9 +1859,14 @@ def _section_compliance(vaults, today, since_date, config):
             "examples": [], "commands": [], "errors": errors,
         }
 
-    since_stamp = datetime(
-        since_date.year, since_date.month, since_date.day, tzinfo=timezone.utc
-    ).timestamp()
+    # 事件卡老化看 90 天；夜間重放只需接續上一趟成功掃描。把兩種窗口共用同一個
+    # since_date 會在每晚重讀數 GB 的舊 transcript，讓後面的宿主同步餓死。
+    since_stamp = (context or {}).get("compliance_since_stamp")
+    if not isinstance(since_stamp, (int, float)) or isinstance(since_stamp, bool):
+        since_stamp = datetime(
+            today.year, today.month, today.day, tzinfo=timezone.utc
+        ).timestamp() - COMPLIANCE_INITIAL_LOOKBACK_SECONDS
+    compliance_since_date = datetime.fromtimestamp(since_stamp, timezone.utc).date()
     transcripts, available = compliance.transcripts_for(roots, since_stamp=since_stamp)
 
     errors, examples = [], []
@@ -1867,14 +1874,17 @@ def _section_compliance(vaults, today, since_date, config):
     silent = []
     exempted = {}
     quieted = 0
+    # A capped scan is a partial observation; it must not change the live
+    # ranking or quiet list as though the full interval had been inspected.
+    write_health = bool((context or {}).get("write_health")) and available == len(transcripts)
     try:
         from epitype import recall_quiet
-        shown = recall_quiet.measure(transcripts, since=since_date.isoformat())
+        shown = recall_quiet.measure(transcripts, since=compliance_since_date.isoformat())
     except Exception as exc:
         shown = None
         errors.append(f"喚回用量統計失敗 {type(exc).__name__}: {exc}")
     for vault in vaults:
-        if shown is not None:
+        if shown is not None and write_health:
             try:
                 quieted += len(recall_quiet.update(vault, shown, today))
             except Exception as exc:
@@ -1882,7 +1892,7 @@ def _section_compliance(vaults, today, since_date, config):
         try:
             rules = compliance.armed_rules(vault)
             vault_hits = compliance.replay(rules, transcripts, since=since_stamp)
-            counts, stopped = compliance.gate_blocks(vault, since=since_date.isoformat())
+            counts, stopped = compliance.gate_blocks(vault, since=compliance_since_date.isoformat())
             vault_blocked, vault_missed, vault_unseen = compliance.reconcile(
                 vault_hits, counts, stopped
             )
@@ -1900,7 +1910,8 @@ def _section_compliance(vaults, today, since_date, config):
             # 出錯，改過的樣式也不能靠舊數字背書——太寬的當晚就自動降級成只計數。
             chances = compliance.opportunities(transcripts, since=since_stamp)
             rehearsed = compliance.rehearse(rules, vault_hits, chances)
-            compliance.update_health(vault, rules, vault_hits, today, noops, rehearsed)
+            if write_health:
+                compliance.update_health(vault, rules, vault_hits, today, noops, rehearsed)
         except Exception as exc:
             errors.append(f"{vault}: 健康度未更新 {type(exc).__name__}: {exc}")
         try:
@@ -1908,7 +1919,7 @@ def _section_compliance(vaults, today, since_date, config):
             # 的數字整個消失——而這一版賴以成立的主張就是「分不出來至少數得出來」，
             # 計數器不能是錯的。
             for card, count in compliance.masked_exemptions(
-                vault, since_date.isoformat()
+                vault, compliance_since_date.isoformat()
             ).items():
                 exempted[card] = exempted.get(card, 0) + count
         except Exception as exc:
@@ -2037,7 +2048,8 @@ def _stale_registrations(context):
 
 
 # 吃 context 的節：第 4 節要家目錄（harvest），第 14 節要知道可不可以寫宿主檔。
-_CONTEXT_SECTIONS = (_section_drafts, _section_host_sync, _section_draft_aging)
+_CONTEXT_SECTIONS = (_section_drafts, _section_host_sync, _section_draft_aging,
+                     _section_compliance)
 
 _SECTIONS = (
     (1, "缺別名卡", _section_missing_aliases),
@@ -2154,7 +2166,8 @@ def _next_steps(sections, shaping=()):
 
 
 def build_report(vaults, today=None, since_date=None, deadline=None, shaping=None, config=None,
-                 harvest_home=None, dry_run=False, write_hosts=False):
+                 harvest_home=None, dry_run=False, write_hosts=False,
+                 compliance_since_stamp=None, write_health=False, host_sync_result=None):
     today = today or datetime.now(timezone.utc).date()
     since_date = since_date or (today - timedelta(days=DEFAULT_EVENT_AGING_DAYS))
     # 設定讀一次就好：第 8 節要「登記了哪些庫」、第 11 節要三個上限鍵。讀不到就是空
@@ -2177,20 +2190,30 @@ def build_report(vaults, today=None, since_date=None, deadline=None, shaping=Non
     # AGENTS.md。2026-09-18 一個臨時腳本拿 build_report 跑合成庫，兩個宿主檔的規則區塊
     # 就被寫成空的——呼叫端看不出這個副作用，那是 API 的問題，不是呼叫端不小心。
     context = {"home": harvest_home, "dry_run": bool(dry_run), "deadline": deadline,
-               "write_hosts": bool(write_hosts)}
-    sections = [
-        run(section_id, title, lambda fn=fn: (
+               "write_hosts": bool(write_hosts),
+               "write_health": bool(write_health) and not dry_run,
+               "compliance_since_stamp": compliance_since_stamp}
+
+    def run_defined(section):
+        section_id, title, fn = section
+        return run(section_id, title, lambda: (
             fn(vaults, today, since_date, config, context)
             if fn in _CONTEXT_SECTIONS
             else fn(vaults, today, since_date, config)
         ))
-        for section_id, title, fn in _SECTIONS
-    ]
-    # 檢討包最後跑：它要把第 8–12 節算完的候選數一起列出來當背景。
+
+    # 宿主同步先跑；重放可能耗盡預算，不能讓代理隔天仍讀到舊規則。
+    host_sync = next(section for section in _SECTIONS if section[0] == 14)
+    compliance = next(section for section in _SECTIONS if section[0] == 13)
+    sections = [host_sync_result if host_sync_result is not None else run_defined(host_sync)]
+    sections.extend(run_defined(section) for section in _SECTIONS if section[0] not in (13, 14))
+    # 檢討包只依賴第 8–12 節；在昂貴的重放之前完成。
     sections.append(run(
         REVIEW_PACK_SECTION_ID, REVIEW_PACK_TITLE,
         lambda: _section_review_pack(vaults, today, since_date, config, sections),
     ))
+    sections.append(run_defined(compliance))
+    sections.sort(key=lambda section: section["id"])
     shaping = list(shaping or ())
     return {
         "vaults": [str(vault) for vault in vaults],
@@ -2577,6 +2600,11 @@ def _report_errors(report):
         elif section.get("error") or section.get("errors"):
             errors[str(section_id)] = {
                 "error": section.get("error"), "errors": section.get("errors") or [],
+            }
+        elif section_id == 13 and (section.get("counts") or {}).get("transcripts_skipped"):
+            errors[str(section_id)] = {
+                "error": "transcripts omitted by scan cap",
+                "errors": [],
             }
     return errors
 
@@ -3688,6 +3716,7 @@ def main(argv=None, output=sys.stdout):
     parsed = parser.parse_args(arguments)
 
     started = time.monotonic()
+    started_epoch = time.time()
     deadline = started + parsed.time_budget_seconds if parsed.time_budget_seconds > 0 else None
     governance = None
     lock_token = None
@@ -3725,6 +3754,21 @@ def main(argv=None, output=sys.stdout):
 
         today = parsed.today or datetime.now(timezone.utc).date()
         since_date = parsed.since or (today - timedelta(days=DEFAULT_EVENT_AGING_DAYS))
+        compliance_since_stamp = _previous_compliance_start(
+            state_path, started_epoch
+        ) if state_path is not None else started_epoch - COMPLIANCE_INITIAL_LOOKBACK_SECONDS
+        # Host files are the rule delivery path. Run their reconciliation before
+        # index shaping or view generation can consume the night's budget.
+        host_title = next(title for number, title, _fn in _SECTIONS if number == 14)
+        try:
+            early_sync = {"id": 14, "title": host_title, "error": None,
+                          **_section_host_sync(
+                              vaults, today, since_date, None,
+                              {"write_hosts": not parsed.dry_run,
+                               "home": Path.home(), "dry_run": parsed.dry_run})}
+        except Exception as exc:
+            early_sync = {"id": 14, "title": host_title,
+                          "error": f"{type(exc).__name__}: {exc}"}
         # 順路重生閱讀目錄：夜間整理已經在走每一個庫，而生成本身是「輸入指紋沒變就
         # 不寫」。失敗不影響審核包——目錄過期還有 card_lint --deep 的漏卡檢查會報。
         # 必須排在整形之前：整形的判準是「目錄已經承載這張卡」，判準本身不能是舊的。
@@ -3751,6 +3795,9 @@ def main(argv=None, output=sys.stdout):
             harvest_home=Path.home(), dry_run=parsed.dry_run,
             # CLI 是有人（或排程）明確叫的那條路：規則改了要寫進宿主檔。--dry-run 不寫。
             write_hosts=not parsed.dry_run,
+            write_health=not parsed.dry_run,
+            compliance_since_stamp=compliance_since_stamp,
+            host_sync_result=early_sync,
         )
         rendered = json.dumps(report, ensure_ascii=False, indent=1)
         content = rendered if parsed.json else _render_markdown(report)
@@ -3770,6 +3817,7 @@ def main(argv=None, output=sys.stdout):
             report,
             out_path,
             time.monotonic() - started,
+            started_epoch,
         )
         print(f"DREAM PACK {out_path}", file=output)
         return 0
@@ -3778,7 +3826,30 @@ def main(argv=None, output=sys.stdout):
             release_lock(governance, lock_token)
 
 
-def _write_run_state(path, report, out_path, elapsed):
+def _previous_compliance_start(path, now):
+    """上次完整重放開始時刻；舊版狀態可由完成時刻與耗時還原。"""
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return now - COMPLIANCE_INITIAL_LOOKBACK_SECONDS
+    if not isinstance(state, dict):
+        return now - COMPLIANCE_INITIAL_LOOKBACK_SECONDS
+    checkpoint = state.get(COMPLIANCE_CHECKPOINT_FIELD)
+    if checkpoint is None and "13" in (state.get(memspec.DREAM_STATE_SECTIONS_FIELD) or {}):
+        errors = state.get(memspec.DREAM_STATE_ERRORS_FIELD) or {}
+        counts = state[memspec.DREAM_STATE_SECTIONS_FIELD].get("13") or {}
+        if "13" not in errors and not counts.get("transcripts_skipped"):
+            completed = state.get(memspec.DREAM_STATE_COMPLETED_EPOCH_FIELD)
+            elapsed = state.get(memspec.DREAM_STATE_ELAPSED_FIELD)
+            if all(isinstance(value, (int, float)) and not isinstance(value, bool)
+                   for value in (completed, elapsed)):
+                checkpoint = completed - elapsed
+    if isinstance(checkpoint, (int, float)) and not isinstance(checkpoint, bool) and 0 < checkpoint <= now:
+        return checkpoint
+    return now - COMPLIANCE_INITIAL_LOOKBACK_SECONDS
+
+
+def _write_run_state(path, report, out_path, elapsed, started_epoch=None):
     """本次嘗試收尾時間、各節數字、完整性——開場與排程共用這一份。
     部分交件仍按本次收尾時間節流，避免故障庫在每場開場被重啟；complete 才表示查完。
     notified_at 沿用舊值：那是上一場的通知紀錄，比對的是新的 completed_at。"""
@@ -3788,6 +3859,14 @@ def _write_run_state(path, report, out_path, elapsed):
         previous = {}
     now = datetime.now(timezone.utc)
     errors = _report_errors(report)
+    checkpoint = previous.get(COMPLIANCE_CHECKPOINT_FIELD) if isinstance(previous, dict) else None
+    if checkpoint is None and previous:
+        checkpoint = _previous_compliance_start(path, time.time())
+    compliance = next((section for section in report["sections"] if section["id"] == 13), None)
+    if (compliance and not compliance.get("error") and not compliance.get("errors")
+            and not (compliance.get("counts") or {}).get("transcripts_skipped")
+            and started_epoch is not None):
+        checkpoint = started_epoch
     value = {
         memspec.DREAM_STATE_COMPLETED_FIELD: now.isoformat(timespec="seconds"),
         memspec.DREAM_STATE_COMPLETED_EPOCH_FIELD: round(now.timestamp(), 3),
@@ -3800,6 +3879,7 @@ def _write_run_state(path, report, out_path, elapsed):
         memspec.DREAM_STATE_SECTIONS_FIELD: {
             str(section["id"]): section.get("counts") or {} for section in report["sections"]
         },
+        COMPLIANCE_CHECKPOINT_FIELD: checkpoint,
         memspec.DREAM_STATE_NOTIFIED_FIELD: (previous or {}).get(memspec.DREAM_STATE_NOTIFIED_FIELD)
         if isinstance(previous, dict)
         else None,

@@ -7,6 +7,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
+from datetime import date
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "adapters" / "claude")]
@@ -57,8 +58,9 @@ class DreamStatusRegression(unittest.TestCase):
         with patch.object(dream.time, "monotonic", side_effect=lambda: next(ticks, 1.0)):
             state, notice = self.run_pack("--time-budget-seconds", "0.001")
         self.assert_incomplete(state, notice)
-        # 盤點 12 節 + 檢討包（第 15 節）：時限耗盡時每一節都要留下缺口紀錄。
-        self.assertEqual(len(state["section_errors"]), len(dream._SECTION_IDS))
+        # 宿主同步先跑；其餘節超時要逐一留下缺口紀錄。
+        self.assertEqual(len(state["section_errors"]), len(dream._SECTION_IDS) - 1)
+        self.assertNotIn("14", state["section_errors"])
         self.assertIn(str(dream.REVIEW_PACK_SECTION_ID), state["section_errors"])
         self.assertTrue(all(row["error"] == dream.TIME_BUDGET_ERROR
                             for row in state["section_errors"].values()))
@@ -106,6 +108,100 @@ class DreamStatusRegression(unittest.TestCase):
         notice = start._dream_notice(self.vault, "startup", self.settings)
         self.assertIn("未完整檢查", notice)
         self.assertNotIn("沒有待處理項", notice)
+
+    def test_sync_and_review_finish_before_expensive_replay(self):
+        order = []
+
+        def section(number):
+            def run(*_args):
+                order.append(number)
+                return {"counts": {}, "examples": [], "errors": []}
+            return run
+
+        sections = tuple((number, title, section(number))
+                         for number, title, _fn in dream._SECTIONS)
+        with patch.object(dream, "_SECTIONS", sections), patch.object(
+                dream, "_section_review_pack", side_effect=lambda *_args: section(15)()):
+            report = dream.build_report([self.vault], today=date(2026, 9, 27), config={})
+        self.assertEqual(order, [14, *range(1, 13), 15, 13])
+        self.assertEqual([part["id"] for part in report["sections"]], list(range(1, 16)))
+
+    def test_compliance_checkpoint_survives_partial_retry(self):
+        prior = {memspec.DREAM_STATE_COMPLETED_EPOCH_FIELD: 1000.0,
+                 memspec.DREAM_STATE_ELAPSED_FIELD: 40.0,
+                 memspec.DREAM_STATE_SECTIONS_FIELD: {"13": {"transcripts_skipped": 0}},
+                 memspec.DREAM_STATE_ERRORS_FIELD: {"14": {"error": "budget"}}}
+        self.state.parent.mkdir(parents=True, exist_ok=True)
+        self.state.write_text(json.dumps(prior), encoding="utf-8")
+        self.assertEqual(dream._previous_compliance_start(self.state, 2000.0), 960.0)
+        sections = [{"id": number, "counts": {}, "error": None, "errors": []}
+                    for number in range(1, 16)]
+        sections[12]["counts"] = {"transcripts_skipped": 2}
+        report = {"today": "2026-09-27", "sections": sections}
+        dream._write_run_state(self.state, report, self.pack, 10.0, 2000.0)
+        retained = json.loads(self.state.read_text(encoding="utf-8"))
+        self.assertEqual(retained[dream.COMPLIANCE_CHECKPOINT_FIELD], 960.0)
+        sections[12]["counts"]["transcripts_skipped"] = 0
+        dream._write_run_state(self.state, report, self.pack, 10.0, 2100.0)
+        advanced = json.loads(self.state.read_text(encoding="utf-8"))
+        self.assertEqual(advanced[dream.COMPLIANCE_CHECKPOINT_FIELD], 2100.0)
+
+    def test_read_only_compliance_never_updates_gate_health(self):
+        vault = self.root / "home" / ".claude" / "projects" / "task" / "memory"
+        vault.mkdir(parents=True)
+        since = 1_790_000_000.0
+        observed = []
+
+        def transcripts(_roots, since_stamp=None):
+            observed.append(since_stamp)
+            return [], 0
+
+        with patch("epitype.compliance.transcripts_for", side_effect=transcripts), \
+             patch("epitype.compliance.update_health", side_effect=AssertionError("health write")), \
+             patch("epitype.recall_quiet.update", side_effect=AssertionError("quiet write")):
+            result = dream._section_compliance([vault], date(2026, 9, 27),
+                                               date(2026, 6, 29), {},
+                                               {"compliance_since_stamp": since})
+        self.assertEqual(observed, [since])
+        self.assertEqual(result["errors"], [])
+
+    def test_cli_sync_precedes_view_and_index_work(self):
+        order = []
+
+        def sync(*_args, **_kwargs):
+            order.append("sync")
+            return {"counts": {"drifted": 0, "written": 0},
+                    "examples": [], "commands": [], "errors": []}
+
+        def views(_vault):
+            order.append("views")
+
+        def shape(*_args, **_kwargs):
+            order.append("shape")
+            return {"status": "unchanged", "kept": 0}
+
+        with patch.object(dream, "_section_host_sync", side_effect=sync), \
+             patch.object(dream, "_views_module") as view_module, \
+             patch.object(dream, "shape_index", side_effect=shape):
+            view_module.return_value.generate.side_effect = views
+            self.run_pack()
+        self.assertEqual(order[:3], ["sync", "views", "shape"])
+
+    def test_capped_replay_is_incomplete_and_does_not_write_health(self):
+        vault = self.root / "home" / ".claude" / "projects" / "task" / "memory"
+        vault.mkdir(parents=True)
+        with patch("epitype.compliance.transcripts_for", return_value=([], 1)), \
+             patch("epitype.compliance.update_health", side_effect=AssertionError("health write")), \
+             patch("epitype.recall_quiet.update", side_effect=AssertionError("quiet write")):
+            result = dream._section_compliance([vault], date(2026, 9, 27),
+                                               date(2026, 6, 29), {},
+                                               {"write_health": True,
+                                                "compliance_since_stamp": 1_790_000_000.0})
+        self.assertEqual(result["counts"]["transcripts_skipped"], 1)
+        report = {"sections": [{"id": number, "error": None, "errors": [],
+                                "counts": result["counts"] if number == 13 else {}}
+                               for number in range(1, 16)]}
+        self.assertIn("13", dream._report_errors(report))
 
 
 if __name__ == "__main__":
