@@ -442,6 +442,32 @@ def _quoted_spans(message):
     return result
 
 
+_ACTION_DENIAL = re.compile(
+    r"(?:不會|不能|不應|不該|不是|並非|沒有|未曾|並未|不打算|不再|拒絕)"
+    r"(?:為了[^。！？!?\n]{0,80}|(?:再|去|再去)?)$"
+)
+_ACTION_DENIAL_BREAKS = ("。", "！", "？", "!", "?", "\n", "；", ";", "但", "可是", "然而", "卻", "反而", "不過")
+
+
+def _negated_action(message, action_start, action_text, quoted):
+    """Check a card-marked action against a nearby denial in the same clause."""
+    base = max(0, action_start - 120)
+    before = message[base:action_start]
+    cut = max((position + len(mark) for mark in _ACTION_DENIAL_BREAKS
+               if (position := before.rfind(mark)) >= 0), default=0)
+    base += cut
+    before = before[cut:]
+    earlier = before.rfind(action_text)
+    if earlier >= 0:
+        base += earlier + len(action_text)
+        before = before[earlier + len(action_text):]
+    denial = _ACTION_DENIAL.search(before)
+    return bool(denial and not any(
+        quote_start <= base + denial.start() < quote_end
+        for quote_start, quote_end in quoted
+    ))
+
+
 def _exceptions(vault):
     """Fragments the nightly review found produce a block that changed nothing.
 
@@ -498,6 +524,11 @@ def _forbidden_fragment(decision, message, defects, masked=None):
         if regex is None:
             continue
         for found in regex.finditer(message):
+            if ("negatable_action" in regex.groupindex
+                    and found.group("negatable_action") is not None
+                    and _negated_action(message, found.start("negatable_action"),
+                                        found.group("negatable_action"), quoted)):
+                continue
             if any(start <= found.start() and found.end() <= end for start, end in quoted):
                 # 遮罩放過的命中要留痕。以前這裡直接 continue，於是繞過去之後三個地方
                 # 同時看不到：閘不擋、稽核沒紀錄、夜間重放也算不到。留一列之後，使用者
@@ -1487,6 +1518,21 @@ def _selftest():
                 and "虛擬盤先用不同參數" in mixed_value.get("reason", ""),
             ))
 
+            contextual = namedtuple("_ContextualProbe", "key forbidden")(
+                "negated-action",
+                (r"背景[^。]{0,60}(?P<negatable_action>降低標準)。",),
+            )
+            checks.append((
+                "否定動作不誤擋，後續正面動作仍攔截",
+                _forbidden_fragment(
+                    contextual, "背景不會降低標準。", []
+                ) is None
+                and _forbidden_fragment(contextual, "背景想降低標準。", []) == "背景想降低標準。"
+                and _forbidden_fragment(
+                    contextual, "背景不會降低標準。但後來背景想降低標準。", []
+                ) == "背景想降低標準。",
+            ))
+
             question_result, question_value, _ = run(
                 "先講結論。虛擬盤要不要改成鏡像實盤，還是維持現狀？"
             )
@@ -2030,7 +2076,7 @@ def _selftest():
             clear_recall_markers(session_id)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 35
+    total = 36
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
