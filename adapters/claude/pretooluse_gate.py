@@ -2638,7 +2638,9 @@ def _selftest():
                           "transcript_path": os.fspath(race_rollout), "cwd": os.fspath(root),
                           "model": "gpt-x", "permission_mode": "default", "tool_name": "Bash",
                           "tool_use_id": "call-1", "tool_input": {"command": "echo hi"}}
-            race_runs = run_concurrent(Path(__file__), race_event, meter_config, 6, environment=race_env)
+            race_runs = run_concurrent(
+                Path(__file__), race_event, meter_config, 6, environment=race_env,
+                clock=memspec.HOOK_CLOCK_FROZEN)
             race_line = memspec.CONTEXT_METER_CODEX_NOTICE.format(
                 cur=170, left=40,
                 path=os.fspath(compact_map.handoff_destination(meter_vault, "codex-race", race_rollout)))
@@ -2668,10 +2670,12 @@ def _selftest():
             lost_rollout, lost_env = write_codex_fixture(root, "codex-unsent", 170000)
             lost_event = {**race_event, "session_id": "codex-unsent", "transcript_path": os.fspath(lost_rollout)}
             run_concurrent(Path(__file__), lost_event, meter_config, 1, environment=lost_env,
-                           settle_seconds=0, close_stdout=True)
+                           settle_seconds=0, close_stdout=True, clock=memspec.HOOK_CLOCK_FROZEN)
             unsent_marker = (recall_marker_directory("codex-unsent") / memspec.CONTEXT_METER_MARKER).exists()
             unsent_outcomes = traced("codex-unsent")
-            unsent_retry = run_synthetic(Path(__file__), lost_event, meter_config, environment=lost_env)
+            unsent_retry = run_synthetic(
+                Path(__file__), lost_event, meter_config, environment=lost_env,
+                clock=memspec.HOOK_CLOCK_FROZEN)
             checks.append((
                 "a claimed line whose output fails is released (traced) and said on the next call",
                 not unsent_marker and "meter-released" in unsent_outcomes

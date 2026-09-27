@@ -1905,7 +1905,9 @@ def _selftest():
                           "session_id": "meter-race", "turn_id": "t1", "cwd": os.fspath(root),
                           "transcript_path": os.fspath(race_rollout), "model": "gpt-x",
                           "permission_mode": "default"}
-            race_runs = run_concurrent(Path(__file__), race_event, roomy, 4, environment=race_env)
+            race_runs = run_concurrent(
+                Path(__file__), race_event, roomy, 4, environment=race_env,
+                clock=memspec.HOOK_CLOCK_FROZEN)
             race_line = memspec.CONTEXT_METER_CODEX_NOTICE.format(
                 cur=170, left=40,
                 path=os.fspath(compact_map.handoff_destination(meter_vault, "meter-race", race_rollout)))
@@ -1926,10 +1928,12 @@ def _selftest():
             unsent_event = {**race_event, "session_id": "meter-unsent",
                             "transcript_path": os.fspath(unsent_rollout)}
             run_concurrent(Path(__file__), unsent_event, roomy, 1, environment=unsent_env,
-                           settle_seconds=0, close_stdout=True)
+                           settle_seconds=0, close_stdout=True, clock=memspec.HOOK_CLOCK_FROZEN)
             unsent_marker = (recall_marker_directory("meter-unsent") / memspec.CONTEXT_METER_MARKER).exists()
             unsent_outcomes = traced("meter-unsent")
-            unsent_retry = run_synthetic(Path(__file__), unsent_event, roomy, environment=unsent_env)
+            unsent_retry = run_synthetic(
+                Path(__file__), unsent_event, roomy, environment=unsent_env,
+                clock=memspec.HOOK_CLOCK_FROZEN)
             checks.append((
                 "concurrent prompts: exactly one says the line; a claim whose output fails is released and retried",
                 all(code == 0 for code, _out, _err in race_runs)

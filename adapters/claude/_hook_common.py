@@ -772,11 +772,11 @@ def run_synthetic(script, event, config_path, arguments=(), environment=None, ti
 
 
 def run_concurrent(script, event, config_path, count, environment=None, settle_seconds=2.0,
-                   close_stdout=False):
+                   close_stdout=False, clock=None):
     """自測用：同時起 count 個掛鉤行程，等它們載入完、卡在讀 stdin，再一起餵同一個事件——
     重現 Codex 一次並行好幾個工具呼叫。回 [(returncode, stdout, stderr)]。
 
-    環境跟 run_synthetic 一樣隔離（家目錄、夢關掉、不帶注入時鐘）。settle_seconds 只是
+    環境跟 run_synthetic 一樣隔離（家目錄、夢關掉；時鐘要明傳）。settle_seconds 只是
     「大概都載入完了」：晚到的行程會看到標記、什麼都不說，不會讓「只有一個說」變假。
     close_stdout=True 在餵事件前關掉讀端，模擬「輸出失敗」（stdout 回空字串）。"""
     import subprocess
@@ -791,14 +791,25 @@ def run_concurrent(script, event, config_path, count, environment=None, settle_s
     }
     environment[memspec.EPITYPE_CONFIG_ENV] = os.fspath(config_path)
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
-    environment.pop(memspec.HOOK_CLOCK_ENV, None)
-    processes = [
-        subprocess.Popen([sys.executable, os.fspath(script)], stdin=subprocess.PIPE,
-                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=environment)
-        for _ in range(count)
-    ]
+    credential = None
+    if clock is None:
+        environment.pop(memspec.HOOK_CLOCK_ENV, None)
+    else:
+        import uuid
+
+        if clock not in memspec.HOOK_CLOCK_MODES:
+            raise ValueError(f"unknown hook clock: {clock}")
+        token = uuid.uuid4().hex
+        credential = Path(config_path).resolve().parent / (memspec.HOOK_CLOCK_CREDENTIAL_PREFIX + token)
+        credential.write_text(clock, encoding="ascii")
+        environment[memspec.HOOK_CLOCK_ENV] = token
+    processes = []
     results = []
     try:
+        for _ in range(count):
+            processes.append(subprocess.Popen(
+                [sys.executable, os.fspath(script)], stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=environment))
         if close_stdout:
             for process in processes:
                 process.stdout.close()
@@ -819,6 +830,11 @@ def run_concurrent(script, event, config_path, count, environment=None, settle_s
         for process in processes:
             if process.poll() is None:
                 process.kill()
+        if credential is not None:
+            try:
+                credential.unlink()
+            except OSError:
+                pass
     return results
 
 

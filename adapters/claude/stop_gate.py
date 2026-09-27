@@ -1769,6 +1769,27 @@ def _selftest():
 
             # 2026-09-25 原句：宿主要求標 bash，owner 按下去是 PowerShell 5.1 → ParserError。
             original = 'cd C:/titan && PYTHONIOENCODING=utf-8 "...python.exe" "...py"'
+            native_parse_ok = True
+            if native_powershell:
+                try:
+                    parsed = _parse_powershell(
+                        [original,
+                         '$env:PYTHONIOENCODING = "utf-8"; & "C:\\python.exe" "C:\\a.py"',
+                         "git -C C:\\repo log --oneline -5"],
+                        timeout=30,
+                    )
+                    native_parse_ok = (
+                        parsed[0] is not None
+                        and parsed[0][0] == 1
+                        and "&&" in parsed[0][1]
+                        and parsed[1:] == [None, None]
+                    )
+                except Exception:
+                    native_parse_ok = False
+            checks.append((
+                "fence_shell: Windows PowerShell 5.1 真解析器擋原句並放行兩種合法寫法",
+                native_parse_ok,
+            ))
             bad_result, bad_value, bad_session = fence_run(
                 "好，直接跑這個：\n```bash\n" + original + "\n```\n")
             bad_reason = bad_value.get("reason", "")
@@ -1779,9 +1800,15 @@ def _selftest():
                              if fence_log.exists() else ())
                 if line.strip()
             ]
-            checks.append((
-                "fence_shell: 09-25 原句由 Windows PowerShell 擋下；缺解析器時放行並回報",
-                (bad_result.returncode == 0
+            bad_logged = any(
+                row.get("kind") == memspec.STOP_GATE_LOG_KIND
+                and row.get("decision") == "執行鍵區塊"
+                and row.get("rule") == memspec.FENCE_SHELL_RULE
+                and row.get("session_id") == bad_session
+                for row in fence_rows
+            )
+            blocked_bad = (
+                bad_result.returncode == 0
                 and bad_value.get("decision") == "block"
                 and "執行鍵區塊" in bad_reason
                 and "第 1 個程式碼區塊（bash）" in bad_reason
@@ -1789,13 +1816,17 @@ def _selftest():
                 and "第 1 行" in bad_reason
                 and "&&" in bad_reason
                 and "owner 按執行會直接失敗" in bad_reason
-                and any(
-                    row.get("kind") == memspec.STOP_GATE_LOG_KIND
-                    and row.get("decision") == "執行鍵區塊"
-                    and row.get("rule") == memspec.FENCE_SHELL_RULE
-                    and row.get("session_id") == bad_session
-                    for row in fence_rows
-                )) if native_powershell else (
+                and bad_logged
+            )
+            timed_out_bad = (
+                bad_result.returncode == 0
+                and not bad_result.stdout.strip()
+                and "TimeoutExpired" in bad_result.stderr
+                and not bad_logged
+            )
+            checks.append((
+                "fence_shell: 原句被攔截；解析器逾時或不存在時明確放行並回報",
+                (blocked_bad or timed_out_bad) if native_powershell else (
                     bad_result.returncode == 0
                     and not bad_result.stdout.strip()
                     and "FileNotFoundError" in bad_result.stderr
@@ -1807,10 +1838,11 @@ def _selftest():
                 '$env:PYTHONIOENCODING = "utf-8"; & "C:\\python.exe" "C:\\a.py"\n'
                 "```\n以及\n```bash\ngit -C C:\\repo log --oneline -5\n```\n")
             checks.append((
-                "fence_shell: 合法 PowerShell 放行；缺解析器時在 stderr 回報",
+                "fence_shell: 合法 PowerShell 放行；解析器不可用時在 stderr 回報",
                 good_result.returncode == 0
                 and not good_result.stdout.strip()
-                and (not good_result.stderr.strip() if native_powershell
+                and ((not good_result.stderr.strip()
+                      or "TimeoutExpired" in good_result.stderr) if native_powershell
                      else "FileNotFoundError" in good_result.stderr),
             ))
             prose_result, _prose_value, _ = fence_run(
@@ -2099,7 +2131,7 @@ def _selftest():
             clear_recall_markers(session_id)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 37
+    total = 38
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
