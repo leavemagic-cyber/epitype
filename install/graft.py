@@ -2442,6 +2442,10 @@ def _selftest():
                 output=io.StringIO(),
                 clear_shim_status=True,
             )
+            expected_failed_hooks = len(EVENTS) - sum(
+                adapter_name == "pretooluse_gate.py"
+                for _, adapter_name in HOOK_SPECS.values()
+            )
             checks.append((
                 "missing adapter fails hook health for lack of positive trace",
                 missing_adapter_code == 1
@@ -2451,10 +2455,7 @@ def _selftest():
                     for event, (_, adapter_name) in HOOK_SPECS.items()
                     if adapter_name == "pretooluse_gate.py"
                 )
-                and f"HEALTH FAIL {len(EVENTS) - sum(
-                    adapter_name == 'pretooluse_gate.py'
-                    for _, adapter_name in HOOK_SPECS.values()
-                )}/{len(EVENTS)}" in missing_adapter_text
+                and f"HEALTH FAIL {expected_failed_hooks}/{len(EVENTS)}" in missing_adapter_text
                 and recovered_code == 0,
             ))
 

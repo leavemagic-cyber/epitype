@@ -1754,6 +1754,7 @@ def _selftest():
             fence_config = root / "fence-config.json"
             write_config(fence_config, [fence_vault])
             home = {"HOME": os.fspath(root), "USERPROFILE": os.fspath(root)}
+            native_powershell = os.name == "nt"
 
             def fence_run(message):
                 session_id = f"stopgate-fence-{uuid.uuid4().hex}"
@@ -1779,8 +1780,8 @@ def _selftest():
                 if line.strip()
             ]
             checks.append((
-                "fence_shell: 09-25 原句放在 ```bash 區塊 → 擋，點名卡、第幾個區塊、行號與解析器訊息",
-                bad_result.returncode == 0
+                "fence_shell: 09-25 原句由 Windows PowerShell 擋下；缺解析器時放行並回報",
+                (bad_result.returncode == 0
                 and bad_value.get("decision") == "block"
                 and "執行鍵區塊" in bad_reason
                 and "第 1 個程式碼區塊（bash）" in bad_reason
@@ -1794,6 +1795,11 @@ def _selftest():
                     and row.get("rule") == memspec.FENCE_SHELL_RULE
                     and row.get("session_id") == bad_session
                     for row in fence_rows
+                )) if native_powershell else (
+                    bad_result.returncode == 0
+                    and not bad_result.stdout.strip()
+                    and "FileNotFoundError" in bad_result.stderr
+                    and not any(row.get("session_id") == bad_session for row in fence_rows)
                 ),
             ))
             good_result, good_value, _ = fence_run(
@@ -1801,10 +1807,11 @@ def _selftest():
                 '$env:PYTHONIOENCODING = "utf-8"; & "C:\\python.exe" "C:\\a.py"\n'
                 "```\n以及\n```bash\ngit -C C:\\repo log --oneline -5\n```\n")
             checks.append((
-                "fence_shell: $env: 寫法與 git -C 都是合法 PowerShell → 放行，stderr 乾淨",
+                "fence_shell: 合法 PowerShell 放行；缺解析器時在 stderr 回報",
                 good_result.returncode == 0
                 and not good_result.stdout.strip()
-                and not good_result.stderr.strip(),
+                and (not good_result.stderr.strip() if native_powershell
+                     else "FileNotFoundError" in good_result.stderr),
             ))
             prose_result, _prose_value, _ = fence_run(
                 "先 cd C:/titan && python a.py 再看結果；沒標語言的區塊不查：\n"
@@ -1823,6 +1830,18 @@ def _selftest():
                 turn_check_limit="", fence_shell=memspec.FENCE_SHELL_POWERSHELL,
             )
             bad_block = "```bash\n" + original + "\n```\n"
+            _FENCE_RESULTS.clear()
+            formatted_bad = _fence_shell_gap(
+                fence_decision, bad_block, {}, time.monotonic(), [],
+                parser=lambda shell, blocks, timeout: [(1, "Unexpected token '&&'")],
+            )
+            checks.append((
+                "fence_shell: parser result names the exact block, line and syntax error",
+                formatted_bad is not None
+                and "第 1 個程式碼區塊（bash）" in formatted_bad
+                and "第 1 行" in formatted_bad
+                and "&&" in formatted_bad,
+            ))
             calls = []
 
             def recording(shell, blocks, timeout):
@@ -1903,7 +1922,9 @@ def _selftest():
 
             def counting(shell, blocks, timeout):
                 counted.append(len(blocks))
-                return _parse_shell_blocks(shell, blocks, timeout)
+                if native_powershell:
+                    return _parse_shell_blocks(shell, blocks, timeout)
+                return [None, (2, "Missing closing brace")]
 
             second_bad = _fence_shell_gap(
                 fence_decision,
@@ -1940,9 +1961,11 @@ def _selftest():
             _FENCE_RESULTS.clear()
             ps_quote = _fence_shell_gap(
                 fence_decision, '```powershell\nWrite-Host "unterminated\n```', {}, time.monotonic(),
-                quote_defects)
+                quote_defects,
+                parser=None if native_powershell else
+                lambda shell, blocks, timeout: [(1, "The string is missing the terminator")])
             checks.append((
-                "fence_shell: 未閉合引號 bash 與 PowerShell 各擋一次（沒有解析器則放行並點名）",
+                "fence_shell: 未閉合引號由 bash 與 PowerShell 解析結果攔截",
                 (bash_quote is not None and "unexpected EOF" in bash_quote
                  if _shutil.which("bash") else bash_quote is None)
                 and ps_quote is not None
@@ -2076,7 +2099,7 @@ def _selftest():
             clear_recall_markers(session_id)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 36
+    total = 37
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

@@ -127,6 +127,7 @@ def _run_selftest(repo_root, relative_path, environment):
         with tempfile.TemporaryDirectory(prefix="epitype-suite-") as scratch:
             child = dict(environment)
             child["TMPDIR"] = child["TEMP"] = child["TMP"] = scratch
+            child["PYTHONIOENCODING"] = "utf-8"
             return subprocess.run(
                 [sys.executable, str(tool), "--selftest"],
                 cwd=repo_root,
