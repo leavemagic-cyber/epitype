@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="Epitype Essentials">
+  <rect width="512" height="512" rx="112" fill="#172334"/>
+  <path d="M164 133v246M164 133h183M164 256h155M164 379h183" fill="none" stroke="#F5F8FA" stroke-width="34" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="365" cy="133" r="18" fill="#55D6C2"/>
+  <circle cx="337" cy="256" r="18" fill="#55D6C2"/>
+  <circle cx="365" cy="379" r="18" fill="#55D6C2"/>
+</svg>
