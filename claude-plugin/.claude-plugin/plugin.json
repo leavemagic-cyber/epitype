@@ -1,0 +1,11 @@
+{
+  "name": "epitype-essentials",
+  "displayName": "Epitype Essentials",
+  "version": "1.0.0",
+  "description": "Three focused skills for evidence-backed completion checks, safe Git staging, and clear work updates.",
+  "author": {
+    "name": "Epitype",
+    "url": "https://github.com/leavemagic-cyber/epitype"
+  },
+  "license": "MIT"
+}
