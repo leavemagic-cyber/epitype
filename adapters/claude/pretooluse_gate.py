@@ -25,6 +25,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from epitype import context_meter
+from epitype import control_lifecycle
 from epitype import memspec
 from epitype import patch_envelope
 from _hook_common import (
@@ -1361,6 +1362,26 @@ def _allow_context(event, notices=(), config=None, started_at=None, meter_claims
     for notice in list(dict.fromkeys(notices))[: memspec.GATE_DEFECT_MAX_LINES]:
         if _notice_marker(session_id, notice):
             lines.append(notice)
+    try:
+        if config is not None and started_at is not None and not expired(started_at):
+            lifecycle_path = control_lifecycle.database_path(config_path())
+            lifecycle_note = control_lifecycle.reminder(
+                event, lifecycle_path, "tool", claim=False
+            )
+            if lifecycle_note:
+                candidate = "\n".join([*lines, lifecycle_note])
+                if payload_fits("PreToolUse", candidate,
+                                config[memspec.CONFIG_BUDGET_BYTES_FIELD]):
+                    claimed = control_lifecycle.reminder(event, lifecycle_path, "tool")
+                    if claimed:
+                        lines.append(claimed)
+                else:
+                    print("Epitype 瀏覽器收尾提醒超出本次 hook 預算；下次工具呼叫仍會重試。",
+                          file=sys.stderr)
+    except Exception as exc:
+        if config_path().exists():
+            print(memspec.GATE_DEGRADED_NOTICE.format(
+                gate="control lifecycle", reason=type(exc).__name__), file=sys.stderr)
     if meter_claims is not None:
         meter = _context_meter_line(event, config, started_at)
         if meter is not None and payload_fits(
@@ -2731,6 +2752,23 @@ def main():
     event = None
     try:
         event = read_event(sys.stdin)
+        if event.get("hook_event_name") == "PostToolUse":
+            try:
+                config = load_config(_STARTED_AT)
+                if config is not None:
+                    note = control_lifecycle.observe(
+                        event, control_lifecycle.database_path(config_path())
+                    )
+                    if note:
+                        emit({"hookSpecificOutput": {
+                            "hookEventName": "PostToolUse",
+                            "additionalContext": note,
+                        }})
+            except Exception as exc:
+                if config_path().exists():
+                    print(memspec.GATE_DEGRADED_NOTICE.format(
+                        gate="PostToolUse", reason=type(exc).__name__), file=sys.stderr)
+            return 0
         value = _handle(event, _STARTED_AT, defects, meter_claims)
         # 這一次呼叫碰到哪些檔，附記給回合閘用：說「我查過某個檔」的時候，那個檔名
         # 必須在這裡出現過。擋下的呼叫不記——那個檔根本沒被打開。

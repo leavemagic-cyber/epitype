@@ -951,7 +951,7 @@ rewrite was added.
 
 ## 26. Control cleanup rules recalled in discussion but absent at tool use
 
-> Superseded by §30 (owner ruling 2026-09-09): the control-lifecycle guidance was removed from the product.
+> Superseded by §30 (owner ruling 2026-09-09): the control-lifecycle guidance was removed from the product. The owner separately authorized post-result browser leak detection on 2026-09-27; see §30's later ruling and `CONTROL_LIFECYCLE.md`.
 
 A short memory-card description can omit the operational distinction between
 closing a target window, closing browser tabs/groups and ending the controller.
@@ -1064,9 +1064,13 @@ owner removed all four on 2026-09-09, answering each question in turn:
 correction was reflexively turned into a product mechanism; the token cost of
 the mechanism itself was never counted, and the 2026-09-02 ruling that the
 behaviour layer runs on cards plus exam questions was never checked against.
-The standing rule that follows: **Epitype does memory only** — cards, fields,
+The standing rule at that time: **Epitype does memory only** — cards, fields,
 views, recall, and gates that rule on what a card says — and ships no built-in
-behavioural guidance text of its own.
+behavioural guidance text of its own. The owner changed Q2's scope on
+2026-09-27: Epitype should record browser open/close results and remind the
+agent when one of its own resources remains open. The result observer and
+reminder are documented in `CONTROL_LIFECYCLE.md`; Q1, Q3 and Q6 were not
+reversed. The 2026-09-09 removal table below remains a historical record.
 
 ### Removed
 

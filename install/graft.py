@@ -26,7 +26,7 @@ MARKER_VALUE = "epitype"
 MARKER_FIELDS = ("id", "comment")
 # SubagentStop 用的是同一支 stop.py：回合閘看 hook_event_name 分流，子代理結束時
 # 只落檔、不判擋。2026-09-20 Codex 審查抓到這裡漏了它——程式寫好了、標準安裝沒接上。
-EVENTS = ("SessionStart", "UserPromptSubmit", "PreCompact", "PreToolUse", "Stop",
+EVENTS = ("SessionStart", "UserPromptSubmit", "PreCompact", "PreToolUse", "PostToolUse", "Stop",
           "SubagentStop")
 STATE_VERSION = 1
 CONFIG_DIRECTORY = ".epitype"
@@ -70,6 +70,7 @@ HOOK_SPECS = {
     "UserPromptSubmit": ("recall.py", "recall_hook.py"),
     "PreCompact": ("precompact.py", "precompact_hook.py"),
     "PreToolUse": ("pretooluse.py", "pretooluse_gate.py"),
+    "PostToolUse": ("pretooluse.py", "pretooluse_gate.py"),
     "Stop": ("stop.py", "stop_gate.py"),
     "SubagentStop": ("stop.py", "stop_gate.py"),
 }
@@ -1152,6 +1153,10 @@ def _synthetic_health(home, repo_root, output):
         ("UserPromptSubmit", "recall.py", {"prompt": "synthetic doctor probe"}, ()),
         ("PreCompact", "precompact.py", {"transcript_path": ""}, ("--codex",)),
         ("PreToolUse", "pretooluse.py", {"tool_name": "SyntheticRead", "tool_input": {"path": "synthetic.txt"}}, ()),
+        ("PostToolUse", "pretooluse.py",
+         {"hook_event_name": "PostToolUse", "session_id": "epitype-doctor",
+          "tool_use_id": "epitype-doctor-post", "tool_name": "SyntheticRead",
+          "tool_input": {"path": "synthetic.txt"}, "tool_response": {}}, ()),
         # A Stop probe must never look like a real turn: an empty message reaches the
         # gate, exercises the adapter, and cannot match a card.
         ("Stop", "stop.py", {"stop_hook_active": False, "last_assistant_message": ""}, ()),
@@ -2440,9 +2445,16 @@ def _selftest():
             checks.append((
                 "missing adapter fails hook health for lack of positive trace",
                 missing_adapter_code == 1
-                and "HOOK PreToolUse: FAIL" in missing_adapter_text
-                and "REASON PreToolUse: no-trace" in missing_adapter_text
-                and f"HEALTH FAIL {len(EVENTS) - 1}/{len(EVENTS)}" in missing_adapter_text
+                and all(
+                    f"HOOK {event}: FAIL" in missing_adapter_text
+                    and f"REASON {event}: no-trace" in missing_adapter_text
+                    for event, (_, adapter_name) in HOOK_SPECS.items()
+                    if adapter_name == "pretooluse_gate.py"
+                )
+                and f"HEALTH FAIL {len(EVENTS) - sum(
+                    adapter_name == 'pretooluse_gate.py'
+                    for _, adapter_name in HOOK_SPECS.values()
+                )}/{len(EVENTS)}" in missing_adapter_text
                 and recovered_code == 0,
             ))
 

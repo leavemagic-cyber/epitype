@@ -46,6 +46,18 @@
         ]
       }
     ],
+    "PostToolUse": [
+      {
+        "matcher": "^(mcp__claude-in-chrome__|mcp__Claude_Browser__|mcp__computer-use__|mcp__cua_repl(?:__|\\.))",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{{PYTHON_EXECUTABLE}} {{EPITYPE_HOOKS_ROOT}}/pretooluse.py",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [

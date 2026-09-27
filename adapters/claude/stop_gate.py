@@ -2060,6 +2060,19 @@ def main():
     try:
         event = read_event(sys.stdin)
         value = _handle(event, _STARTED_AT, defects)
+        if value is None:
+            try:
+                from epitype import control_lifecycle
+
+                note = control_lifecycle.reminder(
+                    event, control_lifecycle.database_path(config_path()), "stop"
+                )
+                if note:
+                    value = {"decision": "block", "reason": note}
+            except Exception as exc:
+                if config_path().exists():
+                    defects.append(memspec.GATE_DEGRADED_NOTICE.format(
+                        gate="control lifecycle", reason=type(exc).__name__))
         # 斷點檔：不管這一回合有沒有被擋，都把「改了什麼、跑了什麼、最後一句話」寫下來。
         # 進度只存在對話裡的話，這一場結束或被停掉就等於沒發生過（owner 2026-09-19）。
         # 純副作用，寫不出來也不影響這道閘的判斷。

@@ -78,6 +78,7 @@ SELFTESTS = (
     Path("tests") / "turn_check_regression.py",
     Path("tests") / "patch_envelope_gate_regression.py",
     Path("tests") / "write_check_regression.py",
+    Path("tests") / "control_lifecycle_regression.py",
     Path("tests") / "prefilter_regression.py",
     Path("tests") / "budget_and_quiet_rules_regression.py",
     Path("tests") / "stranger_install_regression.py",

@@ -21,6 +21,7 @@ _COMMANDS = {
     "token-meter": ("epitype.token_meter", "main", ()),
     "context-meter": ("epitype.context_meter", "main", ()),
     "gates": ("epitype.gates_report", "main", ()),
+    "lifecycle": ("epitype.control_lifecycle", "main", ()),
     "exam": ("exam.exam_runner", "main", ()),
     "trust": ("adapters.codex.hook_trust", "main", ("check",)),
     "harvest": ("epitype.harvest", "main", ()),
