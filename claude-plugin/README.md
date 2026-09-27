@@ -16,6 +16,8 @@ Example requests:
 
 This bundle contains Markdown instructions only. It runs no commands on installation, reads no Claude memory or conversation history, stores no user data, and connects to no service. Claude may use its normal tools when a user asks for work that needs them. Review a suggested command before approving it in your own environment.
 
+See the [privacy policy](PRIVACY.md) for the plugin's data handling scope.
+
 The [Epitype Python package](https://github.com/leavemagic-cyber/epitype) offers local hook-based memory management as a separate, optional installation. Installing this Claude plugin adds only the three skills listed above; it does not install the Python package or its hooks.
 
 For support, open an [Epitype issue](https://github.com/leavemagic-cyber/epitype/issues).

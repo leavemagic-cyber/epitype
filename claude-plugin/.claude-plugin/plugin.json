@@ -7,5 +7,7 @@
     "name": "Epitype",
     "url": "https://github.com/leavemagic-cyber/epitype"
   },
+  "homepage": "https://github.com/leavemagic-cyber/epitype/tree/master/claude-plugin",
+  "repository": "https://github.com/leavemagic-cyber/epitype",
   "license": "MIT"
 }
