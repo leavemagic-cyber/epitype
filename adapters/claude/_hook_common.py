@@ -809,6 +809,8 @@ def run_concurrent(script, event, config_path, count, environment=None, settle_s
             process.stdin.write(data)
         for process in processes:
             process.stdin.close()
+            # Python 3.11 communicate() tries to flush a non-None stdin even after close().
+            process.stdin = None
         for process in processes:
             out, err = process.communicate(timeout=memspec.HOOK_TIMEOUT_SECONDS + 20)
             results.append((process.returncode, (out or b"").decode("utf-8", "replace"),
