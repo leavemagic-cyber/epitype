@@ -280,8 +280,17 @@ def _write_check_findings(fields):
     return []
 
 
-def _unenforceable_gap_findings(fields):
+def _unenforceable_gap_findings(fields, counts):
     """「閘門看不到」不是綁不住的理由，是 Epitype 的缺口；點出來，不要讓它被當成定論放著。"""
+    # A redirected source preserves the old diagnosis as history. Its active
+    # successor is now responsible for the behaviour, so the source's former
+    # product gap is no longer an open warning. An unredirected retired card
+    # still warns: status alone must not hide an unresolved gap.
+    if (fields.get(memspec.DECISION_STATUS_FIELD, "").strip()
+            == memspec.SUPERSEDED_DECISION_STATUS
+            and (fields.get("superseded_by", "").strip()
+                 or counts.get("superseded_by"))):
+        return []
     reason = fields.get(memspec.UNENFORCEABLE_FIELD, "").strip()
     if not reason or not re.search(memspec.UNENFORCEABLE_PRODUCT_GAP_PATTERN, reason, re.IGNORECASE):
         return []
@@ -758,7 +767,7 @@ def _check_card(path, relative, today):
     findings.extend(_fence_shell_findings(fields, counts))
     findings.extend(_write_check_findings(fields))
     findings.extend(_arming_findings(fields, counts, card_type, today, relative))
-    findings.extend(_unenforceable_gap_findings(fields))
+    findings.extend(_unenforceable_gap_findings(fields, counts))
     findings.extend(_example_findings(path, fields, front_lines, counts, today))
 
     for field in memspec.DEPRECATED_CARD_FIELDS:
@@ -1745,6 +1754,8 @@ def _selftest():
                 "fence-langs-alone.md": head + "unenforceable: 判斷型\nfence_langs:\n  - bash\n" + tail,
                 "gap-plain-text.md": head + "unenforceable: 結構型：程式碼區塊的數量與語言標記是版面結構，Stop 閘比對的是純文字\n" + tail,
                 "gap-english.md": head + "unenforceable: the gate can't see code fences\n" + tail,
+                "gap-redirected.md": head + "status: superseded\nsuperseded_by: next-rule.md\nunenforceable: 動作閘看不到先前呼叫\n" + tail,
+                "gap-unredirected.md": head + "status: superseded\nunenforceable: 動作閘看不到先前呼叫\n" + tail,
             }
             for name, text in fence_cards.items():
                 (fence_vault / name).write_text(text.format(name=Path(name).stem), encoding="utf-8")
@@ -1768,6 +1779,8 @@ def _selftest():
             ))
             gap_rules, _card = _findings_of(fence_report, "gap-plain-text.md")
             english_rules, _card = _findings_of(fence_report, "gap-english.md")
+            redirected_rules, _card = _findings_of(fence_report, "gap-redirected.md")
+            unredirected_rules, _card = _findings_of(fence_report, "gap-unredirected.md")
             plain_rules, _card = _findings_of(report, "feedback-good.md")
             checks.append((
                 "unenforceable 理由是「閘門看不到／比對純文字」→ WARN 產品缺口；真的綁不住的理由不受影響",
@@ -1777,6 +1790,8 @@ def _selftest():
                 and memspec.FENCE_SHELL_FIELD in _reason_of(
                     fence_report, "gap-plain-text.md", "unenforceable-gap")
                 and (WARN, "unenforceable-gap") in english_rules
+                and (WARN, "unenforceable-gap") not in redirected_rules
+                and (WARN, "unenforceable-gap") in unredirected_rules
                 and not any(rule == "unenforceable-gap" for _level, rule in plain_rules),
             ))
     except Exception as exc:
