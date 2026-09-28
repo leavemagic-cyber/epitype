@@ -296,8 +296,8 @@ def _fake_home(home):
                 os.environ[name] = value
 
 
-class NativeSync(_TempVault):
-    """D3／D4／D6：卡片→兩邊設定，只動自己寫的鍵，漂移點名到卡片與鍵，拿得回來。"""
+class _NativeFixture(_TempVault):
+    """一台合成機器：兩個宿主的使用者設定（含 hooks 段）、手寫規則檔、治理庫與一個專案庫。"""
 
     def setUp(self):
         super().setUp()
@@ -335,6 +335,11 @@ class NativeSync(_TempVault):
 
     def _snapshot(self):
         return {path: path.read_bytes() for path in (self.settings, self.config, self.guard_rules)}
+
+
+
+class NativeSync(_NativeFixture):
+    """D3／D4／D6：卡片→兩邊設定，只動自己寫的鍵，漂移點名到卡片與鍵，拿得回來。"""
 
     def test_the_whole_round_trip(self):
         before = self._snapshot()
@@ -502,6 +507,130 @@ class NativeSync(_TempVault):
             env=environment)
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertIn('"decision":"forbidden"', done.stdout)
+
+
+class NativeGuard(_NativeFixture):
+    """D5：代理直接改 Epitype 管理的鍵時，寫檔閘擋下；讀、`epitype sync`、改別的設定都放行。"""
+
+    def setUp(self):
+        super().setUp()
+        code, report = self._run(host_sync.apply)
+        self.assertEqual(code, host_sync.EXIT_OK, report)
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "adapters" / "claude"))
+        import _hook_common as common
+
+        self.hook_config = self.home / ".epitype" / "config.json"
+        common.write_config(self.hook_config, self.vaults)
+        saved = {name: os.environ.get(name) for name in
+                 ("USERPROFILE", "HOME", memspec.EPITYPE_CONFIG_ENV, memspec.DREAM_MODE_ENV)}
+        os.environ.update({"USERPROFILE": os.fspath(self.home), "HOME": os.fspath(self.home),
+                           memspec.EPITYPE_CONFIG_ENV: os.fspath(self.hook_config),
+                           memspec.DREAM_MODE_ENV: memspec.DREAM_MODE_OFF})
+
+        def restore():
+            for name, value in saved.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+
+        self.addCleanup(restore)
+
+    def _denial(self, tool_name, tool_input):
+        import time
+
+        import pretooluse_gate as pretool
+
+        value = pretool._handle({"tool_name": tool_name, "tool_input": tool_input,
+                                 "session_id": "native-guard", "cwd": os.fspath(self.root)},
+                                time.monotonic(), [])
+        return (value or {}).get("hookSpecificOutput", {}).get("permissionDecisionReason")
+
+    def _patch(self, path, body):
+        return {"command": ["apply_patch", "*** Begin Patch\n*** Update File: " + os.fspath(path)
+                            + "\n" + body + "*** End Patch\n"]}
+
+    def test_editing_a_managed_key_is_denied_and_points_at_the_card(self):
+        reason = self._denial("Edit", {
+            "file_path": os.fspath(self.settings),
+            "old_string": '"CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS": "4"',
+            "new_string": '"CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS": "8"'})
+        self.assertIsNotNone(reason)
+        self.assertIn("env.CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS", reason)
+        self.assertIn("fb-native.md", reason)
+        self.assertIn("epitype sync --apply", reason)
+        self.assertIn(memspec.HOST_CLAUDE_ENV_FIELD, reason)
+
+    def test_other_ways_of_changing_managed_keys_are_denied(self):
+        settings = json.loads(self.settings.read_text(encoding="utf-8"))
+        settings["permissions"]["deny"] = ["Read(**/.env*)"]
+        cases = {
+            "Write drops a managed deny rule": ("Write", {
+                "file_path": os.fspath(self.settings), "content": json.dumps(settings, indent=2)}),
+            "Edit a managed Codex key": ("Edit", {
+                "file_path": os.fspath(self.config),
+                "old_string": "max_concurrent_threads_per_session = 4",
+                "new_string": "max_concurrent_threads_per_session = 16"}),
+            "Write the generated rules file": ("Write", {
+                "file_path": os.fspath(self.rules), "content": "# mine\n"}),
+            "apply_patch a managed Codex key": ("Bash", self._patch(
+                self.config, "@@\n-max_concurrent_threads_per_session = 4\n"
+                "+max_concurrent_threads_per_session = 16\n")),
+            "apply_patch removing a managed deny rule": ("Bash", self._patch(
+                self.settings, '@@\n-      "Read(**/.env*)",\n-      "Bash(git clean:*)"\n'
+                '+      "Read(**/.env*)"\n     ]\n')),
+            "apply_patch deleting the rules file": ("Bash", {"command": [
+                "apply_patch", "*** Begin Patch\n*** Delete File: " + os.fspath(self.rules)
+                + "\n*** End Patch\n"]}),
+            "project settings edited directly": ("Edit", {
+                "file_path": os.fspath(self.project / ".claude" / "settings.local.json"),
+                "old_string": '"Bash(rm -rf:*)"', "new_string": '"Bash(ls:*)"'}),
+            "PowerShell rewrite": ("PowerShell", {"command": (
+                f"(Get-Content '{self.settings}') -replace '\"CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS\": \"4\"',"
+                f"'\"CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS\": \"8\"' | Set-Content '{self.settings}'")}),
+            "python one-liner": ("Bash", {"command": (
+                "python -c \"import json;p=r'" + os.fspath(self.config) + "';"
+                "open(p,'a').write('max_concurrent_threads_per_session = 9')\"")}),
+            "overwrite by redirection": ("Bash", {"command": f"echo {{}} > '{self.settings}'"}),
+            "sed into the rules file": ("Bash", {"command": f"sed -i 's/git/xit/' {self.rules}"}),
+        }
+        for name, (tool, tool_input) in cases.items():
+            with self.subTest(name=name):
+                self.assertIsNotNone(self._denial(tool, tool_input), name)
+
+    def test_reads_sync_and_the_users_other_settings_are_allowed(self):
+        cases = {
+            "Read tool": ("Read", {"file_path": os.fspath(self.settings)}),
+            "grep with stderr redirected": ("Bash", {"command": (
+                f"grep CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS '{self.settings}' 2>/dev/null")}),
+            "Get-Content of the rules file": ("PowerShell", {
+                "command": f"Get-Content '{self.rules}'"}),
+            "copy the settings out for a backup": ("Bash", {
+                "command": f"cp '{self.settings}' /tmp/backup.json"}),
+            "epitype sync": ("Bash", {"command": "python -m epitype sync --apply > sync.log"}),
+            "epitype sync by path": ("Bash", {
+                "command": "python epitype/host_sync.py --apply >> settings.json.log"}),
+            "Edit the user's own key": ("Edit", {
+                "file_path": os.fspath(self.settings),
+                "old_string": '"theme": "dark"', "new_string": '"theme": "light"'}),
+            "Edit the user's own env": ("Edit", {
+                "file_path": os.fspath(self.settings),
+                "old_string": '"USER_KEY": "1"', "new_string": '"USER_KEY": "2"'}),
+            "add another deny rule by hand": ("Edit", {
+                "file_path": os.fspath(self.settings),
+                "old_string": '"Read(**/.env*)",', "new_string": '"Read(**/.env*)",\n      "Bash(curl:*)",'}),
+            "apply_patch the user's own Codex key": ("Bash", self._patch(
+                self.config, '@@\n-model = "synthetic"   # the user picked this\n'
+                '+model = "other"   # the user picked this\n')),
+            "the hand-written rules file": ("Write", {
+                "file_path": os.fspath(self.guard_rules), "content": GUARD_RULES + "# more\n"}),
+            "an unmanaged config.toml elsewhere": ("Write", {
+                "file_path": os.fspath(self.root / "elsewhere" / "config.toml"),
+                "content": "max_concurrent_threads_per_session = 99\n"}),
+        }
+        for name, (tool, tool_input) in cases.items():
+            with self.subTest(name=name):
+                self.assertIsNone(self._denial(tool, tool_input), name)
 
 
 class DoctorSeesNativeDrift(unittest.TestCase):

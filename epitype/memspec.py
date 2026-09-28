@@ -3200,6 +3200,10 @@ LANGUAGE = _resolve_language()
 # 會在擋人的當下丟 KeyError，而那一刻沒有人在看 traceback；tests/language_regression.py
 # 逐鍵比對兩邊的佔位符集合，就是為了讓這種錯在測試裡先紅。
 _EN = {
+    "HOST_NATIVE_GUARD_REASON": (
+        "🛑 {key} in {path} is managed by Epitype card {card}; do not edit it directly. "
+        "Change the card ({field}) and run `epitype sync --apply`; the user's other settings stay editable."
+    ),
     "RECALL_STALE_STATE_MARK": "⚠ state from {days} days ago, check the current state before citing | ",
     "GATE_DEGRADED_NOTICE": "⚠ Epitype {gate}: the rule layer did not run this time ({reason}) — nothing was checked against any rule.",
     "GATE_VAULT_UNREADABLE_NOTICE": "⚠ Epitype {gate}: vault {vault} could not be read ({reason}); none of its rules applied this time.",
