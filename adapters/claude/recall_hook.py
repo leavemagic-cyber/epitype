@@ -364,19 +364,23 @@ def _with_notes(value, config, event):
 
 
 def _with_lifecycle(value, config, event):
-    """Carry outstanding browser cleanup to the model without a visible Stop prompt."""
+    """Carry outstanding browser cleanup to the model without a visible Stop prompt.
+
+    Peek first and claim only when the whole context fits: a reminder dropped for
+    budget stays available, and a claimed one counts toward the per-resource cap."""
     try:
-        note = control_lifecycle.reminder(
-            event, control_lifecycle.database_path(config_path()),
-            "prompt", claim=False,
-        )
+        lifecycle_path = control_lifecycle.database_path(config_path())
+        note = control_lifecycle.reminder(event, lifecycle_path, "prompt", claim=False)
         if not note:
             return value
         context = value.get("hookSpecificOutput", {}).get("additionalContext", "") if value else ""
         combined = (context + "\n" + note) if context else note
         if payload_fits("UserPromptSubmit", combined,
                         config[memspec.CONFIG_BUDGET_BYTES_FIELD]):
-            return payload("UserPromptSubmit", combined)
+            claimed = control_lifecycle.reminder(event, lifecycle_path, "prompt")
+            if claimed:
+                combined = (context + "\n" + claimed) if context else claimed
+                return payload("UserPromptSubmit", combined)
     except Exception as exc:
         if config_path().exists():
             print(memspec.GATE_DEGRADED_NOTICE.format(

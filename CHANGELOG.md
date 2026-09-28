@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### 瀏覽器查漏：需求變更
+
+- 無法確認的紀錄不再永遠掛著：`unverified-*` 開啟一小時後到期，狀態記為 `expired`（不是 `closed`，不冒充關閉確認）。
+- Chrome 標準第一步 `tabs_context_mcp({createIfEmpty:true})` 沒有先前快照時，改以候選分頁 ID 記成 `unverified-chrome`（原本以呼叫 ID 記）；之後工具回報 `Closed tab X` 即清除。既有測試的斷言因此由呼叫 ID `"1"` 改為分頁 ID `"12"`。
+- 名稱含 close/stop/reset 的其他操控工具不再記一筆「無法確認」；只有 create/open/start/launch 類會記。
+- 提醒改為逐筆資源計次：切換到非操控工具時每筆最多提醒 1 次，使用者訊息階段每筆最多 3 次（原本每則訊息都重發，直到確認關閉）。只關掉其中一部分不算新狀況，不再重新提醒其餘的。
+
 ## v1.8.1 (2026-09-28)
 
 - 修正瀏覽器資源記錄在多個 Hook 同時首次寫入時可能遇到 SQLite schema 鎖定，並確保初始化失敗會關閉資料庫連線；保留既有未標版本的記錄。Windows 並行案例與完整回歸均已驗證。

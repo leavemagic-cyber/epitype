@@ -126,7 +126,8 @@ class ControlLifecycleRegression(unittest.TestCase):
             "chrome-uncertain", "1", "mcp__claude-in-chrome__tabs_context_mcp",
             {"createIfEmpty": True}, mcp(tabs)
         ), self.path))
-        self.assertIn({"kind": "unverified-chrome", "id": "1"},
+        # 無法歸屬的建立以候選分頁 ID 記錄，之後的「Closed tab 12」才對得上。
+        self.assertIn({"kind": "unverified-chrome", "id": "12"},
                       lifecycle.status(self.path, "chrome-uncertain")["pending"])
         lifecycle.observe(post(
             "chrome-uncertain", "2", "mcp__claude-in-chrome__tabs_context_mcp",
@@ -413,6 +414,93 @@ class ControlLifecycleRegression(unittest.TestCase):
         })
         context = (closed_prompt or {}).get("hookSpecificOutput", {}).get("additionalContext", "")
         self.assertNotIn("test-tab", context)
+
+    def test_first_create_if_empty_candidate_clears_on_confirmed_close(self):
+        # 標準第一步沒有先前快照：分不出群組是這次建的還是本來就有，只能記成無法確認，
+        # 但工具回報「Closed tab X」就是關閉確認，不能讓這筆永遠掛著。
+        context = json.dumps({"availableTabs": [{"tabId": 1723269028, "url": "https://a.example/"}],
+                              "tabGroupId": 1299612253})
+        self.assertIn("無法", lifecycle.observe(post(
+            "first", "1", "mcp__claude-in-chrome__tabs_context_mcp",
+            {"createIfEmpty": True}, mcp(context)
+        ), self.path))
+        self.assertIn({"kind": "unverified-chrome", "id": "1723269028"},
+                      lifecycle.status(self.path, "first")["pending"])
+        self.assertIsNone(lifecycle.observe(post(
+            "first", "2", "mcp__claude-in-chrome__tabs_close_mcp", {"tabId": 1723269028},
+            mcp("Closed tab 1723269028. Group is now empty (auto-removed).",
+                "\n\nTab Context:\n- Available tabs:\n")
+        ), self.path))
+        self.assertEqual(lifecycle.status(self.path, "first")["pending"], [])
+        away = {"session_id": "first", "tool_name": "Read"}
+        self.assertIsNone(lifecycle.reminder(away, self.path, "tool"))
+        self.assertIsNone(lifecycle.reminder(away, self.path, "prompt"))
+
+    def test_close_type_control_tools_open_nothing(self):
+        for index, name in enumerate(("mcp__Claude_Browser__tabs_close",
+                                      "mcp__Claude_Browser__preview_stop",
+                                      "mcp__computer-use__reset_session")):
+            self.assertIsNone(lifecycle.observe(post(
+                "closing", str(index), name, {"tabId": "t"}, mcp("done")
+            ), self.path), name)
+        self.assertEqual(lifecycle.status(self.path, "closing")["pending"], [])
+
+    def test_unverified_control_expires_instead_of_waiting_forever(self):
+        self.assertIn("無法", lifecycle.observe(post(
+            "expiring", "1", "mcp__Claude_Browser__tabs_create", {}, mcp("Opened a tab")
+        ), self.path))
+        self.assertIn({"kind": "unverified-control", "id": "1"},
+                      lifecycle.status(self.path, "expiring")["pending"])
+        with closing(sqlite3.connect(self.path)) as db:
+            db.execute("UPDATE resources SET opened=opened-?,changed=changed-? "
+                       "WHERE session='expiring'", (2 * 3600, 2 * 3600))
+            db.commit()
+        self.assertEqual(lifecycle.status(self.path, "expiring")["pending"], [])
+        away = {"session_id": "expiring", "tool_name": "Read"}
+        self.assertIsNone(lifecycle.reminder(away, self.path, "tool"))
+        self.assertIsNone(lifecycle.reminder(away, self.path, "prompt"))
+        # 到期不是關閉確認：事件記成 expire，不冒充 close。
+        lifecycle.observe(post("expiring", "2", "mcp__cua_repl__js_reset", {},
+                               mcp("js kernel reset")), self.path)
+        actions = [row["action"] for row in lifecycle.status(self.path, "expiring")["events"]]
+        self.assertEqual(actions, ["open", "expire"])
+
+    def test_tool_reminder_is_once_per_resource(self):
+        away = {"session_id": "dedupe", "tool_name": "Read"}
+        create = 'await cua.createBrowserTab("iab", "about:blank");'
+        lifecycle.observe(post("dedupe", "1", "mcp__cua_repl__js", {"code": create},
+                               mcp("Browser tab: A")), self.path)
+        self.assertIn("A", lifecycle.reminder(away, self.path, "tool"))
+        lifecycle.observe(post("dedupe", "2", "mcp__cua_repl__js", {"code": create},
+                               mcp("Browser tab: B")), self.path)
+        self.assertIn("B", lifecycle.reminder(away, self.path, "tool"))
+        lifecycle.observe(post("dedupe", "3", "mcp__cua_repl__js",
+                               {"code": 'await cua.listTabs({browser:"iab"});'},
+                               mcp(json.dumps([{"id": "B"}]))), self.path)
+        self.assertEqual({row["id"] for row in lifecycle.status(self.path, "dedupe")["pending"]},
+                         {"B", "repl"})
+        # 只關掉 A 不是新狀況：B 與操控工作階段都已經提醒過一次。
+        self.assertIsNone(lifecycle.reminder(away, self.path, "tool"))
+
+    def test_prompt_reminders_stop_after_limit(self):
+        environment = self.adapter_environment()
+        session = "prompt-cap-" + uuid.uuid4().hex
+        lifecycle.observe(post(
+            session, "1", "mcp__cua_repl__js",
+            {"code": 'await cua.createBrowserTab("iab", "about:blank");'},
+            mcp("Browser tab: capped-tab")
+        ), self.path)
+        seen = []
+        for index in range(5):
+            result = self.run_adapter("recall_hook.py", {
+                "hook_event_name": "UserPromptSubmit", "session_id": session,
+                "prompt": f"第 {index} 則",
+            }, environment)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            seen.append("capped-tab" in result.stdout)
+        self.assertEqual(seen, [True, True, True, False, False])
+        self.assertIn({"kind": "cua-tab:iab", "id": "capped-tab"},
+                      lifecycle.status(self.path, session)["pending"])
 
 
 if __name__ == "__main__":
