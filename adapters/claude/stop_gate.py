@@ -610,7 +610,9 @@ def _length_gap(decision, message, turn):
     chars = len(_turn_body(message).strip())
     if chars <= limit:
         return None
-    if memspec.TURN_LENGTH_EXEMPT_REGEX.search(turn.prompt or ""):
+    # 「這次要完整／詳細」的免擋只認 owner 親打的話：子代理回報或背景通知裡出現「報告」
+    # 「詳細」不是 owner 點的。
+    if memspec.TURN_LENGTH_EXEMPT_REGEX.search(memspec.owner_typed_text(turn.prompt)):
         return None
     return memspec.TURN_LENGTH_REASON.format(
         chars=chars, decision=_named(decision), limit=limit, advice=decision.advice)
@@ -669,8 +671,12 @@ def _unverified_delegation_gap(decision, message, turn):
 
 
 def _prompt_block_gap(decision, message, turn):
-    """A requested pasteable prompt must be present in the chat message."""
-    if not re.search(memspec.TURN_PROMPT_REQUEST_PATTERN, turn.prompt or "", re.IGNORECASE):
+    """A requested pasteable prompt must be present in the chat message.
+
+    只認 owner 親打的請求：子代理回報、背景通知等機器包裝裡命中「write ... prompt」不是
+    owner 要提示詞（2026-09-27 誤擋案例）。"""
+    if not re.search(memspec.TURN_PROMPT_REQUEST_PATTERN,
+                     memspec.owner_typed_text(turn.prompt), re.IGNORECASE):
         return None
     for opening in re.finditer(r"(?m)^[ \t]*(`{3,})[^\n]*\n", message):
         marker = opening.group(1)

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- 回合結束閘「要 PROMPT 就給 code block」等依 owner 話語判斷的檢查改用單一 `memspec.owner_typed_text`：只取 owner 親打的文字，排除子代理回報（`[Subagent hand-back]`／`<agent-message`）、背景任務通知、系統提醒、Stop hook 回饋、斜線指令展開等以 user 角色送進模型的機器包裝。修正子代理回報裡出現「write ... prompt」被當成 owner 要提示詞而誤擋（Claude、Codex 兩宿主皆已回歸驗證）；報告長度上限的「這次要詳細」免擋同樣只認 owner 親打的話。
 - 回合結束閘自測恢復「09-25 原句一定被擋」：Windows 上 hook 逾時放行不再算通過，合法寫法那題也不再接受 stderr 出現 `TimeoutExpired`。端到端改用只給自測子行程（持 frozen 時鐘憑證）的較長解析上限 `FENCE_SHELL_SELFTEST_TIMEOUT_SECONDS`；產品的 5 秒上限另有一題用產品秒數實際解析一次來斷言，並斷言沒有憑證的行程拿不到自測上限。
 
 ## v1.8.1 (2026-09-28)

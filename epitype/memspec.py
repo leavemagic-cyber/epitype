@@ -1304,6 +1304,40 @@ TURN_CHECK_PROMPT_BLOCK = "prompt_code_block"
 TURN_CHECK_NAMES = (
     TURN_CHECK_LENGTH, TURN_CHECK_CITED_UNREAD, TURN_CHECK_UNVERIFIED_DELEGATION,
     TURN_CHECK_PROMPT_BLOCK)
+# 這些內容被包成 user 角色送進模型，但都不是 owner 親口說的：子代理回報、背景任務
+# 通知、系統提醒、Stop hook 回饋、斜線指令展開、跨場訊息、宿主注入的環境或工具區塊。
+# 兩宿主的包裝都在這裡認：任何以 `<` 開頭的標籤區塊，加上幾個純文字前綴。依「owner
+# 說了什麼」判斷的回合檢查一律先過 owner_typed_text，否則會把機器產生的包裝當成 owner
+# 本人的請求（2026-09-27：子代理回報裡的「例：write 到 PROMPT.md」命中提示詞請求樣式
+# 而誤擋，owner 當回合根本沒要提示詞）。
+MACHINE_TURN_PREFIXES = (
+    "[subagent hand-back]",
+    "another claude session sent a message",
+    "stop hook feedback",
+    "[request interrupted",
+)
+
+
+def owner_typed_text(text):
+    """回合裡真正由 owner 親打的文字；機器產生的包裝一律回空字串。
+
+    子代理回報、背景任務通知、系統提醒、Stop hook 回饋等都以 user 角色送進模型，觸發詞
+    命中它們不能當成 owner 本人的請求。認不出 owner 親打的話時回空字串，依「owner 說了
+    什麼」的檢查因此不啟動——寧可漏擋，也不要拿機器的話擋 owner。任何以 `<` 開頭的標籤
+    區塊（<agent-message>、<task-notification>、<system-reminder>、<command-name>、
+    <local-command-…>、Codex 的 <environment_context> 等）都算機器產生，與 harvest.owner_text
+    的 `startswith("<")` 判準一致。"""
+    if not isinstance(text, str):
+        return ""
+    stripped = text.strip()
+    if not stripped or stripped.startswith("<"):
+        return ""
+    folded = stripped.casefold()
+    if any(folded.startswith(prefix) for prefix in MACHINE_TURN_PREFIXES):
+        return ""
+    return stripped
+
+
 TURN_PROMPT_REQUEST_PATTERN = (
     r"(?:給我|給一份|寫一份|幫我寫|產生|提供|撰寫).{0,24}(?:prompt|提示詞)"
     r"|(?:write|give|create).{0,24}\bprompt\b"
