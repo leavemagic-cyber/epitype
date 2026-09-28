@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### 規則的執行層與宿主原生設定（卡片是正本）
+
+- 卡片新增四個宿主原生欄位：`host_claude_env`（鍵值）、`host_claude_deny`（Claude `permissions.deny` 規則清單）、`host_codex_config`（只收白名單：`agents.max_concurrent_threads_per_session`、`agents.max_depth`、`agents.default_subagent_model`）、`host_codex_rules`（Codex execpolicy 前綴規則，一律 `forbidden`）。格式由 `epitype cards` 把關，寫錯判 FAIL；白名單外的 Codex 鍵、舊名 `agents.max_threads` 一律拒收。寫了宿主原生欄位的行為卡算已武裝，不再被要求補閘欄位或 `unenforceable`。需求變更：武裝判準多了「宿主原生欄位」這一種。
+
 ## v1.8.1 (2026-09-28)
 
 - 修正瀏覽器資源記錄在多個 Hook 同時首次寫入時可能遇到 SQLite schema 鎖定，並確保初始化失敗會關閉資料庫連線；保留既有未標版本的記錄。Windows 並行案例與完整回歸均已驗證。

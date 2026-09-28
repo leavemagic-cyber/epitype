@@ -2841,6 +2841,254 @@ CARD_LINT_UNENFORCEABLE_GAP_REASON = (
 )
 
 
+# ── 宿主原生層：卡片是正本，`epitype sync` 把它渲染進兩個宿主自己的設定 ────────────
+# 兩個宿主本身就擋得住一部分規則（Claude 的 permissions.deny／env、Codex 的 config.toml
+# 與 execpolicy 規則檔），但那些設定原本是手寫的、同一條規則在好幾處各寫一份，沒有正本。
+# 這四個欄位讓卡片成為唯一正本；只准收緊的那一種（deny、forbidden 規則），不准開放權限。
+HOST_CLAUDE_ENV_FIELD = "host_claude_env"
+HOST_CLAUDE_DENY_FIELD = "host_claude_deny"
+HOST_CODEX_CONFIG_FIELD = "host_codex_config"
+HOST_CODEX_RULES_FIELD = "host_codex_rules"
+HOST_NATIVE_FIELDS = (
+    HOST_CLAUDE_ENV_FIELD, HOST_CLAUDE_DENY_FIELD, HOST_CODEX_CONFIG_FIELD, HOST_CODEX_RULES_FIELD)
+# Codex 設定只收白名單：config.toml 裡有 sandbox、approval、model provider 這種一改就放寬
+# 權限或換掉帳單的鍵，卡片不該碰得到。鍵名與型別照 codex-cli 0.156.0 的設定結構。
+HOST_CODEX_CONFIG_POSITIVE_INT = "positive_int"
+HOST_CODEX_CONFIG_STRING = "string"
+HOST_CODEX_CONFIG_ALLOWED = {
+    "agents.max_concurrent_threads_per_session": HOST_CODEX_CONFIG_POSITIVE_INT,
+    "agents.max_depth": HOST_CODEX_CONFIG_POSITIVE_INT,
+    "agents.default_subagent_model": HOST_CODEX_CONFIG_STRING,
+}
+# 舊名 Codex 還認，但兩個名字各寫一份就是同一個值有兩個正本。
+HOST_CODEX_CONFIG_ALIASES = {
+    "agents.max_threads": "agents.max_concurrent_threads_per_session",
+}
+HOST_CLAUDE_ENV_KEY_REGEX = r"^[A-Za-z_][A-Za-z0-9_]*$"
+# Claude 權限規則：工具名，或 工具名(樣式)。mcp__server__tool 也是這個形狀。
+HOST_CLAUDE_DENY_REGEX = r"^[A-Za-z][A-Za-z0-9_]*(?:\(.+\))?$"
+# execpolicy 前綴規則的一個字：不含空白、引號、反斜線、`|`（`|` 是「任一個」的分隔）。
+# 規則檔任何一個解析失敗，Codex 整份政策都載不起來，所以寧可在卡片這一端就拒絕。
+HOST_CODEX_RULE_TOKEN_REGEX = r"^[^\s\"'\\|\x00-\x1f]+$"
+HOST_CODEX_RULE_MAX_TOKENS = 16
+HOST_NATIVE_KEY_LINE_REGEX = r"^([A-Za-z_][A-Za-z0-9_.-]*)\s*:\s*(.*)$"
+HOST_FIELD_NOT_MAPPING_REASON = "{field} 要寫成鍵值（一行一個 `鍵: 值`），讀不出任何一組"
+HOST_FIELD_NOT_LIST_REASON = "{field} 要寫成清單（一行一個 `- 項目`），讀不出任何一項"
+HOST_FIELD_DUPLICATE_KEY_REASON = "{field} 的 {key} 寫了兩次；同一個鍵只能有一個值"
+HOST_CLAUDE_ENV_KEY_REASON = "{field} 的鍵 {key} 不是合法的環境變數名（英數字與底線、不以數字開頭）"
+HOST_CLAUDE_ENV_VALUE_REASON = "{field} 的 {key} 沒有值；要設空字串就別寫這個鍵"
+HOST_CLAUDE_DENY_REASON = "{field} 的「{rule}」不是 Claude 權限規則的形狀（工具名，或 工具名(樣式)）"
+HOST_CODEX_CONFIG_KEY_REASON = "{field} 的 {key} 不在白名單（{allowed}）；其他設定一改就可能放寬權限或換掉帳單，卡片不收"
+HOST_CODEX_CONFIG_ALIAS_REASON = "{field} 的 {key} 是舊名，請改寫成 {canonical}——兩個名字各寫一份就是兩個正本"
+HOST_CODEX_CONFIG_TYPE_REASON = "{field} 的 {key} 要是{expected}，寫的是「{value}」"
+HOST_CODEX_CONFIG_TYPE_NAMES = {
+    HOST_CODEX_CONFIG_POSITIVE_INT: "正整數",
+    HOST_CODEX_CONFIG_STRING: "非空字串",
+}
+HOST_CODEX_RULE_REASON = (
+    "{field} 的「{rule}」有寫不進規則檔的字（{token}）；一個字不能含空白、引號、反斜線，"
+    "`|` 兩邊都要有字，最多 {limit} 個字——規則檔解析失敗時 Codex 整份政策都載不起來"
+)
+
+# 執行層：這條規則由誰來擋。沒寫 `enforce:` 時由既有欄位推導，不要求大改卡片。
+ENFORCE_FIELD = "enforce"
+ENFORCE_HOST = "host"
+ENFORCE_GATE = "gate"
+ENFORCE_TEXT = "text"
+ENFORCE_GAP = "gap"
+ENFORCE_VALUES = (ENFORCE_HOST, ENFORCE_GATE, ENFORCE_TEXT, ENFORCE_GAP)
+ENFORCE_UNCLASSIFIED = "unclassified"
+# 逐字捕捉的 owner 原話（corrections/ 底下、帶出處欄位）是證據不是規則，不分層。
+ENFORCE_EXEMPT = "exempt"
+CARD_LINT_ENFORCE_VALUE_REASON = "{field}={value} 不在 {allowed}"
+CARD_LINT_ENFORCE_MISMATCH_REASON = (
+    "{field}={value}，但這張卡沒有{missing}——宣稱有人擋、實際沒人擋，比不宣稱更糟"
+)
+CARD_LINT_ENFORCE_MISSING = {
+    ENFORCE_HOST: "任何宿主原生欄位（{host}）",
+    ENFORCE_GATE: "任何閘欄位（{gate}）",
+    ENFORCE_TEXT: " {unenforceable}: <理由>",
+    ENFORCE_GAP: " {unenforceable}: <理由>",
+}
+CARD_LINT_UNCLASSIFIED_REASON = (
+    "這張規則卡沒有寫由誰來擋：沒有 {enforce}、宿主原生欄位、閘欄位，也沒有 {unenforceable}: <理由>。"
+    "只被讀到的規則 2026-09-16 已實測無效——補一個執行層，或寫明綁不住的理由"
+)
+CARD_LINT_ENFORCE_LINE = (
+    "ENFORCE host={host} gate={gate} text={text} gap={gap} unclassified={unclassified} "
+    "exempt={exempt}"
+)
+CARD_LINT_UNCLASSIFIED_LINE = "UNCLASSIFIED {path} [{type}]"
+
+
+def _host_mapping(front_lines, field):
+    """(是否寫了這個欄位, [(鍵, 值)], [問題])——一層鍵值，區塊與行內兩種寫法。
+
+    鍵可以帶點（`agents.max_depth`）：共用的 TOP_LEVEL_FIELD 不收點，那是頂層欄名的規矩，
+    不是這裡的。"""
+    key_line = re.compile(HOST_NATIVE_KEY_LINE_REGEX)
+    declared, collecting, items, problems = False, False, [], []
+    for raw_line in front_lines:
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if raw_line[:1].isspace():
+            if not collecting:
+                continue
+            match = key_line.match(stripped)
+            if match is None:
+                problems.append(HOST_FIELD_NOT_MAPPING_REASON.format(field=field))
+                collecting = False
+                continue
+            value, _problem = parse_scalar(match.group(2))
+            items.append((match.group(1), value))
+            continue
+        collecting = False
+        match = TOP_LEVEL_FIELD.match(raw_line)
+        if match is None or match.group(1) != field:
+            continue
+        declared = True
+        value = strip_inline_comment(match.group(2)).strip()
+        if value.startswith("{") and value.endswith("}"):
+            try:
+                pieces = split_flow_items(value[1:-1])
+            except ValueError:
+                pieces = None
+            for piece in pieces or ():
+                match = key_line.match(piece)
+                if match is None:
+                    pieces = None
+                    break
+                item, _problem = parse_scalar(match.group(2))
+                items.append((match.group(1), item))
+            if pieces is None:
+                problems.append(HOST_FIELD_NOT_MAPPING_REASON.format(field=field))
+        elif value:
+            problems.append(HOST_FIELD_NOT_MAPPING_REASON.format(field=field))
+        else:
+            collecting = True
+    if declared and not items and not problems:
+        problems.append(HOST_FIELD_NOT_MAPPING_REASON.format(field=field))
+    return declared, items, problems
+
+
+def _host_declared(front_lines, field):
+    return any(
+        not raw_line[:1].isspace()
+        and (match := TOP_LEVEL_FIELD.match(raw_line)) is not None
+        and match.group(1) == field
+        for raw_line in front_lines
+    )
+
+
+def host_native_values(front_lines):
+    """({欄位: 解析後的值}, [問題])——卡片體檢與 `epitype sync` 共用的唯一讀法。
+
+    體檢說合格的值，才是同步會寫出去的值；兩邊各讀一份的話，同一張卡會在體檢眼裡是
+    一回事、寫進宿主設定又是另一回事。沒寫的欄位不在回傳的字典裡。"""
+    values, problems = {}, []
+    front_lines = front_lines or ()
+
+    declared, items, found = _host_mapping(front_lines, HOST_CLAUDE_ENV_FIELD)
+    problems.extend(found)
+    if declared and items:
+        env = {}
+        for key, value in items:
+            if key in env:
+                problems.append(HOST_FIELD_DUPLICATE_KEY_REASON.format(
+                    field=HOST_CLAUDE_ENV_FIELD, key=key))
+            elif not re.match(HOST_CLAUDE_ENV_KEY_REGEX, key):
+                problems.append(HOST_CLAUDE_ENV_KEY_REASON.format(
+                    field=HOST_CLAUDE_ENV_FIELD, key=key))
+            elif not value:
+                problems.append(HOST_CLAUDE_ENV_VALUE_REASON.format(
+                    field=HOST_CLAUDE_ENV_FIELD, key=key))
+            else:
+                env[key] = value
+        if env:
+            values[HOST_CLAUDE_ENV_FIELD] = env
+
+    if _host_declared(front_lines, HOST_CLAUDE_DENY_FIELD):
+        rules = sequence_items(front_lines, HOST_CLAUDE_DENY_FIELD)
+        if not rules:
+            problems.append(HOST_FIELD_NOT_LIST_REASON.format(field=HOST_CLAUDE_DENY_FIELD))
+        kept = []
+        for rule in rules:
+            if not re.match(HOST_CLAUDE_DENY_REGEX, rule):
+                problems.append(HOST_CLAUDE_DENY_REASON.format(
+                    field=HOST_CLAUDE_DENY_FIELD, rule=rule))
+            elif rule not in kept:
+                kept.append(rule)
+        if kept:
+            values[HOST_CLAUDE_DENY_FIELD] = kept
+
+    declared, items, found = _host_mapping(front_lines, HOST_CODEX_CONFIG_FIELD)
+    problems.extend(found)
+    if declared and items:
+        config = {}
+        for key, raw in items:
+            canonical = HOST_CODEX_CONFIG_ALIASES.get(key)
+            if canonical:
+                problems.append(HOST_CODEX_CONFIG_ALIAS_REASON.format(
+                    field=HOST_CODEX_CONFIG_FIELD, key=key, canonical=canonical))
+                continue
+            expected = HOST_CODEX_CONFIG_ALLOWED.get(key)
+            if expected is None:
+                problems.append(HOST_CODEX_CONFIG_KEY_REASON.format(
+                    field=HOST_CODEX_CONFIG_FIELD, key=key,
+                    allowed=SLASH_JOINER.join(HOST_CODEX_CONFIG_ALLOWED)))
+                continue
+            if key in config:
+                problems.append(HOST_FIELD_DUPLICATE_KEY_REASON.format(
+                    field=HOST_CODEX_CONFIG_FIELD, key=key))
+                continue
+            if expected == HOST_CODEX_CONFIG_POSITIVE_INT:
+                value = int(raw) if re.fullmatch(r"[0-9]+", raw or "") else 0
+                valid = value > 0
+            else:
+                value = raw
+                valid = bool(raw.strip())
+            if not valid:
+                problems.append(HOST_CODEX_CONFIG_TYPE_REASON.format(
+                    field=HOST_CODEX_CONFIG_FIELD, key=key, value=raw,
+                    expected=HOST_CODEX_CONFIG_TYPE_NAMES[expected]))
+                continue
+            config[key] = value
+        if config:
+            values[HOST_CODEX_CONFIG_FIELD] = config
+
+    if _host_declared(front_lines, HOST_CODEX_RULES_FIELD):
+        items = sequence_items(front_lines, HOST_CODEX_RULES_FIELD)
+        if not items:
+            problems.append(HOST_FIELD_NOT_LIST_REASON.format(field=HOST_CODEX_RULES_FIELD))
+        rules = []
+        for item in items:
+            tokens = item.split()
+            pattern, bad = [], None
+            for token in tokens:
+                choices = token.split("|")
+                if any(not re.match(HOST_CODEX_RULE_TOKEN_REGEX, choice) for choice in choices):
+                    bad = token
+                    break
+                pattern.append(choices)
+            if bad is None and not 0 < len(pattern) <= HOST_CODEX_RULE_MAX_TOKENS:
+                bad = item
+            if bad is not None:
+                problems.append(HOST_CODEX_RULE_REASON.format(
+                    field=HOST_CODEX_RULES_FIELD, rule=item, token=bad,
+                    limit=HOST_CODEX_RULE_MAX_TOKENS))
+            elif pattern not in rules:
+                rules.append(pattern)
+        if rules:
+            values[HOST_CODEX_RULES_FIELD] = rules
+    return values, problems
+
+
+def host_native_declared(front_lines):
+    """這張卡有沒有寫任何宿主原生欄位（不論值合不合格）。"""
+    return any(_host_declared(front_lines or (), field) for field in HOST_NATIVE_FIELDS)
+
+
 # ── U58 顯示語言 ───────────────────────────────────────────────────────────
 # Epitype 的說明是英文出貨的，擋下來的那一句卻寫死繁中——陌生人裝完第一次被擋，看到的
 # 是一句他讀不懂的話。這裡只換**顯示字**：樣式、欄名、log kind、任何閘拿去比對的東西
@@ -3120,7 +3368,7 @@ RECURRENCE_GATE_ARMING_FIELDS = tuple(dict.fromkeys(CARD_ARMING_FIELDS + (
     ACTION_GUARD_WHEN_FIELD,
     REQUIRE_TEXT_FIELD,
     TURN_CHECK_LIMIT_FIELD,
-)))
+) + HOST_NATIVE_FIELDS))
 # 這幾個欄位裡出現再犯字樣是它們的本分：武裝欄位本身就是規則、例句必須寫得出那句話、
 # unenforceable 的理由正是「為什麼擋不住」該寫的地方（上面第三種處理）。
 RECURRENCE_GATE_EXEMPT_FIELDS = RECURRENCE_GATE_ARMING_FIELDS + (

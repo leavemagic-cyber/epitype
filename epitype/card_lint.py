@@ -134,7 +134,14 @@ def _disarmed_findings(fields, nested):
     return findings
 
 
-def _arming_findings(fields, counts, card_type, today, relative=""):
+def _host_field_findings(front_lines):
+    """宿主原生欄位的格式。讀法與 `epitype sync` 同一份（memspec.host_native_values）：
+    體檢說合格的值，就是會寫進宿主設定的值。"""
+    _values, problems = memspec.host_native_values(front_lines)
+    return [(FAIL, "host-field", problem) for problem in problems]
+
+
+def _arming_findings(fields, counts, card_type, today, relative="", host=False):
     """feedback 卡必須武裝，或明講它綁不住。
 
     2026-09-16 實查：通用庫 400 張卡只有 11 張帶 forbidden，而那 11 張全是產品自己的
@@ -162,6 +169,9 @@ def _arming_findings(fields, counts, card_type, today, relative=""):
             and fields.get(memspec.SESSION_FIELD)):
         return []
     if fields.get(memspec.UNENFORCEABLE_FIELD, "").strip():
+        return []
+    # 宿主原生欄位由宿主自己擋，比閘欄位更硬：寫了就是武裝。
+    if host:
         return []
     for field in memspec.CARD_ARMING_FIELDS:
         if fields.get(field, "").strip() or counts.get(field):
@@ -766,7 +776,10 @@ def _check_card(path, relative, today):
     findings.extend(_require_findings(fields))
     findings.extend(_fence_shell_findings(fields, counts))
     findings.extend(_write_check_findings(fields))
-    findings.extend(_arming_findings(fields, counts, card_type, today, relative))
+    findings.extend(_host_field_findings(front_lines))
+    findings.extend(_arming_findings(
+        fields, counts, card_type, today, relative,
+        host=memspec.host_native_declared(front_lines)))
     findings.extend(_unenforceable_gap_findings(fields, counts))
     findings.extend(_example_findings(path, fields, front_lines, counts, today))
 
