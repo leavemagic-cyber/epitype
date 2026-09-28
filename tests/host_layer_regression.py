@@ -601,6 +601,12 @@ class NativeGuard(_NativeFixture):
                                 time.monotonic(), [])
         return (value or {}).get("hookSpecificOutput", {}).get("permissionDecisionReason")
 
+    def test_a_git_bash_style_path_to_the_managed_file_is_still_a_redirect(self):
+        if os.name != "nt":
+            self.skipTest("drive-letter paths only exist on Windows")
+        posix = "/" + self.settings.drive[0].lower() + self.settings.as_posix()[2:]
+        self.assertIsNotNone(self._denial("Bash", {"command": f"echo {{}} > {posix}"}), posix)
+
     def _patch(self, path, body):
         return {"command": ["apply_patch", "*** Begin Patch\n*** Update File: " + os.fspath(path)
                             + "\n" + body + "*** End Patch\n"]}
@@ -647,6 +653,10 @@ class NativeGuard(_NativeFixture):
                 "python -c \"import json;p=r'" + os.fspath(self.config) + "';"
                 "open(p,'a').write('max_concurrent_threads_per_session = 9')\"")}),
             "overwrite by redirection": ("Bash", {"command": f"echo {{}} > '{self.settings}'"}),
+            "overwrite by redirection through ~": ("Bash", {
+                "command": "echo {} > ~/.claude/settings.json"}),
+            "append by redirection to the rules file": ("Bash", {
+                "command": "echo 'prefix_rule()' >> ~/.codex/rules/epitype_cards.rules"}),
             "sed into the rules file": ("Bash", {"command": f"sed -i 's/git/xit/' {self.rules}"}),
         }
         for name, (tool, tool_input) in cases.items():
@@ -665,6 +675,13 @@ class NativeGuard(_NativeFixture):
             "copy the settings out for a backup": ("Bash", {
                 "command": f"cp '{self.settings}' /tmp/backup.json"}),
             "epitype sync": ("Bash", {"command": "python -m epitype sync --apply > sync.log"}),
+            # 導向的目標只是檔名長得像，不是那個受管的檔：這三條都是讀出來另存。
+            "save a copy of the settings elsewhere": ("Bash", {
+                "command": "cat ~/.claude/settings.json > D:/backup/settings.json.bak"}),
+            "git show another repo's settings": ("Bash", {
+                "command": "git show HEAD:web/.vscode/settings.json > /tmp/old-settings.json"}),
+            "git show another config.toml": ("Bash", {
+                "command": "git show HEAD:.cargo/config.toml > /tmp/config.toml.orig"}),
             "epitype sync by path": ("Bash", {
                 "command": "python epitype/host_sync.py --apply >> settings.json.log"}),
             "Edit the user's own key": ("Edit", {

@@ -1219,7 +1219,42 @@ def _native_file_review(target, after, deleting=False):
     return None
 
 
-def _native_shell_review(text, state):
+def _native_shell_path(raw, cwd):
+    """殼層寫的一個路徑，解析成與狀態表同一種寫法（normcase 的絕對路徑）；解析不了回 None。"""
+    text = raw.strip()
+    folded = text.casefold()
+    for prefix in memspec.HOST_NATIVE_GUARD_HOME_PREFIXES:
+        if folded == prefix or folded.startswith((prefix + "/", prefix + "\\")):
+            text = os.fspath(Path.home()) + text[len(prefix):]
+            break
+    if os.name == "nt":
+        # Git Bash 的 /c/Users/... 就是 C:/Users/...
+        drive = re.match(r"^/([A-Za-z])(/.*)?$", text)
+        if drive:
+            text = drive.group(1) + ":" + (drive.group(2) or "/")
+    try:
+        path = Path(text)
+        if not path.is_absolute():
+            if not isinstance(cwd, str) or not cwd.strip():
+                return None
+            path = Path(cwd) / path
+        return os.path.normcase(os.path.abspath(path))
+    except (OSError, ValueError):
+        return None
+
+
+def _native_redirects(text, cwd):
+    """[(目標的完整路徑, 是不是附加)]：這段殼層文字裡每一個輸出導向。"""
+    found = []
+    for match in re.finditer(memspec.HOST_NATIVE_GUARD_REDIRECT_REGEX, text):
+        raw = next((group for group in match.groups() if group), None)
+        target = _native_shell_path(raw, cwd) if raw else None
+        if target is not None:
+            found.append((target, match.group(0).startswith(">>")))
+    return found
+
+
+def _native_shell_review(text, state, cwd=None):
     """殼層這一側：同一次呼叫裡有被管理的檔名、被管理的鍵、一個寫入動作，三個都在才擋。
 
     讀（cat、grep、Get-Content，含 `2>/dev/null`）、`epitype sync`、複製出去當備份都放行。
@@ -1228,22 +1263,25 @@ def _native_shell_review(text, state):
         return None
     folded = text.casefold()
     writes = re.search(memspec.HOST_NATIVE_GUARD_WRITE_REGEX, text, re.IGNORECASE) is not None
+    redirects = None
     for path_key, record in state.items():
         if not isinstance(record, dict):
             continue
         name = Path(path_key).name
         if name.casefold() not in folded:
             continue
-        redirect = re.search(memspec.HOST_NATIVE_GUARD_REDIRECT_REGEX.format(name=re.escape(name)),
-                             text, re.IGNORECASE)
-        if not writes and redirect is None:
+        if redirects is None:
+            redirects = _native_redirects(text, cwd)
+        managed = os.path.normcase(os.path.abspath(path_key))
+        hits = [append for target, append in redirects if target == managed]
+        if not writes and not hits:
             continue
         if record.get("kind") == _NATIVE_CODEX_RULES:
             cards = sorted(set((record.get("rules") or {}).values()))
             return _native_reason(path_key, memspec.HOST_NATIVE_CODEX_RULES_FILENAME,
                                   memspec.LIST_JOINER.join(cards), memspec.HOST_CODEX_RULES_FIELD)
         protected = _native_protected(record)
-        overwrite = redirect is not None and not redirect.group(0).startswith(">>")
+        overwrite = any(not append for append in hits)
         for display, _path, _item, card, field, token, _wanted in protected:
             if overwrite or token.casefold() in folded:
                 return _native_reason(path_key, display, card, field)
@@ -1297,7 +1335,7 @@ def _native_review(event, tool_name, tool_input):
         return None
     if tool_name.casefold() in _NATIVE_NON_SHELL_TOOLS:
         return None
-    return _native_shell_review(text, state)
+    return _native_shell_review(text, state, cwd)
 
 
 def _write_check_review(event, config, target, prospective, patch, started_at):

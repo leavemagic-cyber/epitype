@@ -2988,7 +2988,11 @@ HOST_NATIVE_GUARD_WRITE_REGEX = (
     r"write_bytes|\.write\(|writealltext|json\.dumps?\(|move-item|remove-item|"
     r"rename-item|new-item|\bmv\b|\brm\b|\bdel\b|\bmove\b|\bren\b"
 )
-HOST_NATIVE_GUARD_REDIRECT_REGEX = r">>?\s*['\"]?[^\s'\"|;&<>]*{name}"
+# 導向的目標要解析成完整路徑、等於受管的那個檔才算寫：只比檔名的話，
+# `cat settings.json > D:/backup/settings.json.bak` 這種讀出來另存也會被擋。
+HOST_NATIVE_GUARD_REDIRECT_REGEX = r">>?[ \t]*(?:\"([^\"]+)\"|'([^']+)'|([^\s|;&<>()]+))"
+HOST_NATIVE_GUARD_HOME_PREFIXES = ("~", "$home", "${home}", "$env:userprofile", "%userprofile%",
+                                   "$env:home")
 # `epitype sync` 就是改這些鍵的正路，不能被自己的閘擋下。
 HOST_NATIVE_GUARD_SYNC_REGEX = (
     r"(?:^|[\s;&|(\"'])(?:epitype(?:\.exe)?\s+sync|-m\s+epitype\s+sync|epitype[\\/]host_sync\.py)\b"
