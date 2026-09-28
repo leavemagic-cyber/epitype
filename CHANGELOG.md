@@ -5,6 +5,8 @@
 ### 規則的執行層與宿主原生設定（卡片是正本）
 
 - 卡片新增四個宿主原生欄位：`host_claude_env`（鍵值）、`host_claude_deny`（Claude `permissions.deny` 規則清單）、`host_codex_config`（只收白名單：`agents.max_concurrent_threads_per_session`、`agents.max_depth`、`agents.default_subagent_model`）、`host_codex_rules`（Codex execpolicy 前綴規則，一律 `forbidden`）。格式由 `epitype cards` 把關，寫錯判 FAIL；白名單外的 Codex 鍵、舊名 `agents.max_threads` 一律拒收。寫了宿主原生欄位的行為卡算已武裝，不再被要求補閘欄位或 `unenforceable`。需求變更：武裝判準多了「宿主原生欄位」這一種。
+- 每張行為卡（feedback／correction／scar／habit，加上 rule）都算得出執行層：`host`（宿主原生欄位）、`gate`（閘欄位）、`text`（`unenforceable` 且理由屬判斷型）、`gap`（理由屬「閘門看不到」＝產品缺口）。可選的 `enforce:` 明寫，寫了就要對得上卡片實際帶的欄位，對不上判 FAIL；沒寫由既有欄位推導。`epitype cards` 印出 `ENFORCE host=… gate=… text=… gap=… unclassified=… exempt=…` 與逐張未分類清單，夜間 Dream 第 2 節同步列出各層數量與未分類卡。逐字捕捉的原話（corrections/ 帶出處）是證據不是規則，單列 `exempt`。
+- 需求變更：規則卡以前不被問「由誰來擋」（它會進常駐規則塊，但那仍是只靠代理自己讀）。現在沒有任何執行層的規則卡判 WARN `unclassified`；先列清單逐張分類，不一次判 FAIL。`card_lint` 自測裡四張合成規則卡因此補上 `unenforceable`，斷言強度不變。
 
 ## v1.8.1 (2026-09-28)
 

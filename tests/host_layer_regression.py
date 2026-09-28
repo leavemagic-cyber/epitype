@@ -144,6 +144,110 @@ class HostFieldLint(_TempVault):
         self.assertNotIn(memspec.HOST_CLAUDE_DENY_FIELD, values)
 
 
+RULE_HEAD = (
+    "name: {stem}\ndescription: 2026-09-28 {stem}\nlayer: resident\nsection: execution\n"
+    "order: 10\ntext: {stem} text\ndecided_by: owner-explicit\napproved_by: owner\n"
+    "approved_at: 2026-09-21\naliases: [{stem}]\nmetadata:\n  type: rule\n"
+)
+
+
+class EnforceTiers(_TempVault):
+    """D1：每張行為卡的執行層（host／gate／text／gap），沒有任何一層的列成未分類清單。"""
+
+    def _vault(self):
+        vault = self.root / "vault"
+        feedback = lambda stem, extra="": _card(FEEDBACK_HEAD.format(stem=stem) + extra)
+        self._write("fb-host.md", feedback("fb-host", "host_claude_deny:\n  - Bash(git clean:*)\n"), vault)
+        self._write("fb-gate.md", feedback(
+            "fb-gate", "forbidden:\n  - 再提議.*改回\nexample_blocks:\n  - 再提議把它改回\n"
+            "example_allows:\n  - 為什麼不改回\n"), vault)
+        self._write("fb-text.md", feedback("fb-text", "unenforceable: 判斷型，要看整段語意\n"), vault)
+        self._write("fb-gap.md", feedback("fb-gap", "unenforceable: 動作閘看不到先前呼叫\n"), vault)
+        self._write("fb-none.md", feedback("fb-none"), vault)
+        self._write("rule-none.md", _card(RULE_HEAD.format(stem="rule-none")), vault)
+        self._write("rule-text.md", _card(
+            RULE_HEAD.format(stem="rule-text") + "unenforceable: 判斷型\n"), vault)
+        self._write("fb-declared.md", feedback(
+            "fb-declared", "enforce: text\nunenforceable: 要讀整段脈絡\n"), vault)
+        self._write("corrections/correction-1.md", _card(
+            "name: correction-1\ndescription: 2026-09-28 原話\ncaptured_at: 2026-09-28T01:00:00Z\n"
+            "session_id: s1\nmetadata:\n  type: correction\n"), vault)
+        # 不算行為卡的、已退場的，都不進分層統計。
+        self._write("project-x.md", _card(
+            "name: project-x\ndescription: 2026-09-28 專案\naliases: [x]\nmetadata:\n  type: project\n"),
+            vault)
+        self._write("fb-old.md", feedback("fb-old", "status: superseded\n"), vault)
+        return vault
+
+    def test_every_behaviour_card_lands_in_exactly_one_layer(self):
+        report = card_lint.scan_vault(self._vault(), TODAY)
+        self.assertEqual(report["enforce"], {
+            memspec.ENFORCE_HOST: 1, memspec.ENFORCE_GATE: 1, memspec.ENFORCE_TEXT: 3,
+            memspec.ENFORCE_GAP: 1, memspec.ENFORCE_UNCLASSIFIED: 2, memspec.ENFORCE_EXEMPT: 1,
+        })
+        self.assertEqual(report["unclassified"], [
+            {"path": "fb-none.md", "type": "feedback"},
+            {"path": "rule-none.md", "type": "rule"},
+        ])
+
+    def test_unclassified_rule_cards_warn_and_feedback_keeps_its_one_finding(self):
+        report = card_lint.scan_vault(self._vault(), TODAY)
+        by_path = {card["path"]: card for card in report["cards"]}
+        rule_findings = [(item["level"], item["rule"]) for item in by_path["rule-none.md"]["findings"]]
+        self.assertIn((card_lint.WARN, "unclassified"), rule_findings)
+        self.assertNotIn(card_lint.FAIL, [level for level, _rule in rule_findings
+                                          if _rule == "unclassified"])
+        # 行為糾正卡已經有「沒武裝」那一條，同一件事不重複講兩次。
+        feedback = [item["rule"] for item in by_path["fb-none.md"]["findings"]]
+        self.assertIn("unarmed", feedback)
+        self.assertNotIn("unclassified", feedback)
+        # 寫了 unenforceable 的規則卡已經有執行層（text），不再被點名未分類。
+        self.assertNotIn("unclassified", [
+            item["rule"] for item in by_path.get("rule-text.md", {}).get("findings", ())])
+
+    def test_declared_layer_must_match_what_the_card_carries(self):
+        cases = {
+            "enforce: gate\nunenforceable: 判斷型\n": "gate",
+            "enforce: host\n": "host",
+            "enforce: text\n": "text",
+            "enforce: loud\nunenforceable: 判斷型\n": "loud",
+        }
+        for index, (extra, word) in enumerate(cases.items()):
+            with self.subTest(extra=extra):
+                stem = f"declared-{index}"
+                findings = self._findings(f"{stem}.md", _card(FEEDBACK_HEAD.format(stem=stem) + extra))
+                enforce = [(level, reason) for level, rule, reason in findings if rule == "enforce"]
+                self.assertEqual(len(enforce), 1, findings)
+                self.assertEqual(enforce[0][0], card_lint.FAIL)
+                self.assertIn(word, enforce[0][1])
+        findings = self._findings("declared-ok.md", _card(
+            FEEDBACK_HEAD.format(stem="declared-ok")
+            + "enforce: host\nhost_codex_rules:\n  - git clean\n"))
+        self.assertEqual([rule for _level, rule, _reason in findings if rule == "enforce"], [])
+
+    def test_the_report_prints_the_layer_counts_and_the_unclassified_list(self):
+        import io
+
+        output = io.StringIO()
+        card_lint._print_report(card_lint.scan_vault(self._vault(), TODAY), output)
+        text = output.getvalue()
+        self.assertIn("ENFORCE host=1 gate=1 text=3 gap=1 unclassified=2 exempt=1", text)
+        self.assertIn("UNCLASSIFIED fb-none.md [feedback]", text)
+        self.assertIn("UNCLASSIFIED rule-none.md [rule]", text)
+
+    def test_the_nightly_card_section_carries_the_layers(self):
+        from epitype import dream
+
+        vault = self._vault()
+        section = dream._section_card_lint([vault], TODAY, TODAY, {})
+        counts = section["counts"]
+        self.assertEqual(counts["enforce_host"], 1)
+        self.assertEqual(counts["enforce_gap"], 1)
+        self.assertEqual(counts["enforce_unclassified"], 2)
+        self.assertEqual(
+            [item["path"] for item in section["unclassified"]], ["fb-none.md", "rule-none.md"])
+
+
 def _selftest():
     suite = unittest.defaultTestLoader.loadTestsFromModule(sys.modules[__name__])
     result = unittest.TextTestRunner(stream=sys.stdout, verbosity=1).run(suite)
