@@ -2864,6 +2864,13 @@ HOST_CODEX_CONFIG_ALLOWED = {
 HOST_CODEX_CONFIG_ALIASES = {
     "agents.max_threads": "agents.max_concurrent_threads_per_session",
 }
+# Claude 的 env 也只收白名單，理由同 Codex：卡片是代理寫得到的，env 一開放，
+# ANTHROPIC_BASE_URL、NODE_TLS_REJECT_UNAUTHORIZED 這種鍵就能繞過寫檔閘改連線端點或關掉
+# TLS 驗證。值在 settings.json 裡一律是字串。
+HOST_CLAUDE_ENV_ALLOWED = {
+    "CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS": HOST_CODEX_CONFIG_POSITIVE_INT,
+    "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": HOST_CODEX_CONFIG_POSITIVE_INT,
+}
 HOST_CLAUDE_ENV_KEY_REGEX = r"^[A-Za-z_][A-Za-z0-9_]*$"
 # Claude 權限規則：工具名，或 工具名(樣式)。mcp__server__tool 也是這個形狀。
 HOST_CLAUDE_DENY_REGEX = r"^[A-Za-z][A-Za-z0-9_]*(?:\(.+\))?$"
@@ -2877,6 +2884,10 @@ HOST_FIELD_NOT_LIST_REASON = "{field} 要寫成清單（一行一個 `- 項目`�
 HOST_FIELD_DUPLICATE_KEY_REASON = "{field} 的 {key} 寫了兩次；同一個鍵只能有一個值"
 HOST_CLAUDE_ENV_KEY_REASON = "{field} 的鍵 {key} 不是合法的環境變數名（英數字與底線、不以數字開頭）"
 HOST_CLAUDE_ENV_VALUE_REASON = "{field} 的 {key} 沒有值；要設空字串就別寫這個鍵"
+HOST_CLAUDE_ENV_ALLOWED_REASON = (
+    "{field} 的 {key} 不在白名單（{allowed}）；其他環境變數可能改掉連線端點或關掉安全檢查，卡片不收"
+)
+HOST_CLAUDE_ENV_TYPE_REASON = "{field} 的 {key} 要是{expected}，寫的是「{value}」"
 HOST_CLAUDE_DENY_REASON = "{field} 的「{rule}」不是 Claude 權限規則的形狀（工具名，或 工具名(樣式)）"
 HOST_CODEX_CONFIG_KEY_REASON = "{field} 的 {key} 不在白名單（{allowed}）；其他設定一改就可能放寬權限或換掉帳單，卡片不收"
 HOST_CODEX_CONFIG_ALIAS_REASON = "{field} 的 {key} 是舊名，請改寫成 {canonical}——兩個名字各寫一份就是兩個正本"
@@ -3063,9 +3074,18 @@ def host_native_values(front_lines):
             elif not re.match(HOST_CLAUDE_ENV_KEY_REGEX, key):
                 problems.append(HOST_CLAUDE_ENV_KEY_REASON.format(
                     field=HOST_CLAUDE_ENV_FIELD, key=key))
+            elif key not in HOST_CLAUDE_ENV_ALLOWED:
+                problems.append(HOST_CLAUDE_ENV_ALLOWED_REASON.format(
+                    field=HOST_CLAUDE_ENV_FIELD, key=key,
+                    allowed=SLASH_JOINER.join(HOST_CLAUDE_ENV_ALLOWED)))
             elif not value:
                 problems.append(HOST_CLAUDE_ENV_VALUE_REASON.format(
                     field=HOST_CLAUDE_ENV_FIELD, key=key))
+            elif (HOST_CLAUDE_ENV_ALLOWED[key] == HOST_CODEX_CONFIG_POSITIVE_INT
+                  and not (re.fullmatch(r"[0-9]+", value) and int(value) > 0)):
+                problems.append(HOST_CLAUDE_ENV_TYPE_REASON.format(
+                    field=HOST_CLAUDE_ENV_FIELD, key=key, value=value,
+                    expected=HOST_CODEX_CONFIG_TYPE_NAMES[HOST_CLAUDE_ENV_ALLOWED[key]]))
             else:
                 env[key] = value
         if env:
