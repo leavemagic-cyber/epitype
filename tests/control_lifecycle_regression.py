@@ -90,6 +90,8 @@ class ControlLifecycleRegression(unittest.TestCase):
         self.assertIn("JSONDecodeError", tracked.stderr)
 
     def test_claude_chrome_create_close_and_remind_once(self):
+        # 這條先問過「No tab group exists」才建群組，是少數情況；實際的標準第一步直接
+        # createIfEmpty，見 test_real_chrome_flow_end_to_end_leaves_nothing_pending。
         self.assertIsNone(lifecycle.observe(post(
             "claude", "1", "mcp__claude-in-chrome__tabs_context_mcp", {},
             mcp("No tab group exists for this session.")
@@ -501,6 +503,53 @@ class ControlLifecycleRegression(unittest.TestCase):
         self.assertEqual(seen, [True, True, True, False, False])
         self.assertIn({"kind": "cua-tab:iab", "id": "capped-tab"},
                       lifecycle.status(self.path, session)["pending"])
+
+    def test_real_chrome_flow_end_to_end_leaves_nothing_pending(self):
+        # 照實際紀錄的順序：第一步就是 createIfEmpty，沒有先問「No tab group exists」。
+        environment = self.adapter_environment()
+        session = "chrome-real-" + uuid.uuid4().hex
+
+        def result(*parts):
+            return [{"type": "text", "text": part} for part in parts]
+
+        def tab_context(*tab_ids):
+            return json.dumps({"availableTabs": [
+                {"tabId": tab_id, "title": "New Tab", "url": "chrome://newtab/"}
+                for tab_id in tab_ids], "tabGroupId": 1299612253})
+
+        steps = [
+            ("1", "tabs_context_mcp", {"createIfEmpty": True},
+             result(tab_context(1723269028),
+                    "\n\nTab Context:\n- Available tabs:\n  • tabId 1723269028: \"New Tab\"")),
+            ("2", "tabs_create_mcp", {},
+             result(tab_context(1723269028, 1723269031),
+                    "\n\nTab Context:\n- Available tabs:\n  • tabId 1723269028\n  • tabId 1723269031")),
+            ("3", "tabs_close_mcp", {"tabId": 1723269031},
+             result("Closed tab 1723269031.",
+                    "\n\nTab Context:\n- Available tabs:\n  • tabId 1723269028: \"New Tab\"")),
+            ("4", "tabs_close_mcp", {"tabId": 1723269028},
+             result("Closed tab 1723269028. Group is now empty (auto-removed).",
+                    "\n\nTab Context:\n- Available tabs:\n")),
+        ]
+        for call_id, tool, tool_input, response in steps:
+            done = self.run_adapter("pretooluse_gate.py", post(
+                session, call_id, "mcp__claude-in-chrome__" + tool, tool_input, response
+            ), environment)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            self.assertEqual(done.stderr.strip(), "")
+        self.assertEqual(lifecycle.status(self.path, session)["pending"], [])
+        prompt = self.run_adapter("recall_hook.py", {
+            "hook_event_name": "UserPromptSubmit", "session_id": session, "prompt": "下一件事",
+        }, environment)
+        self.assertEqual(prompt.returncode, 0, prompt.stderr)
+        self.assertNotIn("瀏覽器", prompt.stdout)
+        self.assertNotIn("收尾", prompt.stdout)
+        away = self.run_adapter("pretooluse_gate.py", {
+            "hook_event_name": "PreToolUse", "session_id": session,
+            "tool_name": "Read", "tool_input": {"path": "notes.txt"},
+        }, environment)
+        self.assertEqual(away.returncode, 0, away.stderr)
+        self.assertNotIn("收尾", away.stdout)
 
 
 if __name__ == "__main__":
