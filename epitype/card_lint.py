@@ -407,6 +407,16 @@ def _pattern_findings(fields, front_lines):
                 tool=tool,
                 known=memspec.LIST_JOINER.join(sorted(memspec.ACTION_GUARD_KNOWN_TOOLS))),
         ))
+    elif tool:
+        # 認得的工具名，但只有其中一個宿主有：那道守衛在另一個宿主永遠不觸發。點名是哪個
+        # 宿主，免得「只在 Claude 生效」被當成全域。
+        missing_hosts = memspec.hosts_without_tool(tool)
+        if missing_hosts:
+            findings.append((
+                WARN, "guard-tool-host",
+                memspec.CARD_GUARD_TOOL_HOST_GAP_REASON.format(
+                    tool=tool, hosts=memspec.LIST_JOINER.join(missing_hosts)),
+            ))
     return findings
 
 
@@ -1871,11 +1881,28 @@ def _selftest():
                 and not any(rule == "unarmed" for _level, rule in arm_redirected_rules)
                 and (WARN, "unenforceable-gap") not in redirected_rules,
             ))
+            # guard_tool 在某一宿主沒有對應工具 → WARN 點名該宿主。
+            def _host_gap(tool):
+                rules = _pattern_findings({memspec.ACTION_GUARD_TOOL_FIELD: tool}, [])
+                return next((reason for level, rule, reason in rules
+                             if level == WARN and rule == "guard-tool-host"), None)
+            checks.append((
+                "guard_tool 只有一個宿主有 → WARN 點名缺對應的宿主；兩宿主都有的不點名",
+                memspec.hosts_without_tool("Read") == ["Codex"]
+                and memspec.hosts_without_tool("PowerShell") == ["Codex"]
+                and memspec.hosts_without_tool("Write") == ["Codex"]
+                and memspec.hosts_without_tool("apply_patch") == ["Claude"]
+                and memspec.hosts_without_tool("Bash") == []
+                and memspec.hosts_without_tool("Task") == []
+                and _host_gap("Read") is not None and "Codex" in _host_gap("Read")
+                and _host_gap("apply_patch") is not None and "Claude" in _host_gap("apply_patch")
+                and _host_gap("Bash") is None and _host_gap("Task") is None,
+            ))
     except Exception as exc:
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 54
+    total = 55
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

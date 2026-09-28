@@ -1795,14 +1795,19 @@ ACTION_GUARD_KNOWN_TOOLS = frozenset((
     "write", "write_file", "create_file",
     "edit", "edit_file", "str_replace_editor", "multiedit", "multi_edit", "apply_edits",
     "read", "glob", "grep", "notebookedit", "webfetch", "websearch", "agent", "task",
+    # Codex：派子代理 spawn_agent、寫檔 apply_patch。認得它們才能對這些卡做宿主涵蓋檢查。
+    "spawn_agent", "apply_patch",
 ))
 # 同一個工具在不同宿主叫不同名字：卡寫 Bash，Cursor 送 Shell（2026-09-16 實測日誌）。
 # 只比名字相等的話，守衛在別的宿主上不生效也不出聲。PowerShell 不併入：卡片本來就分開寫。
 ACTION_GUARD_TOOL_EQUIVALENTS = (
     frozenset(("bash", "shell", "run_terminal_cmd", "exec_command", "local_shell")),
     # 派工子代理的工具在不同版本送 Task 或 Agent（2026-09-19 實測：同一天兩種都出現在
-    # 真實呼叫裡）。卡片只能寫一個名字，所以不併起來的話守衛在一半的場次上不生效。
-    frozenset(("task", "agent")),
+    # 真實呼叫裡）；Codex 派子代理的工具叫 spawn_agent。卡片只能寫一個名字，所以不併起來
+    # 的話「派工要指名模型」這類守衛在 Codex 永遠不觸發。Codex 的 spawn_agent 參數帶
+    # model／reasoning_effort／task_name／message，欄位名 model 與 Claude 一致，所以
+    # guard_requires: model 併群後兩宿主都對得上。
+    frozenset(("task", "agent", "spawn_agent")),
 )
 
 
@@ -1811,6 +1816,43 @@ def action_guard_tool_matches(card_tool, event_tool):
     if card_tool == event_tool:
         return True
     return any(card_tool in group and event_tool in group for group in ACTION_GUARD_TOOL_EQUIVALENTS)
+
+
+# 兩宿主各自認得的動作工具（casefold）。Codex 沒有 Read（讀檔走 shell）、沒有 PowerShell，
+# 寫檔是 apply_patch 而非 Claude 的 Write／Edit；Claude 這一側沒有 apply_patch。守衛卡的
+# guard_tool 若在某一宿主沒有對應工具（連等價群裡的別名都沒有），那道守衛在該宿主永遠不
+# 觸發——card_lint 出 WARN 點名是哪個宿主，避免「只在一邊生效」被當成全域生效。
+HOST_TOOL_NAMES = {
+    "Claude": frozenset((
+        "bash", "powershell", "write", "write_file", "create_file",
+        "edit", "edit_file", "str_replace_editor", "multiedit", "multi_edit", "apply_edits",
+        "read", "glob", "grep", "notebookedit", "webfetch", "websearch", "task", "agent",
+    )),
+    "Codex": frozenset((
+        "shell", "exec_command", "local_shell", "run_terminal_cmd",
+        "apply_patch", "spawn_agent",
+    )),
+}
+
+
+def hosts_without_tool(card_tool):
+    """這個 guard_tool 沒有對應工具（含等價別名）的宿主清單；兩宿主都有回空清單。"""
+    tool = card_tool.casefold()
+    missing = []
+    for host, tools in HOST_TOOL_NAMES.items():
+        if tool in tools:
+            continue
+        if any(tool in group and (group & tools) for group in ACTION_GUARD_TOOL_EQUIVALENTS):
+            continue
+        missing.append(host)
+    return missing
+
+
+CARD_GUARD_TOOL_HOST_GAP_REASON = (
+    "guard_tool「{tool}」在 {hosts} 沒有對應工具，這道守衛在該宿主不會觸發（Codex 讀檔走"
+    " shell、寫檔是 apply_patch，都沒有 Read／Write／Edit／PowerShell）。若要兩宿主都擋，"
+    "換成兩宿主都有的工具（如 Bash／shell）或另立一張對應卡。"
+)
 
 
 CARD_PATTERN_BROKEN_REASON = (
@@ -3048,6 +3090,7 @@ _EN = {
     "CARD_DISARMED_REASON": "{field} is nested one level under {parent}, and the gates read only top-level fields, so this card blocks nothing; move it to the top level of the frontmatter",
     "ACTION_GUARD_DEFECT": "⚠ {field} on guard card {card} is unusable ({reason}), so this one did not apply",
     "CARD_GUARD_TOOL_UNKNOWN_REASON": 'guard_tool "{tool}" is not a tool name we recognise; if it is a typo this guard will never catch anything. Known: {known}',
+    "CARD_GUARD_TOOL_HOST_GAP_REASON": 'guard_tool "{tool}" has no counterpart on {hosts}, so this guard never fires there (Codex reads via shell and writes via apply_patch; it has no Read/Write/Edit/PowerShell). To guard both hosts, use a tool both have (Bash/shell) or add a matching card.',
     "DREAM_NOTICE_LINE": "🌙 dream finished ({date}): type FAIL {card_fail} / missing aliases {missing_aliases} / drafts {drafts} → {pack}",
     "DREAM_NOTICE_INCOMPLETE_LINE": "🌙 dream did not finish its checks ({date}): some results are unconfirmed; see {pack}.",
     "DREAM_NOTICE_OVERDUE_LINE": "🌙 dream is overdue (last run {last}) → python epitype/dream.py --scheduled",

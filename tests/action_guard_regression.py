@@ -342,6 +342,24 @@ class ActionGuardRegression(unittest.TestCase):
         self.dispatch_card()
         self.assertIsNone(self.denial(self.call("Bash", {"command": "git status"})))
 
+    def test_a_task_card_guards_codex_spawn_agent(self):
+        # Codex 派子代理的工具叫 spawn_agent，不在 {task, agent} 群裡的話這道守衛在 Codex
+        # 永遠不觸發。參數帶 model／reasoning_effort／task_name／message，欄位名與 Claude
+        # 一致，所以 guard_requires: model 併群後對得上。
+        self.dispatch_card()
+        reason = self.denial(self.call(
+            "spawn_agent",
+            {"reasoning_effort": "high", "task_name": "查一個檔", "message": "去查"}))
+        self.assertIsNotNone(reason)
+        self.assertIn("model", reason)
+        # 帶了 model 就放行；fork 型的逃生口一樣認得。
+        self.assertIsNone(self.denial(self.call(
+            "spawn_agent",
+            {"model": "gpt-5-codex-mini", "reasoning_effort": "low",
+             "task_name": "機械活", "message": "跑一下"})))
+        self.assertIsNone(self.denial(self.call(
+            "spawn_agent", {"subagent_type": "fork", "message": "x"})))
+
     def test_fragments_and_required_fields_declared_together_must_both_hold(self):
         self.dispatch_card(guard_all_of=['"deploy"'])
         self.assertIsNone(self.denial(self.call("Task", {"prompt": "查個檔"})))
