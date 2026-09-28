@@ -12,6 +12,7 @@ import sqlite3
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -656,6 +657,51 @@ class ControlLifecycleRegression(unittest.TestCase):
         self.assertIn("sub-tab", lifecycle.reminder(owner, self.path, "tool"))
         self.assertIn({"kind": "cua-tab:iab", "id": "sub-tab", "agent": "sub-1"},
                       lifecycle.status(self.path, "split")["pending"])
+
+    def test_ledger_prunes_old_rows_and_keeps_recent_ones(self):
+        # 正式帳本 25 小時累積兩千多列 calls：帳本要有保留期限，不能無限長大。
+        day = 24 * 3600
+        start = 1_000_000.0
+
+        def at(moment, session, call_id, code, output):
+            with mock.patch.object(lifecycle, "_now", return_value=moment):
+                lifecycle.observe(post(session, call_id, "mcp__cua_repl__js",
+                                       {"code": code}, mcp(output)), self.path)
+
+        create = 'await cua.createBrowserTab("iab", "about:blank");'
+        listing = 'await cua.listTabs({browser:"iab"});'
+        at(start, "stale", "1", create, "Browser tab: old")
+        at(start + 60, "stale", "2", listing, "Wall time: 0.01 seconds\nOutput: []")
+
+        def count(table, session=None):
+            with closing(sqlite3.connect(self.path)) as db:
+                if session is None:
+                    return db.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+                return db.execute(f"SELECT count(*) FROM {table} WHERE session=?",
+                                  (session,)).fetchone()[0]
+
+        self.assertEqual(count("calls", "stale"), 2)
+        at(start + 2 * day, "fresh", "a", create, "Browser tab: new")
+        # 去重只需要短時間：一天前的呼叫紀錄先清掉，事件與資源仍保留供查詢。
+        self.assertEqual(count("calls", "stale"), 0)
+        self.assertEqual(count("events", "stale"), 3)
+        self.assertEqual(count("resources", "stale"), 2)
+        at(start + 8 * day, "fresh", "b", listing,
+           "Wall time: 0.01 seconds\nOutput: " + json.dumps([{"id": "new"}]))
+        for table in ("calls", "events", "resources", "session_state", "alerts"):
+            self.assertEqual(count(table, "stale"), 0, table)
+        self.assertEqual(count("calls", "fresh"), 1)
+        self.assertIn({"kind": "cua-tab:iab", "id": "new"},
+                      lifecycle.status(self.path, "fresh")["pending"])
+        # 清理最多每小時一次：緊接著的呼叫不重跑。
+        with closing(sqlite3.connect(self.path)) as db:
+            last = db.execute("SELECT value FROM meta WHERE key='last_cleanup'").fetchone()[0]
+        at(start + 8 * day + 60, "fresh", "c", listing,
+           "Wall time: 0.01 seconds\nOutput: " + json.dumps([{"id": "new"}]))
+        with closing(sqlite3.connect(self.path)) as db:
+            self.assertEqual(
+                db.execute("SELECT value FROM meta WHERE key='last_cleanup'").fetchone()[0], last)
+        self.assertEqual(last, start + 8 * day)
 
 if __name__ == "__main__":
     unittest.main(argv=[arg for arg in sys.argv if arg != "--selftest"])

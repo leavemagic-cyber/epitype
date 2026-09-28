@@ -24,6 +24,11 @@ SCHEMA_VERSION = 2
 UNVERIFIED_TTL_SECONDS = 3600
 # 每筆資源在各階段最多提醒幾次。prompt 階段不擋回合，留少量重試給預算放不下的那次。
 REMINDER_LIMITS = {"tool": 1, "prompt": 3, "stop": 1}
+# calls 只用來擋同一個結果重送，一天足夠；其餘紀錄保留一週後刪除。清理最多每小時一次，
+# 而且建表／升版後先等一個間隔，不在升版那一刻刪資料。
+CALL_RETENTION_SECONDS = 24 * 3600
+RETENTION_SECONDS = 7 * 24 * 3600
+CLEANUP_INTERVAL_SECONDS = 3600
 CHROME = "mcp__claude-in-chrome__"
 CUA_JS = frozenset(("mcp__cua_repl__js", "mcp__cua_repl.js"))
 CUA_RESET = frozenset(("mcp__cua_repl__js_reset", "mcp__cua_repl.js_reset"))
@@ -93,11 +98,15 @@ _TABLES = (
     "action TEXT NOT NULL, kind TEXT NOT NULL, resource_id TEXT NOT NULL,"
     "seen REAL NOT NULL)",
     "CREATE TABLE IF NOT EXISTS session_state ("
-    "session TEXT PRIMARY KEY, data TEXT NOT NULL)",
+    "session TEXT PRIMARY KEY, data TEXT NOT NULL, updated REAL NOT NULL DEFAULT 0)",
     "CREATE TABLE IF NOT EXISTS alerts ("
     "session TEXT NOT NULL, stage TEXT NOT NULL, fingerprint TEXT NOT NULL,"
     "seen REAL NOT NULL, count INTEGER NOT NULL DEFAULT 1,"
     "PRIMARY KEY(session, stage, fingerprint))",
+    "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value REAL NOT NULL)",
+    "CREATE INDEX IF NOT EXISTS calls_seen ON calls(seen)",
+    "CREATE INDEX IF NOT EXISTS events_call ON events(session, call_id)",
+    "CREATE INDEX IF NOT EXISTS events_seen ON events(seen)",
 )
 
 
@@ -113,6 +122,11 @@ def _upgrade(db, version):
             db.execute("ALTER TABLE resources ADD COLUMN agent TEXT NOT NULL DEFAULT ''")
         if "count" not in _columns(db, "alerts"):
             db.execute("ALTER TABLE alerts ADD COLUMN count INTEGER NOT NULL DEFAULT 1")
+        if "updated" not in _columns(db, "session_state"):
+            db.execute("ALTER TABLE session_state ADD COLUMN updated REAL NOT NULL DEFAULT 0")
+        now = _now()
+        db.execute("UPDATE session_state SET updated=? WHERE updated=0", (now,))
+        db.execute("INSERT OR IGNORE INTO meta(key,value) VALUES('last_cleanup',?)", (now,))
         # v1 的提醒指紋是整組待處理清單，改成逐筆資源之後對不上，留著只會佔位。
         db.execute("DELETE FROM alerts")
 
@@ -219,12 +233,29 @@ def _state(db, session):
         return {}
 
 
-def _save_state(db, session, state):
+def _save_state(db, session, state, now):
     db.execute(
-        "INSERT INTO session_state(session,data) VALUES(?,?) "
-        "ON CONFLICT(session) DO UPDATE SET data=excluded.data",
-        (session, json.dumps(state, separators=(",", ":"))),
+        "INSERT INTO session_state(session,data,updated) VALUES(?,?,?) "
+        "ON CONFLICT(session) DO UPDATE SET data=excluded.data,updated=excluded.updated",
+        (session, json.dumps(state, separators=(",", ":")), now),
     )
+
+
+def _cleanup(db, now):
+    """Drop rows past retention, at most once per CLEANUP_INTERVAL_SECONDS."""
+    row = db.execute("SELECT value FROM meta WHERE key='last_cleanup'").fetchone()
+    if row is not None and now - row[0] < CLEANUP_INTERVAL_SECONDS:
+        return
+    db.execute("INSERT INTO meta(key,value) VALUES('last_cleanup',?) "
+               "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (now,))
+    if row is None:
+        return
+    cutoff = now - RETENTION_SECONDS
+    db.execute("DELETE FROM calls WHERE seen<?", (now - CALL_RETENTION_SECONDS,))
+    db.execute("DELETE FROM events WHERE seen<?", (cutoff,))
+    db.execute("DELETE FROM resources WHERE changed<?", (cutoff,))
+    db.execute("DELETE FROM alerts WHERE seen<?", (cutoff,))
+    db.execute("DELETE FROM session_state WHERE updated<?", (cutoff,))
 
 
 def _fingerprint(kind, resource_id, opened):
@@ -467,6 +498,7 @@ def observe(event: dict, path: Path) -> str | None:
             return None
         db.execute("INSERT INTO calls(session,call_id,seen) VALUES(?,?,?)",
                    (session, call_id, now))
+        _cleanup(db, now)
         _expire(db, session, now)
         state = _state(db, session)
         if name.startswith(CHROME):
@@ -487,7 +519,7 @@ def observe(event: dict, path: Path) -> str | None:
                 "WHERE session=? AND call_id=? AND action='open')",
                 (agent, session, session, call_id),
             )
-        _save_state(db, session, state)
+        _save_state(db, session, state, now)
         if db.execute(
             "SELECT 1 FROM events WHERE session=? AND call_id=? AND action='open' "
             "AND kind LIKE 'unverified%' LIMIT 1", (session, call_id)
