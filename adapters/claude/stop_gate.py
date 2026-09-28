@@ -996,6 +996,10 @@ def _turn_context(transcript_path):
             if str(piece or "").strip():
                 texts.append(piece)
     texts.reverse()
+    if len(prompt) > memspec.STOP_GATE_MESSAGE_MAX_CHARS:
+        # owner 的話常接在一大塊貼上內容後面：先取出 owner 親打的部分再截，否則截掉的
+        # 正是那句話。取不出來（整則是機器的）才截原文，派工通知的記號在開頭，截不掉。
+        prompt = memspec.owner_typed_text(prompt) or prompt
     prompt = prompt[: memspec.STOP_GATE_MESSAGE_MAX_CHARS]
     if not dispatch and memspec.TURN_DISPATCH_NOTICE_MARKER in prompt:
         # 背景子代理跑完是以一則新提問的形式回來的，這一回合裡沒有派工那一次呼叫。

@@ -78,12 +78,56 @@ class PromptBlockRegression(unittest.TestCase):
             "<task-notification>\n<task-id>x</task-id> write a prompt\n</task-notification>",
             "<system-reminder>\ngive me a prompt\n</system-reminder>",
             "Stop hook feedback:\n請給一份 prompt。",
-            "<command-name>/goal</command-name> 寫一份 prompt",
+            "<command-name>/goal</command-name>\n<command-message>goal</command-message>",
             "<environment_context>\n<cwd>C:\\x</cwd> give a prompt\n</environment_context>",
+            "<task-notification>\n<task-id>x</task-id>\n</task-notification>\n給我一份 prompt",
+            "<in-app-browser-context source=\"ambient-ui-state\">沒收尾的區塊 給我prompt",
         ):
             self.assertEqual(memspec.owner_typed_text(wrapper), "", wrapper[:40])
         # owner 親打的仍原樣保留。
         self.assertEqual(memspec.owner_typed_text("給我一份 prompt"), "給我一份 prompt")
+
+    def test_owner_words_after_leading_machine_blocks_are_kept(self):
+        # 宿主把機器區塊放在 owner 的話前面：只剝開頭的區塊，剩下的是 owner 的。
+        for shaped, owner in (
+            ('<pasted_content id="p1">\nlog A\nlog B\n</pasted_content id="p1">\n給我一份 prompt',
+             "給我一份 prompt"),
+            ('<in-app-browser-context source="ambient-ui-state">\n這塊是自動附上的介面狀態\n'
+             "</in-app-browser-context>\n## My request: 好!給我prompt，接續處理",
+             "好!給我prompt，接續處理"),
+            ("<system-reminder>提醒內容&lt;/system-reminder&gt;先準備斷點續行", "先準備斷點續行"),
+            ("<command-name>/goal</command-name>\n<command-args>給我一份 prompt</command-args>",
+             "給我一份 prompt"),
+        ):
+            self.assertEqual(memspec.owner_typed_text(shaped), owner, shaped[:40])
+
+    def test_pasted_block_then_owner_request_blocks_on_claude(self):
+        pasted = ('<pasted_content id="p1">\n' + "log line\n" * 50
+                  + '</pasted_content id="p1">\n給我一份 prompt')
+        turn = self.turn("claude", prompt=pasted)
+        self.assertIsNotNone(stop_gate._turn_check_gap(
+            self.decision, "提示詞在 C:/tmp/prompt.txt。", turn, frozenset(), []))
+        # 貼上內容超過截斷上限時，owner 那句話不能被截掉。
+        huge = ('<pasted_content id="p2">\n' + "x" * (memspec.STOP_GATE_MESSAGE_MAX_CHARS + 500)
+                + '\n</pasted_content id="p2">\n給我一份 prompt')
+        turn = self.turn("claude", prompt=huge)
+        self.assertIsNotNone(stop_gate._turn_check_gap(
+            self.decision, "提示詞在 C:/tmp/prompt.txt。", turn, frozenset(), []))
+
+    def test_browser_context_then_owner_request_blocks_on_codex(self):
+        shaped = ('<in-app-browser-context source="ambient-ui-state">\n這塊是自動附上的介面狀態\n'
+                  "</in-app-browser-context>\n## My request: 好!給我prompt，接續處理")
+        turn = self.turn("codex", prompt=shaped)
+        self.assertIsNotNone(stop_gate._turn_check_gap(
+            self.decision, "提示詞在 C:/tmp/prompt.txt。", turn, frozenset(), []))
+        # 同一個形狀下 owner 說了「完整」，報告長度上限要免擋。
+        length = SimpleNamespace(
+            key="len", decided_at="", turn_check=memspec.TURN_CHECK_LENGTH,
+            turn_check_limit="100", advice="")
+        detailed = self.turn("codex", prompt=shaped.replace("好!給我prompt，接續處理", "你就是完整查找一次"))
+        self.assertIsNone(stop_gate._turn_check_gap(length, "話" * 500, detailed, frozenset(), []))
+        plain = self.turn("codex", prompt=shaped.replace("好!給我prompt，接續處理", "接續處理"))
+        self.assertIsNotNone(stop_gate._turn_check_gap(length, "話" * 500, plain, frozenset(), []))
 
     def test_subagent_report_is_not_an_owner_prompt_request(self):
         # A2：子代理回報命中「write ... prompt」樣式，owner 當回合沒要提示詞 → 不擋。

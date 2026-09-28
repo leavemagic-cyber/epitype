@@ -1307,36 +1307,68 @@ TURN_CHECK_NAMES = (
     TURN_CHECK_PROMPT_BLOCK, TURN_CHECK_OWNER_LANGUAGE)
 # 這些內容被包成 user 角色送進模型，但都不是 owner 親口說的：子代理回報、背景任務
 # 通知、系統提醒、Stop hook 回饋、斜線指令展開、跨場訊息、宿主注入的環境或工具區塊。
-# 兩宿主的包裝都在這裡認：任何以 `<` 開頭的標籤區塊，加上幾個純文字前綴。依「owner
-# 說了什麼」判斷的回合檢查一律先過 owner_typed_text，否則會把機器產生的包裝當成 owner
-# 本人的請求（2026-09-27：子代理回報裡的「例：write 到 PROMPT.md」命中提示詞請求樣式
-# 而誤擋，owner 當回合根本沒要提示詞）。
+# 依「owner 說了什麼」判斷的回合檢查一律先過 owner_typed_text，否則會把機器產生的包裝
+# 當成 owner 本人的請求（2026-09-27：子代理回報裡的「例：write 到 PROMPT.md」命中提示詞
+# 請求樣式而誤擋，owner 當回合根本沒要提示詞）。
+#
+# 反方向同樣是錯：宿主常把機器區塊「放在 owner 的話前面」。Codex 開著內建瀏覽器時是
+# <in-app-browser-context …>…</in-app-browser-context> 再接「## My request: <owner 的話>」
+# （30 天 96 則全被當成空白：「好!給我prompt」漏擋、「你就是完整查找…」失去完整免擋而誤擋）；
+# Claude 是 <pasted_content id=…>…</pasted_content id=…> 或 <system-reminder>…</system-reminder>
+# 後面接 owner 的話。所以只剝開頭成對的機器區塊，剩下的才判；剝完什麼都不剩才回空字串。
 MACHINE_TURN_PREFIXES = (
     "[subagent hand-back]",
     "another claude session sent a message",
     "stop hook feedback",
     "[request interrupted",
 )
+# 開頭是這幾種標籤就整則不是 owner 的話，不管後面接什麼。
+MACHINE_TURN_HARD_TAGS = (
+    "task-notification", "agent-message", "cross-session-message",
+    "tool_result", "function_results",
+)
+# 斜線指令展開時 owner 打的參數在這個標籤裡面。
+MACHINE_TURN_OWNER_TAGS = ("command-args",)
+# Codex 內建瀏覽器開著時，owner 的話接在這一行後面。
+OWNER_REQUEST_MARKER = "## My request:"
 
 
 def owner_typed_text(text):
     """回合裡真正由 owner 親打的文字；機器產生的包裝一律回空字串。
 
-    子代理回報、背景任務通知、系統提醒、Stop hook 回饋等都以 user 角色送進模型，觸發詞
-    命中它們不能當成 owner 本人的請求。認不出 owner 親打的話時回空字串，依「owner 說了
-    什麼」的檢查因此不啟動——寧可漏擋，也不要拿機器的話擋 owner。任何以 `<` 開頭的標籤
-    區塊（<agent-message>、<task-notification>、<system-reminder>、<command-name>、
-    <local-command-…>、Codex 的 <environment_context> 等）都算機器產生，與 harvest.owner_text
-    的 `startswith("<")` 判準一致。"""
+    只剝開頭成對的機器區塊（含屬性的開標籤、帶屬性的收尾標籤如 </pasted_content id=…>、
+    被跳脫成 &lt;/…&gt; 的收尾），Codex 另取「## My request:」之後的字，剩下的再判：開頭是
+    子代理回報、背景通知、Stop hook 回饋等就回空字串。標籤沒收尾＝整段都是機器的，回空字串
+    ——寧可漏擋，也不要拿機器的話擋 owner。"""
     if not isinstance(text, str):
         return ""
-    stripped = text.strip()
-    if not stripped or stripped.startswith("<"):
+    rest = text.strip()
+    kept = []
+    while rest.startswith("<"):
+        opening = re.match(r"<([A-Za-z][\w:.-]*)(?:\s[^<>]*?)?(/?)>", rest)
+        if opening is None:
+            break  # 「<3」這種不是標籤，照 owner 的字處理
+        name = opening.group(1).casefold()
+        if name in MACHINE_TURN_HARD_TAGS:
+            return ""
+        if opening.group(2):
+            rest = rest[opening.end():].lstrip()
+            continue
+        tag = re.escape(opening.group(1))
+        closing = re.compile(
+            r"</" + tag + r"(?:\s[^<>]*)?>|&lt;/" + tag + r"(?:\s.*?)?&gt;", re.IGNORECASE,
+        ).search(rest, opening.end())
+        if closing is None:
+            return ""
+        if name in MACHINE_TURN_OWNER_TAGS:
+            kept.append(rest[opening.end():closing.start()].strip())
+        rest = rest[closing.end():].lstrip()
+    marker = rest.find(OWNER_REQUEST_MARKER)
+    if marker >= 0:
+        rest = rest[marker + len(OWNER_REQUEST_MARKER):].strip()
+    if any(rest.casefold().startswith(prefix) for prefix in MACHINE_TURN_PREFIXES):
         return ""
-    folded = stripped.casefold()
-    if any(folded.startswith(prefix) for prefix in MACHINE_TURN_PREFIXES):
-        return ""
-    return stripped
+    return "\n".join(part for part in kept + [rest] if part).strip()
 
 
 TURN_PROMPT_REQUEST_PATTERN = (
