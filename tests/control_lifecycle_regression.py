@@ -12,6 +12,7 @@ from pathlib import Path
 import sqlite3
 import subprocess
 import tempfile
+import time
 import unittest
 from unittest import mock
 import uuid
@@ -729,6 +730,58 @@ class ControlLifecycleRegression(unittest.TestCase):
             graft._synthetic_health(home, ROOT, report)
         self.assertIn("HOOK PostToolUse: FAIL", report.getvalue())
         self.assertIn("REASON PostToolUse: ledger-not-written", report.getvalue())
+
+    def test_v1_ledger_upgrade_expires_unclearable_records_once(self):
+        # v1 留下的無法確認紀錄（以呼叫 ID 為鍵、或來自 close 類工具）依新規則永遠清不掉；
+        # 升版只在 hook 自然開帳本時處理一次，唯讀的查詢指令不得升版。
+        opened = time.time() - 60
+        with closing(sqlite3.connect(self.path)) as db:
+            for statement in (
+                "CREATE TABLE calls (session TEXT NOT NULL, call_id TEXT NOT NULL, "
+                "seen REAL NOT NULL, PRIMARY KEY(session, call_id))",
+                "CREATE TABLE resources (session TEXT NOT NULL, kind TEXT NOT NULL, "
+                "resource_id TEXT NOT NULL, status TEXT NOT NULL, opened REAL NOT NULL, "
+                "changed REAL NOT NULL, PRIMARY KEY(session, kind, resource_id))",
+                "CREATE TABLE events (id INTEGER PRIMARY KEY, session TEXT NOT NULL, "
+                "call_id TEXT NOT NULL, action TEXT NOT NULL, kind TEXT NOT NULL, "
+                "resource_id TEXT NOT NULL, seen REAL NOT NULL)",
+                "CREATE TABLE session_state (session TEXT PRIMARY KEY, data TEXT NOT NULL)",
+                "CREATE TABLE alerts (session TEXT NOT NULL, stage TEXT NOT NULL, "
+                "fingerprint TEXT NOT NULL, seen REAL NOT NULL, "
+                "PRIMARY KEY(session, stage, fingerprint))",
+            ):
+                db.execute(statement)
+            db.executemany("INSERT INTO resources VALUES(?,?,?,?,?,?)", [
+                ("old", "unverified-control", "toolu_close", "open", opened, opened),
+                ("old", "unverified-chrome", "call-9", "open", opened, opened + 1),
+                ("old", "cua-tab:iab", "7", "open", opened, opened + 2),
+                ("old", "cua-tab:iab", "6", "closed", opened, opened + 3),
+            ])
+            db.execute("INSERT INTO alerts VALUES('old','tool','[[\"cua-tab:iab\"]]',?)",
+                       (opened,))
+            db.execute("INSERT INTO session_state VALUES('old','{}')")
+            db.execute("PRAGMA user_version=1")
+            db.commit()
+        before = lifecycle.status(self.path, "old")
+        self.assertEqual({(row["kind"], row["id"]) for row in before["pending"]}, {
+            ("unverified-control", "toolu_close"), ("unverified-chrome", "call-9"),
+            ("cua-tab:iab", "7")})
+        with closing(sqlite3.connect(self.path)) as db:
+            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 1)
+        note = lifecycle.reminder({"session_id": "old", "tool_name": "Read"}, self.path, "tool")
+        self.assertIn("7", note)
+        self.assertNotIn("無法確認", note)
+        after = lifecycle.status(self.path, "old")
+        self.assertEqual(after["pending"], [{"kind": "cua-tab:iab", "id": "7"}])
+        self.assertEqual(sorted(row["action"] for row in after["events"]), ["expire", "expire"])
+        with closing(sqlite3.connect(self.path)) as db:
+            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0],
+                             lifecycle.SCHEMA_VERSION)
+            self.assertEqual(db.execute(
+                "SELECT status FROM resources WHERE resource_id='toolu_close'").fetchone()[0],
+                "expired")
+            self.assertEqual(db.execute(
+                "SELECT count(*) FROM alerts WHERE fingerprint LIKE '[[%'").fetchone()[0], 0)
 
 if __name__ == "__main__":
     unittest.main(argv=[arg for arg in sys.argv if arg != "--selftest"])

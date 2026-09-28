@@ -98,4 +98,14 @@ python -m epitype lifecycle --session SESSION_ID --json
 
 `pending` is the set that still needs verification; a row owned by a subagent
 also carries `agent`. The `events` array shows recorded opens, confirmed closes,
-and expiries.
+and expiries. This command opens the ledger read-only: it never creates,
+upgrades, or prunes it.
+
+## Upgrading a version 1 ledger
+
+The first hook that opens a version 1 ledger upgrades it in place, once. Its
+open `unverified-*` records were keyed by call ID or came from close/stop/reset
+tools, so no rule in this version could ever clear them, and they had already
+been reminded; the upgrade marks them `expired` (event call ID `schema-v2`).
+Confirmed open records are kept. Version 1 reminder fingerprints no longer
+match and are discarded.

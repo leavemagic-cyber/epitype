@@ -8,7 +8,7 @@ be confirmed either way expires instead of waiting forever.
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 import json
 import os
 from pathlib import Path
@@ -129,6 +129,14 @@ def _upgrade(db, version):
         db.execute("INSERT OR IGNORE INTO meta(key,value) VALUES('last_cleanup',?)", (now,))
         # v1 的提醒指紋是整組待處理清單，改成逐筆資源之後對不上，留著只會佔位。
         db.execute("DELETE FROM alerts")
+        # v1 的無法確認紀錄以呼叫 ID 為鍵，或來自 close/stop/reset 類工具，依新規則沒有任何
+        # 清除路徑，而且早已提醒過：升版時一次標成到期（expired，不冒充關閉）。已確認的
+        # 開啟紀錄照舊保留。這只在 hook 自然開帳本時發生，唯讀查詢不會觸發。
+        for session, kind, resource_id in list(db.execute(
+            "SELECT session,kind,resource_id FROM resources "
+            "WHERE status='open' AND kind LIKE 'unverified%'"
+        )):
+            _resource(db, session, "schema-v2", "expire", kind, resource_id, now)
 
 
 def _connect(path: Path):
@@ -528,13 +536,14 @@ def observe(event: dict, path: Path) -> str | None:
     return None
 
 
-def _pending(db, session, now, agent=None):
+def _pending(db, session, now, agent=None, creator="agent"):
     """Open rows, minus unverified ones already past expiry (read-only view).
 
     Rows are (kind, resource_id, opened, agent); agent=None means every creator.
+    `creator` is "''" when reading a v1 ledger that has no agent column.
     """
     return [row for row in db.execute(
-        "SELECT kind,resource_id,opened,agent FROM resources WHERE session=? "
+        f"SELECT kind,resource_id,opened,{creator} FROM resources WHERE session=? "
         "AND status='open' AND NOT (kind LIKE 'unverified%' AND opened<?) ORDER BY opened",
         (session, now - UNVERIFIED_TTL_SECONDS),
     ) if agent is None or row[3] == agent]
@@ -606,12 +615,19 @@ def reminder(event: dict, path: Path, stage: str, *, claim=True) -> str | None:
 
 
 def status(path: Path, session: str):
+    """Read one session without creating, upgrading or pruning the ledger."""
+    empty = {"session": session, "pending": [], "events": []}
     if not path.is_file():
-        return {"session": session, "pending": [], "events": []}
-    with _database(path) as db:
+        return empty
+    uri = Path(path).resolve().as_uri() + "?mode=ro"
+    with closing(sqlite3.connect(uri, uri=True, timeout=5.0)) as db:
+        columns = _columns(db, "resources")
+        if not columns or not _columns(db, "events"):
+            return empty
+        creator = "agent" if "agent" in columns else "''"
         pending = [
             {"kind": kind, "id": resource_id, **({"agent": agent} if agent else {})}
-            for kind, resource_id, _, agent in _pending(db, session, _now())
+            for kind, resource_id, _, agent in _pending(db, session, _now(), creator=creator)
         ]
         events = [{"action": action, "kind": kind, "id": resource_id}
                   for action, kind, resource_id in db.execute(
