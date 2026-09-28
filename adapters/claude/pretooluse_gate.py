@@ -1104,9 +1104,26 @@ def _guard_review(event, tool_name, tool_input, config, started_at, defects):
     return None
 
 
+def _encoding_bom(head):
+    """PowerShell 5.1 \u8a8d\u5f97\u7684 BOM\uff1aUTF-8\u3001UTF-16 LE\u3001UTF-16 BE \u90fd\u8b93\u5b83\u6b63\u78ba\u5224\u78bc\u3002"""
+    return (head.startswith(b"\xef\xbb\xbf")
+            or head.startswith(b"\xff\xfe")
+            or head.startswith(b"\xfe\xff"))
+
+
+def _ps_encoding_safe(text):
+    """\u5beb\u5165\u5f8c\u7684\u5167\u5bb9\u5c0d PowerShell 5.1 \u662f\u5426\u5b89\u5168\u3002
+
+    \u7d14 ASCII \u6642 UTF-8 \u8207 cp950 \u7684\u4f4d\u5143\u7d44\u5b8c\u5168\u76f8\u540c\uff0c\u7de8\u78bc\u7121\u95dc\u3001\u4e0d\u9700 BOM\uff1b\u5426\u5247\u9996\u5b57\u5143\u5fc5\u9808\u662f
+    BOM\uff08UTF-8 \u6216 UTF-16 \u90fd\u4ee5 `\ufeff` \u958b\u982d\uff09\u624d\u80fd\u6a19\u660e\u975e ANSI \u7de8\u78bc\u3002"""
+    return text.startswith("\ufeff") or text.isascii()
+
+
 def _write_check_review(event, config, target, prospective, patch, started_at):
-    """Check a card-declared file invariant before a structured .ps1 write."""
-    if target.suffix.casefold() != ".ps1":
+    """Check a card-declared file invariant before a structured PowerShell write.
+
+    .ps1\uff0f.psm1\uff0f.psd1 \u90fd\u9069\u7528\u540c\u4e00\u689d PS 5.1 \u7de8\u78bc\u898f\u5247\u3002"""
+    if target.suffix.casefold() not in memspec.WRITE_CHECK_PS_SUFFIXES:
         return None
     rules = []
     for vault in resolve_vaults(config, event):
@@ -1121,7 +1138,7 @@ def _write_check_review(event, config, target, prospective, patch, started_at):
 
     try:
         with target.open("rb") as stream:
-            existing_bom = stream.read(3) == b"\xef\xbb\xbf"
+            existing_bom = _encoding_bom(stream.read(4))
     except FileNotFoundError:
         existing_bom = False
     except OSError:
@@ -1139,7 +1156,16 @@ def _write_check_review(event, config, target, prospective, patch, started_at):
         )
         if not removes_bom:
             return None
-        prospective = ""
+        # BOM 被明確移除：移除後只要不含非 ASCII，PowerShell 5.1 仍讀得對；否則要擋。
+        # apply_update 會把 BOM 連同定位一起剝掉、對不上 hunk，無法用來判這一種，故直接
+        # 讀移除 BOM 後的內容來判。讀不到就當作不安全（原本有 BOM，現在拿掉了）。
+        try:
+            remainder = target.read_text(encoding="utf-8-sig")
+        except (OSError, UnicodeError):
+            remainder = None
+        if remainder is not None and remainder.isascii():
+            return None
+        existing_bom = False
     if prospective is None and patch is not None and patch.op == "update":
         try:
             if target.stat().st_size <= memspec.WRITE_GATE_MAX_CONTENT_BYTES:
@@ -1148,9 +1174,9 @@ def _write_check_review(event, config, target, prospective, patch, started_at):
         except (OSError, UnicodeError):
             pass
     if prospective is not None:
-        safe = prospective.startswith("\ufeff")
+        safe = _ps_encoding_safe(prospective)
     else:
-        # When the post-write text is unknown, a file already carrying the BOM
+        # When the post-write text is unknown, a file already carrying a BOM
         # keeps its existing safety evidence. A BOM-less file cannot claim it.
         safe = existing_bom
     if safe:
@@ -1182,15 +1208,17 @@ def _review_one_target(event, config, target, additions, prospective, started_at
     def oversized(text):
         return len(text.encode("utf-8", errors="replace")) > memspec.WRITE_GATE_MAX_CONTENT_BYTES
 
-    if any(oversized(text) for text in additions):
-        return None, []
-    if prospective is not None and oversized(prospective):
-        prospective = None
-
     notices = []
+    # 編碼守衛只看 BOM 與 ASCII，成本與內容大小無關，因此不隨大檔豁免：>256KB 的
+    # .ps1/.psm1/.psd1 若沒有 BOM 且含非 ASCII，PowerShell 5.1 一樣會用 cp950 讀壞。
     write_check = _write_check_review(event, config, target, prospective, patch, started_at)
     if write_check is not None:
         return write_check, notices
+
+    if any(oversized(text) for text in additions):
+        return None, notices
+    if prospective is not None and oversized(prospective):
+        prospective = None
     found = _forbidden_write(
         event, config, target, additions, prospective, started_at, notices
     )

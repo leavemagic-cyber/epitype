@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- PowerShell 腳本編碼守衛修正四項誤擋／漏擋：UTF-16 LE/BE BOM 檔不再被當成「沒有 UTF-8 BOM」而擋（PS 5.1 讀 UTF-16 BOM 沒問題）；純 ASCII 內容不再要求 BOM（無非 ASCII 字元時編碼無關）；守衛範圍從 .ps1 擴及模組 .psm1 與資料檔 .psd1；>256KB 的新內容不再提前放行，缺 BOM 又含非 ASCII 仍要擋。移除 BOM 的 apply_patch 若移除後為純 ASCII 則放行、否則仍擋。
 - 回合結束閘「要 PROMPT 就給 code block」等依 owner 話語判斷的檢查改用單一 `memspec.owner_typed_text`：只取 owner 親打的文字，排除子代理回報（`[Subagent hand-back]`／`<agent-message`）、背景任務通知、系統提醒、Stop hook 回饋、斜線指令展開等以 user 角色送進模型的機器包裝。修正子代理回報裡出現「write ... prompt」被當成 owner 要提示詞而誤擋（Claude、Codex 兩宿主皆已回歸驗證）；報告長度上限的「這次要詳細」免擋同樣只認 owner 親打的話。
 - 回合結束閘自測恢復「09-25 原句一定被擋」：Windows 上 hook 逾時放行不再算通過，合法寫法那題也不再接受 stderr 出現 `TimeoutExpired`。端到端改用只給自測子行程（持 frozen 時鐘憑證）的較長解析上限 `FENCE_SHELL_SELFTEST_TIMEOUT_SECONDS`；產品的 5 秒上限另有一題用產品秒數實際解析一次來斷言，並斷言沒有憑證的行程拿不到自測上限。
 

@@ -52,6 +52,45 @@ class WriteCheckRegression(unittest.TestCase):
         self.assertFalse(self.verdict("Write", {"file_path": str(self.root / "new.txt"),
                                                   "content": "# 中文\n"}))
 
+    def test_utf16_bom_is_recognised(self):
+        # PowerShell 5.1 讀 UTF-16 LE/BE BOM 沒問題；別把它當成「沒有 UTF-8 BOM」而擋。
+        for label, bom in (("le", "utf-16-le"), ("be", "utf-16-be")):
+            target = self.root / f"u16-{label}.ps1"
+            target.write_bytes(("﻿# 中文\nWrite-Output 1\n").encode(bom))
+            # 現有檔已有 UTF-16 BOM，改後面的行不必動 BOM → 不擋。
+            self.assertFalse(self.verdict("Edit", {"file_path": str(target),
+                                                   "old_string": "1", "new_string": "2"}),
+                             label)
+            # 直接寫出帶 BOM 字元的新內容（`﻿` 開頭）也安全。
+            self.assertFalse(self.verdict("Write", {"file_path": str(target),
+                                                    "content": "﻿# 中文\n"}), label)
+
+    def test_pure_ascii_needs_no_bom(self):
+        # 沒有非 ASCII 字元時 UTF-8 與 cp950 位元組相同，編碼無關 → 不必 BOM、不擋。
+        target = self.root / "ascii.ps1"
+        self.assertFalse(self.verdict("Write", {"file_path": str(target),
+                                                "content": "Write-Output 'hello'\n"}))
+        # 一有非 ASCII 又沒 BOM 就回到要擋。
+        self.assertTrue(self.verdict("Write", {"file_path": str(target),
+                                               "content": "Write-Output '中文'\n"}))
+
+    def test_module_and_manifest_suffixes_covered(self):
+        for suffix in (".psm1", ".psd1"):
+            target = self.root / f"mod{suffix}"
+            self.assertTrue(self.verdict("Write", {"file_path": str(target),
+                                                   "content": "# 中文\n"}), suffix)
+            self.assertFalse(self.verdict("Write", {"file_path": str(target),
+                                                    "content": "﻿# 中文\n"}), suffix)
+
+    def test_large_write_is_not_released_early(self):
+        # >256KB 的新內容不再提前放行：沒有 BOM 且含非 ASCII 仍要擋。
+        big = "# 中文說明\n" + ("Write-Output 1\n" * 30000)
+        self.assertGreater(len(big.encode("utf-8")), memspec.WRITE_GATE_MAX_CONTENT_BYTES)
+        target = self.root / "big.ps1"
+        self.assertTrue(self.verdict("Write", {"file_path": str(target), "content": big}))
+        self.assertFalse(self.verdict("Write", {"file_path": str(target),
+                                                "content": "﻿" + big}))
+
     def test_existing_script_keeps_bom(self):
         target = self.root / "existing.ps1"
         target.write_text("# 中文\nWrite-Output 1\n", encoding="utf-8")
