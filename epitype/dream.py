@@ -2135,6 +2135,10 @@ def _section_host_sync(vaults, today, since_date, config, context=None):
                 "errors": [f"{type(exc).__name__}: {exc}"]}
     done = applied.getvalue()
     written = [line for line in done.splitlines() if line.startswith("WROTE")]
+    # 把手改過的受管鍵改回卡片值：逐筆另列一欄、不設上限。放進 examples 會被其他行擠掉，
+    # 而被蓋掉的是某個人手改的值，這件事每一筆都要看得到。
+    reverted = [line for line in done.splitlines()
+                if line.startswith(memspec.HOST_NATIVE_REVERT_PREFIX + " ")]
     replaced = replaced_in(done)
     # 拒寫要人動手，放進 errors：開場那一行才會說這一晚不乾淨。
     refused = [line for line in done.splitlines() if line.startswith("REFUSE")]
@@ -2143,7 +2147,9 @@ def _section_host_sync(vaults, today, since_date, config, context=None):
         # 漂移只數 DRIFT 行。以前數的是「所有非空行」，連 NOTE 都算進去——只有一個區塊
         # 漂移卻報 2，而這一版的主張就是數字要對。
         "counts": {"drifted": len(drifted), "written": len(written),
-                   "replaced": len(replaced), "refused": len(refused)},
+                   "replaced": len(replaced), "refused": len(refused),
+                   "reverted": len(reverted)},
+        "reverted": reverted,
         "examples": (stale + refused + replaced + written)[:EXAMPLE_LIMIT],
         "commands": ([] if code == host_sync.EXIT_OK else ["epitype sync <vault> --apply"])
         + (["epitype install --dry-run", "epitype install"] if stale else []),
@@ -2372,6 +2378,11 @@ def _render_section(lines, section):
     if examples:
         lines.append(f"examples (前 {len(examples)} 筆):")
         for item in examples:
+            lines.append(f"- {item}")
+    reverted = section.get("reverted") or []
+    if reverted:
+        lines.append(f"改回（手改的受管鍵已改回卡片值，共 {len(reverted)} 筆，逐筆列出）:")
+        for item in reverted:
             lines.append(f"- {item}")
     unclassified = section.get("unclassified") or []
     if unclassified:

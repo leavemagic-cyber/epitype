@@ -2957,6 +2957,13 @@ HOST_CODEX_CONFIG_ALLOWED = {
 HOST_CODEX_CONFIG_ALIASES = {
     "agents.max_threads": "agents.max_concurrent_threads_per_session",
 }
+# Claude 的 env 也只收白名單，理由同 Codex：卡片是代理寫得到的，env 一開放，
+# ANTHROPIC_BASE_URL、NODE_TLS_REJECT_UNAUTHORIZED 這種鍵就能繞過寫檔閘改連線端點或關掉
+# TLS 驗證。值在 settings.json 裡一律是字串。
+HOST_CLAUDE_ENV_ALLOWED = {
+    "CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS": HOST_CODEX_CONFIG_POSITIVE_INT,
+    "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": HOST_CODEX_CONFIG_POSITIVE_INT,
+}
 HOST_CLAUDE_ENV_KEY_REGEX = r"^[A-Za-z_][A-Za-z0-9_]*$"
 # Claude 權限規則：工具名，或 工具名(樣式)。mcp__server__tool 也是這個形狀。
 HOST_CLAUDE_DENY_REGEX = r"^[A-Za-z][A-Za-z0-9_]*(?:\(.+\))?$"
@@ -2970,6 +2977,10 @@ HOST_FIELD_NOT_LIST_REASON = "{field} 要寫成清單（一行一個 `- 項目`�
 HOST_FIELD_DUPLICATE_KEY_REASON = "{field} 的 {key} 寫了兩次；同一個鍵只能有一個值"
 HOST_CLAUDE_ENV_KEY_REASON = "{field} 的鍵 {key} 不是合法的環境變數名（英數字與底線、不以數字開頭）"
 HOST_CLAUDE_ENV_VALUE_REASON = "{field} 的 {key} 沒有值；要設空字串就別寫這個鍵"
+HOST_CLAUDE_ENV_ALLOWED_REASON = (
+    "{field} 的 {key} 不在白名單（{allowed}）；其他環境變數可能改掉連線端點或關掉安全檢查，卡片不收"
+)
+HOST_CLAUDE_ENV_TYPE_REASON = "{field} 的 {key} 要是{expected}，寫的是「{value}」"
 HOST_CLAUDE_DENY_REASON = "{field} 的「{rule}」不是 Claude 權限規則的形狀（工具名，或 工具名(樣式)）"
 HOST_CODEX_CONFIG_KEY_REASON = "{field} 的 {key} 不在白名單（{allowed}）；其他設定一改就可能放寬權限或換掉帳單，卡片不收"
 HOST_CODEX_CONFIG_ALIAS_REASON = "{field} 的 {key} 是舊名，請改寫成 {canonical}——兩個名字各寫一份就是兩個正本"
@@ -3051,6 +3062,14 @@ HOST_NATIVE_RULES_FOREIGN_REASON = "{path} 已存在但不是 Epitype 寫的（�
 HOST_NATIVE_UNREADABLE_REASON = "讀不動這個檔：{error}；請先自行修好再同步"
 HOST_NATIVE_SHAPE_REASON = "{key} 所在的 {container} 不是物件／表，不猜使用者的意思；請先自行修好"
 HOST_NATIVE_VERIFY_REASON = "改寫後驗證不過（{detail}），一個位元組都沒寫；多半是這個鍵的寫法不是單純的表／物件"
+# 同步把被手改的受管鍵改回卡片值時，逐筆一行：夜間 Dream 靠這個前綴把它們另列一欄，
+# 不跟其他行搶 examples 的名額——被蓋掉的是某個人手改的值，這件事不能只剩一行 WROTE。
+HOST_NATIVE_REVERT_PREFIX = "改回"
+HOST_NATIVE_REVERT_LINE = "{prefix} {label}: {key}（卡片 {card}）：{before} → {after}"
+HOST_NATIVE_REVERT_ABSENT = "不在"
+HOST_NATIVE_REVERT_PRESENT = "在"
+HOST_NATIVE_REVERT_RULES_BEFORE = "手改過的內容"
+HOST_NATIVE_REVERT_RULES_AFTER = "卡片的 {count} 條"
 HOST_NATIVE_DISOWNED_NOTE = "{key} 的卡片已拿掉，但檔案裡的值已被改成 {have}，留給使用者，不再管理"
 HOST_NATIVE_UNTRUSTED_NOTE = (
     "Codex 只在信任的專案載入專案層設定與規則；{root} 在使用者層 config.toml 沒有 "
@@ -3070,7 +3089,11 @@ HOST_NATIVE_GUARD_WRITE_REGEX = (
     r"write_bytes|\.write\(|writealltext|json\.dumps?\(|move-item|remove-item|"
     r"rename-item|new-item|\bmv\b|\brm\b|\bdel\b|\bmove\b|\bren\b"
 )
-HOST_NATIVE_GUARD_REDIRECT_REGEX = r">>?\s*['\"]?[^\s'\"|;&<>]*{name}"
+# 導向的目標要解析成完整路徑、等於受管的那個檔才算寫：只比檔名的話，
+# `cat settings.json > D:/backup/settings.json.bak` 這種讀出來另存也會被擋。
+HOST_NATIVE_GUARD_REDIRECT_REGEX = r">>?[ \t]*(?:\"([^\"]+)\"|'([^']+)'|([^\s|;&<>()]+))"
+HOST_NATIVE_GUARD_HOME_PREFIXES = ("~", "$home", "${home}", "$env:userprofile", "%userprofile%",
+                                   "$env:home")
 # `epitype sync` 就是改這些鍵的正路，不能被自己的閘擋下。
 HOST_NATIVE_GUARD_SYNC_REGEX = (
     r"(?:^|[\s;&|(\"'])(?:epitype(?:\.exe)?\s+sync|-m\s+epitype\s+sync|epitype[\\/]host_sync\.py)\b"
@@ -3156,9 +3179,18 @@ def host_native_values(front_lines):
             elif not re.match(HOST_CLAUDE_ENV_KEY_REGEX, key):
                 problems.append(HOST_CLAUDE_ENV_KEY_REASON.format(
                     field=HOST_CLAUDE_ENV_FIELD, key=key))
+            elif key not in HOST_CLAUDE_ENV_ALLOWED:
+                problems.append(HOST_CLAUDE_ENV_ALLOWED_REASON.format(
+                    field=HOST_CLAUDE_ENV_FIELD, key=key,
+                    allowed=SLASH_JOINER.join(HOST_CLAUDE_ENV_ALLOWED)))
             elif not value:
                 problems.append(HOST_CLAUDE_ENV_VALUE_REASON.format(
                     field=HOST_CLAUDE_ENV_FIELD, key=key))
+            elif (HOST_CLAUDE_ENV_ALLOWED[key] == HOST_CODEX_CONFIG_POSITIVE_INT
+                  and not (re.fullmatch(r"[0-9]+", value) and int(value) > 0)):
+                problems.append(HOST_CLAUDE_ENV_TYPE_REASON.format(
+                    field=HOST_CLAUDE_ENV_FIELD, key=key, value=value,
+                    expected=HOST_CODEX_CONFIG_TYPE_NAMES[HOST_CLAUDE_ENV_ALLOWED[key]]))
             else:
                 env[key] = value
         if env:

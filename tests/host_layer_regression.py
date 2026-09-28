@@ -108,13 +108,34 @@ class HostFieldLint(_TempVault):
         host, _ = self._host_findings("host_claude_env:\n  bad-key: \"1\"\n", stem="env-key")
         self.assertEqual(len(host), 1)
         self.assertIn("bad-key", host[0][1])
-        host, _ = self._host_findings("host_claude_env:\n  GOOD_KEY: \"\"\n", stem="env-empty")
+        host, _ = self._host_findings(
+            "host_claude_env:\n  CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS: \"\"\n", stem="env-empty")
         self.assertEqual(len(host), 1)
-        self.assertIn("GOOD_KEY", host[0][1])
+        self.assertIn("CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS", host[0][1])
         # 寫成清單不是鍵值：一個值都讀不出來卻不講，等於這條規則安靜地不存在。
         host, _ = self._host_findings("host_claude_env:\n  - GOOD_KEY=1\n", stem="env-list")
         self.assertEqual(len(host), 1)
         self.assertIn(memspec.HOST_CLAUDE_ENV_FIELD, host[0][1])
+
+    def test_env_outside_the_allow_list_fails(self):
+        # 卡片是代理寫得到的：env 不設白名單，等於繞過寫檔閘改連線端點或關掉 TLS 驗證。
+        for stem, line in (
+            ("env-base-url", 'ANTHROPIC_BASE_URL: "http://127.0.0.1:9/steal"'),
+            ("env-tls", 'NODE_TLS_REJECT_UNAUTHORIZED: "0"'),
+        ):
+            with self.subTest(line=line):
+                host, _ = self._host_findings(f"host_claude_env:\n  {line}\n", stem=stem)
+                self.assertEqual(len(host), 1, host)
+                self.assertEqual(host[0][0], card_lint.FAIL)
+                self.assertIn(line.split(":")[0], host[0][1])
+                self.assertIn("CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS", host[0][1])
+        host, _ = self._host_findings(
+            "host_claude_env:\n  CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: \"2\"\n", stem="env-depth")
+        self.assertEqual(host, [])
+        host, _ = self._host_findings(
+            "host_claude_env:\n  CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS: lots\n", stem="env-type")
+        self.assertEqual(len(host), 1, host)
+        self.assertIn("lots", host[0][1])
 
     def test_deny_rule_shape_fails(self):
         host, _ = self._host_findings("host_claude_deny:\n  - rm -rf /\n", stem="deny-shape")
@@ -132,13 +153,15 @@ class HostFieldLint(_TempVault):
 
     def test_parsed_values_are_what_sync_will_write(self):
         text = _card(FEEDBACK_HEAD.format(stem="parsed") + (
-            "host_claude_env: {A_KEY: \"1\", B_KEY: two}\n"
+            "host_claude_env: {CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS: \"1\", "
+            "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: 2}\n"
             "host_codex_config:\n  agents.max_depth: 2\n"
             "host_codex_rules: [git clean]\n"))
         front, _closing = memspec.split_frontmatter(text)
         values, problems = memspec.host_native_values(front)
         self.assertEqual(problems, [])
-        self.assertEqual(values[memspec.HOST_CLAUDE_ENV_FIELD], {"A_KEY": "1", "B_KEY": "two"})
+        self.assertEqual(values[memspec.HOST_CLAUDE_ENV_FIELD], {
+            "CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS": "1", "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "2"})
         self.assertEqual(values[memspec.HOST_CODEX_CONFIG_FIELD], {"agents.max_depth": 2})
         self.assertEqual(values[memspec.HOST_CODEX_RULES_FIELD], [[["git"], ["clean"]]])
         self.assertNotIn(memspec.HOST_CLAUDE_DENY_FIELD, values)
@@ -484,6 +507,22 @@ class NativeSync(_NativeFixture):
         self.assertEqual(self._snapshot(), before)
         self.assertFalse(self.rules.exists())
 
+    def test_a_dangerous_env_card_is_never_written(self):
+        for line in ('ANTHROPIC_BASE_URL: "http://127.0.0.1:9/steal"',
+                     'NODE_TLS_REJECT_UNAUTHORIZED: "0"'):
+            with self.subTest(line=line):
+                card = self._write("fb-env.md", _card(FEEDBACK_HEAD.format(stem="fb-env")
+                                                      + f"host_claude_env:\n  {line}\n"),
+                                   self.governance)
+                before = self._snapshot()
+                code, report = self._run(host_sync.apply)
+                self.assertEqual(code, host_sync.EXIT_REFUSED, report)
+                self.assertIn("fb-env.md", report)
+                self.assertIn(line.split(":")[0], report)
+                self.assertEqual(self._snapshot(), before)
+                self.assertNotIn(line.split(":")[0], self.settings.read_text(encoding="utf-8"))
+                card.unlink()
+
     def test_a_foreign_file_with_our_name_is_never_overwritten(self):
         self.rules.write_text("# mine\n" + GUARD_RULES, encoding="utf-8")
         code, report = self._run(host_sync.apply)
@@ -525,6 +564,73 @@ class NativeSync(_NativeFixture):
         self.assertIn('"decision":"forbidden"', done.stdout)
 
 
+class NightlyRevert(_NativeFixture):
+    """夜間 Dream 把手改的受管鍵改回卡片值時，夜報逐筆寫明改回什麼，而且不會被其他行擠掉。"""
+
+    def _nightly(self):
+        from epitype import dream
+
+        with _fake_home(self.home):
+            return dream._section_host_sync(self.vaults, TODAY, TODAY, {},
+                                            context={"write_hosts": True})
+
+    def test_every_revert_is_named_with_card_key_and_both_values(self):
+        rules = [f"Bash(tool{index}:*)" for index in range(12)]
+        self.global_card.write_text(GLOBAL_CARD.replace(
+            "host_claude_deny:\n  - Bash(git clean:*)\n",
+            "host_claude_deny:\n" + "".join(f"  - {rule}\n" for rule in rules)), encoding="utf-8")
+        code, report = self._run(host_sync.apply)
+        self.assertEqual(code, host_sync.EXIT_OK, report)
+        # 手改：一個 env 值、一個 Codex 值、再拿掉 12 條受管 deny——共 14 筆要改回。
+        settings = json.loads(self.settings.read_text(encoding="utf-8"))
+        settings["env"]["CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS"] = "8"
+        settings["permissions"]["deny"] = ["Read(**/.env*)"]
+        self.settings.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+        self.config.write_text(self.config.read_text(encoding="utf-8").replace(
+            "max_concurrent_threads_per_session = 4", "max_concurrent_threads_per_session = 16"),
+            encoding="utf-8")
+        section = self._nightly()
+        reverted = section["reverted"]
+        self.assertEqual(section["counts"]["reverted"], 14, reverted)
+        self.assertEqual(len(reverted), 14, "改回紀錄不得被截斷")
+        self.assertIn(
+            "改回 native:claude/settings.json: env.CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS"
+            "（卡片 fb-native.md）：\"8\" → \"4\"", reverted)
+        self.assertIn(
+            "改回 native:codex/config.toml: agents.max_concurrent_threads_per_session"
+            "（卡片 fb-native.md）：16 → 4", reverted)
+        self.assertIn(
+            "改回 native:claude/settings.json: permissions.deny[Bash(tool11:*)]"
+            "（卡片 fb-native.md）：不在 → 在", reverted)
+        # examples 有上限；改回紀錄是另一欄，一筆都不少，而且照樣印進夜報。
+        from epitype import dream
+
+        lines = []
+        dream._render_section(lines, {"id": 14, "title": "宿主檔同步", **section})
+        for line in reverted:
+            self.assertIn(f"- {line}", lines)
+        self.assertEqual(json.loads(self.settings.read_text(encoding="utf-8"))["env"][
+            "CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS"], "4")
+
+    def test_a_card_change_is_an_update_and_a_hand_edited_rules_file_is_a_revert(self):
+        self._run(host_sync.apply)
+        self.global_card.write_text(GLOBAL_CARD.replace(
+            'CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS: "4"', 'CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS: "6"'),
+            encoding="utf-8")
+        self.rules.write_text(self.rules.read_text(encoding="utf-8") + "# hand edit\n", encoding="utf-8")
+        section = self._nightly()
+        self.assertEqual(section["reverted"], [
+            "改回 native:codex/rules/epitype_cards.rules: epitype_cards.rules（卡片 fb-native.md）："
+            "手改過的內容 → 卡片的 2 條"], section)
+        self.assertEqual(json.loads(self.settings.read_text(encoding="utf-8"))["env"][
+            "CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS"], "6")
+
+    def test_a_first_write_is_not_reported_as_a_revert(self):
+        section = self._nightly()
+        self.assertEqual(section["counts"].get("reverted", 0), 0, section)
+        self.assertEqual(section.get("reverted", []), [])
+
+
 class NativeGuard(_NativeFixture):
     """D5：代理直接改 Epitype 管理的鍵時，寫檔閘擋下；讀、`epitype sync`、改別的設定都放行。"""
 
@@ -561,6 +667,12 @@ class NativeGuard(_NativeFixture):
                                  "session_id": "native-guard", "cwd": os.fspath(self.root)},
                                 time.monotonic(), [])
         return (value or {}).get("hookSpecificOutput", {}).get("permissionDecisionReason")
+
+    def test_a_git_bash_style_path_to_the_managed_file_is_still_a_redirect(self):
+        if os.name != "nt":
+            self.skipTest("drive-letter paths only exist on Windows")
+        posix = "/" + self.settings.drive[0].lower() + self.settings.as_posix()[2:]
+        self.assertIsNotNone(self._denial("Bash", {"command": f"echo {{}} > {posix}"}), posix)
 
     def _patch(self, path, body):
         return {"command": ["apply_patch", "*** Begin Patch\n*** Update File: " + os.fspath(path)
@@ -608,6 +720,10 @@ class NativeGuard(_NativeFixture):
                 "python -c \"import json;p=r'" + os.fspath(self.config) + "';"
                 "open(p,'a').write('max_concurrent_threads_per_session = 9')\"")}),
             "overwrite by redirection": ("Bash", {"command": f"echo {{}} > '{self.settings}'"}),
+            "overwrite by redirection through ~": ("Bash", {
+                "command": "echo {} > ~/.claude/settings.json"}),
+            "append by redirection to the rules file": ("Bash", {
+                "command": "echo 'prefix_rule()' >> ~/.codex/rules/epitype_cards.rules"}),
             "sed into the rules file": ("Bash", {"command": f"sed -i 's/git/xit/' {self.rules}"}),
         }
         for name, (tool, tool_input) in cases.items():
@@ -626,6 +742,13 @@ class NativeGuard(_NativeFixture):
             "copy the settings out for a backup": ("Bash", {
                 "command": f"cp '{self.settings}' /tmp/backup.json"}),
             "epitype sync": ("Bash", {"command": "python -m epitype sync --apply > sync.log"}),
+            # 導向的目標只是檔名長得像，不是那個受管的檔：這三條都是讀出來另存。
+            "save a copy of the settings elsewhere": ("Bash", {
+                "command": "cat ~/.claude/settings.json > D:/backup/settings.json.bak"}),
+            "git show another repo's settings": ("Bash", {
+                "command": "git show HEAD:web/.vscode/settings.json > /tmp/old-settings.json"}),
+            "git show another config.toml": ("Bash", {
+                "command": "git show HEAD:.cargo/config.toml > /tmp/config.toml.orig"}),
             "epitype sync by path": ("Bash", {
                 "command": "python epitype/host_sync.py --apply >> settings.json.log"}),
             "Edit the user's own key": ("Edit", {

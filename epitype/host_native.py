@@ -17,6 +17,7 @@ import sys; sys.dont_write_bytecode = True
 
 from collections import namedtuple
 from datetime import datetime, timezone
+import hashlib
 import io
 import json
 import os
@@ -647,7 +648,7 @@ def _render(item, record):
             return None, {}, False
         return entry.want, {"kind": target.kind, SECTION_RULES: {
             _rule_display(pattern): card for pattern, card in entry.have},
-            "created_file": created_file}, False
+            "fingerprint": _fingerprint(entry.want), "created_file": created_file}, False
     before = _parse(target.kind, text)
     updated = text if text.strip() else ("{\n}\n" if target.kind == KIND_CLAUDE else "")
     remembered = {section: dict(record.get(section) or {})
@@ -770,6 +771,36 @@ def _backup(path):
     return backup
 
 
+def _fingerprint(text):
+    return hashlib.sha256(str(text or "").replace("\r\n", "\n").encode("utf-8")).hexdigest()[:16]
+
+
+def _reverts(item, record, text):
+    """這次寫入裡，哪些是把「別人手改過的受管值」改回卡片值：[(鍵, 原值, 卡片值, 卡片)]。
+
+    卡片自己改了值（檔案裡還是 Epitype 上次寫的那個）是更新，不是改回；只有檔案裡的值
+    不等於 Epitype 上次寫的，才是有人手改過。"""
+    found = []
+    for entry in item.entries:
+        if entry.status != DRIFT:
+            continue
+        if entry.section == SECTION_RULES:
+            if record.get("fingerprint") and _fingerprint(text) != record["fingerprint"]:
+                found.append((entry.key, memspec.HOST_NATIVE_REVERT_RULES_BEFORE,
+                              memspec.HOST_NATIVE_REVERT_RULES_AFTER.format(count=len(entry.have)),
+                              entry.card))
+            continue
+        name = _entry_name(item.target, entry)
+        if entry.section == SECTION_DENY:
+            found.append((name, memspec.HOST_NATIVE_REVERT_ABSENT,
+                          memspec.HOST_NATIVE_REVERT_PRESENT, entry.card))
+            continue
+        previous = (record.get(entry.section) or {}).get(entry.key) or {}
+        if "value" not in previous or entry.have != previous["value"]:
+            found.append((name, _shown(entry.have), _shown(entry.want), entry.card))
+    return found
+
+
 def _remember(state, path_key, record):
     """一個鍵都不再管理的檔，從狀態表拿掉：留著的話，寫檔閘會繼續護著一個沒有主人的檔。"""
     if any(record.get(section) for section in (SECTION_ENV, SECTION_DENY, SECTION_CONFIG, SECTION_RULES)):
@@ -803,7 +834,8 @@ def apply(vaults, hosts=None, home=None, output=sys.stdout):
                 detail=f"{type(exc).__name__}: {exc}"), file=output)
             refused += 1
             continue
-        raw, _text, bom = _read(item.target.path)
+        raw, current_text, bom = _read(item.target.path)
+        reverts = _reverts(item, record, current_text)
         try:
             if delete:
                 if raw is not None:
@@ -823,6 +855,10 @@ def apply(vaults, hosts=None, home=None, output=sys.stdout):
                     names = "、".join(_entry_name(item.target, entry) for entry in changing)
                     print(f"WROTE  {label}: {names} → {item.target.path}"
                           + (f"（備份 {backup.name}）" if backup else ""), file=output)
+                    for key, before, after, card in reverts:
+                        print(memspec.HOST_NATIVE_REVERT_LINE.format(
+                            prefix=memspec.HOST_NATIVE_REVERT_PREFIX, label=label, key=key,
+                            card=card, before=before, after=after), file=output)
                 _remember(state, path_key, new_record)
             else:
                 _remember(state, path_key, new_record)
