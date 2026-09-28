@@ -52,11 +52,13 @@ def _assistant_text(row):
     return "\n".join(parts)
 
 
-def measure(transcripts, since=None, max_bytes=64 * 1024 * 1024):
+def measure(transcripts, since=None, max_bytes=64 * 1024 * 1024, until=None):
     """{卡片相對路徑: [端出的段數, 其中之後被用到的段數]}。
 
-    `since`（YYYY-MM-DD）只限制「端出」那一列的日期：長壽的對話檔每晚都會被重讀，不限的
-    話同一次端出會被算好幾晚。「用到」＝同一段裡端出之後，回覆或工具呼叫提到了卡名。
+    `since`／`until`（epoch 秒，until 不含）只限制「端出」那一列的時間：長壽的對話檔每晚
+    都會被重讀，不限的話同一次端出會被算好幾晚。夜間重放照精確時間切，這裡也要——按日期
+    取整的話，窗口開始前同一天的端出會被算進來。`since` 給 YYYY-MM-DD 字串時照舊按日期比。
+    「用到」＝同一段裡端出之後，回覆或工具呼叫提到了卡名。
     """
     counts = {}
     for path in transcripts:
@@ -69,7 +71,7 @@ def measure(transcripts, since=None, max_bytes=64 * 1024 * 1024):
                 continue
             attachment = row.get("attachment") if row.get("type") == "attachment" else None
             if isinstance(attachment, dict) and attachment.get("type") == "hook_additional_context":
-                if since and str(row.get("timestamp", ""))[:10] < since:
+                if not _delivered_within(row.get("timestamp"), since, until):
                     continue
                 for text in attachment.get("content") or ():
                     if not isinstance(text, str):
@@ -89,6 +91,21 @@ def measure(transcripts, since=None, max_bytes=64 * 1024 * 1024):
                     pending[key] = True
                     counts[key[1]][1] += 1
     return counts
+
+
+def _delivered_within(stamp, since, until):
+    if isinstance(since, str):
+        return not since or str(stamp or "")[:10] >= since
+    if since is None and until is None:
+        return True
+    from datetime import datetime
+
+    text = str(stamp or "").strip()
+    try:
+        happened = datetime.fromisoformat(text[:-1] + "+00:00" if text.endswith("Z") else text).timestamp()
+    except ValueError:
+        return True
+    return (since is None or happened >= since) and (until is None or happened < until)
 
 
 def _card_type(vault, card):

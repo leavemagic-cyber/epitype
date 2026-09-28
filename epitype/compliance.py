@@ -20,6 +20,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 for _extra in (str(_REPO_ROOT), str(_REPO_ROOT / "adapters" / "claude")):
@@ -31,11 +32,46 @@ from epitype import memspec
 # 一次夜跑最多讀幾個對話檔、每個檔最多幾 MB。夢有總預算，重放不該把它吃光。
 MAX_TRANSCRIPTS = 250
 MAX_TRANSCRIPT_BYTES = 64 * 1024 * 1024
+# 排序只要知道每份紀錄從幾點開始：讀開頭幾列就夠，不整份讀。
+FIRST_EVENT_MAX_LINES = 64
+FIRST_EVENT_MAX_BYTES = 4 * 1024 * 1024
+# 窗口內讀到幾成以下，這一晚的第 13 節就不算數得完整。
+COVERAGE_COMPLETE_PERCENT = 80
+COVERAGE_STATUS_COMPLETE = "完整"
+COVERAGE_STATUS_PARTIAL = "部分"
+COVERAGE_STATUS_INCOMPLETE = "不完整"
 # 一張卡連續幾天完全沒命中，就值得回頭看它是不是當初就寫廢了。
 STALE_CARD_DAYS = 30
 
 Rule = namedtuple("Rule", "card kind path mtime forbidden require_when require_text tool fragments")
 Hit = namedtuple("Hit", "card kind session at fragment digest final text")
+GateRow = namedtuple("GateRow", "session card at digest kind")
+
+# 閘的稽核列裡算「這條規則被違反了一次」的那幾種。只提醒不擋的那一種也算。
+_BLOCK_LOG_KINDS = frozenset((
+    memspec.STOP_GATE_LOG_KIND,
+    memspec.STOP_NOTE_LOG_KIND,
+    memspec.ACTION_GUARD_LOG_KIND,
+    memspec.WRITE_GATE_LOG_KIND,
+))
+# 一列稽核對得上一次命中的時間範圍：閘的紀錄最早可能比對話紀錄的時間早一點（秒以下
+# 捨去、兩邊各自取時），最晚是回合結束才寫。超出這個範圍的同場同卡紀錄是另一次的事，
+# 不能拿來抵這一次——以前按 (場次, 卡) 計數，同一天較早的擋下會抵掉後來真正的漏擋。
+GATE_MATCH_EARLY_SECONDS = 60
+GATE_MATCH_LATE_SECONDS = 600
+# 送達後違反：夜報列前幾條。純文字規則（沒有任何武裝欄位）只數得出送達次數。
+DELIVERY_REPORT_LIMIT = 10
+DELIVERY_UNJUDGEABLE = "無法自動判定是否違反"
+Delivery = namedtuple("Delivery", "session card at mode host")
+
+# Codex rollout 的行首（見 memspec）。推理、工具輸出、事件流一列動輒數百 KB，而重放只要
+# 下面這幾種；先看行首就跳過，不必逐列解 JSON——2026-09-28 一天的 Codex 紀錄就有 250 MB。
+_CODEX_ROW_HEAD = re.compile(memspec.CONTEXT_METER_CODEX_ROW_HEAD.decode("ascii"))
+_CODEX_SESSION_META = "session_meta"
+_CODEX_REPLAY_ROWS = frozenset(
+    ("response_item", item) for item in (
+        "message", "function_call", "custom_tool_call", "local_shell_call")
+)
 
 # 一次攔截「什麼都沒改變」的判準：重寫後與原文的相似度。誤擋通常只換兩三個字，真違規
 # 要補一整段或整句重來。
@@ -142,9 +178,19 @@ def _present_anywhere(pattern, text, cache):
 def _turns(path, max_bytes=MAX_TRANSCRIPT_BYTES):
     """(session, 時間, 閘看到的整回合文字, 這一輪逐段文字, 這一輪的工具呼叫)。
 
+    工具呼叫是 (工具名, 閘讀的那一串, 這一次呼叫的時間)。
+
     Stop 閘看整個回合（`memspec.join_turn_text`），所以第三欄是同一個函式併出來的文字，
-    指紋才跟稽核帳對得起來。
+    指紋才跟稽核帳對得起來。兩個宿主的列都用 `transcript.turn_parts` 拆——回合閘也是用
+    它，自己另寫一份的話，餵進 Codex 的格式讀出來全是空的，而空的看起來就像零漏擋。
+
+    Codex 的場次是 session_meta 的 `session_id`，不是檔名裡的 thread id：子代理有自己的
+    thread id，但閘記帳時拿到的是根場次的 id（2026-09-28 實測稽核帳 125 個 Codex 場次，
+    沒有一個是子代理自己的 thread id）。
     """
+    from epitype import transcript as transcript_reader
+    from pretooluse_gate import _action_text
+
     read = 0
     session, stamp = "", ""
     texts, calls = [], []
@@ -160,6 +206,11 @@ def _turns(path, max_bytes=MAX_TRANSCRIPT_BYTES):
             line = line.strip()
             if not line:
                 continue
+            head = _CODEX_ROW_HEAD.match(line)
+            if head is not None and head.group(1) != _CODEX_SESSION_META and (
+                head.group(1), head.group(2)
+            ) not in _CODEX_REPLAY_ROWS:
+                continue
             try:
                 row = json.loads(line)
             except ValueError:
@@ -167,38 +218,38 @@ def _turns(path, max_bytes=MAX_TRANSCRIPT_BYTES):
             if not isinstance(row, dict):
                 continue
             kind = row.get("type")
-            if kind == "user":
-                if _is_tool_result(row):
-                    # 工具回傳也記成 `user` 列，但它不是一個回合的結束——把它當邊界的話，
-                    # 一個回合會被切成十幾段。後果有兩個：機會數（分母）虛高好幾倍，讓
-                    # 自動降級的門檻形同虛設；以及一堆工具呼叫前的中段訊息被標成「回合
-                    # 最後一則」，全部變成假漏擋。2026-09-17 對抗審查實測：某個紀錄 300
-                    # 個 user 列裡有 279 個是工具回傳。
-                    continue
+            if kind == _CODEX_SESSION_META:
+                meta = row.get("payload")
+                if isinstance(meta, dict):
+                    session = _one_line(meta.get("session_id") or meta.get("id")) or session
+                continue
+            if kind == "assistant":
+                session = row.get("sessionId") or session
+                stamp = row.get("timestamp") or stamp
+            parts = transcript_reader.turn_parts(row)
+            if parts is None:
+                continue
+            role, row_texts, tools = parts
+            if role == transcript_reader.TOOL_RESULT:
+                # 工具回傳也記成 `user` 列，但它不是一個回合的結束——把它當邊界的話，
+                # 一個回合會被切成十幾段。後果有兩個：機會數（分母）虛高好幾倍，讓
+                # 自動降級的門檻形同虛設；以及一堆工具呼叫前的中段訊息被標成「回合
+                # 最後一則」，全部變成假漏擋。2026-09-17 對抗審查實測：某個紀錄 300
+                # 個 user 列裡有 279 個是工具回傳。
+                continue
+            if role == transcript_reader.USER:
                 if texts or calls:
                     yield session, stamp, memspec.join_turn_text(texts), list(texts), list(calls)
                 texts, calls = [], []
                 continue
-            if kind != "assistant":
-                continue
-            session = row.get("sessionId") or session
             stamp = row.get("timestamp") or stamp
-            message = row.get("message")
-            content = message.get("content") if isinstance(message, dict) else None
-            if not isinstance(content, list):
-                continue
-            for block in content:
-                if not isinstance(block, dict):
-                    continue
-                if block.get("type") == "text" and isinstance(block.get("text"), str):
-                    if block["text"].strip():
-                        texts.append(block["text"])
-                elif block.get("type") == "tool_use":
-                    payload = block.get("input")
-                    joined = "\n".join(
-                        value for value in (payload or {}).values() if isinstance(value, str)
-                    ) if isinstance(payload, dict) else ""
-                    calls.append((_one_line(block.get("name")), joined))
+            texts.extend(text for text in row_texts if isinstance(text, str) and text.strip())
+            for name, payload in tools:
+                # 守衛讀的就是閘的那一串（pretooluse_gate._action_text）：不含 description，
+                # 長度同一個上限。自己併一份的話，只在說明欄湊到字面的呼叫會被算成漏擋，
+                # 而且指紋對不上閘記下的那一列。時間記這一次呼叫的，不是回合結尾的。
+                calls.append((_one_line(name), _action_text(payload),
+                              row.get("timestamp") or stamp))
     if texts or calls:
         yield session, stamp, memspec.join_turn_text(texts), list(texts), list(calls)
 
@@ -230,12 +281,15 @@ def _epoch_of(stamp):
         return None
 
 
-def replay(rules, transcripts, epoch=None, since=None):
+def replay(rules, transcripts, epoch=None, since=None, until=None):
     """整天的對話對上這些卡，回傳每一次命中。
 
     只算「卡片存在之後」發生的事。比的是事件當下的時間，不是現在：拿現在去比，等於把
     卡片還不存在的那整段時間也算成漏擋，憑空長出一堆假缺口——2026-09-17 第一次實跑就
     這樣多算了 374 次。`epoch` 是額外的上界（測試用），事件時間讀不出來時才退回它。
+
+    `until`（epoch 秒，不含）是這一晚窗口的終點：掃描被上限截斷時是接續點，否則是夢開跑
+    那一刻。之後的事下一晚才算，這一晚先算了就會算兩次。
     """
     hits = []
     cache = {}
@@ -246,6 +300,8 @@ def replay(rules, transcripts, epoch=None, since=None):
             # 本身的時間切，不能照檔案的修改時間——否則會跟稽核帳的起算日對不齊，把
             # 窗外早就擋過的事算成漏擋（2026-09-17 第一次實跑就是這樣多報一條）。
             if since is not None and happened is not None and happened < since:
+                continue
+            if until is not None and happened is not None and happened >= until:
                 continue
             if happened is None:
                 happened = epoch
@@ -258,11 +314,11 @@ def replay(rules, transcripts, epoch=None, since=None):
                     # all() 是真，照原樣走下去會把每一次同類呼叫都算成命中，夜間報表整排變假。
                     if not rule.fragments:
                         continue
-                    for tool, payload in calls:
+                    for tool, payload, called in calls:
                         if not payload or not memspec.action_guard_tool_matches(rule.tool, tool):
                             continue
                         if all(fragment in payload for fragment in rule.fragments):
-                            hits.append(Hit(rule.card, "guard", session, stamp,
+                            hits.append(Hit(rule.card, "guard", session, called,
                                             "＋".join(rule.fragments), _digest(payload), True, payload))
                     continue
                 if rule.kind in ("turn_check", memspec.FENCE_SHELL_RULE):
@@ -331,13 +387,7 @@ def _read_gate_log(path, since, counts, stopped):
                 continue
             if not isinstance(row, dict):
                 continue
-            if row.get("kind") not in (
-                memspec.STOP_GATE_LOG_KIND,
-                # 只提醒不擋的那一種也是「這條規則被違反了一次」，照樣算命中。
-                memspec.STOP_NOTE_LOG_KIND,
-                memspec.ACTION_GUARD_LOG_KIND,
-                memspec.WRITE_GATE_LOG_KIND,
-            ):
+            if row.get("kind") not in _BLOCK_LOG_KINDS:
                 continue
             stamp = str(row.get("timestamp", ""))
             if since and stamp[:10] < since:
@@ -349,18 +399,15 @@ def _read_gate_log(path, since, counts, stopped):
                 stopped.add((session, row["digest"]))
 
 
-def masked_exemptions(vault, since=None):
-    """引用豁免放過的命中：卡名 -> 次數。
-
-    重放看不到這些——它跟閘用同一套遮罩，所以在它眼裡那些根本不算命中。閘會為每一次
-    豁免寫一列，這裡把那些列數出來，讓「某條規則被引用豁免放過幾次」在夜報上是個數字。
-    短句加引號與真正的引用長得一樣，機器分不出來；分不出來的東西至少要數得出來。
-    """
+def _gate_log_paths(vault):
+    # 輪替出去的那幾份也要讀：稽核檔滿了會改名存檔，只讀主檔的話，輪替之前每一次真的
+    # 擋下都會被算成漏擋（2026-09-17 對抗審查）。
     root = Path(vault)
-    paths = [root / memspec.GATE_LOG_FILENAME]
-    paths += sorted(root.glob(memspec.GATE_LOG_FILENAME + ".*"))
-    counts = {}
-    for path in paths:
+    return [root / memspec.GATE_LOG_FILENAME, *sorted(root.glob(memspec.GATE_LOG_FILENAME + ".*"))]
+
+
+def _gate_log_lines(vault):
+    for path in _gate_log_paths(vault):
         try:
             stream = io.open(path, encoding="utf-8", errors="replace")
         except OSError:
@@ -374,19 +421,200 @@ def masked_exemptions(vault, since=None):
                     row = json.loads(line)
                 except ValueError:
                     continue
-                if not isinstance(row, dict):
-                    continue
-                if row.get("kind") != memspec.STOP_GATE_MASKED_LOG_KIND:
-                    continue
-                if since and str(row.get("timestamp", ""))[:10] < since:
-                    continue
-                name = row.get("decision") or ""
-                counts[name] = counts.get(name, 0) + 1
+                if isinstance(row, dict):
+                    yield row
+
+
+def _in_window(stamp, since, until):
+    """稽核列在不在窗口裡。since／until 是 epoch 秒（精確比）；since 是日期字串時照舊
+    按日期比（舊呼叫端）。時間讀不出來的列留著——寧可多一列可對，也不要憑空多一次漏擋。"""
+    if isinstance(since, str):
+        return not since or str(stamp or "")[:10] >= since
+    happened = _epoch_of(stamp)
+    if happened is None:
+        return True
+    if since is not None and happened < since:
+        return False
+    return until is None or happened < until
+
+
+def gate_rows(vault, since=None, until=None):
+    """閘自己的稽核帳，一列一筆，帶精確時間：[GateRow(session, card, at, digest, kind)]。
+
+    `gate_blocks` 只給 (場次, 卡) 的次數，而且按日期取整——同一天、窗口之前就擋過的那一次
+    會留在計數裡，把窗口內一次真正的漏擋抵掉。這裡照精確時間收，兩端各多收一段對帳寬限：
+    閘的紀錄在事件之後幾秒才寫（秒以下捨去），窗口邊上的那一次不能因此對不上。
+    """
+    lower = None if since is None else since - GATE_MATCH_EARLY_SECONDS
+    upper = None if until is None else until + GATE_MATCH_LATE_SECONDS
+    rows = []
+    for row in _gate_log_lines(vault):
+        if row.get("kind") not in _BLOCK_LOG_KINDS:
+            continue
+        stamp = row.get("timestamp")
+        if not _in_window(stamp, lower, upper):
+            continue
+        rows.append(GateRow(
+            row.get("session_id") or "",
+            row.get("card") or row.get("decision") or "",
+            _epoch_of(stamp),
+            row.get("digest") or "",
+            row.get("kind"),
+        ))
+    return rows
+
+
+def _card_key(vault, card):
+    """送達帳與規則共用的卡片識別：庫＋相對路徑，解析成同一個絕對路徑字串。"""
+    try:
+        return os.path.normcase(os.fspath((Path(vault) / card).resolve()))
+    except (OSError, TypeError, ValueError):
+        return ""
+
+
+def deliveries(vaults, until=None):
+    """喚回送達帳（各庫 .epitype/ 裡的主檔與輪替檔）：[Delivery(場次, 卡識別, 時間, 方式, 宿主)]。
+
+    只收 `until` 之前的。不在這裡切窗口起點：同一場可能昨天就送達、今晚才違反，歸因要
+    看得到那一次送達；「今晚送達幾次」由呼叫端再照窗口數。
+    """
+    found, seen = [], set()
+    for vault in vaults:
+        base = Path(vault) / memspec.FTS_INDEX_DIRECTORY / memspec.RECALL_DELIVERY_LOG_FILENAME
+        for path in (base.with_name(base.name + ".1"), base):
+            try:
+                key = os.path.normcase(os.fspath(path.resolve()))
+            except OSError:
+                continue
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                stream = io.open(path, encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            with stream:
+                for line in stream:
+                    try:
+                        row = json.loads(line)
+                    except ValueError:
+                        continue
+                    if not isinstance(row, dict):
+                        continue
+                    happened = _epoch_of(row.get("timestamp"))
+                    if happened is None or (until is not None and happened >= until):
+                        continue
+                    card = _card_key(row.get("vault") or vault, str(row.get("card") or ""))
+                    if card:
+                        found.append(Delivery(str(row.get("session_id") or ""), card, happened,
+                                              str(row.get("mode") or ""), str(row.get("host") or "")))
+    return found
+
+
+def delivered_then_violated(vaults, rules, delivered, rows, missed, since=None, until=None,
+                            limit=None):
+    """送達→違反帳：({"armed": [...], "plain": [...]}, 送達總數, 送了幾張卡, 送達後違反的場次總數)。
+
+    武裝規則：每張卡列出窗口內送達幾次、幾場，以及「送達之後同一場仍被擋（閘的稽核列）
+    或漏擋（重放）」的場次數。擋下也算——規則已經在對話裡了還是照犯，閘擋得住不代表
+    規則有被照做。純文字規則沒有東西可以自動比，只列送達次數並寫明判定不了。
+    """
+    limit = DELIVERY_REPORT_LIMIT if limit is None else limit
+    vault_of = {}
+    keys = {}
+    for vault, rule in rules:
+        card = _card_key(vault, Path(rule.path).relative_to(vault)) if rule.path else ""
+        if not card:
+            continue
+        vault_of[card] = Path(rule.path).relative_to(vault).as_posix()
+        keys.setdefault(card, set()).update({rule.card, Path(rule.path).stem})
+    violations = {}
+    for row in rows:
+        if row.at is None or (since is not None and row.at < since) or (
+                until is not None and row.at >= until):
+            continue
+        violations.setdefault((row.session, row.card), []).append(row.at)
+    for hit in missed:
+        happened = _epoch_of(hit.at)
+        if happened is not None:
+            violations.setdefault((hit.session, hit.card), []).append(happened)
+
+    per_card = {}
+    for item in delivered:
+        entry = per_card.setdefault(item.card, {"window": 0, "window_sessions": set(), "first": {}})
+        if since is None or item.at >= since:
+            entry["window"] += 1
+            entry["window_sessions"].add(item.session)
+        first = entry["first"]
+        if item.session and item.at < first.get(item.session, float("inf")):
+            first[item.session] = item.at
+
+    armed, plain = [], []
+    total_violated = 0
+    for card, entry in per_card.items():
+        names = keys.get(card)
+        shown = vault_of.get(card) or _display_card(vaults, card)
+        if names:
+            violated = sum(
+                1 for session, at in entry["first"].items()
+                if any(moment >= at for name in names for moment in violations.get((session, name), ()))
+            )
+            total_violated += violated
+            if entry["window"] or violated:
+                armed.append({"card": shown, "rule": _rule_name(names, card),
+                              "deliveries": entry["window"],
+                              "sessions": len(entry["window_sessions"]),
+                              "violated_sessions": violated})
+        elif entry["window"]:
+            plain.append({"card": shown, "deliveries": entry["window"],
+                          "sessions": len(entry["window_sessions"]),
+                          "verdict": DELIVERY_UNJUDGEABLE})
+    armed.sort(key=lambda item: (-item["violated_sessions"], -item["deliveries"], item["card"]))
+    plain.sort(key=lambda item: (-item["deliveries"], item["card"]))
+    window_total = sum(entry["window"] for entry in per_card.values())
+    delivered_cards = sum(1 for entry in per_card.values() if entry["window"])
+    return ({"armed": armed[:limit], "plain": plain[:limit]},
+            window_total, delivered_cards, total_violated)
+
+
+def _rule_name(names, card):
+    stem = Path(card).stem
+    named = sorted(name for name in names if name and os.path.normcase(name) != os.path.normcase(stem))
+    return named[0] if named else stem
+
+
+def _display_card(vaults, card):
+    for vault in vaults:
+        try:
+            return Path(card).relative_to(os.path.normcase(os.fspath(Path(vault).resolve()))).as_posix()
+        except ValueError:
+            continue
+    return card
+
+
+def masked_exemptions(vault, since=None, until=None):
+    """引用豁免放過的命中：卡名 -> 次數。
+
+    重放看不到這些——它跟閘用同一套遮罩，所以在它眼裡那些根本不算命中。閘會為每一次
+    豁免寫一列，這裡把那些列數出來，讓「某條規則被引用豁免放過幾次」在夜報上是個數字。
+    短句加引號與真正的引用長得一樣，機器分不出來；分不出來的東西至少要數得出來。
+    """
+    counts = {}
+    for row in _gate_log_lines(vault):
+        if row.get("kind") != memspec.STOP_GATE_MASKED_LOG_KIND:
+            continue
+        if not _in_window(row.get("timestamp"), since, until):
+            continue
+        name = row.get("decision") or ""
+        counts[name] = counts.get(name, 0) + 1
     return counts
 
 
 def reconcile(hits, blocks, stopped=()):
     """命中對上稽核帳：哪些當場擋了，哪些漏了。
+
+    `blocks` 是 `gate_rows` 的逐列紀錄（照時間與指紋對）；舊呼叫端給的 {(場次, 卡): 次數}
+    照舊按次數抵。
 
     三件事不算漏擋，因為它們都是設計而不是缺口：
     - 同一場、同一張卡、同一段話重複出現——Stop 閘只擋一次，不然改不動就被永遠擋著。
@@ -394,6 +622,8 @@ def reconcile(hits, blocks, stopped=()):
       這一類現在應為零；留著是為了宿主送不出對話紀錄時仍講得出來）。
     - 同一則訊息已經被別張卡擋下——閘一次只報一個理由就停手，那則訊息已經被退回重寫。
     """
+    if not isinstance(blocks, dict):
+        return _reconcile_rows(hits, list(blocks), stopped)
     remaining = dict(blocks)
     stopped = set(stopped)
     seen = set()
@@ -417,12 +647,116 @@ def reconcile(hits, blocks, stopped=()):
     return blocked, missed, unseen
 
 
-def transcripts_for(roots, since_stamp=None, limit=MAX_TRANSCRIPTS):
-    """(要重放的對話紀錄檔, 符合條件的總數)，新的優先。
+class TranscriptScan(tuple):
+    """(要重放的對話紀錄檔, 窗口內總數)——照舊可以拆成兩個值；另外帶兩樣東西：
+
+    - `by_host`：{宿主: [讀了幾份, 窗口內共幾份]}。
+    - `frontier`：被上限截斷時，下一晚要從哪一刻接著讀；沒截斷是 None。
+    """
+
+    def __new__(cls, paths, available, by_host=None, frontier=None):
+        scan = super().__new__(cls, (paths, available))
+        scan.by_host = dict(by_host or {})
+        scan.frontier = frontier
+        return scan
+
+
+def _first_event_epoch(path, max_lines=FIRST_EVENT_MAX_LINES, max_bytes=FIRST_EVENT_MAX_BYTES):
+    """紀錄檔裡第一個有時間的列是幾點（epoch 秒）；讀不到回 None。
+
+    對話紀錄只會往後加，所以第一個時間就是這一場的起點，而檔案裡每一件事都不早於它。
+    """
+    read = 0
+    try:
+        stream = io.open(path, encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    with stream:
+        for number, line in enumerate(stream):
+            read += len(line)
+            if number >= max_lines or read > max_bytes:
+                break
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(row, dict):
+                happened = _epoch_of(row.get("timestamp"))
+                if happened is not None:
+                    return happened
+    return None
+
+
+def _reconcile_rows(hits, rows, stopped=()):
+    """逐列對帳。先認指紋：同場、同卡、同一段話的那一列就是它當場被擋的紀錄。沒有指紋
+    （舊列、寫入閘）或指紋算法跟重放對不上（Codex 的 exec 內層指令、閘只讀到回合尾段）
+    的，才退回時間：同場同卡、落在這一次命中前後寬限內、還沒被別次用掉的那一列。
+    """
+    stopped = set(stopped) | {(row.session, row.digest) for row in rows if row.digest}
+    used = [False] * len(rows)
+    exact, nearby = {}, {}
+    for index in sorted(range(len(rows)), key=lambda index: (rows[index].at or 0.0, index)):
+        row = rows[index]
+        nearby.setdefault((row.session, row.card), []).append(index)
+        if row.digest:
+            exact.setdefault((row.session, row.card, row.digest), []).append(index)
+    seen = set()
+    candidates, unseen = [], []
+    for hit in hits:
+        if not hit.final and hit.kind != "guard":
+            unseen.append(hit)
+            continue
+        marker = (hit.session, hit.card, hit.digest)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        candidates.append(hit)
+    stopped_here = set()
+    for position, hit in enumerate(candidates):
+        for index in exact.get((hit.session, hit.card, hit.digest), ()):
+            if not used[index]:
+                used[index] = True
+                stopped_here.add(position)
+                break
+    for position in sorted(range(len(candidates)),
+                           key=lambda position: (_epoch_of(candidates[position].at) or 0.0, position)):
+        if position in stopped_here:
+            continue
+        hit = candidates[position]
+        # 同一則訊息已經被別張卡擋下——閘一次只報一個理由就停手，那則已經退回重寫。
+        if (hit.session, hit.digest) in stopped:
+            stopped_here.add(position)
+            continue
+        happened = _epoch_of(hit.at)
+        for index in nearby.get((hit.session, hit.card), ()):
+            if used[index]:
+                continue
+            at = rows[index].at
+            if happened is not None and at is not None and not (
+                happened - GATE_MATCH_EARLY_SECONDS <= at <= happened + GATE_MATCH_LATE_SECONDS
+            ):
+                continue
+            used[index] = True
+            stopped_here.add(position)
+            break
+    blocked = [hit for position, hit in enumerate(candidates) if position in stopped_here]
+    missed = [hit for position, hit in enumerate(candidates) if position not in stopped_here]
+    return blocked, missed, unseen
+
+
+def transcripts_for(roots, since_stamp=None, limit=None):
+    """窗口內（修改時間不早於 since_stamp）的對話紀錄，**先開始的先讀**，最多 limit 份。
 
     總數一起回傳，因為「只讀了其中一部分」與「查遍全部、零漏擋」報出來長得一模一樣。
     2026-09-17 實測這台機器 24 小時內動過 101 個檔，當時上限 24——76% 被無聲丟掉。
+
+    以前取「最新的」那幾份：積壓一旦超過上限，每晚都截斷、接續點永遠不前進，最舊的那
+    幾份永遠輪不到。改成照每份紀錄的起點由舊到新排，截斷時接續點＝第一份沒讀的紀錄的
+    起點：沒讀的紀錄裡每一件事都不早於它，所以「窗口起點到接續點」之間發生的事一定全
+    在已讀的檔裡——這一段算完整，接續點之後的留給下一晚，不漏也不重算。只按修改時間
+    排做不到這件事：一份還在寫的長場次修改時間很新，裡面卻有接續點之前的事。
     """
+    limit = MAX_TRANSCRIPTS if limit is None else limit
     found = []
     for root in roots:
         try:
@@ -430,15 +764,71 @@ def transcripts_for(roots, since_stamp=None, limit=MAX_TRANSCRIPTS):
         except OSError:
             continue
         for path in entries:
+            # 記憶庫就住在宿主的專案目錄底下，它自己的稽核帳（`_GATE_LOG.jsonl`）與
+            # `.epitype/` 裡的紀錄也是 .jsonl。那些不是對話，算進來會把分母灌水，讓
+            # 「讀了幾份／窗口內共幾份」失真。宿主的對話檔名與目錄都不以 `.`／`_` 開頭。
+            if any(part.startswith((".", "_")) for part in path.relative_to(root).parts):
+                continue
             try:
                 info = path.stat()
             except OSError:
                 continue
             if since_stamp is not None and info.st_mtime < since_stamp:
                 continue
-            found.append((info.st_mtime, path))
-    found.sort(reverse=True)
-    return [path for _mtime, path in found[:limit]], len(found)
+            born = _first_event_epoch(path)
+            # 讀不出起點的排最前面：寧可每晚都讀它，也不能讓它排到接續點後面而讓接續點
+            # 越過它裡面的事。
+            found.append((0.0 if born is None else born, info.st_mtime, os.fspath(path), path))
+    found.sort(key=lambda item: item[:3])
+    picked = found[:limit]
+    by_host = {}
+    for index, (_born, _mtime, _name, path) in enumerate(found):
+        counted = by_host.setdefault(transcript_host(path), [0, 0])
+        counted[1] += 1
+        if index < limit:
+            counted[0] += 1
+    frontier = found[limit][0] if len(found) > limit else None
+    return TranscriptScan([item[3] for item in picked], len(found), by_host, frontier)
+
+
+def coverage(scan, available=None):
+    """{"processed", "available", "pct", "status", "by_host"}：這一晚讀了窗口裡的幾成。
+
+    status 只有三種：完整（一份都沒少）、部分（少了但讀到八成以上）、不完整（不到八成）。
+    不到八成的那一晚，漏擋數字不能跟完整的一晚放在一起比。
+    """
+    paths, total = scan
+    total = total if available is None else available
+    processed = len(paths)
+    by_host = getattr(scan, "by_host", None)
+    if not by_host:
+        by_host = {}
+        for path in paths:
+            by_host.setdefault(transcript_host(path), [0, 0])[0] += 1
+        # 手上只有總數時，沒讀到的那幾份不知道是誰的；全記在 Claude 名下（舊格式）。
+        claude = by_host.setdefault("claude", [0, 0])
+        claude[1] = claude[0] + max(0, total - processed)
+        for host, counted in by_host.items():
+            if host != "claude":
+                counted[1] = counted[0]
+    if total <= processed:
+        status = COVERAGE_STATUS_COMPLETE
+    elif processed * 100 < COVERAGE_COMPLETE_PERCENT * total:
+        status = COVERAGE_STATUS_INCOMPLETE
+    else:
+        status = COVERAGE_STATUS_PARTIAL
+    pct = 100 if total <= 0 else min(100, processed * 100 // total)
+    return {"processed": processed, "available": total, "pct": pct, "status": status,
+            "by_host": by_host}
+
+
+def transcript_host(path):
+    """這份對話紀錄是哪個宿主寫的。只看落點，與事件識別（capture.event_host）同一個判準；
+    判不出來的算 Claude——重放在 Codex 出現之前就只讀那一種格式。"""
+    from epitype import capture
+
+    found = capture.event_host({"transcript_path": os.fspath(path)})
+    return capture.HOST_CODEX if found == capture.HOST_CODEX else capture.HOST_CLAUDE
 
 
 def first_call_input_tokens(transcripts, since=None):
@@ -534,7 +924,7 @@ def noop_blocks(blocked, finals):
     return found
 
 
-def opportunities(transcripts, since=None):
+def opportunities(transcripts, since=None, until=None):
     """歷史裡有幾次「它本來就有機會命中」：回合數，以及各工具的呼叫次數。
 
     命中次數本身說不出一條樣式寬不寬——heredoc 那條 36 小時攔了 8 次，因為我真的犯了
@@ -547,9 +937,11 @@ def opportunities(transcripts, since=None):
             happened = _epoch_of(stamp)
             if since is not None and happened is not None and happened < since:
                 continue
+            if until is not None and happened is not None and happened >= until:
+                continue
             if final_text:
                 turns += 1
-            for tool, payload in calls:
+            for tool, payload, _called in calls:
                 if payload:
                     key = tool.casefold()
                     tools[key] = tools.get(key, 0) + 1
@@ -993,12 +1385,14 @@ def _selftest():
             ))
 
             newer = root / "new.jsonl"
-            newer.write_text("{}\n", encoding="utf-8")
+            newer.write_text(json.dumps({"type": "user", "timestamp": "2026-09-17T00:00:00+00:00"})
+                             + "\n", encoding="utf-8")
             os.utime(newer, (time.time(), time.time()))
             picked, available = transcripts_for([root], since_stamp=time.time() - 3600)
             checks.append((
-                "只挑起算時間之後動過的紀錄檔，新的排前面，並回報符合條件的總數",
-                picked and picked[0] == newer and available == len(picked),
+                "只挑起算時間之後動過的紀錄檔，先開始的排前面（積壓時最舊的不會永遠輪不到），"
+                "並回報符合條件的總數",
+                picked == [transcript, newer] and available == len(picked),
             ))
             few, total = transcripts_for([root], since_stamp=time.time() - 3600, limit=1)
             checks.append((
@@ -1260,8 +1654,10 @@ def samples(vault, roots, card=None, days=SAMPLE_DAYS, limit=SAMPLE_LIMIT, now=N
 
 def _sample_roots():
     home = Path.home().resolve()
-    root = home / memspec.HOST_STATE_DIRECTORY / memspec.HOST_PROJECTS_DIRECTORY
-    return [root] if root.is_dir() else []
+    roots = [home / memspec.HOST_STATE_DIRECTORY / memspec.HOST_PROJECTS_DIRECTORY]
+    roots += [home / memspec.CODEX_STATE_DIRECTORY / name
+              for name in memspec.CODEX_TRANSCRIPT_DIRECTORIES]
+    return [root for root in roots if root.is_dir()]
 
 
 def _print_samples(argv):

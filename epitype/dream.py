@@ -50,6 +50,19 @@ TIME_BUDGET_ERROR = "time budget exhausted before this section ran"
 DEFAULT_EVENT_AGING_DAYS = 90
 COMPLIANCE_INITIAL_LOOKBACK_SECONDS = 24 * 60 * 60
 COMPLIANCE_CHECKPOINT_FIELD = "last_compliance_started"
+# 接續點讀不到時退回只看 24 小時；報告要寫明是哪一種讀不到，不能看起來像完整接續。
+COMPLIANCE_RESET_MISSING = "狀態檔不存在"
+COMPLIANCE_RESET_CORRUPT = "狀態檔損壞"
+COMPLIANCE_RESET_NO_CHECKPOINT = "沒有接續點"
+COMPLIANCE_RESET_INVALID = "接續點無效"
+COMPLIANCE_RESET_NO_STATE_PATH = "未指定狀態檔"
+COMPLIANCE_COVERAGE_NOTE = "重放覆蓋率 {pct}%（{status}；Claude {claude}、Codex {codex}）"
+COMPLIANCE_FRONTIER_NOTE = "被單晚上限截斷，只算到 {at}，下一晚從那裡接續"
+COMPLIANCE_RESET_NOTE = "窗口重設（{reason}），只回看 24 小時，更早的沒有重放"
+COMPLIANCE_STUCK_ERROR = (
+    "接續點無法前進：窗口起點之前開始、至今還在寫的紀錄就超過單晚上限，"
+    "本晚只讀了其中 {read} 份，下一晚會重算同一段"
+)
 RECENT_WINDOW_DAYS = 7
 DRAFT_DIRNAME = "_drafts"
 _EVENT_TYPE_BY_DIR = dict(memspec.EVENT_CARD_DIRECTORIES)  # {"grants": "grant", ...}
@@ -1811,6 +1824,55 @@ def shape_index(vault, today, apply=True, stamp=None):
 # --------------------------------------------------------------------------- section 13
 
 
+def _transcript_roots(vaults):
+    """要重放的對話紀錄目錄：每個庫所在家目錄的 Claude 專案目錄，加上同一個家目錄的
+    Codex 紀錄（進行中與封存）。只有一個宿主的家目錄就只有那一個宿主的目錄。
+
+    只認從登記庫自己往上找到的專案目錄，不吃 `_projects_roots` 的家目錄退路：那條退路
+    會讓一個放在暫存目錄的庫去重放真機上別人的對話，既是測試污染，也等於拿甲專案的
+    紀錄去對乙專案的卡。
+
+    庫不在宿主的專案目錄底下時就沒有對話可重放。那不是錯誤，是這台機器上沒有那份
+    資料；報成錯誤會讓整晚的夢被標成沒跑完。
+
+    Codex 的紀錄跟著庫所在的那個家目錄走（`<家>/.codex`），不讀 `$CODEX_HOME`：那個
+    環境變數指的是跑夢的這個行程的 Codex，放在暫存家目錄的庫一讀它就會重放真機的對話。
+    """
+    roots = []
+
+    def add(directory):
+        if directory.is_dir() and directory not in roots:
+            roots.append(directory)
+
+    for vault in vaults:
+        resolved = Path(vault).resolve()
+        home = None
+        for parent in resolved.parents:
+            if (
+                parent.name == memspec.HOST_PROJECTS_DIRECTORY
+                and parent.parent.name == memspec.HOST_STATE_DIRECTORY
+                and parent.is_dir()
+            ):
+                add(parent)
+                home = parent.parent.parent
+                break
+        else:
+            # 記憶庫不一定住在宿主的專案目錄底下（安裝器有退路位置），但對話紀錄一定
+            # 住在那裡。只認庫的祖先目錄的話，那些使用者的夜間回饋永遠不會跑，而且回
+            # 報全零、沒有錯誤——跟「查遍全部、零漏擋」長得一模一樣。
+            # 仍然要求庫在這個家目錄底下，免得暫存目錄裡的庫去重放真機上別人的對話。
+            candidate = Path.home().resolve()
+            try:
+                resolved.relative_to(candidate)
+            except ValueError:
+                continue
+            home = candidate
+            add(home / memspec.HOST_STATE_DIRECTORY / memspec.HOST_PROJECTS_DIRECTORY)
+        for name in memspec.CODEX_TRANSCRIPT_DIRECTORIES:
+            add(home / memspec.CODEX_STATE_DIRECTORY / name)
+    return roots
+
+
 def _section_compliance(vaults, today, since_date, config, context=None):
     """白天的閘到底有沒有在擋：重放對話，跟閘自己的稽核帳對帳。
 
@@ -1820,37 +1882,20 @@ def _section_compliance(vaults, today, since_date, config, context=None):
     """
     from epitype import compliance
 
-    # 只認從登記庫自己往上找到的專案目錄，不吃 `_projects_roots` 的家目錄退路：那條退路
-    # 會讓一個放在暫存目錄的庫去重放真機上別人的對話，既是測試污染，也等於拿甲專案的
-    # 紀錄去對乙專案的卡。
-    #
-    # 庫不在宿主的專案目錄底下時就沒有對話可重放。那不是錯誤，是這台機器上沒有那份
-    # 資料；報成錯誤會讓整晚的夢被標成沒跑完。
-    roots = []
-    for vault in vaults:
-        resolved = Path(vault).resolve()
-        for parent in resolved.parents:
-            if (
-                parent.name == memspec.HOST_PROJECTS_DIRECTORY
-                and parent.parent.name == memspec.HOST_STATE_DIRECTORY
-                and parent.is_dir()
-            ):
-                if parent not in roots:
-                    roots.append(parent)
-                break
-        else:
-            # 記憶庫不一定住在宿主的專案目錄底下（安裝器有退路位置），但對話紀錄一定
-            # 住在那裡。只認庫的祖先目錄的話，那些使用者的夜間回饋永遠不會跑，而且回
-            # 報全零、沒有錯誤——跟「查遍全部、零漏擋」長得一模一樣。
-            # 仍然要求庫在這個家目錄底下，免得暫存目錄裡的庫去重放真機上別人的對話。
-            home = Path.home().resolve()
-            fallback = home / memspec.HOST_STATE_DIRECTORY / memspec.HOST_PROJECTS_DIRECTORY
-            if fallback.is_dir() and fallback not in roots:
-                try:
-                    resolved.relative_to(home)
-                except ValueError:
-                    continue
-                roots.append(fallback)
+    roots = _transcript_roots(vaults)
+    context = context or {}
+    # 事件卡老化看 90 天；夜間重放只需接續上一趟成功掃描。把兩種窗口共用同一個
+    # since_date 會在每晚重讀數 GB 的舊 transcript，讓後面的宿主同步餓死。
+    window_reset = str(context.get("compliance_window_reset") or "")
+    since_stamp = context.get("compliance_since_stamp")
+    if not isinstance(since_stamp, (int, float)) or isinstance(since_stamp, bool):
+        since_stamp = datetime(
+            today.year, today.month, today.day, tzinfo=timezone.utc
+        ).timestamp() - COMPLIANCE_INITIAL_LOOKBACK_SECONDS
+        window_reset = window_reset or COMPLIANCE_RESET_NO_CHECKPOINT
+    until_stamp = context.get("compliance_until_stamp")
+    if not isinstance(until_stamp, (int, float)) or isinstance(until_stamp, bool):
+        until_stamp = None
     if not roots:
         # 第一天還沒有任何對話可以重放，但「這個庫武裝了幾條規則」現在就該看得見——
         # 那個數字不存在，正是「500 張武裝卡只有 12 張生效」可以無人察覺的原因。
@@ -1863,24 +1908,34 @@ def _section_compliance(vaults, today, since_date, config, context=None):
                 armed += len(compliance.armed_rules(vault))
             except Exception as exc:
                 errors.append(f"{vault}: {type(exc).__name__}: {exc}")
+        covered = compliance.coverage(([], 0))
         return {
             "counts": {"hits": 0, "blocked": 0, "missed": 0, "outside_gate_view": 0,
                        "silent_rules": armed, "transcripts": 0, "transcripts_skipped": 0,
+                       **_coverage_counts(covered, None, window_reset),
                        "armed_rules": armed},
             "examples": [], "commands": [], "errors": errors,
+            "note": _coverage_note(covered, None, window_reset),
         }
 
-    # 事件卡老化看 90 天；夜間重放只需接續上一趟成功掃描。把兩種窗口共用同一個
-    # since_date 會在每晚重讀數 GB 的舊 transcript，讓後面的宿主同步餓死。
-    since_stamp = (context or {}).get("compliance_since_stamp")
-    if not isinstance(since_stamp, (int, float)) or isinstance(since_stamp, bool):
-        since_stamp = datetime(
-            today.year, today.month, today.day, tzinfo=timezone.utc
-        ).timestamp() - COMPLIANCE_INITIAL_LOOKBACK_SECONDS
-    compliance_since_date = datetime.fromtimestamp(since_stamp, timezone.utc).date()
-    transcripts, available = compliance.transcripts_for(roots, since_stamp=since_stamp)
+    scan = compliance.transcripts_for(roots, since_stamp=since_stamp)
+    transcripts, available = scan
+    covered = compliance.coverage(scan)
+    hosts = [compliance.transcript_host(path) for path in transcripts]
+    # 喚回用量與首次呼叫成本只讀得懂 Claude 的列（附加內容、usage 欄）；Codex 的 rollout
+    # 一份幾十 MB，餵進去只是整份讀完什麼都沒數到。
+    claude_transcripts = [path for path, host in zip(transcripts, hosts) if host != "codex"]
 
     errors, examples = [], []
+    all_rules, all_rows = [], []
+    # 被上限截斷時只算到接續點為止：接續點之前的事全在已讀的檔裡，之後的留給下一晚。
+    frontier = getattr(scan, "frontier", None)
+    if frontier is not None:
+        if frontier <= since_stamp:
+            errors.append(COMPLIANCE_STUCK_ERROR.format(read=len(transcripts)))
+            frontier = None
+        else:
+            until_stamp = frontier if until_stamp is None else min(until_stamp, frontier)
     hits, blocked, missed, unseen = [], [], [], []
     silent = []
     exempted = {}
@@ -1890,7 +1945,7 @@ def _section_compliance(vaults, today, since_date, config, context=None):
     write_health = bool((context or {}).get("write_health")) and available == len(transcripts)
     try:
         from epitype import recall_quiet
-        shown = recall_quiet.measure(transcripts, since=compliance_since_date.isoformat())
+        shown = recall_quiet.measure(claude_transcripts, since=since_stamp, until=until_stamp)
     except Exception as exc:
         shown = None
         errors.append(f"喚回用量統計失敗 {type(exc).__name__}: {exc}")
@@ -1902,11 +1957,10 @@ def _section_compliance(vaults, today, since_date, config, context=None):
                 errors.append(f"{vault}: 喚回靜音名單未更新 {type(exc).__name__}: {exc}")
         try:
             rules = compliance.armed_rules(vault)
-            vault_hits = compliance.replay(rules, transcripts, since=since_stamp)
-            counts, stopped = compliance.gate_blocks(vault, since=compliance_since_date.isoformat())
-            vault_blocked, vault_missed, vault_unseen = compliance.reconcile(
-                vault_hits, counts, stopped
-            )
+            vault_hits = compliance.replay(rules, transcripts, since=since_stamp, until=until_stamp)
+            # 精確時間、逐列對帳：同場當天較早的一次擋下不能抵掉窗口內真正的一次漏擋。
+            rows = compliance.gate_rows(vault, since=since_stamp, until=until_stamp)
+            vault_blocked, vault_missed, vault_unseen = compliance.reconcile(vault_hits, rows)
         except Exception as exc:
             errors.append(f"{vault}: {type(exc).__name__}: {exc}")
             continue
@@ -1919,7 +1973,7 @@ def _section_compliance(vaults, today, since_date, config, context=None):
             noops = compliance.noop_blocks(vault_blocked, finals)
             # 彩排：每條樣式在累積的歷史上命中率多少。新卡不必等它明天在 owner 面前
             # 出錯，改過的樣式也不能靠舊數字背書——太寬的當晚就自動降級成只計數。
-            chances = compliance.opportunities(transcripts, since=since_stamp)
+            chances = compliance.opportunities(transcripts, since=since_stamp, until=until_stamp)
             rehearsed = compliance.rehearse(rules, vault_hits, chances)
             if write_health:
                 compliance.update_health(vault, rules, vault_hits, today, noops, rehearsed)
@@ -1930,17 +1984,30 @@ def _section_compliance(vaults, today, since_date, config, context=None):
             # 的數字整個消失——而這一版賴以成立的主張就是「分不出來至少數得出來」，
             # 計數器不能是錯的。
             for card, count in compliance.masked_exemptions(
-                vault, compliance_since_date.isoformat()
+                vault, since_stamp, until_stamp
             ).items():
                 exempted[card] = exempted.get(card, 0) + count
         except Exception as exc:
             errors.append(f"{vault}: 引用豁免統計失敗 {type(exc).__name__}: {exc}")
+        all_rules.extend((Path(vault), rule) for rule in rules)
+        all_rows.extend(rows)
         hits.extend(vault_hits)
         blocked.extend(vault_blocked)
         missed.extend(vault_missed)
         unseen.extend(vault_unseen)
         fired = {hit.card for hit in vault_hits}
         silent.extend(rule.card for rule in rules if rule.card not in fired)
+
+    # 送達→違反：規則送進對話之後同一場還是照犯的，只記擋下的話永遠看不到。
+    delivery = {"armed": [], "plain": []}
+    delivered_total = delivered_cards = delivered_violated = 0
+    try:
+        delivery, delivered_total, delivered_cards, delivered_violated = \
+            compliance.delivered_then_violated(
+                vaults, all_rules, compliance.deliveries(vaults, until=until_stamp),
+                all_rows, missed, since=since_stamp, until=until_stamp)
+    except Exception as exc:
+        errors.append(f"送達帳統計失敗 {type(exc).__name__}: {exc}")
 
     # 例子只留需要人判斷的那些：漏擋。擋成功的、沒命中的都不列——這一節的產出是改好的
     # 健康度檔，不是給人讀的清單，多寫一行就是每天多付一次 token。
@@ -1960,16 +2027,56 @@ def _section_compliance(vaults, today, since_date, config, context=None):
             "transcripts": len(transcripts),
             # 沒讀到的數字一定要在：只讀了一部分與「查遍全部、零漏擋」報出來長得一樣。
             "transcripts_skipped": max(0, available - len(transcripts)),
+            **_coverage_counts(covered, frontier, window_reset),
             # 引用豁免放過的命中。重放看不到它們（同一套遮罩），所以這個數字只能從閘
             # 自己的稽核列來——短句加引號與真正的引用機器分不出來，分不出來至少要數。
             "quoted_exemptions": sum(exempted.values()),
             "recall_quiet": quieted,
-            "first_call_input_tokens_median": compliance.first_call_input_tokens(transcripts, since_stamp),
+            "deliveries": delivered_total,
+            "delivered_cards": delivered_cards,
+            "delivered_violated_sessions": delivered_violated,
+            "first_call_input_tokens_median": compliance.first_call_input_tokens(
+                claude_transcripts, since_stamp),
         },
         "examples": examples,
         "commands": ["python -m epitype.compliance --selftest"] if missed else [],
         "errors": errors,
+        "note": _coverage_note(covered, frontier, window_reset),
+        "delivery": delivery,
     }
+
+
+def _coverage_counts(covered, frontier, window_reset):
+    """第 13 節的覆蓋率欄位：分宿主的讀了幾份／窗口內共幾份、比例、狀態、接續點、窗口重設。"""
+    by_host = covered["by_host"]
+    counts = {}
+    for host in ("claude", "codex"):
+        processed, available = by_host.get(host, (0, 0))
+        counts[f"transcripts_{host}"] = processed
+        counts[f"available_{host}"] = available
+    counts.update({
+        "coverage_pct": covered["pct"],
+        "coverage_status": covered["status"],
+        # 下一晚從這裡接；沒被上限截斷時是 None，接續點改記這一晚開跑的時刻。
+        "compliance_frontier": frontier,
+        "window_reset": window_reset,
+    })
+    return counts
+
+
+def _coverage_note(covered, frontier, window_reset):
+    by_host = covered["by_host"]
+    parts = [COMPLIANCE_COVERAGE_NOTE.format(
+        pct=covered["pct"], status=covered["status"],
+        claude="{}/{}".format(*by_host.get("claude", (0, 0))),
+        codex="{}/{}".format(*by_host.get("codex", (0, 0))),
+    )]
+    if frontier is not None:
+        parts.append(COMPLIANCE_FRONTIER_NOTE.format(
+            at=datetime.fromtimestamp(frontier, timezone.utc).isoformat(timespec="seconds")))
+    if window_reset:
+        parts.append(COMPLIANCE_RESET_NOTE.format(reason=window_reset))
+    return "；".join(parts)
 
 
 # --------------------------------------------------------------------------- section 14
@@ -2093,6 +2200,16 @@ def _next_steps(sections, shaping=()):
         return section.get("counts") or {}
 
     steps = []
+    replay = counts(13)
+    if replay.get("coverage_status") not in (None, compliance_coverage_complete()):
+        steps.append(
+            f"第 13 節重放{replay['coverage_status']}：覆蓋率 {replay.get('coverage_pct')}%"
+            f"（Claude {replay.get('transcripts_claude', 0)}/{replay.get('available_claude', 0)}、"
+            f"Codex {replay.get('transcripts_codex', 0)}/{replay.get('available_codex', 0)}），"
+            "漏擋數字只含已讀的部分，下一晚自動接續"
+        )
+    if replay.get("window_reset"):
+        steps.append(f"第 13 節窗口重設（{replay['window_reset']}）：只回看 24 小時，更早的沒有重放")
     card = counts(2)
     if card.get("fail", 0) > 0:
         steps.append(f"卡片型別檢查有 FAIL {card['fail']} 筆，先修 → epitype cards <vault>")
@@ -2181,7 +2298,8 @@ def _next_steps(sections, shaping=()):
 
 def build_report(vaults, today=None, since_date=None, deadline=None, shaping=None, config=None,
                  harvest_home=None, dry_run=False, write_hosts=False,
-                 compliance_since_stamp=None, write_health=False, host_sync_result=None):
+                 compliance_since_stamp=None, write_health=False, host_sync_result=None,
+                 compliance_until_stamp=None, compliance_window_reset=None):
     today = today or datetime.now(timezone.utc).date()
     since_date = since_date or (today - timedelta(days=DEFAULT_EVENT_AGING_DAYS))
     # 設定讀一次就好：第 8 節要「登記了哪些庫」、第 11 節要三個上限鍵。讀不到就是空
@@ -2206,7 +2324,9 @@ def build_report(vaults, today=None, since_date=None, deadline=None, shaping=Non
     context = {"home": harvest_home, "dry_run": bool(dry_run), "deadline": deadline,
                "write_hosts": bool(write_hosts),
                "write_health": bool(write_health) and not dry_run,
-               "compliance_since_stamp": compliance_since_stamp}
+               "compliance_since_stamp": compliance_since_stamp,
+               "compliance_until_stamp": compliance_until_stamp,
+               "compliance_window_reset": compliance_window_reset}
 
     def run_defined(section):
         section_id, title, fn = section
@@ -2258,6 +2378,18 @@ def _render_section(lines, section):
         lines.append(f"未分類（沒有任何執行層，前 {len(unclassified)} 筆）:")
         for item in unclassified:
             lines.append(f"- {item}")
+    delivery = section.get("delivery") or {}
+    if delivery.get("armed"):
+        lines.append(f"送達後同一場仍被擋或漏擋（前 {len(delivery['armed'])} 條武裝規則）:")
+        for item in delivery["armed"]:
+            lines.append(
+                f"- {item['card']}（{item['rule']}）：送達 {item['deliveries']} 次／{item['sessions']} 場，"
+                f"送達後仍違反 {item['violated_sessions']} 場")
+    if delivery.get("plain"):
+        lines.append(f"純文字規則送達次數（前 {len(delivery['plain'])} 條）:")
+        for item in delivery["plain"]:
+            lines.append(f"- {item['card']}：送達 {item['deliveries']} 次／{item['sessions']} 場，"
+                         f"{item['verdict']}")
     for command in section.get("commands") or ():
         lines.append(f"建議指令：{command}")
     note = section.get("note")
@@ -2608,6 +2740,18 @@ def _headline(report):
     return headline
 
 
+def compliance_coverage_complete():
+    from epitype import compliance
+
+    return compliance.COVERAGE_STATUS_COMPLETE
+
+
+def compliance_coverage_incomplete():
+    from epitype import compliance
+
+    return compliance.COVERAGE_STATUS_INCOMPLETE
+
+
 def _report_errors(report):
     """保留每節及逐庫錯誤；沒有執行的檢查不能折算成零問題。"""
     sections = {section["id"]: section for section in report["sections"]}
@@ -2619,6 +2763,13 @@ def _report_errors(report):
         elif section.get("error") or section.get("errors"):
             errors[str(section_id)] = {
                 "error": section.get("error"), "errors": section.get("errors") or [],
+            }
+        elif section_id == 13 and (section.get("counts") or {}).get("coverage_status") == \
+                compliance_coverage_incomplete():
+            counts = section["counts"]
+            errors[str(section_id)] = {
+                "error": f"重放覆蓋率 {counts.get('coverage_pct')}% 低於 80%：不完整",
+                "errors": [],
             }
         elif section_id == 13 and (section.get("counts") or {}).get("transcripts_skipped"):
             errors[str(section_id)] = {
@@ -3775,9 +3926,12 @@ def main(argv=None, output=sys.stdout):
 
         today = parsed.today or datetime.now(timezone.utc).date()
         since_date = parsed.since or (today - timedelta(days=DEFAULT_EVENT_AGING_DAYS))
-        compliance_since_stamp = _previous_compliance_start(
-            state_path, started_epoch
-        ) if state_path is not None else started_epoch - COMPLIANCE_INITIAL_LOOKBACK_SECONDS
+        window_reset = []
+        if state_path is not None:
+            compliance_since_stamp = _previous_compliance_start(state_path, started_epoch, window_reset)
+        else:
+            compliance_since_stamp = started_epoch - COMPLIANCE_INITIAL_LOOKBACK_SECONDS
+            window_reset.append(COMPLIANCE_RESET_NO_STATE_PATH)
         # Host files are the rule delivery path. Run their reconciliation before
         # index shaping or view generation can consume the night's budget.
         host_title = next(title for number, title, _fn in _SECTIONS if number == 14)
@@ -3818,6 +3972,9 @@ def main(argv=None, output=sys.stdout):
             write_hosts=not parsed.dry_run,
             write_health=not parsed.dry_run,
             compliance_since_stamp=compliance_since_stamp,
+            # 窗口終點＝開跑這一刻；接續點也記這一刻，之後的事下一晚才算，不會算兩次。
+            compliance_until_stamp=started_epoch,
+            compliance_window_reset="；".join(window_reset),
             host_sync_result=early_sync,
         )
         rendered = json.dumps(report, ensure_ascii=False, indent=1)
@@ -3847,13 +4004,22 @@ def main(argv=None, output=sys.stdout):
             release_lock(governance, lock_token)
 
 
-def _previous_compliance_start(path, now):
-    """上次完整重放開始時刻；舊版狀態可由完成時刻與耗時還原。"""
+def _previous_compliance_start(path, now, reasons=None):
+    """上次重放讀完的那一刻；舊版狀態可由完成時刻與耗時還原。
+
+    讀不到時退回只看 24 小時，並把原因放進 `reasons`（給報告寫「窗口重設」）：退回之後
+    的報告跟一次正常接續長得一樣，不講的話沒有人知道更早的那一段根本沒重放。"""
+    reasons = [] if reasons is None else reasons
     try:
         state = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
+    except OSError:
+        reasons.append(COMPLIANCE_RESET_MISSING)
+        return now - COMPLIANCE_INITIAL_LOOKBACK_SECONDS
+    except (ValueError, TypeError):
+        reasons.append(COMPLIANCE_RESET_CORRUPT)
         return now - COMPLIANCE_INITIAL_LOOKBACK_SECONDS
     if not isinstance(state, dict):
+        reasons.append(COMPLIANCE_RESET_CORRUPT)
         return now - COMPLIANCE_INITIAL_LOOKBACK_SECONDS
     checkpoint = state.get(COMPLIANCE_CHECKPOINT_FIELD)
     if checkpoint is None and "13" in (state.get(memspec.DREAM_STATE_SECTIONS_FIELD) or {}):
@@ -3867,6 +4033,7 @@ def _previous_compliance_start(path, now):
                 checkpoint = completed - elapsed
     if isinstance(checkpoint, (int, float)) and not isinstance(checkpoint, bool) and 0 < checkpoint <= now:
         return checkpoint
+    reasons.append(COMPLIANCE_RESET_NO_CHECKPOINT if checkpoint is None else COMPLIANCE_RESET_INVALID)
     return now - COMPLIANCE_INITIAL_LOOKBACK_SECONDS
 
 
@@ -3884,10 +4051,18 @@ def _write_run_state(path, report, out_path, elapsed, started_epoch=None):
     if checkpoint is None and previous:
         checkpoint = _previous_compliance_start(path, time.time())
     compliance = next((section for section in report["sections"] if section["id"] == 13), None)
-    if (compliance and not compliance.get("error") and not compliance.get("errors")
-            and not (compliance.get("counts") or {}).get("transcripts_skipped")
-            and started_epoch is not None):
-        checkpoint = started_epoch
+    counts = (compliance or {}).get("counts") or {}
+    # 整節掛掉（沒有數字）才停在原地。逐庫的錯誤照報、這一晚標成未完整，但不擋接續點：
+    # 一個每晚都壞的庫曾讓接續點永遠不動，窗口一路長到每晚都被上限截斷。
+    if compliance and not compliance.get("error") and counts and started_epoch is not None:
+        frontier = counts.get("compliance_frontier")
+        if not counts.get("transcripts_skipped"):
+            checkpoint = started_epoch
+        elif (isinstance(frontier, (int, float)) and not isinstance(frontier, bool)
+              and frontier <= started_epoch
+              and not (isinstance(checkpoint, (int, float)) and frontier <= checkpoint)):
+            # 被上限截斷：推進到已完整讀完的那一刻，下一晚接著追。
+            checkpoint = frontier
     value = {
         memspec.DREAM_STATE_COMPLETED_FIELD: now.isoformat(timespec="seconds"),
         memspec.DREAM_STATE_COMPLETED_EPOCH_FIELD: round(now.timestamp(), 3),

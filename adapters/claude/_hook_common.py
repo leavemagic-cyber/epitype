@@ -492,11 +492,11 @@ def with_session(row, session_id):
     return row
 
 
-def _rotate_gate_log_if_oversized(target):
+def _rotate_gate_log_if_oversized(target, max_bytes=None):
     """Called with the log's file lock already held. A stat/replace failure is
     swallowed: a rotation that cannot happen must never block the audit write."""
     try:
-        if target.stat().st_size <= GATE_LOG_MAX_BYTES:
+        if target.stat().st_size <= (GATE_LOG_MAX_BYTES if max_bytes is None else max_bytes):
             return
     except OSError:
         return
@@ -521,6 +521,33 @@ def append_gate_log(vault, row, started_at):
         _rotate_gate_log_if_oversized(target)
         with target.open("a", encoding="utf-8", newline="\n") as stream:
             stream.write(json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+
+
+def append_recall_deliveries(vault, rows, started_at):
+    """喚回送達帳：一次提問送出的每張卡一列，同一把檔案鎖寫完（並行的提問不會交錯）。
+
+    呼叫端在輸出送出之後才叫它，失敗一律吞掉：記帳是給夜間對帳用的，不能讓送達晚一步，
+    更不能讓送達失敗。期限已過就不寫（丟 TimeoutError 給呼叫端吞）。"""
+    target = Path(vault) / memspec.FTS_INDEX_DIRECTORY / memspec.RECALL_DELIVERY_LOG_FILENAME
+    remaining = remaining_seconds(started_at)
+    if remaining <= 0:
+        raise TimeoutError("hook deadline reached")
+    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    lines = "".join(
+        json.dumps({"timestamp": stamp, **row}, ensure_ascii=False, separators=(",", ":")) + "\n"
+        for row in rows
+    )
+    if not lines:
+        return
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with memspec.file_lock(target, min(0.25, remaining)) as acquired:
+        if not acquired:
+            raise OSError("recall delivery lock unavailable")
+        _rotate_gate_log_if_oversized(target, memspec.RECALL_DELIVERY_LOG_MAX_BYTES)
+        with target.open("a", encoding="utf-8", newline="\n") as stream:
+            stream.write(lines)
             stream.flush()
             os.fsync(stream.fileno())
 

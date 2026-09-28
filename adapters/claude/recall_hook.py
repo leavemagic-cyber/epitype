@@ -20,6 +20,7 @@ from epitype import context_meter, control_lifecycle, memsearch, memspec, recall
 # 這裡保留原本的私名，呼叫端與 selftest 不因搬移而改。
 from epitype.capture import (
     capture_event as _capture_event,
+    event_host as _event_host,
     grant_digest as _grant_digest,
     is_owner_utterance,
     matched_sentence as _matched_sentence,
@@ -27,6 +28,7 @@ from epitype.capture import (
     write_capture as _write_capture,
 )
 from _hook_common import (
+    append_recall_deliveries,
     isolated_temp_root,
     capture_vault as _capture_vault,
     claim_meter,
@@ -303,14 +305,14 @@ def _source_passage(path, vault, terms, expected_name=None):
     return f"原文節錄 L{index + 1}" + (f"-{end}" if end > index + 1 else "") + f"：{passage}"
 
 
-def _handle(event, started_at, delivery_markers=None, meter_pending=None):
+def _handle(event, started_at, delivery_markers=None, meter_pending=None, deliveries=None):
     prompt = event.get("prompt")
     if not isinstance(prompt, str) or not prompt.strip():
         return None
     config = load_config(started_at)
     if config is None:
         return None
-    value = _recall(event, started_at, config, delivery_markers)
+    value = _recall(event, started_at, config, delivery_markers, deliveries)
     if expired(started_at):
         return None
     value = _with_notes(value, config, event)
@@ -388,7 +390,7 @@ def _with_lifecycle(value, config, event):
     return value
 
 
-def _recall(event, started_at, config, delivery_markers=None):
+def _recall(event, started_at, config, delivery_markers=None, deliveries=None):
     prompt = event["prompt"]
 
     # 落點依「這場對話屬於哪個專案」決定（_hook_common.capture_vault）：專案的卡
@@ -409,6 +411,7 @@ def _recall(event, started_at, config, delivery_markers=None):
     ordinary_groups = []
     legend = []
     shown_names = set()  # 同檔名跨庫（專案的指路卡與通用庫正本）一則只端一張，先到的庫優先
+    origins = {}  # 端出的那一行 -> (庫, 卡在庫裡的相對路徑, 送達方式)，送達帳用
     for vault in scoped_vaults(config, event):
         if expired(started_at):
             return None
@@ -460,6 +463,7 @@ def _recall(event, started_at, config, delivery_markers=None):
                     located = f"{alias}/{Path(path).resolve().relative_to(vault).as_posix()}"
                 except (OSError, ValueError):
                     located = path  # never emit an alias the legend cannot resolve
+            card_identity = located[len(alias) + 1:] if located.startswith(alias + "/") else path
             name = _one_line(hit.get("name"))
             description = _one_line(hit.get("description"))[: memspec.RECALL_DESCRIPTION_MAX_CHARS]
             if decision is not None:
@@ -481,6 +485,8 @@ def _recall(event, started_at, config, delivery_markers=None):
                     parts = (mark + parts[0], *parts[1:])
             prefix = memspec.DECISION_PREFIX if decision is not None else ""
             line = "- " + prefix + " | ".join(part for part in parts if part)
+            origins[line] = (vault, card_identity, memspec.RECALL_DELIVERY_MODE_DECISION
+                             if decision is not None else memspec.RECALL_DELIVERY_MODE_CARD)
             if decision is not None:
                 pinned_entries.append((line, path, vault, result.get("terms", ()), name))
             else:
@@ -503,6 +509,7 @@ def _recall(event, started_at, config, delivery_markers=None):
     pinned = []
     source_reads = 0
     for position, (line, path, vault, terms, name) in enumerate(pinned_entries):
+        origin = origins.get(line)
         if source_reads == 0 and not expired(started_at):
             passage = _source_passage(path, vault, terms, name)
             if passage:
@@ -514,9 +521,11 @@ def _recall(event, started_at, config, delivery_markers=None):
                                 config[memspec.CONFIG_BUDGET_BYTES_FIELD]):
                     line = expanded
                     source_reads += 1
+        origins[line] = origin
         pinned.append(line)
     others = []
     for index, (line, path, vault, terms, name) in enumerate(other_entries):
+        origin = origins.get(line)
         if index < memspec.RECALL_SOURCE_MAX_CARDS - source_reads and not expired(started_at):
             passage = _source_passage(path, vault, terms, name)
             if passage:
@@ -527,6 +536,7 @@ def _recall(event, started_at, config, delivery_markers=None):
                 if payload_fits("UserPromptSubmit", "\n".join([head, *pinned, expanded]),
                                 config[memspec.CONFIG_BUDGET_BYTES_FIELD]):
                     line = expanded
+        origins[line] = origin
         others.append(line)
     session_id = event.get("session_id", event.get("sessionId", ""))
     if not isinstance(session_id, str):
@@ -570,7 +580,29 @@ def _recall(event, started_at, config, delivery_markers=None):
         markers.append((session_id, head_digest))
     if delivery_markers is not None:
         delivery_markers.extend(markers)
+    if deliveries is not None:
+        _queue_deliveries(deliveries, config, event, session_id,
+                          [origins.get(line) for line, _digest in pending if line in sent_lines])
     return payload("UserPromptSubmit", context)
+
+
+def _queue_deliveries(deliveries, config, event, session_id, delivered):
+    """把這一則實際送出的卡排進送達帳（真正寫檔在輸出之後，由 main 做）。
+
+    落在治理庫：閘的稽核列也寫那裡，夜間兩份帳才在同一個地方對。算不出治理庫（有庫
+    暫時不在）就不記——記帳失敗不能影響送達。"""
+    try:
+        target = governance_vault(config, for_write=True)
+    except Exception:
+        return
+    host = _event_host(event)
+    rows = [
+        {"session_id": session_id, "vault": os.fspath(vault), "card": card, "mode": mode,
+         "host": host}
+        for vault, card, mode in (item for item in delivered if item)
+    ]
+    if rows:
+        deliveries.append((target, rows))
 
 
 def _selftest():
@@ -1978,7 +2010,8 @@ def main():
         event = read_event(sys.stdin)
         delivery_markers = []
         meter_pending = []
-        value = _handle(event, _STARTED_AT, delivery_markers, meter_pending)
+        deliveries = []
+        value = _handle(event, _STARTED_AT, delivery_markers, meter_pending, deliveries)
         if (value is not None or meter_pending) and not expired(_STARTED_AT):
             lost = []
             if meter_pending:
@@ -1993,12 +2026,23 @@ def main():
             # can repeat context, but must never suppress context not emitted.
             for session_id, digest in delivery_markers:
                 _claim_marker(session_id, digest)
+            if value is not None:
+                _record_deliveries(deliveries)
     except Exception:
         pass
     if won:
         release_meter(won)
         _trace_meter(event, (), (), won)
     return 0
+
+
+def _record_deliveries(deliveries):
+    """送出之後才記帳；任何失敗（期限到了、鎖搶不到、磁碟寫不進）都吞掉。"""
+    for target, rows in deliveries:
+        try:
+            append_recall_deliveries(target, rows, _STARTED_AT)
+        except Exception:
+            continue
 
 
 def _trace_meter(event, emitted, lost, released=()):
