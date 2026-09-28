@@ -680,7 +680,37 @@ def _prompt_block_gap(decision, message, turn):
     return memspec.TURN_PROMPT_BLOCK_REASON.format(advice=decision.advice)
 
 
-def _turn_check_gap(decision, message, turn, opened_names, defects):
+def _finished_agents_gap(decision, event, started_at):
+    """Codex 主線結束時仍開著的已完成直屬子代理，回一句理由；判不了一律 None。"""
+    if not isinstance(event, dict):
+        return None
+    if (str(event.get("hook_event_name") or "") == memspec.SUBAGENT_STOP_EVENT
+            or event.get("agent_id") or event.get("agentId")):
+        return None
+    path = event.get("transcript_path")
+    if not isinstance(path, str) or not path:
+        return None
+    try:
+        from epitype import codex_agents
+
+        found = codex_agents.unclosed_finished(
+            Path(path), lambda: started_at is not None and expired(started_at))
+    except Exception:
+        # rollout 讀不到、讀壞或格式變了：擋錯人比漏擋貴，放行。
+        return None
+    if not found:
+        return None
+    limit = memspec.TURN_FINISHED_AGENTS_MAX_NAMES
+    names = [f"{nickname}（{agent_id}）" if nickname else agent_id
+             for agent_id, nickname in found[:limit]]
+    if len(found) > limit:
+        names.append(f"等 {len(found)} 個")
+    return memspec.TURN_FINISHED_AGENTS_REASON.format(
+        count=len(found), names=memspec.LIST_JOINER.join(names), advice=decision.advice)
+
+
+def _turn_check_gap(decision, message, turn, opened_names, defects, event=None,
+                    started_at=None):
     """卡片指名的內建檢查。字面比對看不到的事實，由這裡判。"""
     name = decision.turn_check
     if not name:
@@ -696,6 +726,8 @@ def _turn_check_gap(decision, message, turn, opened_names, defects):
         return _unverified_delegation_gap(decision, message, turn)
     if name == memspec.TURN_CHECK_PROMPT_BLOCK:
         return _prompt_block_gap(decision, message, turn)
+    if name == memspec.TURN_CHECK_FINISHED_AGENTS:
+        return _finished_agents_gap(decision, event, started_at)
     return _cited_unread_gap(decision, message, turn, opened_names)
 
 
@@ -1280,7 +1312,8 @@ def _first_violation(decisions, event, message, config, started_at, defects, tur
             except Exception:
                 opened_names = frozenset()
         for decision in decisions:
-            reason = _turn_check_gap(decision, message, turn, opened_names, defects)
+            reason = _turn_check_gap(decision, message, turn, opened_names, defects,
+                                     event=event, started_at=started_at)
             if reason is None:
                 continue
             verdicts.append((decision, _TURN_CHECK_RULE, reason, ""))

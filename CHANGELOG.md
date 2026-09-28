@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### 新增
+
+- 回合閘內建檢查 `turn_check: finished_agents_closed`：Codex 主線 Stop 時，若直屬子代理已完成（completed／errored）卻沒用 `close_agent` 關閉，就列出名稱並要求關閉。依據只取官方 openai/codex rust-v0.156.0，因此只判 multi-agent V1；V2（官方未註冊 `close_agent`）、子代理 Stop、Claude 對話紀錄與讀不完的 rollout 一律放行。卡片需另行啟用。
+
 ### 瀏覽器查漏：需求變更
 
 - 無法確認的紀錄不再永遠掛著：`unverified-*` 開啟一小時後到期，狀態記為 `expired`（不是 `closed`，不冒充關閉確認）。
