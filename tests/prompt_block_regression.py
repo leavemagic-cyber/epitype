@@ -25,11 +25,11 @@ class PromptBlockRegression(unittest.TestCase):
             key="prompt-in-chat", turn_check=memspec.TURN_CHECK_PROMPT_BLOCK,
             advice="請給可直接複製的內容。")
 
-    def turn(self, kind):
+    def turn(self, kind, prompt="給我 PROMPT，貼到新對話"):
         path = self.root / f"{kind}.jsonl"
         if kind == "claude":
             rows = [
-                {"type": "user", "message": {"content": "給我 PROMPT，貼到新對話"}},
+                {"type": "user", "message": {"content": prompt}},
                 {"type": "assistant", "message": {"content": [
                     {"type": "tool_use", "name": "Read", "input": {"path": "source.md"}}]}},
                 {"type": "user", "message": {"content": [
@@ -39,7 +39,7 @@ class PromptBlockRegression(unittest.TestCase):
             rows = [
                 {"type": "response_item", "payload": {
                     "type": "message", "role": "user", "content": [
-                        {"type": "input_text", "text": "給我 PROMPT，貼到新對話"}]}},
+                        {"type": "input_text", "text": prompt}]}},
                 {"type": "response_item", "payload": {
                     "type": "custom_tool_call", "name": "functions.exec", "input": "read source"}},
                 {"type": "response_item", "payload": {
@@ -68,6 +68,43 @@ class PromptBlockRegression(unittest.TestCase):
         turn = stop_gate._turn(prompt="請解釋 PROMPT 是什麼")
         self.assertIsNone(stop_gate._turn_check_gap(
             self.decision, "它是給模型的指示文字。", turn, frozenset(), []))
+
+    def test_owner_typed_text_rejects_machine_wrappers(self):
+        # 機器產生、被包成 user 角色的內容不是 owner 親口說的。
+        for wrapper in (
+            "[Subagent hand-back] 例：write 到 PROMPT.md 時附提示詞。",
+            'Another Claude session sent a message:\n<agent-message from="a">\n'
+            "[Subagent hand-back] give me a prompt 是子代理的話。",
+            "<task-notification>\n<task-id>x</task-id> write a prompt\n</task-notification>",
+            "<system-reminder>\ngive me a prompt\n</system-reminder>",
+            "Stop hook feedback:\n請給一份 prompt。",
+            "<command-name>/goal</command-name> 寫一份 prompt",
+            "<environment_context>\n<cwd>C:\\x</cwd> give a prompt\n</environment_context>",
+        ):
+            self.assertEqual(memspec.owner_typed_text(wrapper), "", wrapper[:40])
+        # owner 親打的仍原樣保留。
+        self.assertEqual(memspec.owner_typed_text("給我一份 prompt"), "給我一份 prompt")
+
+    def test_subagent_report_is_not_an_owner_prompt_request(self):
+        # A2：子代理回報命中「write ... prompt」樣式，owner 當回合沒要提示詞 → 不擋。
+        handback = (
+            'Another Claude session sent a message:\n<agent-message from="a">\n'
+            "[Subagent hand-back] 例：write 到 PROMPT.md 時附提示詞。回報完成。")
+        for host in ("claude", "codex"):
+            with self.subTest(host=host):
+                turn = self.turn(host, prompt=handback)
+                self.assertIn("Subagent hand-back", turn.prompt)
+                self.assertEqual(memspec.owner_typed_text(turn.prompt), "")
+                self.assertIsNone(stop_gate._turn_check_gap(
+                    self.decision, "已整合並驗證，結果如下（無 code block）。",
+                    turn, frozenset(), []))
+
+    def test_owner_prompt_request_still_blocks_on_both_hosts(self):
+        for host in ("claude", "codex"):
+            with self.subTest(host=host):
+                turn = self.turn(host, prompt="給我一份 prompt 貼到新對話")
+                self.assertIsNotNone(stop_gate._turn_check_gap(
+                    self.decision, "提示詞在 C:/tmp/prompt.txt。", turn, frozenset(), []))
 
     def test_installed_stop_path_reads_card_and_transcript(self):
         vault = self.root / "vault"

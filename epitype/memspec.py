@@ -1304,6 +1304,40 @@ TURN_CHECK_PROMPT_BLOCK = "prompt_code_block"
 TURN_CHECK_NAMES = (
     TURN_CHECK_LENGTH, TURN_CHECK_CITED_UNREAD, TURN_CHECK_UNVERIFIED_DELEGATION,
     TURN_CHECK_PROMPT_BLOCK)
+# 這些內容被包成 user 角色送進模型，但都不是 owner 親口說的：子代理回報、背景任務
+# 通知、系統提醒、Stop hook 回饋、斜線指令展開、跨場訊息、宿主注入的環境或工具區塊。
+# 兩宿主的包裝都在這裡認：任何以 `<` 開頭的標籤區塊，加上幾個純文字前綴。依「owner
+# 說了什麼」判斷的回合檢查一律先過 owner_typed_text，否則會把機器產生的包裝當成 owner
+# 本人的請求（2026-09-27：子代理回報裡的「例：write 到 PROMPT.md」命中提示詞請求樣式
+# 而誤擋，owner 當回合根本沒要提示詞）。
+MACHINE_TURN_PREFIXES = (
+    "[subagent hand-back]",
+    "another claude session sent a message",
+    "stop hook feedback",
+    "[request interrupted",
+)
+
+
+def owner_typed_text(text):
+    """回合裡真正由 owner 親打的文字；機器產生的包裝一律回空字串。
+
+    子代理回報、背景任務通知、系統提醒、Stop hook 回饋等都以 user 角色送進模型，觸發詞
+    命中它們不能當成 owner 本人的請求。認不出 owner 親打的話時回空字串，依「owner 說了
+    什麼」的檢查因此不啟動——寧可漏擋，也不要拿機器的話擋 owner。任何以 `<` 開頭的標籤
+    區塊（<agent-message>、<task-notification>、<system-reminder>、<command-name>、
+    <local-command-…>、Codex 的 <environment_context> 等）都算機器產生，與 harvest.owner_text
+    的 `startswith("<")` 判準一致。"""
+    if not isinstance(text, str):
+        return ""
+    stripped = text.strip()
+    if not stripped or stripped.startswith("<"):
+        return ""
+    folded = stripped.casefold()
+    if any(folded.startswith(prefix) for prefix in MACHINE_TURN_PREFIXES):
+        return ""
+    return stripped
+
+
 TURN_PROMPT_REQUEST_PATTERN = (
     r"(?:給我|給一份|寫一份|幫我寫|產生|提供|撰寫).{0,24}(?:prompt|提示詞)"
     r"|(?:write|give|create).{0,24}\bprompt\b"
@@ -1705,6 +1739,9 @@ CARD_ARMING_FIELDS = (
 WRITE_CHECK_FIELD = "write_check"
 WRITE_CHECK_PS51_UTF8_BOM = "ps51_utf8_bom"
 WRITE_CHECK_VALUES = (WRITE_CHECK_PS51_UTF8_BOM,)
+# PowerShell 5.1 讀腳本、模組（.psm1）、資料檔（.psd1）的編碼判準一致：沒有 BOM 就用
+# 系統 ANSI（cp950）解讀非 ASCII 字元。UTF-8 BOM 與 UTF-16 LE/BE BOM 都能讓它正確判碼。
+WRITE_CHECK_PS_SUFFIXES = (".ps1", ".psm1", ".psd1")
 CARD_ARMING_FIELDS = CARD_ARMING_FIELDS + (WRITE_CHECK_FIELD,)
 CARD_GATE_FIELDS = CARD_GATE_FIELDS + (WRITE_CHECK_FIELD,)
 WRITE_CHECK_REASON = (
@@ -1758,14 +1795,19 @@ ACTION_GUARD_KNOWN_TOOLS = frozenset((
     "write", "write_file", "create_file",
     "edit", "edit_file", "str_replace_editor", "multiedit", "multi_edit", "apply_edits",
     "read", "glob", "grep", "notebookedit", "webfetch", "websearch", "agent", "task",
+    # Codex：派子代理 spawn_agent、寫檔 apply_patch。認得它們才能對這些卡做宿主涵蓋檢查。
+    "spawn_agent", "apply_patch",
 ))
 # 同一個工具在不同宿主叫不同名字：卡寫 Bash，Cursor 送 Shell（2026-09-16 實測日誌）。
 # 只比名字相等的話，守衛在別的宿主上不生效也不出聲。PowerShell 不併入：卡片本來就分開寫。
 ACTION_GUARD_TOOL_EQUIVALENTS = (
     frozenset(("bash", "shell", "run_terminal_cmd", "exec_command", "local_shell")),
     # 派工子代理的工具在不同版本送 Task 或 Agent（2026-09-19 實測：同一天兩種都出現在
-    # 真實呼叫裡）。卡片只能寫一個名字，所以不併起來的話守衛在一半的場次上不生效。
-    frozenset(("task", "agent")),
+    # 真實呼叫裡）；Codex 派子代理的工具叫 spawn_agent。卡片只能寫一個名字，所以不併起來
+    # 的話「派工要指名模型」這類守衛在 Codex 永遠不觸發。Codex 的 spawn_agent 參數帶
+    # model／reasoning_effort／task_name／message，欄位名 model 與 Claude 一致，所以
+    # guard_requires: model 併群後兩宿主都對得上。
+    frozenset(("task", "agent", "spawn_agent")),
 )
 
 
@@ -1774,6 +1816,43 @@ def action_guard_tool_matches(card_tool, event_tool):
     if card_tool == event_tool:
         return True
     return any(card_tool in group and event_tool in group for group in ACTION_GUARD_TOOL_EQUIVALENTS)
+
+
+# 兩宿主各自認得的動作工具（casefold）。Codex 沒有 Read（讀檔走 shell）、沒有 PowerShell，
+# 寫檔是 apply_patch 而非 Claude 的 Write／Edit；Claude 這一側沒有 apply_patch。守衛卡的
+# guard_tool 若在某一宿主沒有對應工具（連等價群裡的別名都沒有），那道守衛在該宿主永遠不
+# 觸發——card_lint 出 WARN 點名是哪個宿主，避免「只在一邊生效」被當成全域生效。
+HOST_TOOL_NAMES = {
+    "Claude": frozenset((
+        "bash", "powershell", "write", "write_file", "create_file",
+        "edit", "edit_file", "str_replace_editor", "multiedit", "multi_edit", "apply_edits",
+        "read", "glob", "grep", "notebookedit", "webfetch", "websearch", "task", "agent",
+    )),
+    "Codex": frozenset((
+        "shell", "exec_command", "local_shell", "run_terminal_cmd",
+        "apply_patch", "spawn_agent",
+    )),
+}
+
+
+def hosts_without_tool(card_tool):
+    """這個 guard_tool 沒有對應工具（含等價別名）的宿主清單；兩宿主都有回空清單。"""
+    tool = card_tool.casefold()
+    missing = []
+    for host, tools in HOST_TOOL_NAMES.items():
+        if tool in tools:
+            continue
+        if any(tool in group and (group & tools) for group in ACTION_GUARD_TOOL_EQUIVALENTS):
+            continue
+        missing.append(host)
+    return missing
+
+
+CARD_GUARD_TOOL_HOST_GAP_REASON = (
+    "guard_tool「{tool}」在 {hosts} 沒有對應工具，這道守衛在該宿主不會觸發（Codex 讀檔走"
+    " shell、寫檔是 apply_patch，都沒有 Read／Write／Edit／PowerShell）。若要兩宿主都擋，"
+    "換成兩宿主都有的工具（如 Bash／shell）或另立一張對應卡。"
+)
 
 
 CARD_PATTERN_BROKEN_REASON = (
@@ -2792,6 +2871,9 @@ FENCE_SHELL_DEFAULT_LANGS = (
 )
 # 解析器的上限。超過就放行並在 stderr 留一行——閘門不能因為解析器卡住而失敗。
 FENCE_SHELL_TIMEOUT_SECONDS = 5.0
+# 自測專用：只有持 frozen 時鐘憑證的自測子行程拿這個上限跑端到端，機器忙也不會把「逾時放行」
+# 當成「判斷正確」。產品的 FENCE_SHELL_TIMEOUT_SECONDS 夠不夠解析一次，自測另有一題直接量。
+FENCE_SHELL_SELFTEST_TIMEOUT_SECONDS = 60.0
 FENCE_SHELL_MAX_BLOCKS = 20
 FENCE_SHELL_ERROR_MAX_CHARS = 160
 FENCE_SHELL_SNIPPET_MAX_CHARS = 80
@@ -3008,6 +3090,7 @@ _EN = {
     "CARD_DISARMED_REASON": "{field} is nested one level under {parent}, and the gates read only top-level fields, so this card blocks nothing; move it to the top level of the frontmatter",
     "ACTION_GUARD_DEFECT": "⚠ {field} on guard card {card} is unusable ({reason}), so this one did not apply",
     "CARD_GUARD_TOOL_UNKNOWN_REASON": 'guard_tool "{tool}" is not a tool name we recognise; if it is a typo this guard will never catch anything. Known: {known}',
+    "CARD_GUARD_TOOL_HOST_GAP_REASON": 'guard_tool "{tool}" has no counterpart on {hosts}, so this guard never fires there (Codex reads via shell and writes via apply_patch; it has no Read/Write/Edit/PowerShell). To guard both hosts, use a tool both have (Bash/shell) or add a matching card.',
     "DREAM_NOTICE_LINE": "🌙 dream finished ({date}): type FAIL {card_fail} / missing aliases {missing_aliases} / drafts {drafts} → {pack}",
     "DREAM_NOTICE_INCOMPLETE_LINE": "🌙 dream did not finish its checks ({date}): some results are unconfirmed; see {pack}.",
     "DREAM_NOTICE_OVERDUE_LINE": "🌙 dream is overdue (last run {last}) → python epitype/dream.py --scheduled",

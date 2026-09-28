@@ -134,7 +134,58 @@ def _disarmed_findings(fields, nested):
     return findings
 
 
-def _arming_findings(fields, counts, card_type, today, relative=""):
+def _superseded_targets(front_lines):
+    """superseded_by 指向的繼任卡名（去路徑、去 .md、casefold）。scalar 與 [a, b] 都認。
+
+    真實卡的 superseded_by 有的帶 .md、有的不帶、有的是清單，故一律歸一成卡名 stem。"""
+    raw = ""
+    for line in front_lines or ():
+        if not line or line[:1] in (" ", "\t"):
+            continue  # superseded_by 是 top-level，縮排的不是它
+        stripped = line.strip()
+        if ":" not in stripped:
+            continue
+        key, _, value = stripped.partition(":")
+        if key.strip() == memspec.SUPERSEDED_BY_FIELD:
+            raw = memspec.strip_inline_comment(value).strip()
+            break
+    if not raw:
+        return set()
+    items = raw[1:-1].split(",") if raw.startswith("[") and raw.endswith("]") else [raw]
+    targets = set()
+    for item in items:
+        token = item.strip().strip("'\"").strip()
+        if not token:
+            continue
+        link = memspec.INDEX_CARD_LINK_REGEX.search(token)  # [text](path.md) → path.md
+        if link:
+            token = link.group(1)
+        token = token.strip("[]").strip()
+        name = token.replace("\\", "/").rsplit("/", 1)[-1]
+        if name.casefold().endswith(".md"):
+            name = name[:-3]
+        if name:
+            targets.add(name.casefold())
+    return targets
+
+
+def _redirected_to_existing(fields, counts, targets, known_cards):
+    """status: superseded 且 superseded_by 指向確實存在的繼任卡時為 True。
+
+    known_cards 為 None（單卡檢查、無庫上下文）時無法驗證繼任卡，維持「有寫就認」。
+    有庫上下文時，superseded_by 指向不存在的卡不算重導向——豁免不生效，警告照出（否則
+    刪了繼任卡就能讓一張沒人接手的舊卡永遠靜音）。"""
+    if fields.get(memspec.DECISION_STATUS_FIELD, "").strip() != memspec.SUPERSEDED_DECISION_STATUS:
+        return False
+    if not (fields.get(memspec.SUPERSEDED_BY_FIELD, "").strip()
+            or counts.get(memspec.SUPERSEDED_BY_FIELD)):
+        return False
+    if known_cards is None:
+        return True
+    return any(target in known_cards for target in targets)
+
+
+def _arming_findings(fields, counts, card_type, today, relative="", superseded_redirect=None):
     """feedback 卡必須武裝，或明講它綁不住。
 
     2026-09-16 實查：通用庫 400 張卡只有 11 張帶 forbidden，而那 11 張全是產品自己的
@@ -148,10 +199,10 @@ def _arming_findings(fields, counts, card_type, today, relative=""):
         return []
     # A redirected source card is retained as historical evidence. Its live
     # successors carry the rules, so arming the retired source would revive it.
-    if (fields.get(memspec.DECISION_STATUS_FIELD, "").strip()
-            == memspec.SUPERSEDED_DECISION_STATUS
-            and (fields.get("superseded_by", "").strip()
-                 or counts.get("superseded_by"))):
+    # superseded_redirect None＝呼叫端沒驗繼任卡存在（單卡路徑），退回「有寫就認」。
+    if superseded_redirect is None:
+        superseded_redirect = _redirected_to_existing(fields, counts, set(), None)
+    if superseded_redirect:
         return []
     # corrections/ contains verbatim owner events, not rules authored for the gates.
     # The event must have its provenance fields; a hand-written behavioural card
@@ -280,16 +331,16 @@ def _write_check_findings(fields):
     return []
 
 
-def _unenforceable_gap_findings(fields, counts):
+def _unenforceable_gap_findings(fields, counts, superseded_redirect=None):
     """「閘門看不到」不是綁不住的理由，是 Epitype 的缺口；點出來，不要讓它被當成定論放著。"""
     # A redirected source preserves the old diagnosis as history. Its active
     # successor is now responsible for the behaviour, so the source's former
     # product gap is no longer an open warning. An unredirected retired card
-    # still warns: status alone must not hide an unresolved gap.
-    if (fields.get(memspec.DECISION_STATUS_FIELD, "").strip()
-            == memspec.SUPERSEDED_DECISION_STATUS
-            and (fields.get("superseded_by", "").strip()
-                 or counts.get("superseded_by"))):
+    # still warns: status alone must not hide an unresolved gap. A superseded_by
+    # pointing at a card that does not exist is not a redirect.
+    if superseded_redirect is None:
+        superseded_redirect = _redirected_to_existing(fields, counts, set(), None)
+    if superseded_redirect:
         return []
     reason = fields.get(memspec.UNENFORCEABLE_FIELD, "").strip()
     if not reason or not re.search(memspec.UNENFORCEABLE_PRODUCT_GAP_PATTERN, reason, re.IGNORECASE):
@@ -356,6 +407,16 @@ def _pattern_findings(fields, front_lines):
                 tool=tool,
                 known=memspec.LIST_JOINER.join(sorted(memspec.ACTION_GUARD_KNOWN_TOOLS))),
         ))
+    elif tool:
+        # 認得的工具名，但只有其中一個宿主有：那道守衛在另一個宿主永遠不觸發。點名是哪個
+        # 宿主，免得「只在 Claude 生效」被當成全域。
+        missing_hosts = memspec.hosts_without_tool(tool)
+        if missing_hosts:
+            findings.append((
+                WARN, "guard-tool-host",
+                memspec.CARD_GUARD_TOOL_HOST_GAP_REASON.format(
+                    tool=tool, hosts=memspec.LIST_JOINER.join(missing_hosts)),
+            ))
     return findings
 
 
@@ -725,8 +786,11 @@ def _apply_git_dates(vault, raw_cards, budget):
         ]
 
 
-def _check_card(path, relative, today):
-    """(型別, findings, 推得的日期)。findings 是 (level, rule, reason) 的清單。"""
+def _check_card(path, relative, today, known_cards=None):
+    """(型別, findings, 推得的日期)。findings 是 (level, rule, reason) 的清單。
+
+    known_cards 是這個 vault 現存的卡名集合（stem，casefold）；提供時 superseded_by
+    指向不存在的卡就不算重導向。單卡檢查（寫檔閘）沒有庫上下文，傳 None。"""
     fields, problem = memspec.frontmatter_fields(path)
     try:
         text = path.read_text(encoding="utf-8-sig")
@@ -766,8 +830,10 @@ def _check_card(path, relative, today):
     findings.extend(_require_findings(fields))
     findings.extend(_fence_shell_findings(fields, counts))
     findings.extend(_write_check_findings(fields))
-    findings.extend(_arming_findings(fields, counts, card_type, today, relative))
-    findings.extend(_unenforceable_gap_findings(fields, counts))
+    redirect = _redirected_to_existing(
+        fields, counts, _superseded_targets(front_lines), known_cards)
+    findings.extend(_arming_findings(fields, counts, card_type, today, relative, redirect))
+    findings.extend(_unenforceable_gap_findings(fields, counts, redirect))
     findings.extend(_example_findings(path, fields, front_lines, counts, today))
 
     for field in memspec.DEPRECATED_CARD_FIELDS:
@@ -978,7 +1044,11 @@ def scan_vault(vault, today=None, deadline=None, deep=False):
     oversized = 0
     timed_out = False
     relatives = []
-    for path in memsearch.card_files(vault):
+    card_paths = list(memsearch.card_files(vault))
+    # 現存卡名（stem，casefold），用來判 superseded_by 指的繼任卡在不在；指向不存在的
+    # 卡不算重導向，武裝／缺口豁免因此不會被一個斷掉的指標騙過去。
+    known_cards = {path.stem.casefold() for path in card_paths}
+    for path in card_paths:
         if deadline is not None and time.monotonic() >= deadline:
             timed_out = True
             break
@@ -991,7 +1061,7 @@ def scan_vault(vault, today=None, deadline=None, deep=False):
         relative = path.relative_to(vault).as_posix()
         relatives.append(relative)
         try:
-            card_type, findings, derived = _check_card(path, relative, today)
+            card_type, findings, derived = _check_card(path, relative, today, known_cards)
         except Exception as exc:  # 一張壞卡不得讓整庫掃描停擺
             card_type, findings, derived = (
                 memspec.DEFAULT_CARD_TYPE,
@@ -1755,7 +1825,14 @@ def _selftest():
                 "gap-plain-text.md": head + "unenforceable: 結構型：程式碼區塊的數量與語言標記是版面結構，Stop 閘比對的是純文字\n" + tail,
                 "gap-english.md": head + "unenforceable: the gate can't see code fences\n" + tail,
                 "gap-redirected.md": head + "status: superseded\nsuperseded_by: next-rule.md\nunenforceable: 動作閘看不到先前呼叫\n" + tail,
+                # 繼任卡必須真的在庫裡，重導向才成立。
+                "next-rule.md": head + "forbidden: [禁詞甲]\n" + tail,
                 "gap-unredirected.md": head + "status: superseded\nunenforceable: 動作閘看不到先前呼叫\n" + tail,
+                # superseded_by 指向不存在的卡：不算重導向，缺口警告照出。
+                "gap-dangling.md": head + "status: superseded\nsuperseded_by: no-such-card.md\nunenforceable: 動作閘看不到先前呼叫\n" + tail,
+                # 武裝豁免同樣要驗繼任卡存在（不寫 unenforceable，才看得到 unarmed 差異）。
+                "arm-redirected.md": head + "status: superseded\nsuperseded_by: next-rule.md\n" + tail,
+                "arm-dangling.md": head + "status: superseded\nsuperseded_by: no-such-card.md\n" + tail,
             }
             for name, text in fence_cards.items():
                 (fence_vault / name).write_text(text.format(name=Path(name).stem), encoding="utf-8")
@@ -1781,6 +1858,9 @@ def _selftest():
             english_rules, _card = _findings_of(fence_report, "gap-english.md")
             redirected_rules, _card = _findings_of(fence_report, "gap-redirected.md")
             unredirected_rules, _card = _findings_of(fence_report, "gap-unredirected.md")
+            dangling_rules, _card = _findings_of(fence_report, "gap-dangling.md")
+            arm_redirected_rules, _card = _findings_of(fence_report, "arm-redirected.md")
+            arm_dangling_rules, _card = _findings_of(fence_report, "arm-dangling.md")
             plain_rules, _card = _findings_of(report, "feedback-good.md")
             checks.append((
                 "unenforceable 理由是「閘門看不到／比對純文字」→ WARN 產品缺口；真的綁不住的理由不受影響",
@@ -1794,11 +1874,35 @@ def _selftest():
                 and (WARN, "unenforceable-gap") in unredirected_rules
                 and not any(rule == "unenforceable-gap" for _level, rule in plain_rules),
             ))
+            checks.append((
+                "superseded_by 指向不存在的卡不算重導向：武裝與缺口豁免都不生效；指向存在的卡才豁免",
+                (WARN, "unenforceable-gap") in dangling_rules
+                and any(rule == "unarmed" for _level, rule in arm_dangling_rules)
+                and not any(rule == "unarmed" for _level, rule in arm_redirected_rules)
+                and (WARN, "unenforceable-gap") not in redirected_rules,
+            ))
+            # guard_tool 在某一宿主沒有對應工具 → WARN 點名該宿主。
+            def _host_gap(tool):
+                rules = _pattern_findings({memspec.ACTION_GUARD_TOOL_FIELD: tool}, [])
+                return next((reason for level, rule, reason in rules
+                             if level == WARN and rule == "guard-tool-host"), None)
+            checks.append((
+                "guard_tool 只有一個宿主有 → WARN 點名缺對應的宿主；兩宿主都有的不點名",
+                memspec.hosts_without_tool("Read") == ["Codex"]
+                and memspec.hosts_without_tool("PowerShell") == ["Codex"]
+                and memspec.hosts_without_tool("Write") == ["Codex"]
+                and memspec.hosts_without_tool("apply_patch") == ["Claude"]
+                and memspec.hosts_without_tool("Bash") == []
+                and memspec.hosts_without_tool("Task") == []
+                and _host_gap("Read") is not None and "Codex" in _host_gap("Read")
+                and _host_gap("apply_patch") is not None and "Claude" in _host_gap("apply_patch")
+                and _host_gap("Bash") is None and _host_gap("Task") is None,
+            ))
     except Exception as exc:
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 53
+    total = 55
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
