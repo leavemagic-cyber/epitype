@@ -1312,41 +1312,74 @@ TURN_CHECK_LENGTH = "length"
 TURN_CHECK_CITED_UNREAD = "cited_unread"
 TURN_CHECK_UNVERIFIED_DELEGATION = "unverified_delegation"
 TURN_CHECK_PROMPT_BLOCK = "prompt_code_block"
+TURN_CHECK_OWNER_LANGUAGE = "owner_language"
 TURN_CHECK_NAMES = (
     TURN_CHECK_LENGTH, TURN_CHECK_CITED_UNREAD, TURN_CHECK_UNVERIFIED_DELEGATION,
-    TURN_CHECK_PROMPT_BLOCK)
+    TURN_CHECK_PROMPT_BLOCK, TURN_CHECK_OWNER_LANGUAGE)
 # 這些內容被包成 user 角色送進模型，但都不是 owner 親口說的：子代理回報、背景任務
 # 通知、系統提醒、Stop hook 回饋、斜線指令展開、跨場訊息、宿主注入的環境或工具區塊。
-# 兩宿主的包裝都在這裡認：任何以 `<` 開頭的標籤區塊，加上幾個純文字前綴。依「owner
-# 說了什麼」判斷的回合檢查一律先過 owner_typed_text，否則會把機器產生的包裝當成 owner
-# 本人的請求（2026-09-27：子代理回報裡的「例：write 到 PROMPT.md」命中提示詞請求樣式
-# 而誤擋，owner 當回合根本沒要提示詞）。
+# 依「owner 說了什麼」判斷的回合檢查一律先過 owner_typed_text，否則會把機器產生的包裝
+# 當成 owner 本人的請求（2026-09-27：子代理回報裡的「例：write 到 PROMPT.md」命中提示詞
+# 請求樣式而誤擋，owner 當回合根本沒要提示詞）。
+#
+# 反方向同樣是錯：宿主常把機器區塊「放在 owner 的話前面」。Codex 開著內建瀏覽器時是
+# <in-app-browser-context …>…</in-app-browser-context> 再接「## My request: <owner 的話>」
+# （30 天 96 則全被當成空白：「好!給我prompt」漏擋、「你就是完整查找…」失去完整免擋而誤擋）；
+# Claude 是 <pasted_content id=…>…</pasted_content id=…> 或 <system-reminder>…</system-reminder>
+# 後面接 owner 的話。所以只剝開頭成對的機器區塊，剩下的才判；剝完什麼都不剩才回空字串。
 MACHINE_TURN_PREFIXES = (
     "[subagent hand-back]",
     "another claude session sent a message",
     "stop hook feedback",
     "[request interrupted",
 )
+# 開頭是這幾種標籤就整則不是 owner 的話，不管後面接什麼。
+MACHINE_TURN_HARD_TAGS = (
+    "task-notification", "agent-message", "cross-session-message",
+    "tool_result", "function_results",
+)
+# 斜線指令展開時 owner 打的參數在這個標籤裡面。
+MACHINE_TURN_OWNER_TAGS = ("command-args",)
+# Codex 內建瀏覽器開著時，owner 的話接在這一行後面。
+OWNER_REQUEST_MARKER = "## My request:"
 
 
 def owner_typed_text(text):
     """回合裡真正由 owner 親打的文字；機器產生的包裝一律回空字串。
 
-    子代理回報、背景任務通知、系統提醒、Stop hook 回饋等都以 user 角色送進模型，觸發詞
-    命中它們不能當成 owner 本人的請求。認不出 owner 親打的話時回空字串，依「owner 說了
-    什麼」的檢查因此不啟動——寧可漏擋，也不要拿機器的話擋 owner。任何以 `<` 開頭的標籤
-    區塊（<agent-message>、<task-notification>、<system-reminder>、<command-name>、
-    <local-command-…>、Codex 的 <environment_context> 等）都算機器產生，與 harvest.owner_text
-    的 `startswith("<")` 判準一致。"""
+    只剝開頭成對的機器區塊（含屬性的開標籤、帶屬性的收尾標籤如 </pasted_content id=…>、
+    被跳脫成 &lt;/…&gt; 的收尾），Codex 另取「## My request:」之後的字，剩下的再判：開頭是
+    子代理回報、背景通知、Stop hook 回饋等就回空字串。標籤沒收尾＝整段都是機器的，回空字串
+    ——寧可漏擋，也不要拿機器的話擋 owner。"""
     if not isinstance(text, str):
         return ""
-    stripped = text.strip()
-    if not stripped or stripped.startswith("<"):
+    rest = text.strip()
+    kept = []
+    while rest.startswith("<"):
+        opening = re.match(r"<([A-Za-z][\w:.-]*)(?:\s[^<>]*?)?(/?)>", rest)
+        if opening is None:
+            break  # 「<3」這種不是標籤，照 owner 的字處理
+        name = opening.group(1).casefold()
+        if name in MACHINE_TURN_HARD_TAGS:
+            return ""
+        if opening.group(2):
+            rest = rest[opening.end():].lstrip()
+            continue
+        tag = re.escape(opening.group(1))
+        closing = re.compile(
+            r"</" + tag + r"(?:\s[^<>]*)?>|&lt;/" + tag + r"(?:\s.*?)?&gt;", re.IGNORECASE,
+        ).search(rest, opening.end())
+        if closing is None:
+            return ""
+        if name in MACHINE_TURN_OWNER_TAGS:
+            kept.append(rest[opening.end():closing.start()].strip())
+        rest = rest[closing.end():].lstrip()
+    marker = rest.find(OWNER_REQUEST_MARKER)
+    if marker >= 0:
+        rest = rest[marker + len(OWNER_REQUEST_MARKER):].strip()
+    if any(rest.casefold().startswith(prefix) for prefix in MACHINE_TURN_PREFIXES):
         return ""
-    folded = stripped.casefold()
-    if any(folded.startswith(prefix) for prefix in MACHINE_TURN_PREFIXES):
-        return ""
-    return stripped
+    return "\n".join(part for part in kept + [rest] if part).strip()
 
 
 TURN_PROMPT_REQUEST_PATTERN = (
@@ -1356,6 +1389,37 @@ TURN_PROMPT_REQUEST_PATTERN = (
 TURN_PROMPT_BLOCK_REASON = (
     "📌 owner 要可直接貼到新對話的 PROMPT；請把完整提示詞放在聊天訊息的非空 code block，"
     "不要只給檔案路徑。{advice}"
+)
+# turn_check: owner_language —— 對 owner 說的話要用他的語言（2026-09-29：規則是「與 owner
+# 溝通一律繁體中文」，既有的 plain-zhtw 卡只抓簡體字，整則英文回覆照樣放行，同一天重複發生）。
+# 卡片欄位：
+#   turn_check_target: 目標語言，預設 zh-Hant；可用值見 TURN_LANGUAGE_SCRIPTS（陌生人換成自己的語言）。
+#   turn_check_limit:  目標語言至少要佔說明文字的百分之幾，預設 50。
+# 只量最後一則回覆裡「給 owner 讀的說明文字」：程式碼區塊、行內碼、網址、連結目標、檔案與
+# Windows 路徑、引號裡的原文、技術識別字（含底線／數字／內部大寫／全大寫縮寫）都先拿掉。
+# 單位：一個中日韓字元算 1，一個其他文字的詞算 1——以字母計會讓英文詞重 5 倍，夾英文術語的
+# 中文回覆會被誤擋。外文字母不足 TURN_LANGUAGE_MIN_FOREIGN_LETTERS 就不判（短回覆、純程式碼）。
+# 子代理的回合不查：它對主線說話，不是對 owner。
+TURN_CHECK_TARGET_FIELD = "turn_check_target"
+TURN_LANGUAGE_DEFAULT_TARGET = "zh-Hant"
+TURN_LANGUAGE_DEFAULT_MIN_SHARE = 50
+TURN_LANGUAGE_MIN_FOREIGN_LETTERS = 40
+# 目標語言 → (算作目標的文字系統, 擋下時對代理說的語言名)。
+TURN_LANGUAGE_SCRIPTS = {
+    "zh-hant": (("han",), "繁體中文"),
+    "zh-hans": (("han",), "簡體中文"),
+    "zh": (("han",), "中文"),
+    "ja": (("han", "kana"), "日文"),
+    "ko": (("hangul", "han"), "韓文"),
+    "en": (("latin",), "英文"),
+}
+TURN_LANGUAGE_REASON = (
+    "📌 這則回覆的說明文字大多不是{language}（只佔 {share}%）。請改用{language}重寫；"
+    "程式碼、路徑、指令名可以保留原文。{advice}"
+)
+TURN_LANGUAGE_UNKNOWN_DEFECT = (
+    "⚠ Epitype 回合閘：裁定 {decision} 的 turn_check_target「{target}」不認得"
+    "（可用的是 {known}），這一項暫不生效。"
 )
 TURN_CHECK_UNKNOWN_DEFECT = (
     "⚠ Epitype 回合閘：裁定 {decision} 的 turn_check「{name}」不是內建檢查"
@@ -3426,6 +3490,8 @@ _EN = {
     "STOP_GATE_REQUIRE_REASON": '📌 "{trigger}" still needs context. Add one sentence containing {expected}. {advice}',
     "REQUIRE_HINT_TEMPLATE": "one of: {items}",
     "TURN_CHECK_UNKNOWN_DEFECT": '⚠ Epitype stop gate: turn_check "{name}" on ruling {decision} is not a built-in check (available: {known}), so this one did not apply.',
+    "TURN_LANGUAGE_REASON": "📌 most of this reply's prose is not in {language} (only {share}%). Rewrite it in {language}; code, paths and command names may stay as they are.{advice}",
+    "TURN_LANGUAGE_UNKNOWN_DEFECT": '⚠ Epitype Stop gate: ruling {decision} has turn_check_target "{target}", which is not recognised (known: {known}); this check is off for now.',
     "TURN_LENGTH_REASON": '📌 this turn is {chars} characters, over the {limit} limit from "{decision}", and the owner did not ask for the full version this time. Put the detail in a file; keep the reply to the conclusion, the numbers and the file links.{advice}',
     "TURN_CITED_UNREAD_REASON": '📌 this turn said "{claim}", but no tool call in this session ever opened {path}. Per "{decision}": read it, or change the claim to say it was not read.{advice}',
     "BLOCKED_ECHO_REASON": "the message after the block was {overlap:.0%} the same as the first one, so the owner read the same text twice. Next time you are blocked, add only the part that was missing.",
@@ -3561,6 +3627,7 @@ RECURRENCE_GATE_ARMING_FIELDS = tuple(dict.fromkeys(CARD_ARMING_FIELDS + (
     ACTION_GUARD_WHEN_FIELD,
     REQUIRE_TEXT_FIELD,
     TURN_CHECK_LIMIT_FIELD,
+    TURN_CHECK_TARGET_FIELD,
 ) + HOST_NATIVE_FIELDS))
 # 這幾個欄位裡出現再犯字樣是它們的本分：武裝欄位本身就是規則、例句必須寫得出那句話、
 # unenforceable 的理由正是「為什麼擋不住」該寫的地方（上面第三種處理）。

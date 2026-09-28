@@ -59,7 +59,7 @@ _DECISION_CACHE_FILENAME = "stop_decisions.json"
 # Every authority the gate acts on is re-read from this turn's bytes below, so a
 # ruling that gained fields (require_when/require_text/advice) needs no version bump.
 # 7：fence_shell 成為武裝欄位——舊快取把只帶它的卡記成「不是裁定」，不換版就要等輪替才認得。
-_DECISION_CACHE_VERSION = 7
+_DECISION_CACHE_VERSION = 8
 _KEY = "key"
 _DECIDED_AT = "decided_at"
 _QUOTE = "quote"
@@ -84,10 +84,10 @@ def _turn(texts=(), prompt="", dispatch="", calls_after_dispatch=0):
 _Decision = namedtuple(
     "_Decision",
     "key decided_at quote forbidden aliases path decided_by require_when require_text advice"
-    " applies_to turn_check turn_check_limit on_hit fence_shell fence_langs",
-    # 只有最後幾欄有預設值：沒標處置的卡就是「照擋」，沒宣告殼層的卡不查圍籬區塊；
-    # 既有的建構處不必跟著改。
-    defaults=("", "", ()),
+    " applies_to turn_check turn_check_limit on_hit fence_shell fence_langs turn_check_target",
+    # 只有最後幾欄有預設值：沒標處置的卡就是「照擋」，沒宣告殼層的卡不查圍籬區塊，
+    # 沒寫目標語言的 owner_language 卡用預設語言；既有的建構處不必跟著改。
+    defaults=("", "", (), ""),
 )
 
 
@@ -179,6 +179,7 @@ def _read_decision(path):
         memspec.APPLIES_TO_FIELD: _one_line(fields.get(memspec.APPLIES_TO_FIELD)).casefold(),
         memspec.TURN_CHECK_FIELD: _one_line(fields.get(memspec.TURN_CHECK_FIELD)).casefold(),
         memspec.TURN_CHECK_LIMIT_FIELD: _one_line(fields.get(memspec.TURN_CHECK_LIMIT_FIELD)),
+        memspec.TURN_CHECK_TARGET_FIELD: _one_line(fields.get(memspec.TURN_CHECK_TARGET_FIELD)),
         memspec.ON_HIT_FIELD: _one_line(fields.get(memspec.ON_HIT_FIELD)).casefold(),
         memspec.FENCE_SHELL_FIELD: _one_line(fields.get(memspec.FENCE_SHELL_FIELD)).casefold(),
         memspec.FENCE_LANGS_FIELD: [
@@ -213,6 +214,8 @@ def _decision_from_ruling(vault, card_path, ruling):
         fence_shell=_one_line(ruling.get(memspec.FENCE_SHELL_FIELD)).casefold(),
         fence_langs=tuple(
             item.casefold() for item in _strings(ruling.get(memspec.FENCE_LANGS_FIELD))),
+        # 舊快取沒有這一欄：get 回 None，檢查時退回預設語言。
+        turn_check_target=_one_line(ruling.get(memspec.TURN_CHECK_TARGET_FIELD)),
     )
 
 
@@ -687,7 +690,104 @@ def _prompt_block_gap(decision, message, turn):
     return memspec.TURN_PROMPT_BLOCK_REASON.format(advice=decision.advice)
 
 
-def _turn_check_gap(decision, message, turn, opened_names, defects):
+_PROSE_STRIP_REGEXES = None
+
+
+def _prose_strip_regexes():
+    """給 owner 讀的說明文字以外的東西。識別字只認 ASCII：Python 的 \\w 含中日韓字元，
+    用它會把「第5個」這種中文一起削掉。"""
+    global _PROSE_STRIP_REGEXES
+    if _PROSE_STRIP_REGEXES is None:
+        ident = r"(?<![A-Za-z0-9_]){}(?![A-Za-z0-9_])"
+        _PROSE_STRIP_REGEXES = [re.compile(pattern) for pattern in (
+            "(?s)" + memspec.TURN_LENGTH_FENCE_PATTERN.replace("```", "~~~"),
+            r"`[^`\n]*`",
+            r"(?m)^[ \t]*>.*$",
+            r"\]\([^)\n]*\)",
+            r"(?i)\b(?:https?|file|ftp)://\S+|\bwww\.\S+",
+            r"[A-Za-z]:[\\/][^\s，。、；：）)」』\"“”]*",
+            r"\\\\[^\s，。、；：）)」』\"“”]+",
+            r"[^\s，。、；：（）()「」『』\"“”]*[\\/][^\s，。、；：（）()「」『』\"“”]*",
+            r"\"[^\"\n]*\"|“[^”\n]*”|「[^」\n]*」|『[^』\n]*』",
+            r"(?<!\S)--?[A-Za-z][A-Za-z0-9_-]*",
+            ident.format(r"[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+"),
+            ident.format(r"[A-Za-z0-9_]*[_0-9][A-Za-z0-9_]*"),
+            ident.format(r"[A-Za-z]*[a-z][A-Z][A-Za-z]*"),
+            ident.format(r"[A-Z]{2,}"),
+        )]
+    return _PROSE_STRIP_REGEXES
+
+
+def _owner_prose(message):
+    """最後一則回覆裡給 owner 讀的說明文字：程式碼、路徑、網址、引文、識別字都拿掉。"""
+    text = memspec.TURN_LENGTH_FENCE_REGEX.sub(" ", str(message or ""))
+    for regex in _prose_strip_regexes():
+        text = regex.sub(" ", text)
+    return text
+
+
+def _script_of(char):
+    code = ord(char)
+    if (0x4E00 <= code <= 0x9FFF or 0x3400 <= code <= 0x4DBF or 0xF900 <= code <= 0xFAFF
+            or 0x20000 <= code <= 0x2FFFF):
+        return "han"
+    if 0x3040 <= code <= 0x30FF or 0x31F0 <= code <= 0x31FF or 0xFF66 <= code <= 0xFF9D:
+        return "kana"
+    if 0xAC00 <= code <= 0xD7AF or 0x1100 <= code <= 0x11FF or 0x3130 <= code <= 0x318F:
+        return "hangul"
+    if not char.isalpha():
+        return ""
+    return "latin" if code < 0x0250 or 0x1E00 <= code <= 0x1EFF else "other"
+
+
+def _language_units(prose):
+    """(各文字系統的單位數, 各文字系統的字母數)。中日韓一字一單位，其他文字一個詞一單位。"""
+    units, letters = {}, {}
+    previous = ""
+    for char in prose:
+        script = _script_of(char)
+        if script:
+            letters[script] = letters.get(script, 0) + 1
+            if script in ("han", "kana", "hangul") or script != previous:
+                units[script] = units.get(script, 0) + 1
+        previous = script if script not in ("han", "kana", "hangul") else ""
+    return units, letters
+
+
+def _owner_language_gap(decision, message, turn, event, defects):
+    """回覆給 owner 的說明文字不是他的語言，就回一句理由。子代理的回合不查。"""
+    if isinstance(event, dict) and (
+            event.get("hook_event_name") == memspec.SUBAGENT_STOP_EVENT
+            or event.get("agent_id")):
+        return None
+    target = (decision.turn_check_target or memspec.TURN_LANGUAGE_DEFAULT_TARGET).casefold()
+    spec = memspec.TURN_LANGUAGE_SCRIPTS.get(target)
+    if spec is None:
+        defects.append(memspec.TURN_LANGUAGE_UNKNOWN_DEFECT.format(
+            decision=decision.key, target=decision.turn_check_target,
+            known=memspec.LIST_JOINER.join(memspec.TURN_LANGUAGE_SCRIPTS)))
+        return None
+    scripts, language = spec
+    raw = str(decision.turn_check_limit or "").strip()
+    minimum = int(raw) if raw.isdigit() and 0 < int(raw) <= 100 else (
+        memspec.TURN_LANGUAGE_DEFAULT_MIN_SHARE)
+    # 只量最後一則：中途的工具旁白另算，不讓它把一則中文結論拖下水。
+    final = event.get("last_assistant_message") if isinstance(event, dict) else None
+    if not isinstance(final, str) or not final.strip():
+        final = message
+    units, letters = _language_units(_owner_prose(final))
+    foreign = sum(count for script, count in letters.items() if script not in scripts)
+    if foreign < memspec.TURN_LANGUAGE_MIN_FOREIGN_LETTERS:
+        return None
+    total = sum(units.values())
+    share = round(100 * sum(units.get(script, 0) for script in scripts) / total) if total else 0
+    if share >= minimum:
+        return None
+    return memspec.TURN_LANGUAGE_REASON.format(
+        language=language, share=share, advice=decision.advice)
+
+
+def _turn_check_gap(decision, message, turn, opened_names, defects, event=None):
     """卡片指名的內建檢查。字面比對看不到的事實，由這裡判。"""
     name = decision.turn_check
     if not name:
@@ -703,6 +803,8 @@ def _turn_check_gap(decision, message, turn, opened_names, defects):
         return _unverified_delegation_gap(decision, message, turn)
     if name == memspec.TURN_CHECK_PROMPT_BLOCK:
         return _prompt_block_gap(decision, message, turn)
+    if name == memspec.TURN_CHECK_OWNER_LANGUAGE:
+        return _owner_language_gap(decision, message, turn, event, defects)
     return _cited_unread_gap(decision, message, turn, opened_names)
 
 
@@ -894,6 +996,10 @@ def _turn_context(transcript_path):
             if str(piece or "").strip():
                 texts.append(piece)
     texts.reverse()
+    if len(prompt) > memspec.STOP_GATE_MESSAGE_MAX_CHARS:
+        # owner 的話常接在一大塊貼上內容後面：先取出 owner 親打的部分再截，否則截掉的
+        # 正是那句話。取不出來（整則是機器的）才截原文，派工通知的記號在開頭，截不掉。
+        prompt = memspec.owner_typed_text(prompt) or prompt
     prompt = prompt[: memspec.STOP_GATE_MESSAGE_MAX_CHARS]
     if not dispatch and memspec.TURN_DISPATCH_NOTICE_MARKER in prompt:
         # 背景子代理跑完是以一則新提問的形式回來的，這一回合裡沒有派工那一次呼叫。
@@ -1290,7 +1396,7 @@ def _first_violation(decisions, event, message, config, started_at, defects, tur
             except Exception:
                 opened_names = frozenset()
         for decision in decisions:
-            reason = _turn_check_gap(decision, message, turn, opened_names, defects)
+            reason = _turn_check_gap(decision, message, turn, opened_names, defects, event)
             if reason is None:
                 continue
             verdicts.append((decision, _TURN_CHECK_RULE, reason, ""))
