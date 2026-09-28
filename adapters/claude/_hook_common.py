@@ -119,6 +119,11 @@ def _hook_clock():
     return _HOOK_CLOCK
 
 
+def hook_clock_frozen():
+    """這個行程是否持有自測發的 frozen 時鐘憑證。正式掛鉤一律 False。"""
+    return _hook_clock() == memspec.HOOK_CLOCK_FROZEN
+
+
 def remaining_seconds(started_at):
     clock = _hook_clock()
     if clock == memspec.HOOK_CLOCK_FROZEN:

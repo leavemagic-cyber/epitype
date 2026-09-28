@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- 回合結束閘自測恢復「09-25 原句一定被擋」：Windows 上 hook 逾時放行不再算通過，合法寫法那題也不再接受 stderr 出現 `TimeoutExpired`。端到端改用只給自測子行程（持 frozen 時鐘憑證）的較長解析上限 `FENCE_SHELL_SELFTEST_TIMEOUT_SECONDS`；產品的 5 秒上限另有一題用產品秒數實際解析一次來斷言，並斷言沒有憑證的行程拿不到自測上限。
+
 ## v1.8.1 (2026-09-28)
 
 - 修正瀏覽器資源記錄在多個 Hook 同時首次寫入時可能遇到 SQLite schema 鎖定，並確保初始化失敗會關閉資料庫連線；保留既有未標版本的記錄。Windows 並行案例與完整回歸均已驗證。

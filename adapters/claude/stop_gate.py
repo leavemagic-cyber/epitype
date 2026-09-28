@@ -40,6 +40,7 @@ from _hook_common import (
     native_cwd_vaults,
     read_event,
     recall_marker_directory,
+    hook_clock_frozen,
     remaining_seconds,
     run_synthetic,
     sequence_fields,
@@ -1197,7 +1198,10 @@ def _fence_shell_gap(decision, message, event, started_at, defects, parser=None)
     cache_key = (shell, tuple(blocks))
     results = _FENCE_RESULTS.get(cache_key)
     if results is None:
-        timeout = min(memspec.FENCE_SHELL_TIMEOUT_SECONDS, remaining_seconds(started_at))
+        if hook_clock_frozen():
+            timeout = memspec.FENCE_SHELL_SELFTEST_TIMEOUT_SECONDS
+        else:
+            timeout = min(memspec.FENCE_SHELL_TIMEOUT_SECONDS, remaining_seconds(started_at))
         try:
             if timeout <= 0:
                 raise TimeoutError("hook deadline reached")
@@ -1790,6 +1794,24 @@ def _selftest():
                 "fence_shell: Windows PowerShell 5.1 真解析器擋原句並放行兩種合法寫法",
                 native_parse_ok,
             ))
+            # 下面的端到端跑在 frozen 時鐘上，解析器用的是自測上限；產品上限夠不夠，在這裡
+            # 用產品的秒數實際解析一次。逾時就是失敗：正式掛鉤那一刻會直接放行。
+            product_budget_ok = True
+            if native_powershell:
+                try:
+                    budget_parsed = _parse_powershell(
+                        [original], timeout=memspec.FENCE_SHELL_TIMEOUT_SECONDS)
+                    product_budget_ok = (
+                        budget_parsed[0] is not None
+                        and budget_parsed[0][0] == 1
+                        and "&&" in budget_parsed[0][1]
+                    )
+                except Exception:
+                    product_budget_ok = False
+            checks.append((
+                "fence_shell: 產品上限 FENCE_SHELL_TIMEOUT_SECONDS 內能完成一次 Windows PowerShell 5.1 解析",
+                product_budget_ok,
+            ))
             bad_result, bad_value, bad_session = fence_run(
                 "好，直接跑這個：\n```bash\n" + original + "\n```\n")
             bad_reason = bad_value.get("reason", "")
@@ -1818,15 +1840,10 @@ def _selftest():
                 and "owner 按執行會直接失敗" in bad_reason
                 and bad_logged
             )
-            timed_out_bad = (
-                bad_result.returncode == 0
-                and not bad_result.stdout.strip()
-                and "TimeoutExpired" in bad_result.stderr
-                and not bad_logged
-            )
+            # 逾時放行不算通過：這題要證明的就是原句一定被擋。
             checks.append((
-                "fence_shell: 原句被攔截；解析器逾時或不存在時明確放行並回報",
-                (blocked_bad or timed_out_bad) if native_powershell else (
+                "fence_shell: 09-25 原句由 Windows PowerShell 擋下；缺解析器時放行並回報",
+                blocked_bad if native_powershell else (
                     bad_result.returncode == 0
                     and not bad_result.stdout.strip()
                     and "FileNotFoundError" in bad_result.stderr
@@ -1838,11 +1855,10 @@ def _selftest():
                 '$env:PYTHONIOENCODING = "utf-8"; & "C:\\python.exe" "C:\\a.py"\n'
                 "```\n以及\n```bash\ngit -C C:\\repo log --oneline -5\n```\n")
             checks.append((
-                "fence_shell: 合法 PowerShell 放行；解析器不可用時在 stderr 回報",
+                "fence_shell: 合法 PowerShell 放行；缺解析器時在 stderr 回報",
                 good_result.returncode == 0
                 and not good_result.stdout.strip()
-                and ((not good_result.stderr.strip()
-                      or "TimeoutExpired" in good_result.stderr) if native_powershell
+                and (not good_result.stderr.strip() if native_powershell
                      else "FileNotFoundError" in good_result.stderr),
             ))
             prose_result, _prose_value, _ = fence_run(
@@ -1863,10 +1879,19 @@ def _selftest():
             )
             bad_block = "```bash\n" + original + "\n```\n"
             _FENCE_RESULTS.clear()
+            budgets = []
             formatted_bad = _fence_shell_gap(
                 fence_decision, bad_block, {}, time.monotonic(), [],
-                parser=lambda shell, blocks, timeout: [(1, "Unexpected token '&&'")],
+                parser=lambda shell, blocks, timeout: (
+                    budgets.append(timeout) or [(1, "Unexpected token '&&'")]),
             )
+            checks.append((
+                "fence_shell: 沒有時鐘憑證的行程只拿產品上限，自測上限不會漏進正式掛鉤",
+                not hook_clock_frozen()
+                and len(budgets) == 1
+                and 0 < budgets[0] <= memspec.FENCE_SHELL_TIMEOUT_SECONDS
+                < memspec.FENCE_SHELL_SELFTEST_TIMEOUT_SECONDS,
+            ))
             checks.append((
                 "fence_shell: parser result names the exact block, line and syntax error",
                 formatted_bad is not None
@@ -2131,7 +2156,7 @@ def _selftest():
             clear_recall_markers(session_id)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 38
+    total = 40
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

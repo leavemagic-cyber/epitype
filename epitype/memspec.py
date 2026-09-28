@@ -2792,6 +2792,9 @@ FENCE_SHELL_DEFAULT_LANGS = (
 )
 # 解析器的上限。超過就放行並在 stderr 留一行——閘門不能因為解析器卡住而失敗。
 FENCE_SHELL_TIMEOUT_SECONDS = 5.0
+# 自測專用：只有持 frozen 時鐘憑證的自測子行程拿這個上限跑端到端，機器忙也不會把「逾時放行」
+# 當成「判斷正確」。產品的 FENCE_SHELL_TIMEOUT_SECONDS 夠不夠解析一次，自測另有一題直接量。
+FENCE_SHELL_SELFTEST_TIMEOUT_SECONDS = 60.0
 FENCE_SHELL_MAX_BLOCKS = 20
 FENCE_SHELL_ERROR_MAX_CHARS = 160
 FENCE_SHELL_SNIPPET_MAX_CHARS = 80
