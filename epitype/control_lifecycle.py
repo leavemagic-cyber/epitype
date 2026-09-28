@@ -22,6 +22,8 @@ CHROME = "mcp__claude-in-chrome__"
 CUA_JS = frozenset(("mcp__cua_repl__js", "mcp__cua_repl.js"))
 CUA_RESET = frozenset(("mcp__cua_repl__js_reset", "mcp__cua_repl.js_reset"))
 OTHER_CONTROL = ("mcp__Claude_Browser__", "mcp__computer-use__")
+_CHROME_TRACKED = frozenset(("tabs_context_mcp", "tabs_create_mcp", "tabs_close_mcp"))
+_CONTROL_VERB = re.compile(r"(?:create|open|close|start|stop|reset|launch)", re.I)
 _TAB_CREATED = re.compile(r"Browser tab:\s*([A-Za-z0-9_-]+)\b")
 _CHROME_CLOSED = re.compile(r"\bClosed tab\s+([A-Za-z0-9_-]+)\b", re.I)
 _CREATE_CUA = re.compile(r"\bcua\.createBrowserTab\s*\(")
@@ -40,6 +42,24 @@ def is_control_tool(name: str) -> bool:
         or name in CUA_RESET
         or name.startswith(OTHER_CONTROL)
     )
+
+
+def is_tracked_tool(name) -> bool:
+    """Only these results can change the ledger.
+
+    PostToolUse fires for every screenshot, click and page read; anything else
+    must return before the hook reads config or opens SQLite.
+    """
+    if not isinstance(name, str):
+        return False
+    if name.startswith(CHROME):
+        return name[len(CHROME):] in _CHROME_TRACKED
+    if name in CUA_JS or name in CUA_RESET:
+        return True
+    for prefix in OTHER_CONTROL:
+        if name.startswith(prefix):
+            return bool(_CONTROL_VERB.search(name[len(prefix):]))
+    return False
 
 
 def _connect(path: Path):
@@ -356,7 +376,7 @@ def observe(event: dict, path: Path) -> str | None:
     name = event.get("tool_name")
     session = event.get("session_id", event.get("sessionId"))
     call_id = event.get("tool_use_id")
-    if not isinstance(name, str) or not is_control_tool(name):
+    if not is_tracked_tool(name):
         return None
     if not isinstance(session, str) or not session or not isinstance(call_id, str) or not call_id:
         return "Epitype 無法追蹤這次瀏覽器操作：工具沒有提供本次呼叫的識別碼。"
@@ -380,9 +400,7 @@ def observe(event: dict, path: Path) -> str | None:
         elif name in CUA_JS or name in CUA_RESET:
             _observe_cua(db, session, call_id, name, tool_input, text, objects,
                          failed, now)
-        elif name.startswith(OTHER_CONTROL) and re.search(
-            r"(?:create|open|close|start|stop|reset|launch)", name, re.I
-        ):
+        elif name.startswith(OTHER_CONTROL):
             _resource(db, session, call_id, "open", "unverified-control", call_id, now)
         _save_state(db, session, state)
         if db.execute(

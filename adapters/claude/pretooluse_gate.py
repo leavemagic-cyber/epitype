@@ -2757,6 +2757,10 @@ def main():
     try:
         event = read_event(sys.stdin)
         if event.get("hook_event_name") == "PostToolUse":
+            # 截圖、點擊這類每步都觸發的操控改不了帳本：在讀設定、開 SQLite 之前就回去，
+            # 否則每個瀏覽器動作都白付一次設定載入。
+            if not control_lifecycle.is_tracked_tool(event.get("tool_name")):
+                return 0
             try:
                 config = load_config(_STARTED_AT)
                 if config is not None:

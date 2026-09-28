@@ -45,6 +45,50 @@ class ControlLifecycleRegression(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
+    def adapter_environment(self, config_text=None):
+        """A throwaway config beside self.path, so adapters write only this ledger."""
+        vault = Path(self.temporary.name) / "vault"
+        vault.mkdir(exist_ok=True)
+        config = Path(self.temporary.name) / "config.json"
+        config.write_text(config_text if config_text is not None else json.dumps(
+            {"vaults": [str(vault)], "budget_bytes": 4096}), encoding="utf-8")
+        environment = dict(os.environ)
+        environment["EPITYPE_CONFIG"] = str(config)
+        scratch = Path(self.temporary.name) / "scratch"
+        scratch.mkdir(exist_ok=True)
+        environment["TMPDIR"] = environment["TEMP"] = environment["TMP"] = str(scratch)
+        return environment
+
+    def run_adapter(self, adapter, event, environment):
+        return subprocess.run(
+            [sys.executable, str(ROOT / "adapters" / "claude" / adapter)],
+            input=json.dumps(event), capture_output=True, text=True,
+            encoding="utf-8", errors="replace", env=environment,
+            cwd=ROOT, timeout=15, check=False,
+        )
+
+    def test_untracked_control_result_skips_config_and_ledger(self):
+        # 截圖、點擊每步都觸發 PostToolUse；它們改不了帳本，不該讀設定也不該寫 SQLite。
+        screenshot = post("fast", "1", "mcp__claude-in-chrome__computer",
+                          {"action": "screenshot"}, mcp("ok"))
+        self.assertIsNone(lifecycle.observe(screenshot, self.path))
+        self.assertFalse(self.path.exists())
+        self.assertFalse(lifecycle.is_tracked_tool("mcp__claude-in-chrome__navigate"))
+        self.assertFalse(lifecycle.is_tracked_tool("mcp__computer-use__screenshot"))
+        self.assertTrue(lifecycle.is_tracked_tool("mcp__claude-in-chrome__tabs_close_mcp"))
+        self.assertTrue(lifecycle.is_tracked_tool("mcp__cua_repl__js"))
+        # 設定檔壞掉時，只有真的會讀設定的呼叫才會報解析失敗：未追蹤的工具連讀都不讀。
+        environment = self.adapter_environment("not json")
+        skipped = self.run_adapter("pretooluse_gate.py", screenshot, environment)
+        self.assertEqual(skipped.returncode, 0, skipped.stderr)
+        self.assertEqual(skipped.stderr.strip(), "")
+        self.assertEqual(skipped.stdout.strip(), "")
+        tracked = self.run_adapter("pretooluse_gate.py", post(
+            "fast", "2", "mcp__claude-in-chrome__tabs_context_mcp", {},
+            mcp("No tab group exists for this session.")), environment)
+        self.assertEqual(tracked.returncode, 0, tracked.stderr)
+        self.assertIn("JSONDecodeError", tracked.stderr)
+
     def test_claude_chrome_create_close_and_remind_once(self):
         self.assertIsNone(lifecycle.observe(post(
             "claude", "1", "mcp__claude-in-chrome__tabs_context_mcp", {},
