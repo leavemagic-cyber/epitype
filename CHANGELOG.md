@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- 回合結束閘新增內建檢查 `turn_check: owner_language`：對 owner 的最後一則回覆，說明文字的目標語言占比低於門檻就擋，理由用白話要求改用該語言重寫。卡片欄位 `turn_check_target`（預設 `zh-Hant`，可用 zh-Hant／zh-Hans／zh／ja／ko／en）與 `turn_check_limit`（目標語言最低占比，預設 50%）。只量給 owner 讀的文字：程式碼區塊、行內碼、網址、連結目標、檔案與 Windows 路徑、引號原文、技術識別字先拿掉；外文字母不足 40 個不判；中日韓一字、其他文字一詞各算一單位（以字母計會讓夾英文術語的中文回覆被誤擋）。子代理回合（SubagentStop、帶 `agent_id`）不查。決策快取換版 7→8，舊快取不會讓新欄位對既有卡默默失效。
 - 兩宿主工具名對照：Codex 派子代理的 `spawn_agent` 併入 `{task, agent}` 等價群，「派工要指名模型」等 `guard_requires: model` 守衛在 Codex 也會觸發（spawn_agent 參數 model／reasoning_effort／task_name／message，欄位名 model 與 Claude 一致）。`spawn_agent`、`apply_patch` 加入認得的工具名單。`card_lint` 新增 `guard-tool-host` WARN：`guard_tool` 若在某一宿主沒有對應工具（Codex 無 Read／Write／Edit／PowerShell，讀走 shell、寫走 apply_patch），點名該守衛在哪個宿主不生效。
 - `card_lint`：`superseded` 卡的武裝豁免與「產品缺口」豁免改為要驗繼任卡確實存在。`superseded_by` 指向不存在的卡不再算重導向——豁免不生效、警告照出，避免刪掉繼任卡後一張沒人接手的舊卡永遠靜音。全庫掃描（`scan_vault`）以現存卡名集合驗證；單卡寫檔閘無庫上下文時維持「有寫就認」。（4de3e07 的另三項降級——過期一次性授權由 WARN 轉 INFO、`corrections/` 逐字捕捉事件免武裝、有繼任卡的 superseded 卡免武裝——經 diff 與提交訊息判斷有明確語意依據且已隨 v1.8.1 發布，予以保留。）
 - PowerShell 腳本編碼守衛修正四項誤擋／漏擋：UTF-16 LE/BE BOM 檔不再被當成「沒有 UTF-8 BOM」而擋（PS 5.1 讀 UTF-16 BOM 沒問題）；純 ASCII 內容不再要求 BOM（無非 ASCII 字元時編碼無關）；守衛範圍從 .ps1 擴及模組 .psm1 與資料檔 .psd1；>256KB 的新內容不再提前放行，缺 BOM 又含非 ASCII 仍要擋。移除 BOM 的 apply_patch 若移除後為純 ASCII 則放行、否則仍擋。

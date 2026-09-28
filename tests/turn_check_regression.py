@@ -292,6 +292,105 @@ class WiringIntoTheGate(unittest.TestCase):
             self.assertEqual(stop_gate._read_cache(cache), ({}, {}, ""))
 
 
+ENGLISH_REPLY = (
+    "All four parts are written and I've spot-checked each myself. The gate now blocks "
+    "the original sentence, the encoding guard accepts both byte orders, and the lint "
+    "no longer hides a dangling successor. Nothing else changed in the working tree.")
+CHINESE_REPLY = (
+    "四項都寫好了，我逐項自己抽查過。`pretooluse_gate.py` 的編碼守衛改好，"
+    "C:\\Epitype\\repo\\adapters\\claude\\stop_gate.py 也更新；合併用 `git merge --ff-only`，"
+    "之後跑 run_all 確認 TOTAL PASS。細節見 https://example.com/report 與下面的指令：\n"
+    "```powershell\npython tests/run_all.py --jobs 4\ngit log --oneline -5\n```\n"
+    "剩下的風險是 Codex 那一側還沒在真機驗過，下一步請 owner 決定要不要合併。")
+
+
+class OwnerLanguage(unittest.TestCase):
+    """回覆給 owner 的說明文字要用他的語言；程式碼、路徑、識別字不算。"""
+
+    def check(self, message, event=None, defects=None, **overrides):
+        card = decision(turn_check=memspec.TURN_CHECK_OWNER_LANGUAGE, **overrides)
+        return stop_gate._turn_check_gap(
+            card, message, _Turn([], ""), frozenset(),
+            [] if defects is None else defects, event or {})
+
+    def test_an_all_english_reply_is_blocked_in_plain_chinese(self):
+        reason = self.check(ENGLISH_REPLY)
+        self.assertIsNotNone(reason)
+        self.assertIn("繁體中文重寫", reason)
+
+    def test_a_chinese_reply_with_code_paths_and_identifiers_passes(self):
+        self.assertIsNone(self.check(CHINESE_REPLY))
+
+    def test_a_short_or_code_only_reply_passes(self):
+        self.assertIsNone(self.check("Done."))
+        self.assertIsNone(self.check("```bash\ngit status && git log --oneline -20\n```"))
+
+    def test_a_subagent_turn_is_never_judged(self):
+        self.assertIsNone(self.check(
+            ENGLISH_REPLY, event={"hook_event_name": memspec.SUBAGENT_STOP_EVENT}))
+        self.assertIsNone(self.check(
+            ENGLISH_REPLY, event={"hook_event_name": "Stop", "agent_id": "a1b2"}))
+
+    def test_only_the_final_message_is_measured(self):
+        # 中途的英文工具旁白不把中文結論拖下水；反過來最後一則是英文就擋。
+        joined = ENGLISH_REPLY + "\n\n" + CHINESE_REPLY
+        self.assertIsNone(self.check(joined, event={"last_assistant_message": CHINESE_REPLY}))
+        self.assertIsNotNone(self.check(joined, event={"last_assistant_message": ENGLISH_REPLY}))
+
+    def test_the_card_sets_target_and_threshold(self):
+        # 陌生人換成自己的語言：目標是英文時，一則中文回覆反過來要擋。
+        self.assertIsNotNone(self.check(CHINESE_REPLY * 2, turn_check_target="en"))
+        self.assertIsNone(self.check(ENGLISH_REPLY, turn_check_target="en"))
+        # 門檻壓到 1% 時，一則大半英文、夾幾個中文字的回覆也算過關。
+        self.assertIsNone(self.check(ENGLISH_REPLY + " 已完成。", turn_check_limit="1"))
+
+    def test_an_unknown_target_is_reported_not_swallowed(self):
+        defects = []
+        self.assertIsNone(self.check(ENGLISH_REPLY, defects=defects, turn_check_target="klingon"))
+        self.assertTrue(defects)
+        self.assertIn("klingon", defects[0])
+
+    def test_both_hosts_through_the_installed_stop_hook(self):
+        from _hook_common import run_synthetic, write_config
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            vault = root / "vault"
+            vault.mkdir()
+            (vault / "lang.md").write_text(
+                "---\nname: owner-language\ndescription: 對 owner 一律繁體中文\n"
+                f"{memspec.TURN_CHECK_FIELD}: {memspec.TURN_CHECK_OWNER_LANGUAGE}\n"
+                f"{memspec.TURN_CHECK_TARGET_FIELD}: zh-Hant\n---\nBody\n", encoding="utf-8")
+            config = root / "config.json"
+            write_config(config, [vault])
+            rows = {
+                "claude": [{"type": "user", "message": {"content": "進度？"}}],
+                "codex": [{"type": "response_item", "payload": {
+                    "type": "message", "role": "user",
+                    "content": [{"type": "input_text", "text": "進度？"}]}}],
+            }
+            for host, lines in rows.items():
+                transcript = root / f"{host}.jsonl"
+                transcript.write_text("\n".join(json.dumps(row, ensure_ascii=False)
+                                                for row in lines) + "\n", encoding="utf-8")
+                for event_name, message, blocked in (
+                        ("Stop", ENGLISH_REPLY, True),
+                        ("Stop", CHINESE_REPLY, False),
+                        (memspec.SUBAGENT_STOP_EVENT, ENGLISH_REPLY, False)):
+                    event = {"session_id": f"lang-{host}-{time.monotonic_ns()}",
+                             "hook_event_name": event_name, "stop_hook_active": False,
+                             "transcript_path": str(transcript),
+                             "last_assistant_message": message}
+                    result = run_synthetic(
+                        Path(stop_gate.__file__), event, config,
+                        environment={"HOME": str(root), "USERPROFILE": str(root)},
+                        clock=memspec.HOOK_CLOCK_FROZEN)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    verdict = json.loads(result.stdout) if result.stdout.strip() else {}
+                    self.assertEqual(verdict.get("decision") == "block", blocked,
+                                     f"{host} {event_name}: {verdict}")
+
+
 class TheOpenedRecord(unittest.TestCase):
     def test_it_records_and_reads_back_filenames(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -338,7 +437,7 @@ def _selftest():
     suite = unittest.TestSuite(
         loader.loadTestsFromTestCase(case)
         for case in (ReportLength, CitedButNeverOpened, DelegatedWorkStillHasAnOwner,
-                     FencedCodeIsADeliverable, WiringIntoTheGate, TheOpenedRecord)
+                     FencedCodeIsADeliverable, WiringIntoTheGate, OwnerLanguage, TheOpenedRecord)
     )
     result = unittest.TextTestRunner(verbosity=1).run(suite)
     total = result.testsRun
