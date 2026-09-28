@@ -185,7 +185,76 @@ def _redirected_to_existing(fields, counts, targets, known_cards):
     return any(target in known_cards for target in targets)
 
 
-def _arming_findings(fields, counts, card_type, today, relative="", superseded_redirect=None):
+def _host_field_findings(front_lines):
+    """宿主原生欄位的格式。讀法與 `epitype sync` 同一份（memspec.host_native_values）：
+    體檢說合格的值，就是會寫進宿主設定的值。"""
+    _values, problems = memspec.host_native_values(front_lines)
+    return [(FAIL, "host-field", problem) for problem in problems]
+
+
+def _enforce_findings(fields, counts, front_lines):
+    """(這張卡的執行層或 None, findings)。
+
+    沒寫 `enforce:` 就由既有欄位推導：宿主原生欄位＝host、閘欄位＝gate、寫了
+    unenforceable＝text，理由屬「閘門看不到」那一類＝gap（產品缺口，與
+    `unenforceable-gap` 同一個判準）。寫了就要對得上卡片實際帶的欄位：宣稱有人擋、實際
+    沒人擋，是「假裝武裝」那一種，比不宣稱更糟，所以 FAIL。"""
+    host = memspec.host_native_declared(front_lines)
+    gate = any(
+        fields.get(field, "").strip() or counts.get(field) for field in memspec.CARD_ARMING_FIELDS
+    )
+    reason = fields.get(memspec.UNENFORCEABLE_FIELD, "").strip()
+    if host:
+        derived = memspec.ENFORCE_HOST
+    elif gate:
+        derived = memspec.ENFORCE_GATE
+    elif reason:
+        gap = re.search(memspec.UNENFORCEABLE_PRODUCT_GAP_PATTERN, reason, re.IGNORECASE)
+        derived = memspec.ENFORCE_GAP if gap else memspec.ENFORCE_TEXT
+    else:
+        derived = None
+    declared = fields.get(memspec.ENFORCE_FIELD, "").strip().casefold()
+    if not declared:
+        return derived, []
+    if declared not in memspec.ENFORCE_VALUES:
+        return derived, [(FAIL, "enforce", memspec.CARD_LINT_ENFORCE_VALUE_REASON.format(
+            field=memspec.ENFORCE_FIELD, value=declared,
+            allowed="|".join(memspec.ENFORCE_VALUES)))]
+    carried = {
+        memspec.ENFORCE_HOST: host,
+        memspec.ENFORCE_GATE: gate,
+        memspec.ENFORCE_TEXT: bool(reason),
+        memspec.ENFORCE_GAP: bool(reason),
+    }[declared]
+    if not carried:
+        missing = memspec.CARD_LINT_ENFORCE_MISSING[declared].format(
+            host=memspec.SLASH_JOINER.join(memspec.HOST_NATIVE_FIELDS),
+            gate=memspec.SLASH_JOINER.join(memspec.CARD_ARMING_FIELDS),
+            unenforceable=memspec.UNENFORCEABLE_FIELD)
+        return derived, [(FAIL, "enforce", memspec.CARD_LINT_ENFORCE_MISMATCH_REASON.format(
+            field=memspec.ENFORCE_FIELD, value=declared, missing=missing))]
+    return declared, []
+
+
+def _enforce_layer(fields, card_type, relative, tier):
+    """這張卡在分層統計裡落在哪一格；None＝不在統計範圍。
+
+    範圍＝行為卡（會被要求武裝的那幾種，加上規則卡——它同樣在記「以後要怎麼做」），而且
+    還在生效。corrections/ 底下帶出處欄位的是逐字捕捉的原話，是證據不是規則，單獨一格。"""
+    if card_type not in memspec.RECURRENCE_GATE_CARD_TYPES:
+        return None
+    if fields.get(memspec.DECISION_STATUS_FIELD, "").strip() in memspec.STOP_GATE_SILENT_STATUSES:
+        return None
+    if (card_type == memspec.CARD_TYPE_CORRECTION
+            and relative.startswith(memspec.CORRECTION_DIRECTORY + "/")
+            and fields.get(memspec.CAPTURED_AT_FIELD)
+            and fields.get(memspec.SESSION_FIELD)):
+        return memspec.ENFORCE_EXEMPT
+    return tier or memspec.ENFORCE_UNCLASSIFIED
+
+
+def _arming_findings(fields, counts, card_type, today, relative="", superseded_redirect=None,
+                     host=False):
     """feedback 卡必須武裝，或明講它綁不住。
 
     2026-09-16 實查：通用庫 400 張卡只有 11 張帶 forbidden，而那 11 張全是產品自己的
@@ -213,6 +282,9 @@ def _arming_findings(fields, counts, card_type, today, relative="", superseded_r
             and fields.get(memspec.SESSION_FIELD)):
         return []
     if fields.get(memspec.UNENFORCEABLE_FIELD, "").strip():
+        return []
+    # 宿主原生欄位由宿主自己擋，比閘欄位更硬：寫了就是武裝。
+    if host:
         return []
     for field in memspec.CARD_ARMING_FIELDS:
         if fields.get(field, "").strip() or counts.get(field):
@@ -787,7 +859,8 @@ def _apply_git_dates(vault, raw_cards, budget):
 
 
 def _check_card(path, relative, today, known_cards=None):
-    """(型別, findings, 推得的日期)。findings 是 (level, rule, reason) 的清單。
+    """(型別, findings, 推得的日期, 執行層)。findings 是 (level, rule, reason) 的清單；
+    執行層是 `_enforce_layer` 的結果，None＝不在分層統計範圍。
 
     known_cards 是這個 vault 現存的卡名集合（stem，casefold）；提供時 superseded_by
     指向不存在的卡就不算重導向。單卡檢查（寫檔閘）沒有庫上下文，傳 None。"""
@@ -795,16 +868,16 @@ def _check_card(path, relative, today, known_cards=None):
     try:
         text = path.read_text(encoding="utf-8-sig")
     except (OSError, UnicodeError) as exc:
-        return memspec.DEFAULT_CARD_TYPE, [(FAIL, "unreadable", f"{type(exc).__name__}")], None
+        return memspec.DEFAULT_CARD_TYPE, [(FAIL, "unreadable", f"{type(exc).__name__}")], None, None
     front_lines, closing = memspec.split_frontmatter(text)
 
     findings = []
     if front_lines is None:
         findings.append((FAIL, "frontmatter", memspec.CARD_LINT_NO_FRONTMATTER_REASON))
-        return memspec.DEFAULT_CARD_TYPE, findings, None
+        return memspec.DEFAULT_CARD_TYPE, findings, None, None
     if closing is None:
         findings.append((FAIL, "frontmatter", memspec.CARD_LINT_NO_BOUNDARY_REASON))
-        return memspec.DEFAULT_CARD_TYPE, findings, None
+        return memspec.DEFAULT_CARD_TYPE, findings, None, None
 
     nested, counts = _nested_and_lists(front_lines, path)
     card_type = _card_type(relative, fields, nested)
@@ -832,7 +905,18 @@ def _check_card(path, relative, today, known_cards=None):
     findings.extend(_write_check_findings(fields))
     redirect = _redirected_to_existing(
         fields, counts, _superseded_targets(front_lines), known_cards)
-    findings.extend(_arming_findings(fields, counts, card_type, today, relative, redirect))
+    findings.extend(_host_field_findings(front_lines))
+    tier, enforce = _enforce_findings(fields, counts, front_lines)
+    findings.extend(enforce)
+    layer = _enforce_layer(fields, card_type, relative, tier)
+    # 行為糾正卡沒有任何一層時，「沒武裝」那一條已經在講同一件事；規則卡原本不被問，
+    # 這一條補的就是那個缺口。先 WARN 並列清單，逐張分類，不一次判掉。
+    if layer == memspec.ENFORCE_UNCLASSIFIED and card_type == memspec.CARD_TYPE_RULE:
+        findings.append((WARN, "unclassified", memspec.CARD_LINT_UNCLASSIFIED_REASON.format(
+            enforce=memspec.ENFORCE_FIELD, unenforceable=memspec.UNENFORCEABLE_FIELD)))
+    findings.extend(_arming_findings(
+        fields, counts, card_type, today, relative, redirect,
+        host=memspec.host_native_declared(front_lines)))
     findings.extend(_unenforceable_gap_findings(fields, counts, redirect))
     findings.extend(_example_findings(path, fields, front_lines, counts, today))
 
@@ -934,7 +1018,7 @@ def _check_card(path, relative, today, known_cards=None):
                 allowed=memspec.SLASH_JOINER.join(memspec.ON_HIT_VALUES),
                 note=memspec.CARD_LINT_ON_HIT_NOTE),
         ))
-    return card_type, findings, derived
+    return card_type, findings, derived, layer
 
 
 def check_card(path, relative, today=None):
@@ -946,7 +1030,7 @@ def check_card(path, relative, today=None):
 
     git 首提日不在這條路徑上：閘門看的是還沒落盤的內容，磁碟上沒有那個檔可查。
     """
-    card_type, findings, _derived = _check_card(
+    card_type, findings, _derived, _layer = _check_card(
         path, relative, today or datetime.now(timezone.utc).date()
     )
     return card_type, findings
@@ -1021,6 +1105,11 @@ def _vault_findings(vault, relatives):
     return findings
 
 
+def _empty_layers():
+    return {name: 0 for name in memspec.ENFORCE_VALUES
+            + (memspec.ENFORCE_UNCLASSIFIED, memspec.ENFORCE_EXEMPT)}
+
+
 def scan_vault(vault, today=None, deadline=None, deep=False):
     """唯讀掃描一個 vault；deadline 是 time.monotonic() 上限，逾時就標記並停手。
 
@@ -1037,6 +1126,7 @@ def scan_vault(vault, today=None, deadline=None, deep=False):
             "fail_cards": 0, "by_type": {}, "oversized_skipped": 0,
             "native_docs_skipped": len(memsearch.card_files(vault)),
             "timed_out": False, "cards": [], "vault_findings": [],
+            "enforce": _empty_layers(), "unclassified": [],
         }
     today = today or datetime.now(timezone.utc).date()
     raw_cards = []
@@ -1044,6 +1134,8 @@ def scan_vault(vault, today=None, deadline=None, deep=False):
     oversized = 0
     timed_out = False
     relatives = []
+    layers = _empty_layers()
+    unclassified = []
     card_paths = list(memsearch.card_files(vault))
     # 現存卡名（stem，casefold），用來判 superseded_by 指的繼任卡在不在；指向不存在的
     # 卡不算重導向，武裝／缺口豁免因此不會被一個斷掉的指標騙過去。
@@ -1061,14 +1153,19 @@ def scan_vault(vault, today=None, deadline=None, deep=False):
         relative = path.relative_to(vault).as_posix()
         relatives.append(relative)
         try:
-            card_type, findings, derived = _check_card(path, relative, today, known_cards)
+            card_type, findings, derived, layer = _check_card(path, relative, today, known_cards)
         except Exception as exc:  # 一張壞卡不得讓整庫掃描停擺
-            card_type, findings, derived = (
+            card_type, findings, derived, layer = (
                 memspec.DEFAULT_CARD_TYPE,
                 [(FAIL, "unreadable", f"{type(exc).__name__}: {exc}")],
                 None,
+                None,
             )
         by_type[card_type] = by_type.get(card_type, 0) + 1
+        if layer is not None:
+            layers[layer] += 1
+            if layer == memspec.ENFORCE_UNCLASSIFIED:
+                unclassified.append({"path": relative, "type": card_type})
         if findings:
             raw_cards.append({"path": relative, "type": card_type, "findings": findings, "derived": derived})
     budget = memspec.CARD_DATE_GIT_BUDGET_SECONDS
@@ -1111,6 +1208,8 @@ def scan_vault(vault, today=None, deadline=None, deep=False):
             {"level": level, "rule": rule, "reason": reason}
             for level, rule, reason in vault_findings
         ],
+        "enforce": layers,
+        "unclassified": sorted(unclassified, key=lambda item: item["path"]),
     }
 
 
@@ -1233,6 +1332,10 @@ def _print_report(report, output, verbose=False):
         print(f"{card['path']} [{card['type']}]", file=output)
         for item in items:
             print(f"  {item['level']} {item['rule']}: {item['reason']}", file=output)
+    layers = report.get("enforce") or _empty_layers()
+    print(memspec.CARD_LINT_ENFORCE_LINE.format(**layers), file=output)
+    for item in report.get("unclassified") or ():
+        print(memspec.CARD_LINT_UNCLASSIFIED_LINE.format(**item), file=output)
     by_type = ",".join(f"{name}:{count}" for name, count in report["by_type"].items()) or "-"
     note = f" oversized={report['oversized_skipped']}" if report["oversized_skipped"] else ""
     note += (f" native_docs_skipped={report['native_docs_skipped']}"
@@ -1296,21 +1399,25 @@ _FIXTURES = {
     "rule-floor.md": "---\nname: rule-floor\ndescription: 2026-09-09 合成底線規則卡\n"
     "layer: floor\nsection: alpha\norder: 1\ntext: Synthetic floor sentence for the fixtures.\n"
     "decided_by: three-way\napproved_by: synthetic-pair\napproved_at: 2026-09-09\n"
+    "unenforceable: 判斷型（合成）\n"
     "aliases:\n  - 合成規則\n  - synthetic rule\nmetadata:\n  type: rule\n---\nbody\n",
     "rule-bad.md": "---\nname: rule-bad\ndescription: 2026-09-09 壞規則卡\n"
     "layer: nowhere\nsection: alpha\norder: 甲\ntext: " + "x" * (400 + 1) + "\n"
     "decided_by: owner-explicit\napproved_by: synthetic-pair\napproved_at: 昨天\n"
+    "unenforceable: 判斷型（合成）\n"
     "aliases:\n  - 壞規則\nmetadata:\n  type: rule\n---\nbody\n",
     # 宿主區（U-R3）：hosts 值域內＋常駐層是乾淨的；值域外的名字與底線層帶 hosts 都是 FAIL。
     "rule-hosts.md": "---\nname: rule-hosts\ndescription: 2026-09-10 合成宿主區規則卡\n"
     "layer: resident\nsection: alpha\norder: 2\ntext: Synthetic host-only sentence for the fixtures.\n"
     "decided_by: three-way\napproved_by: synthetic-pair\napproved_at: 2026-09-10\n"
     "hosts:\n  - claude\n  - codex\n"
+    "unenforceable: 判斷型（合成）\n"
     "aliases:\n  - 宿主區規則\n  - host zone rule\nmetadata:\n  type: rule\n---\nbody\n",
     "rule-hosts-bad.md": "---\nname: rule-hosts-bad\ndescription: 2026-09-10 宿主區寫壞的規則卡\n"
     "layer: floor\nsection: alpha\norder: 3\ntext: Synthetic floor sentence that must stay shared.\n"
     "decided_by: three-way\napproved_by: synthetic-pair\napproved_at: 2026-09-10\n"
     "hosts: [claude, gemini]\n"
+    "unenforceable: 判斷型（合成）\n"
     "aliases:\n  - 壞宿主區\nmetadata:\n  type: rule\n---\nbody\n",
     "scar-bad.md": "---\nname: scar-bad\ndescription: 2026-09-01 壞傷疤卡\ntrigger:\n  tool: \"^(Bash)$\"\nmetadata:\n  type: scar\n---\nbody\n",
     "scar-good.md": "---\nname: scar-good\ndescription: 2026-09-01 好傷疤卡\nadvice: 改用 Write 落檔\nincident: 2026-09-02 三個 session 各踩一次\nvalid_until: 2026-08-01\nmetadata:\n  type: scar\n---\nbody\n",

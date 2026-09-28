@@ -1105,24 +1105,220 @@ def _guard_review(event, tool_name, tool_input, config, started_at, defects):
 
 
 def _encoding_bom(head):
-    """PowerShell 5.1 \u8a8d\u5f97\u7684 BOM\uff1aUTF-8\u3001UTF-16 LE\u3001UTF-16 BE \u90fd\u8b93\u5b83\u6b63\u78ba\u5224\u78bc\u3002"""
+    """PowerShell 5.1 認得的 BOM：UTF-8、UTF-16 LE、UTF-16 BE 都讓它正確判碼。"""
     return (head.startswith(b"\xef\xbb\xbf")
             or head.startswith(b"\xff\xfe")
             or head.startswith(b"\xfe\xff"))
 
 
 def _ps_encoding_safe(text):
-    """\u5beb\u5165\u5f8c\u7684\u5167\u5bb9\u5c0d PowerShell 5.1 \u662f\u5426\u5b89\u5168\u3002
+    """寫入後的內容對 PowerShell 5.1 是否安全。
 
-    \u7d14 ASCII \u6642 UTF-8 \u8207 cp950 \u7684\u4f4d\u5143\u7d44\u5b8c\u5168\u76f8\u540c\uff0c\u7de8\u78bc\u7121\u95dc\u3001\u4e0d\u9700 BOM\uff1b\u5426\u5247\u9996\u5b57\u5143\u5fc5\u9808\u662f
-    BOM\uff08UTF-8 \u6216 UTF-16 \u90fd\u4ee5 `\ufeff` \u958b\u982d\uff09\u624d\u80fd\u6a19\u660e\u975e ANSI \u7de8\u78bc\u3002"""
+    純 ASCII 時 UTF-8 與 cp950 的位元組完全相同，編碼無關、不需 BOM；否則首字元必須是
+    BOM（UTF-8 或 UTF-16 都以 `\ufeff` 開頭）才能標明非 ANSI 編碼。"""
     return text.startswith("\ufeff") or text.isascii()
+
+
+# 宿主原生設定：卡片是正本，`epitype sync` 渲染出來的鍵不准直接改（見 epitype/host_native.py）。
+# 檔名先比對，對上了才讀狀態檔——絕大多數呼叫連那一次讀檔都不付。
+_NATIVE_BASENAMES = frozenset(name.casefold() for name in (
+    memspec.HOST_NATIVE_CLAUDE_USER_SETTINGS,
+    memspec.HOST_NATIVE_CLAUDE_PROJECT_SETTINGS,
+    memspec.HOST_NATIVE_CODEX_CONFIG,
+    memspec.HOST_NATIVE_CODEX_RULES_FILENAME,
+))
+# 殼層判斷只給真的會執行指令的工具：Grep 的樣式裡剛好有 `rm ` 不是在寫檔。
+_NATIVE_NON_SHELL_TOOLS = frozenset((
+    "read", "glob", "grep", "webfetch", "websearch", "agent", "task", "ls", "notebookread",
+))
+_NATIVE_CLAUDE, _NATIVE_CODEX_CONFIG, _NATIVE_CODEX_RULES = (
+    "claude_settings", "codex_config", "codex_rules")
+
+
+def _native_state():
+    """{normcase 路徑: 紀錄}；讀不到就是沒有被管理的鍵（放行）。與 host_native.state_path 同一處。"""
+    path = Path.home() / ".epitype" / memspec.HOST_NATIVE_STATE_FILENAME
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    targets = loaded.get("targets") if isinstance(loaded, dict) else None
+    return targets if isinstance(targets, dict) else {}
+
+
+def _native_protected(record):
+    """[(顯示名, 取值路徑, 清單項目或 None, 卡片, 欄位, 殼層比對字, 卡片要的值)]：
+    這個檔裡被管理的每一個鍵。清單項目（deny 規則）的「值」是它在不在，卡片要的是在。"""
+    kind = record.get("kind")
+    items = []
+    if kind == _NATIVE_CLAUDE:
+        for key, entry in (record.get("env") or {}).items():
+            items.append((f"env.{key}", ("env", key), None, (entry or {}).get("card"),
+                          memspec.HOST_CLAUDE_ENV_FIELD, key, (entry or {}).get("value")))
+        for rule, entry in (record.get("deny") or {}).items():
+            items.append((f"permissions.deny[{rule}]", ("permissions", "deny"), rule,
+                          (entry or {}).get("card"), memspec.HOST_CLAUDE_DENY_FIELD, rule, True))
+    elif kind == _NATIVE_CODEX_CONFIG:
+        for dotted, entry in (record.get("keys") or {}).items():
+            items.append((dotted, tuple(dotted.split(".")), None, (entry or {}).get("card"),
+                          memspec.HOST_CODEX_CONFIG_FIELD, dotted.rsplit(".", 1)[-1],
+                          (entry or {}).get("value")))
+    return items
+
+
+def _native_value(parsed, path, item):
+    node = parsed
+    for key in path:
+        node = node.get(key) if isinstance(node, dict) else None
+    if item is not None:
+        return isinstance(node, list) and item in node
+    return node
+
+
+def _native_parse(kind, text):
+    """解析設定檔內容；解析不了回 None。"""
+    try:
+        if not text.strip():
+            return {}
+        if kind == _NATIVE_CLAUDE:
+            value = json.loads(text)
+            return value if isinstance(value, dict) else None
+        import tomllib
+
+        return tomllib.loads(text)
+    except (ValueError, TypeError):
+        return None
+
+
+def _native_reason(path, name, card, field):
+    return _deny_value(memspec.HOST_NATIVE_GUARD_REASON.format(
+        path=path, key=name, card=card or "?", field=field))
+
+
+def _native_file_review(target, after, deleting=False):
+    """這次寫入改到了 Epitype 管理的鍵嗎？改到就擋，其餘放行。
+
+    只擋「這次寫入讓被管理的鍵變了、而且變的不是卡片要的值」：檔案本來就漂移、這次寫的
+    是別的鍵，照樣放行（修漂移是 `epitype sync` 的事，不該讓使用者其他的設定改不了）。
+    寫入後的內容推不出來（Edit 的舊字串不在檔裡）就放行：那次寫入在宿主那一端也會失敗。"""
+    if target.name.casefold() not in _NATIVE_BASENAMES:
+        return None
+    record = _native_state().get(os.path.normcase(os.fspath(target)))
+    if not isinstance(record, dict):
+        return None
+    kind = record.get("kind")
+    if kind == _NATIVE_CODEX_RULES:
+        cards = sorted(set((record.get("rules") or {}).values()))
+        return _native_reason(target, memspec.HOST_NATIVE_CODEX_RULES_FILENAME,
+                              memspec.LIST_JOINER.join(cards), memspec.HOST_CODEX_RULES_FIELD)
+    protected = _native_protected(record)
+    if not protected:
+        return None
+    try:
+        before_text = target.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeError):
+        before_text = ""
+    before = _native_parse(kind, before_text) or {}
+    if deleting:
+        after_doc = {}
+    elif after is None:
+        return None
+    else:
+        after_doc = _native_parse(kind, after.lstrip("﻿"))
+    for name, path, item, card, field, _token, wanted in protected:
+        was = _native_value(before, path, item)
+        # 寫完解析不了＝那個鍵等於被整份拿掉。
+        now = None if after_doc is None else _native_value(after_doc, path, item)
+        if now != was and now != wanted:
+            return _native_reason(target, name, card, field)
+    return None
+
+
+def _native_shell_review(text, state):
+    """殼層這一側：同一次呼叫裡有被管理的檔名、被管理的鍵、一個寫入動作，三個都在才擋。
+
+    讀（cat、grep、Get-Content，含 `2>/dev/null`）、`epitype sync`、複製出去當備份都放行。
+    整份覆寫（`> 那個檔`）不必點名鍵：它會把被管理的鍵一起抹掉。"""
+    if re.search(memspec.HOST_NATIVE_GUARD_SYNC_REGEX, text, re.IGNORECASE):
+        return None
+    folded = text.casefold()
+    writes = re.search(memspec.HOST_NATIVE_GUARD_WRITE_REGEX, text, re.IGNORECASE) is not None
+    for path_key, record in state.items():
+        if not isinstance(record, dict):
+            continue
+        name = Path(path_key).name
+        if name.casefold() not in folded:
+            continue
+        redirect = re.search(memspec.HOST_NATIVE_GUARD_REDIRECT_REGEX.format(name=re.escape(name)),
+                             text, re.IGNORECASE)
+        if not writes and redirect is None:
+            continue
+        if record.get("kind") == _NATIVE_CODEX_RULES:
+            cards = sorted(set((record.get("rules") or {}).values()))
+            return _native_reason(path_key, memspec.HOST_NATIVE_CODEX_RULES_FILENAME,
+                                  memspec.LIST_JOINER.join(cards), memspec.HOST_CODEX_RULES_FIELD)
+        protected = _native_protected(record)
+        overwrite = redirect is not None and not redirect.group(0).startswith(">>")
+        for display, _path, _item, card, field, token, _wanted in protected:
+            if overwrite or token.casefold() in folded:
+                return _native_reason(path_key, display, card, field)
+    return None
+
+
+def _native_review(event, tool_name, tool_input):
+    """代理直接改 Epitype 管理的宿主原生鍵時擋下：Edit／Write、Codex 的 apply_patch 封套、殼層。"""
+    if not isinstance(tool_input, dict):
+        return None
+    cwd = event.get("cwd")
+    if tool_name.casefold() in memspec.WRITE_GATE_TOOL_NAMES:
+        target = _write_target(tool_input, cwd)
+        if target is None or target.name.casefold() not in _NATIVE_BASENAMES:
+            return None
+        _additions, prospective = _prospective_write(tool_name, tool_input, target)
+        return _native_file_review(target, prospective)
+    pieces = []
+    for key, value in tool_input.items():
+        if key in memspec.ACTION_GUARD_IGNORED_FIELDS:
+            continue
+        if isinstance(value, str):
+            pieces.append(value)
+        elif isinstance(value, (list, tuple)):
+            pieces.extend(item for item in value if isinstance(item, str))
+    text = "\n".join(pieces)
+    folded = text.casefold()
+    if not any(name in folded for name in _NATIVE_BASENAMES):
+        return None
+    state = _native_state()
+    if not state:
+        return None
+    if patch_envelope.BEGIN_MARKER in text:
+        for entry in patch_envelope.parse(text):
+            target = _resolve_target(entry.path, cwd)
+            if target is None or target.name.casefold() not in _NATIVE_BASENAMES:
+                continue
+            if entry.op == "delete":
+                deny = _native_file_review(target, None, deleting=True)
+            elif entry.op == "add":
+                deny = _native_file_review(target, patch_envelope.full_content(entry))
+            else:
+                try:
+                    before = target.read_text(encoding="utf-8-sig")
+                except (OSError, UnicodeError):
+                    before = None
+                after = None if before is None else patch_envelope.apply_update(entry, before)
+                deny = _native_file_review(target, after)
+            if deny is not None:
+                return deny
+        return None
+    if tool_name.casefold() in _NATIVE_NON_SHELL_TOOLS:
+        return None
+    return _native_shell_review(text, state)
 
 
 def _write_check_review(event, config, target, prospective, patch, started_at):
     """Check a card-declared file invariant before a structured PowerShell write.
 
-    .ps1\uff0f.psm1\uff0f.psd1 \u90fd\u9069\u7528\u540c\u4e00\u689d PS 5.1 \u7de8\u78bc\u898f\u5247\u3002"""
+    .ps1／.psm1／.psd1 都適用同一條 PS 5.1 編碼規則。"""
     if target.suffix.casefold() not in memspec.WRITE_CHECK_PS_SUFFIXES:
         return None
     rules = []
@@ -1520,6 +1716,12 @@ def _handle(event, started_at, defects=None, meter_claims=None):
         guard_value = None
     if guard_value is not None:
         return guard_value
+    try:
+        native_value = _native_review(event, tool_name, event.get("tool_input"))
+    except Exception:
+        native_value = None
+    if native_value is not None:
+        return native_value
     try:
         write_value, notices = _write_review(
             event, tool_name, event.get("tool_input"), config, started_at

@@ -186,7 +186,12 @@ def _section_card_lint(vaults, today, since_date, config):
     fail = warn = fail_cards = 0
     native_docs_skipped = 0
     cards = []
+    layers = {}
+    unclassified = []
     for vault, report in results:
+        for name, count in (report.get("enforce") or {}).items():
+            layers[name] = layers.get(name, 0) + count
+        unclassified.extend({"vault": str(vault), **item} for item in report.get("unclassified") or ())
         fail += report["fail"]
         warn += report["warn"]
         fail_cards += report["fail_cards"]
@@ -196,9 +201,12 @@ def _section_card_lint(vaults, today, since_date, config):
     cards.sort(key=lambda item: (-item["fail"], -item["warn"], item["path"]))
     commands = [f'epitype cards "{vault}"' for vault in vaults] if (fail or warn) else []
     return {
+        # 執行層：每張行為卡由誰來擋。未分類＝沒有任何一層，只靠代理自己讀。
         "counts": {"fail": fail, "warn": warn, "fail_cards": fail_cards,
-                   "native_docs_skipped": native_docs_skipped},
+                   "native_docs_skipped": native_docs_skipped,
+                   **{f"enforce_{name}": count for name, count in layers.items()}},
         "examples": cards[:EXAMPLE_LIMIT],
+        "unclassified": unclassified[:EXAMPLE_LIMIT],
         "commands": commands,
         "errors": errors,
     }
@@ -2244,6 +2252,11 @@ def _render_section(lines, section):
     if examples:
         lines.append(f"examples (前 {len(examples)} 筆):")
         for item in examples:
+            lines.append(f"- {item}")
+    unclassified = section.get("unclassified") or []
+    if unclassified:
+        lines.append(f"未分類（沒有任何執行層，前 {len(unclassified)} 筆）:")
+        for item in unclassified:
             lines.append(f"- {item}")
     for command in section.get("commands") or ():
         lines.append(f"建議指令：{command}")

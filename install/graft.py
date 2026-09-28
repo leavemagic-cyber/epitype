@@ -1520,7 +1520,8 @@ def registration_gaps(home, hosts=None, hooks_root=None, repo_root=None):
     return gaps
 
 
-def _doctor(home, dry_run=False, output=sys.stdout, clear_shim_status=False, scheduler=None):
+def _doctor(home, dry_run=False, output=sys.stdout, clear_shim_status=False, scheduler=None,
+            strict_native=True):
     hosts = _detect_hosts(home)
     print("HOSTS: " + (", ".join(hosts) if hosts else "none"), file=output)
     if dry_run:
@@ -1571,6 +1572,11 @@ def _doctor(home, dry_run=False, output=sys.stdout, clear_shim_status=False, sch
         # 目錄時只讀得到那兩個檔（全域 AGENTS.md 只收治理庫）。這裡只報現況，不寫。
         for line in _project_sync_status(managed, home):
             print(line, file=output)
+        # 宿主原生設定（卡片渲染進 settings.json／config.toml／規則檔的那些鍵）與卡片不一致
+        # ＝漂移：正本是卡片，設定檔被手改之後兩邊就各說各話。
+        native_lines, native_drifted = _native_sync_status(managed, home)
+        for line in native_lines:
+            print(line, file=output)
         repo_root = _validate_repo_root(
             config.get("repo_root") if isinstance(config, dict) else None,
             require_adapters=False,
@@ -1613,10 +1619,33 @@ def _doctor(home, dry_run=False, output=sys.stdout, clear_shim_status=False, sch
         if not health_ok:
             print("DOCTOR FAIL synthetic hook health", file=output)
             return 1
+        if native_drifted and strict_native:
+            print(_host_native_memspec().HOST_NATIVE_DOCTOR_FAIL, file=output)
+            return 1
         return 0
     except Exception as exc:
         print(f"DOCTOR FAIL {type(exc).__name__}: {exc}", file=output)
         return 1
+
+
+def _host_native_memspec():
+    from epitype import memspec
+
+    return memspec
+
+
+def _native_sync_status(vaults, home):
+    """(每一行, 有沒有漂移)。純讀：doctor 只報，不寫。算不出來時報 unavailable、不算漂移——
+    doctor 自己的一個輔助檢查壞掉，不該讓整台機器看起來是設定跑掉。"""
+    try:
+        from epitype import host_native
+
+        lines, drifted = host_native.drift_lines(vaults, home=home)
+    except Exception as exc:
+        return [f"NATIVE: status unavailable ({type(exc).__name__}: {exc})"], False
+    if not lines:
+        return ["NATIVE: PASS host-native settings match the cards"], False
+    return [f"NATIVE: {line}" for line in lines], drifted
 
 
 def _project_file_state(plan):
@@ -1813,7 +1842,8 @@ def _install(
         transaction.write(state_path, _state_bytes(state))
         protected_after = {path: path.read_bytes() for path in protected_paths if path.is_file()}
         _assert_native_protection(protected_before, protected_after)
-        if _doctor(home, output=output, scheduler=scheduler) != 0:
+        # 宿主原生設定這時還沒同步（同步在下面），漂移是預期中的，不算安裝失敗。
+        if _doctor(home, output=output, scheduler=scheduler, strict_native=False) != 0:
             raise InstallError("post-install doctor failed")
 
         # 規則塊與索引同步進宿主自己會載入的那個檔。沒有這一步，使用者寫了卡、產生了
@@ -1941,7 +1971,7 @@ def _relocate(home, target, dry_run=False, output=sys.stdout, scheduler=None):
             command = [before["command"][0], os.fspath(repo_root / Path(*DREAM_SCRIPT_PARTS)), DREAM_SCHEDULED_FLAG]
             updated = {"command": command, "at": before["at"]}
             _replace_nightly_command(before, command, runner)
-        doctor_code = _doctor(home, output=output, scheduler=scheduler)
+        doctor_code = _doctor(home, output=output, scheduler=scheduler, strict_native=False)
         if doctor_code:
             raise InstallError("post-relocate doctor failed")
     except Exception:
