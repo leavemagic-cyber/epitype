@@ -431,6 +431,22 @@ class NativeSync(_NativeFixture):
         self.assertFalse((self.project / ".codex" / "config.toml").exists())
         self.assertEqual(host_native.load_state(self.home), {})
 
+    def test_crlf_and_bom_survive_a_write_and_a_removal(self):
+        original = b"\xef\xbb\xbf" + USER_SETTINGS.replace("\n", "\r\n").encode("utf-8")
+        self.settings.write_bytes(original)
+        config = (USER_CONFIG.replace("\n", "\r\n")).encode("utf-8")
+        self.config.write_bytes(config)
+        code, report = self._run(host_sync.apply)
+        written = self.settings.read_bytes()
+        self.assertTrue(written.startswith(b"\xef\xbb\xbf"), report)
+        self.assertNotIn(b"\n", written.replace(b"\r\n", b""), "行尾要維持 CRLF")
+        self.assertNotIn(b"\n", self.config.read_bytes().replace(b"\r\n", b""))
+        self.global_card.unlink()
+        self.project_card.unlink()
+        self._run(host_sync.apply)
+        self.assertEqual(self.settings.read_bytes(), original)
+        self.assertEqual(self.config.read_bytes(), config)
+
     def test_a_user_value_that_differs_is_a_conflict_not_an_overwrite(self):
         self.settings.write_text(USER_SETTINGS.replace(
             '"USER_KEY": "1"', '"USER_KEY": "1",\n    "CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS": "20"'),
