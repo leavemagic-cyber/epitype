@@ -23,7 +23,7 @@ SCHEMA_VERSION = 2
 # 否則它會在每一則訊息重發提醒。
 UNVERIFIED_TTL_SECONDS = 3600
 # 每筆資源在各階段最多提醒幾次。prompt 階段不擋回合，留少量重試給預算放不下的那次。
-REMINDER_LIMITS = {"tool": 1, "prompt": 3, "stop": 1}
+REMINDER_LIMITS = {"tool": 1, "prompt": 3}
 # calls 只用來擋同一個結果重送，一天足夠；其餘紀錄保留一週後刪除。清理最多每小時一次，
 # 而且建表／升版後先等一個間隔，不在升版那一刻刪資料。
 CALL_RETENTION_SECONDS = 24 * 3600
@@ -574,11 +574,6 @@ def reminder(event: dict, path: Path, stage: str, *, claim=True) -> str | None:
     if not isinstance(session, str) or not session or not path.is_file():
         return None
     if stage == "tool" and is_control_tool(str(event.get("tool_name") or "")):
-        return None
-    if stage == "stop" and (
-        event.get("stop_hook_active")
-        or event.get("hook_event_name") == "SubagentStop"
-    ):
         return None
     now = _now()
     with _database(path) as db:

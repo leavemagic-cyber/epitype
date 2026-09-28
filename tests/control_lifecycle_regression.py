@@ -5,6 +5,7 @@ sys.dont_write_bytecode = True
 
 from contextlib import closing
 from concurrent.futures import ThreadPoolExecutor
+import io
 import json
 import os
 from pathlib import Path
@@ -247,12 +248,15 @@ class ControlLifecycleRegression(unittest.TestCase):
         ), self.path)
         self.assertIn("無法", warning)
         self.assertEqual(lifecycle.status(self.path, "two")["pending"], [])
+        # Stop 階段的提醒已在 68438f4 拿掉（Codex 會把它顯示成使用者要處理的 Hook 反饋），
+        # 這裡改走實際存在的切換工具階段。
         self.assertIn("無法確認", lifecycle.reminder(
-            {"session_id": "one", "hook_event_name": "Stop"},
-            self.path, "stop"))
+            {"session_id": "one", "tool_name": "Read"}, self.path, "tool"))
         self.assertIsNone(lifecycle.reminder(
-            {"session_id": "one", "hook_event_name": "Stop"},
-            self.path, "stop"))
+            {"session_id": "one", "tool_name": "Read"}, self.path, "tool"))
+        with self.assertRaises(ValueError):
+            lifecycle.reminder({"session_id": "one", "hook_event_name": "Stop"},
+                               self.path, "stop")
 
     def test_parallel_distinct_results_not_lost(self):
         def one(index):
@@ -702,6 +706,29 @@ class ControlLifecycleRegression(unittest.TestCase):
             self.assertEqual(
                 db.execute("SELECT value FROM meta WHERE key='last_cleanup'").fetchone()[0], last)
         self.assertEqual(last, start + 8 * day)
+
+    def test_doctor_post_tool_use_probe_reaches_the_ledger(self):
+        # 健康檢查若用未追蹤的工具當探針，觀察器一開頭就回去，PASS 什麼也證明不了。
+        from install import graft
+
+        self.assertEqual(graft.CONTROL_LEDGER_FILENAME, lifecycle.DB_FILENAME)
+        self.assertTrue(lifecycle.is_tracked_tool(graft._POSTTOOLUSE_PROBE["tool_name"]))
+        home = Path(self.temporary.name) / "home"
+        hooks = home / graft.CONFIG_DIRECTORY / graft.HOOK_DIRECTORY
+        hooks.mkdir(parents=True)
+        for name, payload in graft._shim_payloads(ROOT).items():
+            (hooks / name).write_bytes(payload)
+        (home / graft.CONFIG_DIRECTORY / "config.json").write_text(json.dumps(
+            {"repo_root": str(ROOT), "vaults": [str(home)]}), encoding="utf-8")
+        report = io.StringIO()
+        graft._synthetic_health(home, ROOT, report)
+        self.assertIn("HOOK PostToolUse: PASS", report.getvalue())
+        untracked = dict(graft._POSTTOOLUSE_PROBE, tool_name="SyntheticRead")
+        report = io.StringIO()
+        with mock.patch.object(graft, "_POSTTOOLUSE_PROBE", untracked):
+            graft._synthetic_health(home, ROOT, report)
+        self.assertIn("HOOK PostToolUse: FAIL", report.getvalue())
+        self.assertIn("REASON PostToolUse: ledger-not-written", report.getvalue())
 
 if __name__ == "__main__":
     unittest.main(argv=[arg for arg in sys.argv if arg != "--selftest"])

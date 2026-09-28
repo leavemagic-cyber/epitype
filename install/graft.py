@@ -2,6 +2,7 @@ import sys; sys.dont_write_bytecode = True; [getattr(stream, "reconfigure", lamb
 """Install, inspect, or precisely remove Epitype hook registrations."""
 
 import argparse
+from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import difflib
@@ -14,6 +15,7 @@ from pathlib import Path
 import re
 import shlex
 import shutil
+import sqlite3
 import subprocess
 import tempfile
 import time
@@ -1147,16 +1149,40 @@ def _uncommitted_changes(repo_root):
     return sum(1 for line in result.stdout.splitlines() if line.strip())
 
 
+# 帳本檔名在 epitype/control_lifecycle.py 也有一份（安裝器不 import epitype）；
+# 漂移由 tests/control_lifecycle_regression.py 比對。
+CONTROL_LEDGER_FILENAME = "control_lifecycle.sqlite3"
+# PostToolUse 探針必須是會寫帳本的工具：未追蹤的工具在觀察器一開頭就返回，PASS 證明不了
+# 觀察器能寫帳本。它只在暫存設定旁的暫存帳本留一列，不碰使用者的帳本。
+_POSTTOOLUSE_PROBE = {
+    "hook_event_name": "PostToolUse", "session_id": "epitype-doctor",
+    "tool_use_id": "epitype-doctor-post",
+    "tool_name": "mcp__claude-in-chrome__tabs_context_mcp", "tool_input": {},
+    "tool_response": {"content": [
+        {"type": "text", "text": "No tab group exists for this session."}]},
+}
+
+
+def _ledger_probe_reason(ledger, event):
+    """None when the PostToolUse probe left its call in the temporary ledger."""
+    try:
+        with closing(sqlite3.connect(ledger.as_uri() + "?mode=ro", uri=True)) as db:
+            found = db.execute(
+                "SELECT 1 FROM calls WHERE session=? AND call_id=?",
+                (event["session_id"], event["tool_use_id"]),
+            ).fetchone()
+    except (sqlite3.Error, ValueError):
+        found = None
+    return None if found else "ledger-not-written"
+
+
 def _synthetic_health(home, repo_root, output):
     scripts = (
         ("SessionStart", "sessionstart.py", {"source": "epitype-doctor"}, ()),
         ("UserPromptSubmit", "recall.py", {"prompt": "synthetic doctor probe"}, ()),
         ("PreCompact", "precompact.py", {"transcript_path": ""}, ("--codex",)),
         ("PreToolUse", "pretooluse.py", {"tool_name": "SyntheticRead", "tool_input": {"path": "synthetic.txt"}}, ()),
-        ("PostToolUse", "pretooluse.py",
-         {"hook_event_name": "PostToolUse", "session_id": "epitype-doctor",
-          "tool_use_id": "epitype-doctor-post", "tool_name": "SyntheticRead",
-          "tool_input": {"path": "synthetic.txt"}, "tool_response": {}}, ()),
+        ("PostToolUse", "pretooluse.py", _POSTTOOLUSE_PROBE, ()),
         # A Stop probe must never look like a real turn: an empty message reaches the
         # gate, exercises the adapter, and cannot match a card.
         ("Stop", "stop.py", {"stop_hook_active": False, "last_assistant_message": ""}, ()),
@@ -1205,6 +1231,8 @@ def _synthetic_health(home, repo_root, output):
             elapsed_ms = int((time.monotonic() - started) * 1000)
             expected_adapter = repo_root / "adapters" / "claude" / HOOK_SPECS[name][1]
             reason = _synthetic_trace_reason(trace_path, shim_name, expected_adapter)
+            if reason is None and name == "PostToolUse":
+                reason = _ledger_probe_reason(root / CONTROL_LEDGER_FILENAME, event)
             ok = reason is None
             passed += int(ok)
             print(f"HOOK {name}: {'PASS' if ok else 'FAIL'} ({elapsed_ms} ms)", file=output)
