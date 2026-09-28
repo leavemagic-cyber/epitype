@@ -122,7 +122,7 @@ class ControlLifecycleRegression(unittest.TestCase):
                          ["open", "open", "close", "close"])
         self.assertNotIn(b"secret.example", self.path.read_bytes())
 
-    def test_uncertain_chrome_creation_clears_only_after_group_absence(self):
+    def test_uncertain_chrome_creation_clears_on_close_not_group_absence(self):
         tabs = json.dumps({"availableTabs": [{"tabId": 12}], "tabGroupId": 45})
         self.assertIn("無法", lifecycle.observe(post(
             "chrome-uncertain", "1", "mcp__claude-in-chrome__tabs_context_mcp",
@@ -131,9 +131,16 @@ class ControlLifecycleRegression(unittest.TestCase):
         # 無法歸屬的建立以候選分頁 ID 記錄，之後的「Closed tab 12」才對得上。
         self.assertIn({"kind": "unverified-chrome", "id": "12"},
                       lifecycle.status(self.path, "chrome-uncertain")["pending"])
+        # 群組不見了可能是使用者解散群組，分頁仍開著：這不是關閉確認。
         lifecycle.observe(post(
             "chrome-uncertain", "2", "mcp__claude-in-chrome__tabs_context_mcp",
             {}, mcp("No tab group exists for this session.")
+        ), self.path)
+        self.assertEqual(lifecycle.status(self.path, "chrome-uncertain")["pending"],
+                         [{"kind": "unverified-chrome", "id": "12"}])
+        lifecycle.observe(post(
+            "chrome-uncertain", "3", "mcp__claude-in-chrome__tabs_close_mcp",
+            {"tabId": 12}, mcp("Closed tab 12.")
         ), self.path)
         self.assertEqual(lifecycle.status(self.path, "chrome-uncertain")["pending"], [])
 
@@ -551,6 +558,79 @@ class ControlLifecycleRegression(unittest.TestCase):
         self.assertEqual(away.returncode, 0, away.stderr)
         self.assertNotIn("收尾", away.stdout)
 
+
+    def owned_iab_tab(self, session, tab_id="keep"):
+        lifecycle.observe(post(session, "create", "mcp__cua_repl__js",
+                               {"code": 'await cua.createBrowserTab("iab", "about:blank");'},
+                               mcp(f"Browser tab: {tab_id}")), self.path)
+
+    def test_filtered_or_trailing_inventory_cannot_prove_closure(self):
+        # 清單被篩過、或最後一個值不是清單本身時，「清單裡沒有」證明不了「已關閉」。
+        cases = [
+            ('const t = await cua.listTabs({browser:"iab"}); '
+             'JSON.stringify(t.filter(x => x.id !== "keep"))',
+             mcp("Wall time: 0.05 seconds\nOutput: []")),
+            ('JSON.stringify((await cua.listTabs({ browser: "iab" }))'
+             '.filter(x => x.url.includes("x")))',
+             mcp("Wall time: 0.05 seconds\nOutput: []")),
+            ('await cua.listTabs({browser:"iab"}); console.log("[]");',
+             mcp("Wall time: 0.05 seconds\nOutput:", json.dumps([{"id": "keep"}]), "[]")),
+            ('const s = await cua.getState(); '
+             'JSON.stringify({browsers: s.browsers.filter(b => b.type !== "iab")})',
+             mcp("Output: " + json.dumps({"browsers": [{"type": "extension", "tabs": []}]}))),
+            ('await cua.listTabs({browser:"iab"});',
+             mcp("Wall time: 0.05 seconds\nOutput:", json.dumps([{"id": "keep"}]),
+                 json.dumps([{"id": "other"}]))),
+        ]
+        for index, (code, response) in enumerate(cases):
+            session = f"filtered-{index}"
+            self.owned_iab_tab(session)
+            lifecycle.observe(post(session, "list", "mcp__cua_repl__js", {"code": code},
+                                   response), self.path)
+            self.assertIn({"kind": "cua-tab:iab", "id": "keep"},
+                          lifecycle.status(self.path, session)["pending"], code)
+
+    def test_bare_final_inventory_still_proves_closure(self):
+        for index, code in enumerate((
+            "await tab.close(); await cua.listTabs({browser:'iab'});",
+            'globalThis.tabsNow = await cua.listTabs({ browser: "iab" })',
+            "await cua.getState();",
+        )):
+            session = f"bare-{index}"
+            self.owned_iab_tab(session)
+            output = (json.dumps({"browsers": [{"type": "iab", "tabs": []}]})
+                      if "getState" in code else "[]")
+            lifecycle.observe(post(session, "list", "mcp__cua_repl__js", {"code": code},
+                                   mcp("Wall time: 0.05 seconds\nOutput:", output)), self.path)
+            self.assertEqual(lifecycle.status(self.path, session)["pending"],
+                             [{"kind": "cua-controller", "id": "repl"}], code)
+
+    def test_chrome_tab_missing_from_group_is_not_closed(self):
+        # Chrome 的清單只列群組內分頁：拖出群組或群組解散都會讓它「不在清單」，分頁卻還開著。
+        lifecycle.observe(post("drag", "1", "mcp__claude-in-chrome__tabs_context_mcp", {},
+                               mcp("No tab group exists for this session.")), self.path)
+        lifecycle.observe(post("drag", "2", "mcp__claude-in-chrome__tabs_context_mcp",
+                               {"createIfEmpty": True},
+                               mcp(json.dumps({"availableTabs": [{"tabId": 1}],
+                                               "tabGroupId": 9}))), self.path)
+        lifecycle.observe(post("drag", "3", "mcp__claude-in-chrome__tabs_create_mcp", {},
+                               mcp(json.dumps({"availableTabs": [{"tabId": 1}, {"tabId": 2}],
+                                               "tabGroupId": 9}))), self.path)
+        lifecycle.observe(post("drag", "4", "mcp__claude-in-chrome__tabs_context_mcp", {},
+                               mcp(json.dumps({"availableTabs": [{"tabId": 1}],
+                                               "tabGroupId": 9}))), self.path)
+        self.assertIn({"kind": "chrome-tab", "id": "2"},
+                      lifecycle.status(self.path, "drag")["pending"])
+        lifecycle.observe(post("drag", "5", "mcp__claude-in-chrome__tabs_close_mcp",
+                               {"tabId": 1}, mcp("Closed tab 1.", json.dumps(
+                                   {"availableTabs": [], "tabGroupId": 9}))), self.path)
+        self.assertEqual(lifecycle.status(self.path, "drag")["pending"],
+                         [{"kind": "chrome-group", "id": "9"}, {"kind": "chrome-tab", "id": "2"}])
+        lifecycle.observe(post("drag", "6", "mcp__claude-in-chrome__tabs_context_mcp", {},
+                               mcp("No tab group exists for this session.")), self.path)
+        # 群組不見只證明群組沒了；被拖出去的分頁 2 仍待確認。
+        self.assertEqual(lifecycle.status(self.path, "drag")["pending"],
+                         [{"kind": "chrome-tab", "id": "2"}])
 
 if __name__ == "__main__":
     unittest.main(argv=[arg for arg in sys.argv if arg != "--selftest"])

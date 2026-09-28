@@ -35,7 +35,13 @@ _TAB_CREATED = re.compile(r"Browser tab:\s*([A-Za-z0-9_-]+)\b")
 _CHROME_CLOSED = re.compile(r"\bClosed tab\s+([A-Za-z0-9_-]+)\b", re.I)
 _CREATE_CUA = re.compile(r"\bcua\.createBrowserTab\s*\(")
 _CREATE_BROWSER = re.compile(r"\bcua\.createBrowserTab\s*\(\s*['\"](iab|chrome|edge)['\"]", re.I)
-_LIST_BROWSER = re.compile(r"\bcua\.listTabs\s*\(\s*\{\s*browser\s*:\s*['\"](iab|chrome|edge)['\"]", re.I)
+# 清單只有在「程式最後一個敘述就是這個呼叫本身」時才算完整：REPL 輸出的是最後一個值，
+# 任何 filter/map/stringify 包裝或之後再印的東西都可能讓「清單裡沒有」變成假的關閉證據。
+_FINAL_INVENTORY = re.compile(
+    r"(?:^|[;{}\n])\s*(?:return\s+)?(?:[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\s*=\s*)?"
+    r"await\s+cua\.(?:(?P<state>getState)\s*\(\s*\)|listTabs\s*\(\s*\{\s*browser\s*:\s*"
+    r"(?P<quote>['\"])(?P<family>(?i:iab|chrome|edge))(?P=quote)\s*\}\s*\))\s*;?\s*$"
+)
 
 
 def database_path(config_file: Path) -> Path:
@@ -298,17 +304,16 @@ def _observe_chrome(db, session, call_id, name, tool_input, result_text, objects
     no_group = "No tab group exists for this session" in result_text
     if failed:
         return
+    # Chrome 的 availableTabs 只列本工作階段群組裡的分頁，不是整個瀏覽器的清單：分頁被拖出
+    # 群組、群組被解散，都會讓它「不在清單」卻仍開著。所以分頁只認「Closed tab X」；
+    # 群組不見只證明群組本身沒了。
     if name.endswith("tabs_context_mcp") or name.endswith("tabs_create_mcp"):
         previous = state.get("chrome_snapshot")
         if no_group:
             state["chrome_snapshot"] = []
             state["chrome_group_absent"] = True
-            for tab_id in _open_ids(db, session, "chrome-tab"):
-                _resource(db, session, call_id, "close", "chrome-tab", tab_id, now)
             for group_id in _open_ids(db, session, "chrome-group"):
                 _resource(db, session, call_id, "close", "chrome-group", group_id, now)
-            for unknown in _open_ids(db, session, "unverified-chrome"):
-                _resource(db, session, call_id, "close", "unverified-chrome", unknown, now)
             return
         if context is None:
             return
@@ -336,8 +341,6 @@ def _observe_chrome(db, session, call_id, name, tool_input, result_text, objects
                 _resource(db, session, call_id, "open", "chrome-tab", tab_id, now)
             if group and state.get("chrome_group_absent") is True:
                 _resource(db, session, call_id, "open", "chrome-group", group, now)
-        for tab_id in _open_ids(db, session, "chrome-tab") - ids:
-            _resource(db, session, call_id, "close", "chrome-tab", tab_id, now)
         state["chrome_snapshot"] = sorted(ids)
         state["chrome_group_absent"] = False
     elif name.endswith("tabs_close_mcp"):
@@ -356,38 +359,41 @@ def _observe_chrome(db, session, call_id, name, tool_input, result_text, objects
                 _resource(db, session, call_id, "close", "chrome-group", group_id, now)
             state["chrome_group_absent"] = True
         if context is not None:
-            ids, _ = context
-            for owned in _open_ids(db, session, "chrome-tab") - ids:
-                _resource(db, session, call_id, "close", "chrome-tab", owned, now)
-            state["chrome_snapshot"] = sorted(ids)
+            state["chrome_snapshot"] = sorted(context[0])
+
+
+def _only(values):
+    """The single distinct value, or None when absent or ambiguous."""
+    distinct = {json.dumps(value, sort_keys=True, default=str): value for value in values}
+    return next(iter(distinct.values())) if len(distinct) == 1 else None
 
 
 def _cua_inventory(code, objects):
-    if re.search(r"\bcua\.getState\s*\(", code):
-        for value in objects:
-            if not isinstance(value, dict) or not isinstance(value.get("browsers"), list):
-                continue
-            if value.get("errors"):
-                return None
-            return {
-                str(tab["id"]) for browser in value["browsers"]
-                if isinstance(browser, dict)
-                for tab in (browser.get("tabs") or [])
-                if isinstance(tab, dict) and isinstance(tab.get("id"), (str, int))
-            }, None
-    if re.search(r"\bcua\.listTabs\s*\(", code):
-        match = _LIST_BROWSER.search(code)
-        if match is None:
-            # listTabs may be scoped by a variable. Its result is not a
-            # complete cross-browser inventory, so it cannot prove closure.
+    """Tab IDs from a complete, unfiltered inventory, or None when unprovable.
+
+    listTabs scoped by a variable or a numeric browser ID, a wrapped or filtered
+    result, or several candidate lists in one output cannot prove closure.
+    """
+    match = _FINAL_INVENTORY.search(code)
+    if match is None:
+        return None
+    if match.group("state"):
+        value = _only(value for value in objects
+                      if isinstance(value, dict) and isinstance(value.get("browsers"), list))
+        if value is None or value.get("errors"):
             return None
-        for value in reversed(objects):
-            if isinstance(value, list) and all(
-                isinstance(tab, dict) and isinstance(tab.get("id"), (str, int))
-                for tab in value
-            ):
-                return {str(tab["id"]) for tab in value}, match.group(1).lower()
-    return None
+        return {
+            str(tab["id"]) for browser in value["browsers"]
+            if isinstance(browser, dict)
+            for tab in (browser.get("tabs") or [])
+            if isinstance(tab, dict) and isinstance(tab.get("id"), (str, int))
+        }, None
+    value = _only(value for value in objects if isinstance(value, list) and all(
+        isinstance(tab, dict) and isinstance(tab.get("id"), (str, int)) for tab in value
+    ))
+    if value is None:
+        return None
+    return {str(tab["id"]) for tab in value}, match.group("family").lower()
 
 
 def _observe_cua(db, session, call_id, name, tool_input, result_text, objects, failed, now):
