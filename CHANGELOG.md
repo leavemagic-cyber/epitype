@@ -7,6 +7,18 @@
 - PowerShell 腳本編碼守衛修正四項誤擋／漏擋：UTF-16 LE/BE BOM 檔不再被當成「沒有 UTF-8 BOM」而擋（PS 5.1 讀 UTF-16 BOM 沒問題）；純 ASCII 內容不再要求 BOM（無非 ASCII 字元時編碼無關）；守衛範圍從 .ps1 擴及模組 .psm1 與資料檔 .psd1；>256KB 的新內容不再提前放行，缺 BOM 又含非 ASCII 仍要擋。移除 BOM 的 apply_patch 若移除後為純 ASCII 則放行、否則仍擋。
 - 回合結束閘「要 PROMPT 就給 code block」等依 owner 話語判斷的檢查改用單一 `memspec.owner_typed_text`：只取 owner 親打的文字，排除子代理回報（`[Subagent hand-back]`／`<agent-message`）、背景任務通知、系統提醒、Stop hook 回饋、斜線指令展開等以 user 角色送進模型的機器包裝。修正子代理回報裡出現「write ... prompt」被當成 owner 要提示詞而誤擋（Claude、Codex 兩宿主皆已回歸驗證）；報告長度上限的「這次要詳細」免擋同樣只認 owner 親打的話。
 - 回合結束閘自測恢復「09-25 原句一定被擋」：Windows 上 hook 逾時放行不再算通過，合法寫法那題也不再接受 stderr 出現 `TimeoutExpired`。端到端改用只給自測子行程（持 frozen 時鐘憑證）的較長解析上限 `FENCE_SHELL_SELFTEST_TIMEOUT_SECONDS`；產品的 5 秒上限另有一題用產品秒數實際解析一次來斷言，並斷言沒有憑證的行程拿不到自測上限。
+### 瀏覽器查漏：需求變更
+
+- 無法確認的紀錄不再永遠掛著：`unverified-*` 開啟一小時後到期，狀態記為 `expired`（不是 `closed`，不冒充關閉確認）。
+- Chrome 標準第一步 `tabs_context_mcp({createIfEmpty:true})` 沒有先前快照時，改以候選分頁 ID 記成 `unverified-chrome`（原本以呼叫 ID 記）；之後工具回報 `Closed tab X` 即清除。既有測試的斷言因此由呼叫 ID `"1"` 改為分頁 ID `"12"`。
+- 名稱含 close/stop/reset 的其他操控工具不再記一筆「無法確認」；只有 create/open/start/launch 類會記。
+- 「清單裡沒有」只在清單可證明完整、未經篩選時才算關閉：Chrome 的 `availableTabs` 只列群組內分頁，分頁被拖出群組或群組解散都不再視為關閉，分頁只認 `Closed tab X`，`No tab group exists` 只關閉群組紀錄。CUA 的 `listTabs`／`getState` 必須是程式最後一個敘述本身（不經 filter、stringify 等包裝），而且輸出中只有一份候選清單。既有測試「群組不見即清除無法確認紀錄」因此改為「群組不見仍待確認、`Closed tab 12` 才清除」。
+- 子代理與主線分開：Hook 輸入帶 `agent_id` 的呼叫所開的資源歸該子代理，收尾提醒只給建立者；主線與其他子代理不再收到、也不會照著去關別人的分頁。`lifecycle --json` 的待處理項目在屬於子代理時多一個 `agent` 欄位。
+- 帳本加上保留期限：只為去重保存的呼叫紀錄保留一天，其餘紀錄（資源、事件、提醒、工作階段狀態）一週後刪除；清理最多每小時一次，建表或升版後先等一小時。截圖、點擊這類改不了帳本的操控結果不再寫入。
+- 提醒改為逐筆資源計次：切換到非操控工具時每筆最多提醒 1 次，使用者訊息階段每筆最多 3 次（原本每則訊息都重發，直到確認關閉）。只關掉其中一部分不算新狀況，不再重新提醒其餘的。
+- 提醒函式移除已無呼叫端的 `stop` 階段（Stop 提醒已於 68438f4 拿掉），傳入未知階段會報錯。既有測試原本用 `stop` 階段驗證「只提醒一次、不同工作階段分開」，改用實際存在的 `tool` 階段，另加一條斷言確認 `stop` 會被拒絕。
+- `epitype doctor` 的 PostToolUse 探針改用會寫帳本的 `tabs_context_mcp` 結果，並確認暫存帳本真的留下這次呼叫；原本的 `SyntheticRead` 在觀察器一開頭就返回，PASS 證明不了觀察器正常。Hook 設定內容未變。
+- 帳本升到第 2 版：第一個自然執行的 Hook 開啟舊帳本時一次處理——v1 留下、依新規則永遠清不掉的 `unverified-*` 紀錄標為 `expired`（事件呼叫 ID `schema-v2`），已確認的開啟紀錄保留，舊提醒指紋捨棄。`python -m epitype lifecycle` 改為唯讀開啟，不再建表、升版或清理。
 
 ## v1.8.1 (2026-09-28)
 
