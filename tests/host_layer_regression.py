@@ -78,6 +78,26 @@ class HostFieldLint(_TempVault):
         # 宿主原生欄位就是一種擋得住的欄位：不該再被要求補閘欄位或 unenforceable。
         self.assertNotIn("unarmed", rules)
 
+    def test_host_fields_need_an_official_source(self):
+        extra = "host_claude_env:\n  CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS: \"4\"\n"
+        missing = [rule for _l, rule, _r in self._findings(
+            "src-missing.md", _card(FEEDBACK_HEAD.format(stem="src-missing") + extra))]
+        self.assertIn("host-source", missing)
+        cited = [rule for _l, rule, _r in self._findings(
+            "src-cited.md", _card(FEEDBACK_HEAD.format(stem="src-cited") + extra
+                                  + "host_source: https://code.claude.com/docs/en/env-vars\n"))]
+        self.assertNotIn("host-source", cited)
+
+    def test_host_only_guard_declared_with_hosts_is_not_a_gap(self):
+        guard = "guard_tool: PowerShell\nguard_all_of:\n  - Remove-Item\n"
+        both = [rule for _l, rule, _r in self._findings(
+            "ps-both.md", _card(FEEDBACK_HEAD.format(stem="ps-both") + guard))]
+        self.assertIn("guard-tool-host", both)
+        claude_only = [rule for _l, rule, _r in self._findings(
+            "ps-claude.md", _card(FEEDBACK_HEAD.format(stem="ps-claude") + guard
+                                  + "hosts:\n  - claude\n"))]
+        self.assertNotIn("guard-tool-host", claude_only)
+
     def test_adding_a_host_field_counts_as_arming_for_the_recurrence_gate(self):
         # 替卡片補上宿主原生欄位就是在讓它擋得住；再犯閘不能把這種寫入當成「只加敘述」。
         for field in memspec.HOST_NATIVE_FIELDS:

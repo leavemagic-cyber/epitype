@@ -189,7 +189,15 @@ def _host_field_findings(front_lines):
     """宿主原生欄位的格式。讀法與 `epitype sync` 同一份（memspec.host_native_values）：
     體檢說合格的值，就是會寫進宿主設定的值。"""
     _values, problems = memspec.host_native_values(front_lines)
-    return [(FAIL, "host-field", problem) for problem in problems]
+    findings = [(FAIL, "host-field", problem) for problem in problems]
+    # 宿主的設定鍵與行為要照官方文件或官方原始碼定，不准從紀錄推測（owner 2026-09-29）。
+    # 出處寫在卡上，寫卡當下就擋得到，不必等到同步才發現。
+    if memspec.host_native_declared(front_lines):
+        sources = memspec.sequence_items(front_lines or (), memspec.HOST_SOURCE_FIELD)
+        if not any(re.match(r"https://\S+\.\S+", source) for source in sources):
+            findings.append((FAIL, "host-source", memspec.HOST_SOURCE_MISSING_REASON.format(
+                field=memspec.HOST_SOURCE_FIELD)))
+    return findings
 
 
 def _enforce_findings(fields, counts, front_lines):
@@ -483,6 +491,12 @@ def _pattern_findings(fields, front_lines):
         # 認得的工具名，但只有其中一個宿主有：那道守衛在另一個宿主永遠不觸發。點名是哪個
         # 宿主，免得「只在 Claude 生效」被當成全域。
         missing_hosts = memspec.hosts_without_tool(tool)
+        # 兩個宿主本來就不一樣：卡片用 hosts 寫明只給哪一邊時，另一邊沒有這個工具是設計，
+        # 不是缺口。只對卡片宣告要涵蓋、卻沒有對應工具的宿主提醒。
+        declared = {host.casefold() for host in
+                    memspec.sequence_items(front_lines or (), memspec.RULE_HOSTS_FIELD)}
+        if declared:
+            missing_hosts = [host for host in missing_hosts if host.casefold() in declared]
         if missing_hosts:
             findings.append((
                 WARN, "guard-tool-host",

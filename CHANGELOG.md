@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- 宿主原生欄位必須附 `host_source`（官方文件或官方原始碼網址），沒附判 FAIL `host-source`：兩個宿主的設定鍵與行為各不相同，照紀錄推測的不准寫進宿主設定（owner 2026-09-29）。
+- `guard-tool-host` 提醒尊重卡片的 `hosts`：寫明只給某一邊的規則，另一邊沒有對應工具是設計，不再提醒；提醒文字也改成先建議標 `hosts`，不再一律要求兩邊都擋。
 - `owner_typed_text` 不再因為開頭是機器區塊就把整則當空白：只剝開頭成對的機器區塊（含屬性的開標籤、`</pasted_content id=…>` 這類帶屬性的收尾、被跳脫成 `&lt;/…&gt;` 的收尾），Codex 另取 `## My request:` 之後的字，剩下的才判；剝完不剩或標籤沒收尾才回空字串。子代理回報、背景任務通知、跨場訊息、Stop hook 回饋照舊排除；斜線指令的 `<command-args>` 內文算 owner 的話。修正 Codex 開著內建瀏覽器時「給我prompt」漏擋、「完整」失去長度免擋；Claude 貼上內容後的請求同樣認得，超過 2 萬字的貼上也先取出 owner 那句話再截斷。需求變更：原本「開頭是 `<` 就整則不算」的判準改掉，回歸測試中 `<command-name>…</command-name> 寫一份 prompt` 這個舊期望換成真實的斜線指令形狀。
 - 回合結束閘新增內建檢查 `turn_check: owner_language`：對 owner 的最後一則回覆，說明文字的目標語言占比低於門檻就擋，理由用白話要求改用該語言重寫。卡片欄位 `turn_check_target`（預設 `zh-Hant`，可用 zh-Hant／zh-Hans／zh／ja／ko／en）與 `turn_check_limit`（目標語言最低占比，預設 50%）。只量給 owner 讀的文字：程式碼區塊、行內碼、網址、連結目標、檔案與 Windows 路徑、引號原文、技術識別字先拿掉；外文字母不足 40 個不判；中日韓一字、其他文字一詞各算一單位（以字母計會讓夾英文術語的中文回覆被誤擋）。子代理回合（SubagentStop、帶 `agent_id`）不查。決策快取換版 7→8，舊快取不會讓新欄位對既有卡默默失效。
 - 兩宿主工具名對照：Codex 派子代理的 `spawn_agent` 併入 `{task, agent}` 等價群，「派工要指名模型」等 `guard_requires: model` 守衛在 Codex 也會觸發（spawn_agent 參數 model／reasoning_effort／task_name／message，欄位名 model 與 Claude 一致）。`spawn_agent`、`apply_patch` 加入認得的工具名單。`card_lint` 新增 `guard-tool-host` WARN：`guard_tool` 若在某一宿主沒有對應工具（Codex 無 Read／Write／Edit／PowerShell，讀走 shell、寫走 apply_patch），點名該守衛在哪個宿主不生效。

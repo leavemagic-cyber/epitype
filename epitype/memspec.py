@@ -1925,8 +1925,8 @@ def hosts_without_tool(card_tool):
 
 CARD_GUARD_TOOL_HOST_GAP_REASON = (
     "guard_tool「{tool}」在 {hosts} 沒有對應工具，這道守衛在該宿主不會觸發（Codex 讀檔走"
-    " shell、寫檔是 apply_patch，都沒有 Read／Write／Edit／PowerShell）。若要兩宿主都擋，"
-    "換成兩宿主都有的工具（如 Bash／shell）或另立一張對應卡。"
+    " shell、寫檔是 apply_patch，都沒有 Read／Write／Edit／PowerShell）。這條本來就只給一邊的話，"
+    "寫 hosts 標明；兩邊都要擋才換成兩邊都有的工具，或照該宿主官方文件另立一張卡。"
 )
 
 
@@ -3008,6 +3008,12 @@ HOST_CODEX_CONFIG_FIELD = "host_codex_config"
 HOST_CODEX_RULES_FIELD = "host_codex_rules"
 HOST_NATIVE_FIELDS = (
     HOST_CLAUDE_ENV_FIELD, HOST_CLAUDE_DENY_FIELD, HOST_CODEX_CONFIG_FIELD, HOST_CODEX_RULES_FIELD)
+# 兩個宿主的設定鍵與行為各不相同，也會隨版本改。寫進宿主設定的每一條都要附官方文件或
+# 官方原始碼的網址；沒有出處的是從紀錄推測出來的，不准拿來設定宿主（owner 2026-09-29）。
+HOST_SOURCE_FIELD = "host_source"
+HOST_SOURCE_MISSING_REASON = (
+    "寫了宿主原生欄位，但 {field} 沒有官方出處網址（https://…）。"
+    "宿主設定要照官方文件或官方原始碼定，查不到就不要寫進宿主設定")
 # Codex 設定只收白名單：config.toml 裡有 sandbox、approval、model provider 這種一改就放寬
 # 權限或換掉帳單的鍵，卡片不該碰得到。鍵名與型別照 codex-cli 0.156.0 的設定結構。
 HOST_CODEX_CONFIG_POSITIVE_INT = "positive_int"
@@ -3514,7 +3520,8 @@ _EN = {
     "CARD_DISARMED_REASON": "{field} is nested one level under {parent}, and the gates read only top-level fields, so this card blocks nothing; move it to the top level of the frontmatter",
     "ACTION_GUARD_DEFECT": "⚠ {field} on guard card {card} is unusable ({reason}), so this one did not apply",
     "CARD_GUARD_TOOL_UNKNOWN_REASON": 'guard_tool "{tool}" is not a tool name we recognise; if it is a typo this guard will never catch anything. Known: {known}',
-    "CARD_GUARD_TOOL_HOST_GAP_REASON": 'guard_tool "{tool}" has no counterpart on {hosts}, so this guard never fires there (Codex reads via shell and writes via apply_patch; it has no Read/Write/Edit/PowerShell). To guard both hosts, use a tool both have (Bash/shell) or add a matching card.',
+    "CARD_GUARD_TOOL_HOST_GAP_REASON": 'guard_tool "{tool}" has no counterpart on {hosts}, so this guard never fires there (Codex reads via shell and writes via apply_patch; it has no Read/Write/Edit/PowerShell). If the rule is meant for one host only, declare it with hosts; to guard both, use a tool both have or add a card written from that host\'s official docs.',
+    "HOST_SOURCE_MISSING_REASON": "this card sets host-native fields but {field} has no official source URL (https://…). Host settings must follow the host's official docs or official source code; if you cannot find one, do not write it into host settings",
     "DREAM_NOTICE_LINE": "🌙 dream finished ({date}): type FAIL {card_fail} / missing aliases {missing_aliases} / drafts {drafts} → {pack}",
     "DREAM_NOTICE_INCOMPLETE_LINE": "🌙 dream did not finish its checks ({date}): some results are unconfirmed; see {pack}.",
     "DREAM_NOTICE_OVERDUE_LINE": "🌙 dream is overdue (last run {last}) → python epitype/dream.py --scheduled",
