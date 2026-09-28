@@ -1228,7 +1228,7 @@ def _native_shell_path(raw, cwd):
             text = os.fspath(Path.home()) + text[len(prefix):]
             break
     if os.name == "nt":
-        # Git Bash 的 /c/Users/... 就是 C:/Users/...
+        # Git Bash 的 /c/<路徑> 就是 C:/<路徑>
         drive = re.match(r"^/([A-Za-z])(/.*)?$", text)
         if drive:
             text = drive.group(1) + ":" + (drive.group(2) or "/")
