@@ -248,6 +248,309 @@ class EnforceTiers(_TempVault):
             [item["path"] for item in section["unclassified"]], ["fb-none.md", "rule-none.md"])
 
 
+import contextlib
+import io
+import json
+import tomllib
+
+from epitype import capture_route, host_native, host_sync
+
+GLOBAL_CARD = _card(FEEDBACK_HEAD.format(stem="fb-native") + (
+    "host_claude_env:\n  CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS: \"4\"\n"
+    "host_claude_deny:\n  - Bash(git clean:*)\n"
+    "host_codex_config:\n  agents.max_concurrent_threads_per_session: 4\n"
+    "host_codex_rules:\n  - git clean\n  - git push --force|-f\n"))
+PROJECT_CARD = _card(FEEDBACK_HEAD.format(stem="fb-project") + (
+    "host_claude_deny:\n  - Bash(rm -rf:*)\n"
+    "host_codex_config:\n  agents.max_depth: 2\n"))
+USER_SETTINGS = (
+    '{\n  "env": {\n    "USER_KEY": "1"\n  },\n  "permissions": {\n    "allow": [\n'
+    '      "Bash(git status)"\n    ],\n    "deny": [\n      "Read(**/.env*)"\n    ]\n  },\n'
+    '  "hooks": {\n    "PreToolUse": [\n      {\n        "hooks": [\n          {\n'
+    '            "type": "command",\n            "command": "python gate.py"\n'
+    '          }\n        ]\n      }\n    ]\n  },\n  "theme": "dark"\n}\n'
+)
+HOOKS_BLOCK = USER_SETTINGS[USER_SETTINGS.index('  "hooks"'):USER_SETTINGS.index('  "theme"')]
+USER_CONFIG = (
+    'model = "synthetic"   # the user picked this\n\n[features]\nhooks = true\n\n'
+    "[hooks.state]\n\n[hooks.state.'C:\\hooks.json:pre_tool_use:0:0']\n"
+    'trusted_hash = "sha256:abc"\n\n'
+)
+CONFIG_HOOKS_BLOCK = USER_CONFIG[USER_CONFIG.index("[hooks.state]"):]
+GUARD_RULES = 'prefix_rule(pattern=["git", "reset", "--hard"], decision="forbidden")\n'
+
+
+@contextlib.contextmanager
+def _fake_home(home):
+    saved = {name: os.environ.get(name) for name in ("USERPROFILE", "HOME", memspec.EPITYPE_CONFIG_ENV)}
+    os.environ["USERPROFILE"] = os.fspath(home)
+    os.environ["HOME"] = os.fspath(home)
+    os.environ.pop(memspec.EPITYPE_CONFIG_ENV, None)
+    try:
+        yield
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
+class NativeSync(_TempVault):
+    """D3／D4／D6：卡片→兩邊設定，只動自己寫的鍵，漂移點名到卡片與鍵，拿得回來。"""
+
+    def setUp(self):
+        super().setUp()
+        self.home = self.root / "home"
+        (self.home / ".claude").mkdir(parents=True)
+        (self.home / ".codex" / "rules").mkdir(parents=True)
+        self.settings = self.home / ".claude" / "settings.json"
+        self.settings.write_bytes(USER_SETTINGS.encode("utf-8"))
+        self.config = self.home / ".codex" / "config.toml"
+        self.guard_rules = self.home / ".codex" / "rules" / "epitype_guard.rules"
+        self.guard_rules.write_bytes(GUARD_RULES.encode("utf-8"))
+        self.rules = self.home / ".codex" / "rules" / memspec.HOST_NATIVE_CODEX_RULES_FILENAME
+        self.governance = self.root / "governance"
+        self.governance.mkdir()
+        (self.governance / memspec.WORK_LEDGER_FILENAME).write_text("# 帳本\n", encoding="utf-8")
+        self.global_card = self._write("fb-native.md", GLOBAL_CARD, self.governance)
+        self.project = self.root / "shop"
+        self.project.mkdir()
+        self.vault = (self.home / ".claude" / "projects"
+                      / capture_route.project_slug(self.project) / "memory")
+        self.vault.mkdir(parents=True)
+        (self.vault.parent / "session.jsonl").write_text(
+            json.dumps({"type": "user", "cwd": os.fspath(self.project)}) + "\n", encoding="utf-8")
+        self.project_card = self._write("fb-project.md", PROJECT_CARD, self.vault)
+        # 專案要被 Codex 信任，專案層設定才會載入；這台合成機器信任它。
+        trust = f"[projects.'{os.fspath(self.project)}']\ntrust_level = \"trusted\"\n"
+        self.config.write_bytes((USER_CONFIG + trust).encode("utf-8"))
+        self.vaults = [self.governance, self.vault]
+
+    def _run(self, function):
+        report = io.StringIO()
+        with _fake_home(self.home):
+            code = function(self.vaults, home=self.home, output=report)
+        return code, report.getvalue()
+
+    def _snapshot(self):
+        return {path: path.read_bytes() for path in (self.settings, self.config, self.guard_rules)}
+
+    def test_the_whole_round_trip(self):
+        before = self._snapshot()
+        code, report = self._run(host_sync.check)
+        self.assertEqual(code, host_sync.EXIT_DRIFT, report)
+        for expected in (
+            "env.CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS 還沒寫入（卡片 fb-native.md",
+            "permissions.deny[Bash(git clean:*)] 還沒寫入（卡片 fb-native.md）",
+            "agents.max_concurrent_threads_per_session 還沒寫入（卡片 fb-native.md",
+            "native:codex/rules/epitype_cards.rules: 規則檔與卡片不一致",
+            "permissions.deny[Bash(rm -rf:*)] 還沒寫入（卡片 fb-project.md）",
+            "agents.max_depth 還沒寫入（卡片 fb-project.md",
+        ):
+            self.assertIn(expected, report)
+        # 比對只是比對：一個位元組都沒動。
+        self.assertEqual(self._snapshot(), before)
+        self.assertFalse(self.rules.exists())
+
+        code, report = self._run(host_sync.apply)
+        self.assertEqual(code, host_sync.EXIT_OK, report)
+        settings_text = self.settings.read_text(encoding="utf-8")
+        settings = json.loads(settings_text)
+        self.assertEqual(settings["env"], {"USER_KEY": "1", "CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS": "4"})
+        self.assertEqual(settings["permissions"]["deny"], ["Read(**/.env*)", "Bash(git clean:*)"])
+        self.assertEqual(settings["permissions"]["allow"], ["Bash(git status)"])
+        self.assertEqual(settings["theme"], "dark")
+        self.assertIn(HOOKS_BLOCK, settings_text, "hooks 段必須逐位元組不變")
+        config_text = self.config.read_text(encoding="utf-8")
+        config = tomllib.loads(config_text)
+        self.assertEqual(config["agents"], {"max_concurrent_threads_per_session": 4})
+        self.assertEqual(config["model"], "synthetic")
+        self.assertIn('model = "synthetic"   # the user picked this\n', config_text)
+        self.assertIn(CONFIG_HOOKS_BLOCK, config_text, "hooks.state 段必須逐位元組不變")
+        self.assertEqual(self.guard_rules.read_bytes(), before[self.guard_rules], "手寫規則檔不碰")
+        rules = self.rules.read_text(encoding="utf-8")
+        self.assertTrue(rules.startswith(memspec.HOST_NATIVE_RULES_HEADER))
+        self.assertIn('prefix_rule(pattern=["git", "clean"], decision="forbidden"', rules)
+        self.assertIn('prefix_rule(pattern=["git", "push", ["--force", "-f"]], decision="forbidden"', rules)
+        for path in (self.settings, self.config):
+            backups = [item.name for item in path.parent.iterdir()
+                       if item.name.startswith(path.name + ".bak_epitype_native_")]
+            self.assertEqual(len(backups), 1, backups)
+            self.assertEqual((path.parent / backups[0]).read_bytes(), before[path])
+        project_settings = json.loads(
+            (self.project / ".claude" / "settings.local.json").read_text(encoding="utf-8"))
+        self.assertEqual(project_settings, {"permissions": {"deny": ["Bash(rm -rf:*)"]}})
+        project_config = tomllib.loads(
+            (self.project / ".codex" / "config.toml").read_text(encoding="utf-8"))
+        self.assertEqual(project_config, {"agents": {"max_depth": 2}})
+        # 專案卡沒有 Codex 規則：專案根不長出空的規則檔。
+        self.assertFalse((self.project / ".codex" / "rules").exists())
+        # 全域卡的值不會混進專案，專案卡的值也不會混進使用者層。
+        self.assertNotIn("Bash(rm -rf:*)", settings_text)
+
+        code, report = self._run(host_sync.check)
+        self.assertEqual(code, host_sync.EXIT_OK, report)
+        self.assertNotIn("DRIFT", report)
+        code, report = self._run(host_sync.apply)
+        self.assertNotIn("WROTE", report, "第二次同步不該再寫任何檔")
+
+        # 手改一個被管理的鍵＝漂移：點名卡片與鍵，doctor 判 FAIL。
+        self.settings.write_text(settings_text.replace('"4"', '"8"'), encoding="utf-8")
+        from install import graft
+
+        with _fake_home(self.home):
+            lines, drifted = graft._native_sync_status(self.vaults, self.home)
+        self.assertTrue(drifted)
+        self.assertIn(
+            "NATIVE: DRIFT  native:claude/settings.json: env.CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS "
+            "與卡片 fb-native.md 不一致：卡片要 \"4\"，檔案是 \"8\"", lines)
+        code, report = self._run(host_sync.check)
+        self.assertEqual(code, host_sync.EXIT_DRIFT, report)
+        code, report = self._run(host_sync.apply)
+        self.assertEqual(json.loads(self.settings.read_text(encoding="utf-8"))["env"][
+            "CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS"], "4")
+
+        # 卡片拿掉欄位→同步拿回 Epitype 寫的鍵，使用者原有的留著。
+        self.global_card.write_text(_card(FEEDBACK_HEAD.format(stem="fb-native")
+                                          + "unenforceable: 判斷型\n"), encoding="utf-8")
+        self.project_card.unlink()
+        code, report = self._run(host_sync.apply)
+        self.assertEqual(code, host_sync.EXIT_OK, report)
+        self.assertEqual(json.loads(self.settings.read_bytes()), json.loads(before[self.settings]))
+        self.assertEqual(tomllib.loads(self.config.read_text(encoding="utf-8")),
+                         tomllib.loads(before[self.config].decode("utf-8")))
+        self.assertEqual(self.config.read_bytes(), before[self.config])
+        self.assertFalse(self.rules.exists())
+        self.assertFalse((self.project / ".claude" / "settings.local.json").exists())
+        self.assertFalse((self.project / ".codex" / "config.toml").exists())
+        self.assertEqual(host_native.load_state(self.home), {})
+
+    def test_a_user_value_that_differs_is_a_conflict_not_an_overwrite(self):
+        self.settings.write_text(USER_SETTINGS.replace(
+            '"USER_KEY": "1"', '"USER_KEY": "1",\n    "CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS": "20"'),
+            encoding="utf-8")
+        code, report = self._run(host_sync.apply)
+        self.assertEqual(code, host_sync.EXIT_REFUSED, report)
+        self.assertIn("env.CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS 使用者已經自己設成 \"20\"", report)
+        settings = json.loads(self.settings.read_text(encoding="utf-8"))
+        self.assertEqual(settings["env"]["CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS"], "20")
+        # 衝突的只有那一個鍵，同一個檔裡的 deny 照寫。
+        self.assertIn("Bash(git clean:*)", settings["permissions"]["deny"])
+
+    def test_a_user_value_that_already_matches_is_left_in_place_when_the_card_goes(self):
+        self.settings.write_text(USER_SETTINGS.replace(
+            '"USER_KEY": "1"', '"USER_KEY": "1",\n    "CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS": "4"'),
+            encoding="utf-8")
+        original = self.settings.read_bytes()
+        code, report = self._run(host_sync.apply)
+        self.assertEqual(code, host_sync.EXIT_OK, report)
+        self.global_card.unlink()
+        self._run(host_sync.apply)
+        # 那個值原本就是使用者的；卡片拿掉，Epitype 不替他刪。
+        self.assertEqual(json.loads(self.settings.read_bytes())["env"]["CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS"], "4")
+        self.assertEqual(json.loads(self.settings.read_bytes()), json.loads(original))
+
+    def test_an_invalid_card_blocks_its_whole_vault(self):
+        self._write("fb-broken.md", _card(FEEDBACK_HEAD.format(stem="fb-broken")
+                                          + "host_codex_config:\n  sandbox_mode: danger-full-access\n"),
+                    self.governance)
+        before = self._snapshot()
+        code, report = self._run(host_sync.apply)
+        self.assertEqual(code, host_sync.EXIT_REFUSED, report)
+        self.assertIn("fb-broken.md", report)
+        self.assertIn("sandbox_mode", report)
+        self.assertEqual(self._snapshot(), before)
+        self.assertFalse(self.rules.exists())
+
+    def test_a_foreign_file_with_our_name_is_never_overwritten(self):
+        self.rules.write_text("# mine\n" + GUARD_RULES, encoding="utf-8")
+        code, report = self._run(host_sync.apply)
+        self.assertEqual(code, host_sync.EXIT_REFUSED, report)
+        self.assertEqual(self.rules.read_text(encoding="utf-8"), "# mine\n" + GUARD_RULES)
+
+    def test_an_untrusted_codex_project_is_named(self):
+        self.config.write_bytes(USER_CONFIG.encode("utf-8"))
+        code, report = self._run(host_sync.check)
+        self.assertIn("NOTE   native:project:shop/.codex/config.toml: Codex 只在信任的專案", report)
+
+    def test_uninstall_takes_back_only_what_epitype_wrote(self):
+        before = self._snapshot()
+        self._run(host_sync.apply)
+        report = io.StringIO()
+        with _fake_home(self.home):
+            host_sync.remove(home=self.home, output=report, vaults=self.vaults)
+        self.assertEqual(json.loads(self.settings.read_bytes()), json.loads(before[self.settings]))
+        self.assertEqual(self.config.read_bytes(), before[self.config])
+        self.assertFalse(self.rules.exists())
+        self.assertEqual(self.guard_rules.read_bytes(), before[self.guard_rules])
+        self.assertFalse((self.project / ".claude" / "settings.local.json").exists())
+
+    def test_rendered_rules_parse_with_codex_when_it_is_installed(self):
+        import shutil
+        import subprocess
+
+        codex = shutil.which("codex")
+        if codex is None:
+            self.skipTest("codex CLI not installed; rules syntax verified by the renderer's own escaping")
+        self._run(host_sync.apply)
+        # CODEX_HOME 指向假家：驗語法不該碰使用者真正的 Codex 目錄。
+        environment = dict(os.environ, CODEX_HOME=os.fspath(self.home / ".codex"))
+        done = subprocess.run(
+            [codex, "execpolicy", "check", "--rules", os.fspath(self.rules), "git", "push", "-f"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
+            env=environment)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn('"decision":"forbidden"', done.stdout)
+
+
+class DoctorSeesNativeDrift(unittest.TestCase):
+    """D4 端到端：真的裝一次，doctor 在設定被手改之後判 FAIL，並點名卡片與鍵。"""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="epitype-hostdoctor-")
+        self.addCleanup(temporary.cleanup)
+        self.home = Path(temporary.name).resolve()
+        (self.home / ".claude").mkdir()
+        (self.home / ".claude" / "settings.json").write_text('{"theme": "dark"}', encoding="utf-8")
+        self.env = dict(os.environ, HOME=str(self.home), USERPROFILE=str(self.home),
+                        PYTHONPATH=str(Path(__file__).resolve().parents[1]),
+                        PYTHONDONTWRITEBYTECODE="1", PYTHONIOENCODING="utf-8",
+                        EPITYPE_DREAM_MODE="off")
+        self.env.pop(memspec.EPITYPE_CONFIG_ENV, None)
+
+    def epitype(self, *args):
+        import subprocess
+
+        done = subprocess.run([sys.executable, "-m", "epitype", *args], cwd=str(self.home),
+                              env=self.env, capture_output=True, timeout=240)
+        return done.returncode, (done.stdout + done.stderr).decode("utf-8", "replace")
+
+    def test_doctor_fails_on_a_hand_edited_managed_key(self):
+        code, text = self.epitype("install", "--home", str(self.home))
+        self.assertEqual(code, 0, text[-800:])
+        config = json.loads((self.home / ".epitype" / "config.json").read_text(encoding="utf-8"))
+        vault = Path(config["vaults"][0])
+        (vault / "fb-native.md").write_text(_card(FEEDBACK_HEAD.format(stem="fb-native") + (
+            "host_claude_env:\n  CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS: \"4\"\n")), encoding="utf-8")
+        code, text = self.epitype("doctor")
+        self.assertEqual(code, 1, text[-800:])
+        self.assertIn("NATIVE: DRIFT  native:claude/settings.json: "
+                      "env.CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS 還沒寫入（卡片 fb-native.md", text)
+        self.assertIn(memspec.HOST_NATIVE_DOCTOR_FAIL, text)
+        code, text = self.epitype("sync", "--apply")
+        self.assertEqual(code, 0, text[-800:])
+        code, text = self.epitype("doctor")
+        self.assertEqual(code, 0, text[-800:])
+        self.assertIn("NATIVE: PASS", text)
+        settings = self.home / ".claude" / "settings.json"
+        settings.write_text(settings.read_text(encoding="utf-8").replace('"4"', '"8"'), encoding="utf-8")
+        code, text = self.epitype("doctor")
+        self.assertEqual(code, 1, text[-800:])
+        self.assertIn("env.CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS 與卡片 fb-native.md 不一致："
+                      "卡片要 \"4\"，檔案是 \"8\"", text)
+
+
 def _selftest():
     suite = unittest.defaultTestLoader.loadTestsFromModule(sys.modules[__name__])
     result = unittest.TextTestRunner(stream=sys.stdout, verbosity=1).run(suite)

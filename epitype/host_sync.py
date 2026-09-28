@@ -30,7 +30,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from epitype import capture_route, core_gen, memspec
+from epitype import capture_route, core_gen, host_native, memspec
 
 # unrecognised：這一塊現在有幾行認不出是 Epitype 上次寫的；取代前原文要先存起來。
 Region = namedtuple("Region", "name text present current unrecognised", defaults=(0,))
@@ -668,6 +668,11 @@ def check(vaults, hosts=None, home=None, output=sys.stdout):
             elif _drifted(region):
                 print(f"DRIFT  {item.host}: {region.name} 與卡片不一致", file=output)
                 drift += 1
+    # 宿主原生設定（settings.json／config.toml／execpolicy 規則檔）是同一件事的另一半：
+    # 卡片是正本，設定是渲染結果。一起比對，一個結束碼。
+    native_drift, native_refused = host_native.check(vaults, hosts, home, output)
+    drift += native_drift
+    refused += native_refused
     if not plans:
         print("沒有偵測到任何宿主（家目錄底下沒有 .claude／.codex）", file=output)
     elif not drift and not refused:
@@ -746,6 +751,8 @@ def apply(vaults, hosts=None, home=None, output=sys.stdout, actor=memspec.HOST_S
                   file=output)
         written += 1
         print(f"WROTE  {item.host}: {'、'.join(changed) or '標記整理'} → {item.path}", file=output)
+    _native_written, native_refused = host_native.apply(vaults, hosts, home, output)
+    refused += native_refused
     if not plans:
         print("沒有偵測到任何宿主（家目錄底下沒有 .claude／.codex）", file=output)
     return EXIT_REFUSED if refused else EXIT_OK
@@ -773,6 +780,8 @@ def remove(hosts=None, home=None, output=sys.stdout, vaults=()):
             # 就是替他決定那個檔該不該存在。
             always_delete_empty=False,
         )
+    # 宿主原生設定裡 Epitype 寫過的鍵：靠狀態檔找回來，不必讀卡片。
+    removed += host_native.remove_all(home, output)
     if not removed:
         print("宿主檔裡沒有我們寫的區塊，沒有要拿掉的東西", file=output)
     return EXIT_OK
