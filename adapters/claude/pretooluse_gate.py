@@ -1112,6 +1112,10 @@ _NATIVE_BASENAMES = frozenset(name.casefold() for name in (
     memspec.HOST_NATIVE_CODEX_CONFIG,
     memspec.HOST_NATIVE_CODEX_RULES_FILENAME,
 ))
+# 殼層判斷只給真的會執行指令的工具：Grep 的樣式裡剛好有 `rm ` 不是在寫檔。
+_NATIVE_NON_SHELL_TOOLS = frozenset((
+    "read", "glob", "grep", "webfetch", "websearch", "agent", "task", "ls", "notebookread",
+))
 _NATIVE_CLAUDE, _NATIVE_CODEX_CONFIG, _NATIVE_CODEX_RULES = (
     "claude_settings", "codex_config", "codex_rules")
 
@@ -1290,6 +1294,8 @@ def _native_review(event, tool_name, tool_input):
                 deny = _native_file_review(target, after)
             if deny is not None:
                 return deny
+        return None
+    if tool_name.casefold() in _NATIVE_NON_SHELL_TOOLS:
         return None
     return _native_shell_review(text, state)
 

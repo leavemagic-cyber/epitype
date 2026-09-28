@@ -601,6 +601,8 @@ class NativeGuard(_NativeFixture):
     def test_reads_sync_and_the_users_other_settings_are_allowed(self):
         cases = {
             "Read tool": ("Read", {"file_path": os.fspath(self.settings)}),
+            "Grep whose pattern looks like a write": ("Grep", {
+                "pattern": "rm -rf|CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS", "path": os.fspath(self.settings)}),
             "grep with stderr redirected": ("Bash", {"command": (
                 f"grep CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS '{self.settings}' 2>/dev/null")}),
             "Get-Content of the rules file": ("PowerShell", {

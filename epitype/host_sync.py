@@ -670,7 +670,12 @@ def check(vaults, hosts=None, home=None, output=sys.stdout):
                 drift += 1
     # 宿主原生設定（settings.json／config.toml／execpolicy 規則檔）是同一件事的另一半：
     # 卡片是正本，設定是渲染結果。一起比對，一個結束碼。
-    native_drift, native_refused = host_native.check(vaults, hosts, home, output)
+    try:
+        native_drift, native_refused = host_native.check(vaults, hosts, home, output)
+    except Exception as exc:
+        # 原生那一半壞掉不該連規則塊的比對結果一起吞掉：報一件拒寫，其餘照報。
+        print(f"REFUSE native: 比對失敗 {type(exc).__name__}: {exc}", file=output)
+        native_drift, native_refused = 0, 1
     drift += native_drift
     refused += native_refused
     if not plans:
@@ -751,7 +756,11 @@ def apply(vaults, hosts=None, home=None, output=sys.stdout, actor=memspec.HOST_S
                   file=output)
         written += 1
         print(f"WROTE  {item.host}: {'、'.join(changed) or '標記整理'} → {item.path}", file=output)
-    _native_written, native_refused = host_native.apply(vaults, hosts, home, output)
+    try:
+        _native_written, native_refused = host_native.apply(vaults, hosts, home, output)
+    except Exception as exc:
+        print(f"REFUSE native: 寫入失敗 {type(exc).__name__}: {exc}", file=output)
+        native_refused = 1
     refused += native_refused
     if not plans:
         print("沒有偵測到任何宿主（家目錄底下沒有 .claude／.codex）", file=output)
