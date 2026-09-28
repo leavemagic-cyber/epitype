@@ -1382,6 +1382,17 @@ def owner_typed_text(text):
     return "\n".join(part for part in kept + [rest] if part).strip()
 
 
+# Codex 主線在 Stop 時，還有已完成（completed／errored）卻沒用 close_agent 關閉的直屬子代理
+# 就擋。只判 multi-agent V1：官方 rust-v0.156.0 只有 V1 註冊 close_agent，也只有它寫明完成的
+# 代理在關閉前仍佔名額（出處見 epitype/codex_agents.py）。子代理的 Stop、Claude 對話紀錄、
+# V2 工作階段、讀不完或讀壞的 rollout 一律放行。
+TURN_CHECK_FINISHED_AGENTS = "finished_agents_closed"
+TURN_CHECK_NAMES = TURN_CHECK_NAMES + (TURN_CHECK_FINISHED_AGENTS,)
+TURN_FINISHED_AGENTS_REASON = (
+    "📌 還有 {count} 個已完成的子代理沒關：{names}。請對每一個呼叫 close_agent"
+    "（target 填它的 agent_id）；完成的子代理在關閉前仍佔用這個工作階段的代理名額。{advice}"
+)
+TURN_FINISHED_AGENTS_MAX_NAMES = 6
 TURN_PROMPT_REQUEST_PATTERN = (
     r"(?:給我|給一份|寫一份|幫我寫|產生|提供|撰寫).{0,24}(?:prompt|提示詞)"
     r"|(?:write|give|create).{0,24}\bprompt\b"
