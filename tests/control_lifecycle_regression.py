@@ -632,5 +632,30 @@ class ControlLifecycleRegression(unittest.TestCase):
         self.assertEqual(lifecycle.status(self.path, "drag")["pending"],
                          [{"kind": "chrome-tab", "id": "2"}])
 
+    def test_subagent_cannot_take_the_main_thread_reminder(self):
+        # 子代理拿到主線的提醒，會照著「用完請關」去關主線的分頁；主線自己反而收不到。
+        self.owned_iab_tab("shared", "main-tab")
+        subagent = {"session_id": "shared", "agent_id": "sub-1", "tool_name": "Read"}
+        main = {"session_id": "shared", "tool_name": "Read"}
+        self.assertIsNone(lifecycle.reminder(subagent, self.path, "tool"))
+        self.assertIn("main-tab", lifecycle.reminder(main, self.path, "tool"))
+
+    def test_subagent_resources_remind_only_that_subagent(self):
+        created = post("split", "sub-create", "mcp__cua_repl__js",
+                       {"code": 'await cua.createBrowserTab("iab", "about:blank");'},
+                       mcp("Browser tab: sub-tab"))
+        created["agent_id"] = "sub-1"
+        lifecycle.observe(created, self.path)
+        main = {"session_id": "split", "tool_name": "Read"}
+        other = {"session_id": "split", "agent_id": "sub-2", "tool_name": "Read"}
+        owner = {"session_id": "split", "agent_id": "sub-1", "tool_name": "Read"}
+        self.assertIsNone(lifecycle.reminder(main, self.path, "tool"))
+        self.assertIsNone(lifecycle.reminder({"session_id": "split", "prompt": "x"},
+                                             self.path, "prompt"))
+        self.assertIsNone(lifecycle.reminder(other, self.path, "tool"))
+        self.assertIn("sub-tab", lifecycle.reminder(owner, self.path, "tool"))
+        self.assertIn({"kind": "cua-tab:iab", "id": "sub-tab", "agent": "sub-1"},
+                      lifecycle.status(self.path, "split")["pending"])
+
 if __name__ == "__main__":
     unittest.main(argv=[arg for arg in sys.argv if arg != "--selftest"])

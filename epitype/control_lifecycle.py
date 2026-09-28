@@ -86,6 +86,7 @@ _TABLES = (
     "CREATE TABLE IF NOT EXISTS resources ("
     "session TEXT NOT NULL, kind TEXT NOT NULL, resource_id TEXT NOT NULL,"
     "status TEXT NOT NULL, opened REAL NOT NULL, changed REAL NOT NULL,"
+    "agent TEXT NOT NULL DEFAULT '',"
     "PRIMARY KEY(session, kind, resource_id))",
     "CREATE TABLE IF NOT EXISTS events ("
     "id INTEGER PRIMARY KEY, session TEXT NOT NULL, call_id TEXT NOT NULL,"
@@ -107,6 +108,9 @@ def _columns(db, table):
 def _upgrade(db, version):
     """Bring a ledger written by an older schema to SCHEMA_VERSION in place."""
     if version < 2:
+        # 空字串＝主線；子代理的呼叫帶 agent_id，提醒只給建立者。
+        if "agent" not in _columns(db, "resources"):
+            db.execute("ALTER TABLE resources ADD COLUMN agent TEXT NOT NULL DEFAULT ''")
         if "count" not in _columns(db, "alerts"):
             db.execute("ALTER TABLE alerts ADD COLUMN count INTEGER NOT NULL DEFAULT 1")
         # v1 的提醒指紋是整組待處理清單，改成逐筆資源之後對不上，留著只會佔位。
@@ -198,6 +202,12 @@ def _failed(response) -> bool:
     return False
 
 
+def _agent(event):
+    """The subagent that made this call; "" is the main thread."""
+    value = event.get("agent_id", event.get("agentId"))
+    return value[:128] if isinstance(value, str) else ""
+
+
 def _state(db, session):
     row = db.execute("SELECT data FROM session_state WHERE session=?", (session,)).fetchone()
     if not row:
@@ -236,7 +246,7 @@ def _resource(db, session, call_id, action, kind, resource_id, now):
         db.execute(
             "INSERT INTO resources(session,kind,resource_id,status,opened,changed) "
             "VALUES(?,?,?,?,?,?) ON CONFLICT(session,kind,resource_id) DO UPDATE "
-            "SET status='open',opened=excluded.opened,changed=excluded.changed",
+            "SET status='open',opened=excluded.opened,changed=excluded.changed,agent=''",
             (session, kind, resource_id, "open", now, now),
         )
     elif action in ("close", "expire"):
@@ -467,6 +477,16 @@ def observe(event: dict, path: Path) -> str | None:
                          failed, now)
         elif name.startswith(OTHER_CONTROL):
             _resource(db, session, call_id, "open", "unverified-control", call_id, now)
+        agent = _agent(event)
+        if agent:
+            # 這次呼叫開的資源歸這個子代理：主線與其他子代理不會收到它的收尾提醒，
+            # 也就不會照著提醒去關別人的分頁。
+            db.execute(
+                "UPDATE resources SET agent=? WHERE session=? AND status='open' AND "
+                "(kind,resource_id) IN (SELECT kind,resource_id FROM events "
+                "WHERE session=? AND call_id=? AND action='open')",
+                (agent, session, session, call_id),
+            )
         _save_state(db, session, state)
         if db.execute(
             "SELECT 1 FROM events WHERE session=? AND call_id=? AND action='open' "
@@ -476,13 +496,16 @@ def observe(event: dict, path: Path) -> str | None:
     return None
 
 
-def _pending(db, session, now):
-    """Open rows, minus unverified ones already past expiry (read-only view)."""
-    return list(db.execute(
-        "SELECT kind,resource_id,opened FROM resources WHERE session=? AND status='open' "
-        "AND NOT (kind LIKE 'unverified%' AND opened<?) ORDER BY opened",
+def _pending(db, session, now, agent=None):
+    """Open rows, minus unverified ones already past expiry (read-only view).
+
+    Rows are (kind, resource_id, opened, agent); agent=None means every creator.
+    """
+    return [row for row in db.execute(
+        "SELECT kind,resource_id,opened,agent FROM resources WHERE session=? "
+        "AND status='open' AND NOT (kind LIKE 'unverified%' AND opened<?) ORDER BY opened",
         (session, now - UNVERIFIED_TTL_SECONDS),
-    ))
+    ) if agent is None or row[3] == agent]
 
 
 def _summary(pending):
@@ -529,10 +552,11 @@ def reminder(event: dict, path: Path, stage: str, *, claim=True) -> str | None:
     with _database(path) as db:
         if claim:
             _expire(db, session, now)
-        pending = _pending(db, session, now)
+        pending = _pending(db, session, now, _agent(event))
         if not pending:
             return None
-        marks = [_fingerprint(kind, resource_id, opened) for kind, resource_id, opened in pending]
+        marks = [_fingerprint(kind, resource_id, opened)
+                 for kind, resource_id, opened, _ in pending]
         counts = dict(db.execute(
             "SELECT fingerprint,count FROM alerts WHERE session=? AND stage=?",
             (session, stage),
@@ -558,8 +582,10 @@ def status(path: Path, session: str):
     if not path.is_file():
         return {"session": session, "pending": [], "events": []}
     with _database(path) as db:
-        pending = [{"kind": kind, "id": resource_id} for kind, resource_id, _
-                   in _pending(db, session, _now())]
+        pending = [
+            {"kind": kind, "id": resource_id, **({"agent": agent} if agent else {})}
+            for kind, resource_id, _, agent in _pending(db, session, _now())
+        ]
         events = [{"action": action, "kind": kind, "id": resource_id}
                   for action, kind, resource_id in db.execute(
                       "SELECT action,kind,resource_id FROM events WHERE session=? "

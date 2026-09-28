@@ -8,6 +8,7 @@
 - Chrome 標準第一步 `tabs_context_mcp({createIfEmpty:true})` 沒有先前快照時，改以候選分頁 ID 記成 `unverified-chrome`（原本以呼叫 ID 記）；之後工具回報 `Closed tab X` 即清除。既有測試的斷言因此由呼叫 ID `"1"` 改為分頁 ID `"12"`。
 - 名稱含 close/stop/reset 的其他操控工具不再記一筆「無法確認」；只有 create/open/start/launch 類會記。
 - 「清單裡沒有」只在清單可證明完整、未經篩選時才算關閉：Chrome 的 `availableTabs` 只列群組內分頁，分頁被拖出群組或群組解散都不再視為關閉，分頁只認 `Closed tab X`，`No tab group exists` 只關閉群組紀錄。CUA 的 `listTabs`／`getState` 必須是程式最後一個敘述本身（不經 filter、stringify 等包裝），而且輸出中只有一份候選清單。既有測試「群組不見即清除無法確認紀錄」因此改為「群組不見仍待確認、`Closed tab 12` 才清除」。
+- 子代理與主線分開：Hook 輸入帶 `agent_id` 的呼叫所開的資源歸該子代理，收尾提醒只給建立者；主線與其他子代理不再收到、也不會照著去關別人的分頁。`lifecycle --json` 的待處理項目在屬於子代理時多一個 `agent` 欄位。
 - 提醒改為逐筆資源計次：切換到非操控工具時每筆最多提醒 1 次，使用者訊息階段每筆最多 3 次（原本每則訊息都重發，直到確認關閉）。只關掉其中一部分不算新狀況，不再重新提醒其餘的。
 
 ## v1.8.1 (2026-09-28)
