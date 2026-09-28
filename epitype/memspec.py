@@ -2969,6 +2969,14 @@ HOST_NATIVE_RULES_FOREIGN_REASON = "{path} 已存在但不是 Epitype 寫的（�
 HOST_NATIVE_UNREADABLE_REASON = "讀不動這個檔：{error}；請先自行修好再同步"
 HOST_NATIVE_SHAPE_REASON = "{key} 所在的 {container} 不是物件／表，不猜使用者的意思；請先自行修好"
 HOST_NATIVE_VERIFY_REASON = "改寫後驗證不過（{detail}），一個位元組都沒寫；多半是這個鍵的寫法不是單純的表／物件"
+# 同步把被手改的受管鍵改回卡片值時，逐筆一行：夜間 Dream 靠這個前綴把它們另列一欄，
+# 不跟其他行搶 examples 的名額——被蓋掉的是某個人手改的值，這件事不能只剩一行 WROTE。
+HOST_NATIVE_REVERT_PREFIX = "改回"
+HOST_NATIVE_REVERT_LINE = "{prefix} {label}: {key}（卡片 {card}）：{before} → {after}"
+HOST_NATIVE_REVERT_ABSENT = "不在"
+HOST_NATIVE_REVERT_PRESENT = "在"
+HOST_NATIVE_REVERT_RULES_BEFORE = "手改過的內容"
+HOST_NATIVE_REVERT_RULES_AFTER = "卡片的 {count} 條"
 HOST_NATIVE_DISOWNED_NOTE = "{key} 的卡片已拿掉，但檔案裡的值已被改成 {have}，留給使用者，不再管理"
 HOST_NATIVE_UNTRUSTED_NOTE = (
     "Codex 只在信任的專案載入專案層設定與規則；{root} 在使用者層 config.toml 沒有 "

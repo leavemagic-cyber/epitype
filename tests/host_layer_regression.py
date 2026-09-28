@@ -564,6 +564,73 @@ class NativeSync(_NativeFixture):
         self.assertIn('"decision":"forbidden"', done.stdout)
 
 
+class NightlyRevert(_NativeFixture):
+    """夜間 Dream 把手改的受管鍵改回卡片值時，夜報逐筆寫明改回什麼，而且不會被其他行擠掉。"""
+
+    def _nightly(self):
+        from epitype import dream
+
+        with _fake_home(self.home):
+            return dream._section_host_sync(self.vaults, TODAY, TODAY, {},
+                                            context={"write_hosts": True})
+
+    def test_every_revert_is_named_with_card_key_and_both_values(self):
+        rules = [f"Bash(tool{index}:*)" for index in range(12)]
+        self.global_card.write_text(GLOBAL_CARD.replace(
+            "host_claude_deny:\n  - Bash(git clean:*)\n",
+            "host_claude_deny:\n" + "".join(f"  - {rule}\n" for rule in rules)), encoding="utf-8")
+        code, report = self._run(host_sync.apply)
+        self.assertEqual(code, host_sync.EXIT_OK, report)
+        # 手改：一個 env 值、一個 Codex 值、再拿掉 12 條受管 deny——共 14 筆要改回。
+        settings = json.loads(self.settings.read_text(encoding="utf-8"))
+        settings["env"]["CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS"] = "8"
+        settings["permissions"]["deny"] = ["Read(**/.env*)"]
+        self.settings.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+        self.config.write_text(self.config.read_text(encoding="utf-8").replace(
+            "max_concurrent_threads_per_session = 4", "max_concurrent_threads_per_session = 16"),
+            encoding="utf-8")
+        section = self._nightly()
+        reverted = section["reverted"]
+        self.assertEqual(section["counts"]["reverted"], 14, reverted)
+        self.assertEqual(len(reverted), 14, "改回紀錄不得被截斷")
+        self.assertIn(
+            "改回 native:claude/settings.json: env.CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS"
+            "（卡片 fb-native.md）：\"8\" → \"4\"", reverted)
+        self.assertIn(
+            "改回 native:codex/config.toml: agents.max_concurrent_threads_per_session"
+            "（卡片 fb-native.md）：16 → 4", reverted)
+        self.assertIn(
+            "改回 native:claude/settings.json: permissions.deny[Bash(tool11:*)]"
+            "（卡片 fb-native.md）：不在 → 在", reverted)
+        # examples 有上限；改回紀錄是另一欄，一筆都不少，而且照樣印進夜報。
+        from epitype import dream
+
+        lines = []
+        dream._render_section(lines, {"id": 14, "title": "宿主檔同步", **section})
+        for line in reverted:
+            self.assertIn(f"- {line}", lines)
+        self.assertEqual(json.loads(self.settings.read_text(encoding="utf-8"))["env"][
+            "CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS"], "4")
+
+    def test_a_card_change_is_an_update_and_a_hand_edited_rules_file_is_a_revert(self):
+        self._run(host_sync.apply)
+        self.global_card.write_text(GLOBAL_CARD.replace(
+            'CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS: "4"', 'CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS: "6"'),
+            encoding="utf-8")
+        self.rules.write_text(self.rules.read_text(encoding="utf-8") + "# hand edit\n", encoding="utf-8")
+        section = self._nightly()
+        self.assertEqual(section["reverted"], [
+            "改回 native:codex/rules/epitype_cards.rules: epitype_cards.rules（卡片 fb-native.md）："
+            "手改過的內容 → 卡片的 2 條"], section)
+        self.assertEqual(json.loads(self.settings.read_text(encoding="utf-8"))["env"][
+            "CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS"], "6")
+
+    def test_a_first_write_is_not_reported_as_a_revert(self):
+        section = self._nightly()
+        self.assertEqual(section["counts"].get("reverted", 0), 0, section)
+        self.assertEqual(section.get("reverted", []), [])
+
+
 class NativeGuard(_NativeFixture):
     """D5：代理直接改 Epitype 管理的鍵時，寫檔閘擋下；讀、`epitype sync`、改別的設定都放行。"""
 
