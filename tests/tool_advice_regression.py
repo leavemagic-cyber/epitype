@@ -46,5 +46,19 @@ class ToolAdviceRegression(unittest.TestCase):
         self.assertIsNone(self.call('Bash', {'command': 'echo x'}))
 
 
+    def test_dropped_output_releases_advice_for_retry(self):
+        self.write_card('retry.md', name='retry', description='先查證', advise_tool='Bash')
+        event = {'session_id': 'retry-' + self.root.name, 'tool_name': 'Bash', 'tool_input': {'command': 'echo x'}}
+        claims = []
+        first = pretool._handle(event, time.monotonic(), [], advice_claims=claims)
+        self.assertIn('先查證', first['hookSpecificOutput']['additionalContext'])
+        self.assertTrue(claims)
+        pretool._finish_advice(claims, False)
+        second = pretool._handle(event, time.monotonic(), [], advice_claims=claims)
+        self.assertIn('先查證', second['hookSpecificOutput']['additionalContext'])
+        pretool._finish_advice(claims, True)
+        self.assertIsNone(pretool._handle(event, time.monotonic(), []))
+
+
 if __name__ == '__main__':
     unittest.main()

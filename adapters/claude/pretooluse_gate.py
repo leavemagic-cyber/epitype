@@ -1651,7 +1651,22 @@ def _context_meter_line(event, config, started_at):
     return found[0], directory, found[1], found[2]
 
 
-def _allow_context(event, notices=(), config=None, started_at=None, meter_claims=None, advisories=()):
+def _finish_advice(claims, emitted):
+    import hashlib
+    from epitype import rule_context
+    for session, marker, path, vault in claims:
+        try:
+            if emitted:
+                rule_context.record(vault, session, path.relative_to(vault))
+            else:
+                digest = hashlib.sha256(marker.encode('utf-8')).hexdigest()[:16]
+                (notice_marker_directory(session) / digest).unlink(missing_ok=True)
+        except (OSError, ValueError):
+            pass
+    claims.clear()
+
+
+def _allow_context(event, notices=(), config=None, started_at=None, meter_claims=None, advisories=(), advice_claims=None):
     """Context for a call the gate lets through: the write gate's own advice and
     the rulings whose `forbidden` pattern could not be compiled, each named once
     per session — a ruling that silently stopped being enforced is the failure the
@@ -1683,7 +1698,10 @@ def _allow_context(event, notices=(), config=None, started_at=None, meter_claims
                 from epitype import rule_context
                 for vault in resolve_vaults(config, event):
                     if path.resolve().is_relative_to(vault.resolve()):
-                        rule_context.record(vault, session_id, path.relative_to(vault))
+                        if advice_claims is None:
+                            rule_context.record(vault, session_id, path.relative_to(vault))
+                        else:
+                            advice_claims.append((session_id, "tool-advice:" + str(path.resolve()), path, vault))
                         break
             except (OSError, ValueError):
                 pass
@@ -1794,7 +1812,7 @@ def _waste_review(event, tool_name, tool_input, config, started_at):
     return None, None
 
 
-def _handle(event, started_at, defects=None, meter_claims=None):
+def _handle(event, started_at, defects=None, meter_claims=None, advice_claims=None):
     """The gate's whole decision, in two parts.
 
     A call about to write file content is judged against the owner's settled rulings
@@ -1846,7 +1864,7 @@ def _handle(event, started_at, defects=None, meter_claims=None):
         return waste_value
     if waste_notice:
         notices = tuple(notices) + (waste_notice,)
-    return _allow_context(event, notices, config, started_at, meter_claims, advisories)
+    return _allow_context(event, notices, config, started_at, meter_claims, advisories, advice_claims)
 
 
 def _selftest():
@@ -3088,6 +3106,7 @@ def main():
             return _selftest()
     defects = []
     meter_claims = []
+    advice_claims = []
     won = []
     event = None
     try:
@@ -3113,7 +3132,7 @@ def main():
                     print(memspec.GATE_DEGRADED_NOTICE.format(
                         gate="PostToolUse", reason=type(exc).__name__), file=sys.stderr)
             return 0
-        value = _handle(event, _STARTED_AT, defects, meter_claims)
+        value = _handle(event, _STARTED_AT, defects, meter_claims, advice_claims)
         # 這一次呼叫碰到哪些檔，附記給回合閘用：說「我查過某個檔」的時候，那個檔名
         # 必須在這裡出現過。擋下的呼叫不記——那個檔根本沒被打開。
         if value is None or value.get("hookSpecificOutput", {}).get(
@@ -3134,6 +3153,7 @@ def main():
                 if value is not None:
                     emit(value)
                     sys.stdout.flush()
+                    _finish_advice(advice_claims, True)
                 emitted, won = won, []
                 _trace_meter(event, emitted, lost)
     except Exception as exc:
@@ -3151,6 +3171,7 @@ def main():
     if won:
         release_meter(won)
         _trace_meter(event, (), (), won)
+    _finish_advice(advice_claims, False)
     return 0
 
 

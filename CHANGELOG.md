@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Release tool-advice dedup claims when hook output expires or fails, and record compaction pointers only after successful emission.
+
 - Document official Codex V2 completion and capacity-pressure eviction semantics; keep current App slot release unverified and make no cap changes.
 
 - Include safe literal candidates from wrapped Codex shell calls in nightly evidence, separately from proven executions; never evaluate wrapper code.
