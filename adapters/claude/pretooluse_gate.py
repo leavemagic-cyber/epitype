@@ -1585,9 +1585,16 @@ def _envelope_review(event, tool_input, config, started_at):
         if expired(started_at):
             break
         target = _resolve_target(entry.path, cwd)
-        if target is None or entry.op == "delete":
+        if target is None:
             continue
-        if not entry.additions and target.suffix.casefold() != ".ps1":
+        if entry.op == "delete":
+            if target.suffix.casefold() == ".md":
+                deny, _advice = _review_one_target(
+                    event, config, target, [], "", started_at, session_id)
+                if deny is not None:
+                    return deny, []
+            continue
+        if not entry.additions and target.suffix.casefold() not in (".ps1", ".md"):
             continue
         deny, advice = _review_one_target(
             event, config, target, list(entry.additions),

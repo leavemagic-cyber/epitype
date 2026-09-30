@@ -31,6 +31,11 @@ class OwnerRules(unittest.TestCase):
                                        'session_id': 'owner-rules'}, time.monotonic(), [])
                 self.assertIsNotNone(value, tool)
                 self.assertEqual(value['hookSpecificOutput']['permissionDecision'], 'deny')
+                self.assertIn('裁定', value['hookSpecificOutput']['permissionDecisionReason'])
+        deleted = pretool._handle({'tool_name': 'apply_patch', 'session_id': 'owner-delete',
+                    'tool_input': {'input': f'*** Begin Patch\n*** Delete File: {target}\n*** End Patch'}},
+                    time.monotonic(), [])
+        self.assertEqual(deleted['hookSpecificOutput']['permissionDecision'], 'deny')
         self.assertIsNone(owner_rules.violation(before, before.replace('完成 A', '完成 B'), [self.vault]))
 
 
