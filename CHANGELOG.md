@@ -1,6 +1,6 @@
 # Changelog
 
-## v1.9.0 (2026-10-01)
+## Unreleased
 
 - 卡片欄位被宿主包進 `metadata:` 底下一層時照頂層讀（需求變更）：Claude 桌面版編輯記憶卡時會重寫 frontmatter，只留 `name`／`description`／`metadata` 在頂層，其餘欄位全部移到 `metadata:` 底下；閘門與其他讀取端原本只讀頂層，卡片因此安靜地不再擋（2026-09-30 兩張真卡）。現在由共用讀法 `memspec.hoist_metadata_fields`（`split_frontmatter` 內建）把 `metadata:` 區塊底下的鍵攤回頂層：同名時頂層優先，`type`／`modified` 留在原處，磁碟上的卡片不動。回合結束閘、動作守衛、`write_check`、卡片體檢、檢索索引、喚回的過期標記、視圖、核心生成、宿主同步都走這一份。閘門快取、索引與視圖指紋同步換版（`_DECISION_CACHE_VERSION` 9、`_GUARD_CACHE_VERSION` 6、`_FTS_FORMAT_VERSION` 8、`views.FORMAT_VERSION` 2），舊的「不是裁定」負例會重認、卡片沒動的庫也會重寫視圖。體檢因此改判：閘門欄位在 `metadata:` 底下不再是 FAIL `disarmed-field`，改列 INFO `metadata-nested`（別名同）；掛在別的鍵底下、單行 `metadata: {...}` 的仍然讀不到，照舊 FAIL；tab 縮排的區塊也不讀（體檢報的是 tab 本身）。既有測試中以 `metadata:` 當「被包進下一層」範例的四題（`action_guard_regression` 三題、`write_check_regression` 一題）與體檢自測的 `fence-nested` 改掛在別的鍵底下，`alias_safety_regression` 的 `aliases-indented` 斷言改為 `metadata-nested`；新增 `tests/metadata_nested_regression.py`。詳見 docs/FAILURE_MODES.md §46。
 - 上一條的後續（Codex gpt-6.1-sol 審查所得，三項各有修正前會紅的測試）：`alias_batch` 補別名時，既有清單若被宿主包在 `metadata:` 底下，新別名接在那一份後面，不再另建頂層 `aliases`——另建會依「同名時頂層優先」遮掉原本生效的別名，閘門只剩新加的，而索引兩層都讀、搜尋看起來正常；清單裡的空行與註解也不再讓定位提早停下（否則新項目會用猜的縮排插在既有項目前面）；自己切檔頭的 `memsearch._read_card` 與 `harvest` 只在看到收尾界線時才攤平、才讀縮排的 `aliases`，沒收尾的檔頭不再讓一路吃到檔尾的文字變成巢狀欄位（索引因此再換版到 8）；`scar_census` 的診斷行號改指檔案裡原本那一行。`hoist_metadata_fields` 的去重改用集合。
