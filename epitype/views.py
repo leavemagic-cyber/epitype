@@ -29,7 +29,9 @@ except ImportError:  # Direct script execution keeps the CLI contract.
     import memspec
 
 # 指紋只在同一個生成格式內比較才有意義：改了版面卻沿用舊指紋＝永遠不重寫。
-FORMAT_VERSION = "1"
+# 卡片的讀法變了也一樣要換版——卡沒動、讀出來的欄位卻不同，舊視圖就是錯的。
+# 2：包在 `metadata:` 底下的欄位照頂層讀（status、superseded_by、decision_key）。
+FORMAT_VERSION = "2"
 DEFAULT_LOCK_TIMEOUT = 5.0
 
 STATE_CURRENT = "current"

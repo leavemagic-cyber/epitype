@@ -2017,9 +2017,12 @@ def hoist_metadata_fields(front_lines):
     The result is the same lines reordered — each hoisted block is dedented and placed
     right after what is left of the `metadata:` block — so the line count and the
     closing index do not change; `origins[i]` is the input index of output line `i`,
-    for a caller that points back into the file. Only the block form is read: a flow
-    mapping (`metadata: {...}`), a tab-indented block and a block that is not a plain
-    mapping are returned as written, and card_lint still fails a gate field in them."""
+    for a caller that points back into the file. Only the block form of the card's
+    first `metadata` key is read: a flow mapping (`metadata: {...}`), a tab-indented
+    block and a block that is a sequence are returned as written. card_lint fails a
+    gate field in a flow mapping as disarmed; tab indentation is the frontmatter
+    check's finding. A child whose key is not a plain field name stays where it is
+    and does not stop its siblings from being read."""
     lines = list(front_lines)
     unchanged = (lines, list(range(len(lines))), ())
     start = None
@@ -2031,9 +2034,11 @@ def hoist_metadata_fields(front_lines):
         if match is None:
             continue
         key, raw_value = match.groups()
-        top_keys.add(key)
-        if key == METADATA_FIELD and start is None and not strip_inline_comment(raw_value).strip():
+        # 只認第一個 `metadata`：重複鍵本來就是第一個算數，後面那個不該反而生效。
+        if (key == METADATA_FIELD and key not in top_keys
+                and not strip_inline_comment(raw_value).strip()):
             start = index
+        top_keys.add(key)
     if start is None:
         return unchanged
 
@@ -2060,9 +2065,14 @@ def hoist_metadata_fields(front_lines):
             child_indent = len(leading)
         if len(leading) < child_indent:
             return unchanged
-        match = TOP_LEVEL_FIELD.match(stripped) if len(leading) == child_indent else None
+        at_child_indent = len(leading) == child_indent
+        match = TOP_LEVEL_FIELD.match(stripped) if at_child_indent else None
         if match is not None:
             groups.append((match.group(1), [index]))
+        elif at_child_indent and not stripped.startswith("-"):
+            # 不合欄名規則的鍵（加了引號、非 ASCII）自成一組留在原處；把它當成整塊讀
+            # 不懂的理由，會讓排在它後面的武裝欄位跟著失效。
+            groups.append((None, [index]))
         elif groups:
             groups[-1][1].append(index)
         else:
@@ -2079,7 +2089,7 @@ def hoist_metadata_fields(front_lines):
     moved_lines = []
     moved_origins = []
     for key, indexes in groups:
-        if key in METADATA_OWN_KEYS or key in top_keys or key in hoisted:
+        if key is None or key in METADATA_OWN_KEYS or key in top_keys or key in hoisted:
             kept.extend(indexes)
             continue
         hoisted.append(key)

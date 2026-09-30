@@ -19,7 +19,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "adapters" / "claude")]
-from epitype import card_lint, memsearch, memspec
+from epitype import card_lint, memsearch, memspec, views
 import _hook_common as common
 import pretooluse_gate as pretool
 import recall_hook
@@ -112,6 +112,21 @@ class SharedReading(unittest.TestCase):
             raw = (HEAD + body).split("---\n")[1].splitlines()
             lines, origins, hoisted = memspec.hoist_metadata_fields(raw)
             self.assertEqual((lines, origins, hoisted), (raw, list(range(len(raw))), ()), label)
+
+    def test_a_child_that_is_not_a_plain_field_name_does_not_stop_its_siblings(self):
+        text = (HEAD + "metadata:\n  \"加了引號的鍵\": 1\n  中文鍵: 2\n  type: feedback\n"
+                "  forbidden:\n  - 同層項目\n  \"another one\": 3\n  status: active\n---\nbody\n")
+        lines, _closing, origins, hoisted = memspec.frontmatter_layout(text)
+        self.assertEqual(hoisted, (memspec.FORBIDDEN_FIELD, memspec.DECISION_STATUS_FIELD))
+        self.assertEqual(memspec.sequence_items(lines, memspec.FORBIDDEN_FIELD), ["同層項目"])
+        self.assertEqual(sorted(origins), list(range(len(lines))))
+        for kept in ('  "加了引號的鍵": 1', "  中文鍵: 2", '  "another one": 3'):
+            self.assertIn(kept, lines)
+
+    def test_only_the_first_metadata_key_is_read(self):
+        # 重複鍵一律第一個算數；第一個是單行寫法時，後面那個區塊不該反而生效。
+        raw = (HEAD + "metadata: {type: feedback}\nmetadata:\n  decision_key: x\n").split("---\n")[1].splitlines()
+        self.assertEqual(memspec.hoist_metadata_fields(raw), (raw, list(range(len(raw))), ()))
 
     def test_frontmatter_that_never_closes_is_not_reordered(self):
         text = NESTED_RULING.replace("---\nbody\n", "body\n")
@@ -315,6 +330,21 @@ class LintIndexAndRecall(GateFixture):
         self.card(NESTED_RULING.replace("  status: active\n", "  status: superseded\n"))
         memsearch.build_index(str(self.vault))
         self.assertEqual(memsearch.query_index(str(self.vault), "合成別名")["results"], [])
+
+    def test_a_view_written_by_the_old_reading_is_rewritten_without_force(self):
+        # 視圖的指紋只吃路徑、時間與大小：卡沒動、讀法變了，不換版就永遠回 unchanged，
+        # 被取代的卡會一直留在「現行」那一份。
+        self.card(NESTED_RULING.replace("  status: active\n", "  status: superseded\n"))
+        current_path, _closed_path = views.view_paths(self.vault)
+        with patch.object(views, "FORMAT_VERSION", "1"), patch.object(
+                memspec, "hoist_metadata_fields",
+                lambda lines: (list(lines), list(range(len(lines))), ())):
+            self.assertEqual(views.generate(self.vault)["status"], "written")
+        self.assertIn("nested-ruling", current_path.read_text(encoding="utf-8"))
+        result = views.generate(self.vault)
+        self.assertEqual((result["status"], result["current"], result["closed"]), ("written", 0, 1))
+        self.assertNotIn("nested-ruling", current_path.read_text(encoding="utf-8"))
+        self.assertEqual(views.generate(self.vault)["status"], "unchanged")
 
     def test_the_stale_mark_reads_a_nested_verification_date(self):
         stamp = (date.today() - timedelta(days=97)).isoformat()

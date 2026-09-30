@@ -2083,10 +2083,15 @@ after what is left of `metadata:`, so the line count and the closing index do no
 that point back into the file: `frontmatter_text` (line numbers in diagnostics) and the
 recurrence gate's `_field_spans`. The card on disk is never changed by reading it.
 
-Both gate caches and the search index hold what the old reader saw, so their versions
-were bumped (`_DECISION_CACHE_VERSION`, `_GUARD_CACHE_VERSION`, `_FTS_FORMAT_VERSION`).
-Without that, a card the old gate had called "not a ruling" would stay inert until the
-negative-entry rotation reached it.
+Both gate caches, the search index and the views fingerprint hold what the old reader
+saw, so their versions were bumped (`_DECISION_CACHE_VERSION`, `_GUARD_CACHE_VERSION`,
+`_FTS_FORMAT_VERSION`, `views.FORMAT_VERSION`). Without that, a card the old gate had
+called "not a ruling" would stay inert until the negative-entry rotation reached it, and
+a vault whose cards did not change would keep a superseded card in `_views/current.md`.
+The views fingerprint was the one the first pass missed; an independent review found it.
+
+One reader does not let the top level win: the search index merges `aliases` from both
+levels, as it did before. That only widens what search finds.
 
 `card_lint` reports gate fields and `aliases` read this way as INFO `metadata-nested`, so
 the layout stays visible without counting as a defect.
@@ -2095,12 +2100,15 @@ the layout stays visible without counting as a defect.
 
 A gate field under any parent other than `metadata` is still read by nothing, and
 `card_lint` still fails it as `disarmed-field`. So is one inside a flow mapping
-(`metadata: {decision_key: x}`) or a tab-indented block: only the block form the host
-writer produces is read.
+(`metadata: {decision_key: x}`). Only the block form the host writer produces is read,
+and only under the card's first `metadata` key. A tab-indented block is not read either;
+there the lint's finding is the tab itself (`WARN frontmatter`), not `disarmed-field`. A
+child whose key is not a plain field name (quoted, non-ASCII) stays under `metadata` and
+does not stop its siblings from being read.
 
 Regression: `tests/metadata_nested_regression.py` runs the same card in both layouts
 through each reader. It covers the Stop gate blocking on a `forbidden` list under
 `metadata:` (in process and through the real hook process), the action guard and
 `write_check` denying, a nested `status` retiring a ruling, the top level winning, a
-stale negative cache entry, the lint, the index, the stale mark, the origin mapping, and
-each layout that must be left as written.
+stale negative cache entry, a view written by the old reading, the lint, the index, the
+stale mark, the origin mapping, and each layout that must be left as written.
