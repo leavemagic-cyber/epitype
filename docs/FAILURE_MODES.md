@@ -2035,3 +2035,72 @@ card, the Codex envelope shape, ordinary vocabulary, conditional rule text and a
 (including an en dash the patch spells as a hyphen), an unappliable patch and an
 `*** End of File` hunk, BOM, CRLF and quoted-value cards, the exempt field, a repeat, and
 malformed input. `epitype/patch_envelope.py --selftest` covers hunk capture and application.
+
+## 46. The host rewrote the card and the card stopped blocking (2026-09-30)
+
+On 2026-09-30 two armed cards in a project vault stopped blocking. Nobody had changed
+their rules. The Claude desktop app had edited the cards, and its memory writer rewrites
+the frontmatter when it does: it keeps `name`, `description` and `metadata`, and moves
+every other top-level key one level down, under `metadata:`. `forbidden`, `decision_key`,
+`status`, `example_blocks`, `aliases` and `last_verified_at` all ended up there. Every
+Epitype reader took top-level fields only, so the Stop gate loaded neither card.
+`card_lint` did say so (`FAIL disarmed-field`), but only to someone who ran it. The gates
+said nothing.
+
+This was the second time. §3 records the first (2026-09-16), and the answer then was the
+lint FAIL plus a standing note to write frontmatter with a script instead of the host's
+tools. That answer depended on every session remembering the note, while the host's
+writer runs on any edit it handles.
+
+Reading the machine's twelve vaults with the fixed reader showed how far it went. 614 of
+1,478 cards carry keys under `metadata:`. Most are the host's own (`node_type`,
+`originSessionId`, `source_agent`). But 40 cards had `last_verified_at` there, 37
+`aliases`, 20 `unenforceable`, 4 `status` and `superseded_by`, and one a `host_claude_env`
+setting. None of those was a FAIL, because the lint named gate fields only. The readers
+simply did not see them: a superseded card's `status` was blank to the index, a
+behaviour card that had declared itself unenforceable was still reported as unarmed, and
+host sync did not know the card declared a setting.
+
+### The rule
+
+A child of a block `metadata:` is the top-level field of the same name. The card's own
+top-level field wins when both exist. `type` and `modified` stay where they are, because
+they belong to `metadata`. The rule covers every key, not a list of known ones, so a
+field added later needs no registration.
+
+### Where it lives
+
+`memspec.hoist_metadata_fields` does the reading and `memspec.split_frontmatter` applies
+it. Every reader that goes through the shared split gets it without knowing:
+`frontmatter_fields`, `sequence_items`, both gates' `declared_frontmatter`, the lints,
+the views, core generation and host sync. Three readers cut the frontmatter themselves
+and call the hoist directly: the search index (`memsearch._parse_frontmatter`), the
+recall hook's stale mark, and `harvest`.
+
+The lines come back reordered, not rewritten. Each hoisted block is dedented and placed
+after what is left of `metadata:`, so the line count and the closing index do not change.
+`memspec.frontmatter_layout` also returns each line's original index, for the two callers
+that point back into the file: `frontmatter_text` (line numbers in diagnostics) and the
+recurrence gate's `_field_spans`. The card on disk is never changed by reading it.
+
+Both gate caches and the search index hold what the old reader saw, so their versions
+were bumped (`_DECISION_CACHE_VERSION`, `_GUARD_CACHE_VERSION`, `_FTS_FORMAT_VERSION`).
+Without that, a card the old gate had called "not a ruling" would stay inert until the
+negative-entry rotation reached it.
+
+`card_lint` reports gate fields and `aliases` read this way as INFO `metadata-nested`, so
+the layout stays visible without counting as a defect.
+
+### What is still a FAIL
+
+A gate field under any parent other than `metadata` is still read by nothing, and
+`card_lint` still fails it as `disarmed-field`. So is one inside a flow mapping
+(`metadata: {decision_key: x}`) or a tab-indented block: only the block form the host
+writer produces is read.
+
+Regression: `tests/metadata_nested_regression.py` runs the same card in both layouts
+through each reader. It covers the Stop gate blocking on a `forbidden` list under
+`metadata:` (in process and through the real hook process), the action guard and
+`write_check` denying, a nested `status` retiring a ruling, the top level winning, a
+stale negative cache entry, the lint, the index, the stale mark, the origin mapping, and
+each layout that must be left as written.

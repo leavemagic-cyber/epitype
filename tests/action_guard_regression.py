@@ -188,11 +188,12 @@ class ActionGuardRegression(unittest.TestCase):
         self.assertTrue(any("太寬的守衛" in line for line in defects), defects)
 
     def test_fields_nested_under_a_parent_block_enforce_nothing(self):
-        # 2026-09-16: three freshly written decision cards were silently disarmed
-        # this way. The gate reads top-level fields only, so a nested card must not
-        # look armed -- card_lint is what tells the author, not a surprise denial.
+        # The gate reads top-level fields only, so a card nested under some other key
+        # must not look armed -- card_lint is what tells the author, not a surprise
+        # denial. `metadata:` is the one parent read as top level, and its own tests
+        # are in tests/metadata_nested_regression.py.
         (self.vault / "scar-nested.md").write_text(
-            "---\nname: 巢狀守衛\ndescription: 欄位被包進 metadata\nmetadata:\n"
+            "---\nname: 巢狀守衛\ndescription: 欄位被包進下一層\nextra:\n"
             '  guard_tool: Bash\n  guard_all_of:\n    - "<<"\n    - "\\\\"\n---\nbody\n',
             encoding="utf-8",
         )
@@ -936,10 +937,12 @@ class GuardCardLint(unittest.TestCase):
         _type, findings = card_lint.check_card(self.vault / filename, filename)
         return {(level, rule) for level, rule, _reason in findings}, findings
 
+    # `metadata:` 底下的欄位自 2026-09-30 起照頂層讀（tests/metadata_nested_regression.py），
+    # 所以這兩題改掛在別的鍵底下——那裡的欄位閘門仍然讀不到。
     def test_a_field_nested_one_level_deep_is_a_fail_not_a_pass(self):
         rules, findings = self.findings(
             "scar-nested.md",
-            "---\nname: 巢狀守衛\ndescription: 2026-09-16 欄位被包進 metadata\nmetadata:\n"
+            "---\nname: 巢狀守衛\ndescription: 2026-09-16 欄位被包進下一層\nextra:\n"
             '  guard_tool: Bash\n  guard_all_of:\n    - "<<"\n---\nbody\n',
         )
         self.assertIn(("FAIL", "disarmed-field"), rules, findings)
@@ -949,7 +952,7 @@ class GuardCardLint(unittest.TestCase):
     def test_a_nested_decision_key_is_caught_the_same_way(self):
         rules, _ = self.findings(
             "decision-nested.md",
-            "---\nname: 巢狀裁定\ndescription: 2026-09-16 欄位被包進 metadata\nmetadata:\n"
+            "---\nname: 巢狀裁定\ndescription: 2026-09-16 欄位被包進下一層\nextra:\n"
             "  decision_key: x\n  status: active\n---\nbody\n",
         )
         self.assertIn(("FAIL", "disarmed-field"), rules)

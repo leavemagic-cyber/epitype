@@ -256,8 +256,8 @@ def _card_fields(path):
         if line.strip() in ("---", "..."):
             break
         block.append(line)
-    frontmatter = "\n".join(block)
-    aliases = memsearch._parse_frontmatter(frontmatter).get(memspec.ALIASES_FIELD, "").strip()
+    frontmatter = "\n".join(memspec.hoist_metadata_fields(block)[0])
+    aliases =memsearch._parse_frontmatter(frontmatter).get(memspec.ALIASES_FIELD, "").strip()
     return bool(DECISION_KEY_REGEX.search(frontmatter)), bool(aliases)
 
 

@@ -59,7 +59,8 @@ _DECISION_CACHE_FILENAME = "stop_decisions.json"
 # Every authority the gate acts on is re-read from this turn's bytes below, so a
 # ruling that gained fields (require_when/require_text/advice) needs no version bump.
 # 7：fence_shell 成為武裝欄位——舊快取把只帶它的卡記成「不是裁定」，不換版就要等輪替才認得。
-_DECISION_CACHE_VERSION = 8
+# 9：包在 `metadata:` 底下的武裝欄位照頂層讀——同一種舊負例，同一個理由。
+_DECISION_CACHE_VERSION = 9
 _KEY = "key"
 _DECIDED_AT = "decided_at"
 _QUOTE = "quote"

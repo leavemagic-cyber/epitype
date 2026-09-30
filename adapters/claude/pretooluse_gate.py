@@ -443,15 +443,17 @@ def _field_spans(text, fields):
     """({field: its non-blank frontmatter lines}, indexes of every line inside those fields).
 
     The top-level reading every gate uses: a field is its `key:` line plus the indented
-    lines under it. A key nested one level down is not the field — the gates do not
-    read it, and card_lint already FAILs that card as disarmed."""
+    lines under it. A key under `metadata:` is that field too (the shared reading moves
+    it to the top level), so the indexes go through the layout's origins to land on the
+    card's own lines. A key nested under any other parent is not the field — the gates
+    do not read it, and card_lint already FAILs that card as disarmed."""
     blocks, inside = {}, set()
-    front, closing = memspec.split_frontmatter(text)
+    front, closing, origins, _hoisted = memspec.frontmatter_layout(text)
     if front is None or closing is None:
         return blocks, inside
     parent = None
-    for offset, raw_line in enumerate(front):
-        index = offset + 1
+    for origin, raw_line in zip(origins, front):
+        index = origin + 1
         line = raw_line.rstrip()
         if not line.strip() or line[:1].isspace():
             if parent in fields:
@@ -855,7 +857,8 @@ def warm_guard_cache(vaults, started_at, deadline=None):
 
 _WARM_CAP = 1 << 30
 # 欄位形狀增加 write_check；版本不對就整份重讀。
-_GUARD_CACHE_VERSION = 5
+# 6：包在 `metadata:` 底下的守衛欄位照頂層讀，舊快取把那些卡記成「沒有守衛」。
+_GUARD_CACHE_VERSION = 6
 
 
 def _guards(vault, started_at, defects, cap=None, deadline=None):

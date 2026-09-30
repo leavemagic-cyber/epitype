@@ -106,11 +106,12 @@ def _stale_state_mark(path, today=None):
             head = stream.read(memspec.RECALL_STALE_STATE_HEAD_BYTES).decode("utf-8", "replace")
     except OSError:
         return ""
-    if not head.startswith("---"):
+    # 共用的讀法：宿主包進 `metadata:` 的 last_verified_at 在這裡已經是頂層欄位。
+    lines, _closing = memspec.split_frontmatter(head)
+    if lines is None:
         return ""
-    end = head.find("\n---", 3)
-    front = head if end < 0 else head[:end]
-    declared = re.search(memspec.RECALL_STALE_TYPE_PATTERN, front, re.MULTILINE)
+    front = "\n".join(lines)
+    declared =re.search(memspec.RECALL_STALE_TYPE_PATTERN, front, re.MULTILINE)
     if declared is None or declared.group(1).casefold() not in memspec.RECALL_STALE_STATE_TYPES:
         return ""
     verified = re.search(memspec.RECALL_STALE_VERIFIED_PATTERN, front, re.MULTILINE)

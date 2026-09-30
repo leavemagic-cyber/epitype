@@ -127,6 +127,18 @@ class IndentedAliases(unittest.TestCase):
         _type, findings = card_lint.check_card(self.vault / "project-nested.md", "project-nested.md")
         rules = {(level, rule) for level, rule, _reason in findings}
         self.assertNotIn((card_lint.WARN, "aliases"), rules)
+        # `metadata:` 底下的整批照頂層讀，體檢用同一條 INFO 說它們在哪裡。
+        self.assertIn((card_lint.INFO, "metadata-nested"), rules)
+
+    def test_aliases_under_another_parent_are_still_reported_as_indented(self):
+        self.write("project-other-parent.md",
+                   "---\nname: project-other-parent\ndescription: fixture\n"
+                   "last_verified_at: 2026-09-19\nmetadata:\n  type: project\nextra:\n  aliases:\n"
+                   "    - 縮排別名丙\n---\n內文\n")
+        _type, findings = card_lint.check_card(
+            self.vault / "project-other-parent.md", "project-other-parent.md")
+        rules = {(level, rule) for level, rule, _reason in findings}
+        self.assertNotIn((card_lint.WARN, "aliases"), rules)
         self.assertIn((card_lint.INFO, "aliases-indented"), rules)
 
 

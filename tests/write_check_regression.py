@@ -132,8 +132,10 @@ class WriteCheckRegression(unittest.TestCase):
         _type, findings = card_lint.check_card(self.card, self.card.name)
         self.assertTrue(any(level == card_lint.FAIL and rule == "write-check"
                             for level, rule, _reason in findings))
+        # `metadata:` 底下的照頂層讀、照樣生效（tests/metadata_nested_regression.py）；
+        # 掛在別的鍵底下的才是看起來武裝、實際不擋。
         self.card.write_text(self.card.read_text(encoding="utf-8").replace(
-            "write_check: unknown", "  write_check: ps51_utf8_bom"), encoding="utf-8")
+            "write_check: unknown", "extra:\n  write_check: ps51_utf8_bom"), encoding="utf-8")
         _type, findings = card_lint.check_card(self.card, self.card.name)
         self.assertTrue(any(level == card_lint.FAIL and rule == "disarmed-field"
                             for level, rule, _reason in findings))

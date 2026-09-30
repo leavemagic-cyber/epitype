@@ -795,6 +795,9 @@ PENDING_NAME_PREFIX = "pending-"
 METADATA_FIELD = "metadata"
 METADATA_TYPE_FIELD = "metadata.type"
 METADATA_MODIFIED_FIELD = "metadata.modified"
+# `metadata` 自己的子欄位。寫在它底下的其他鍵一律照頂層欄位讀（hoist_metadata_fields）。
+METADATA_OWN_KEYS = tuple(
+    field.split(".", 1)[1] for field in (METADATA_TYPE_FIELD, METADATA_MODIFIED_FIELD))
 # 到期日是作者親手寫的，過期只 WARN；協定 §3.5 允許歸檔、永遠不允許刪。
 CARD_EXPIRY_FIELDS = (GRANT_EXPIRES_FIELD, VALID_UNTIL_FIELD)
 # 通用卡的日期任一即可；沒有任何日期的卡無法判斷它講的是哪個時點的事實。
@@ -1689,6 +1692,7 @@ TURN_UNVERIFIED_DELEGATION_REASON = (
     "派出去的工，責任沒有跟著派出去。{advice}"
 )
 # 閘門一律只讀頂層欄位。這幾個欄位一旦被包進下一層，卡片看起來武裝、實際什麼都不擋。
+# 唯一的例外是 `metadata:` 區塊：hoist_metadata_fields 會把它底下的欄位攤回頂層再交給閘門。
 CARD_GATE_FIELDS = (
     DECISION_KEY_FIELD,
     FORBIDDEN_FIELD,
@@ -1999,6 +2003,123 @@ WRITE_GATE_FIELD_EXAMPLES = {
 }
 
 
+def hoist_metadata_fields(front_lines):
+    """(lines, origins, hoisted keys): children of a block `metadata:` read as top level.
+
+    The Claude desktop app's memory writer keeps `name`, `description` and `metadata`
+    and moves every other top-level key one level down, under `metadata:`. Every
+    reader here takes top-level fields, so a card rewritten that way stopped blocking
+    and nothing said so. One reading for all of them instead of each reader learning
+    a second layout: a child of `metadata:` is the top-level field of the same name,
+    unless the card already has that field at the top level (top level wins) or the
+    key is one `metadata` owns (METADATA_OWN_KEYS).
+
+    The result is the same lines reordered — each hoisted block is dedented and placed
+    right after what is left of the `metadata:` block — so the line count and the
+    closing index do not change; `origins[i]` is the input index of output line `i`,
+    for a caller that points back into the file. Only the block form is read: a flow
+    mapping (`metadata: {...}`), a tab-indented block and a block that is not a plain
+    mapping are returned as written, and card_lint still fails a gate field in them."""
+    lines = list(front_lines)
+    unchanged = (lines, list(range(len(lines))), ())
+    start = None
+    top_keys = set()
+    for index, raw_line in enumerate(lines):
+        if raw_line[:1].isspace():
+            continue
+        match = TOP_LEVEL_FIELD.match(raw_line)
+        if match is None:
+            continue
+        key, raw_value = match.groups()
+        top_keys.add(key)
+        if key == METADATA_FIELD and start is None and not strip_inline_comment(raw_value).strip():
+            start = index
+    if start is None:
+        return unchanged
+
+    end = start + 1
+    while end < len(lines) and (
+        not lines[end].strip()
+        or lines[end][:1].isspace()
+        or lines[end].startswith("#")
+    ):
+        end += 1
+    child_indent = None
+    preamble = []
+    groups = []
+    for index in range(start + 1, end):
+        raw_line = lines[index]
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#"):
+            (groups[-1][1] if groups else preamble).append(index)
+            continue
+        leading = raw_line[: len(raw_line) - len(raw_line.lstrip())]
+        if "\t" in leading:
+            return unchanged
+        if child_indent is None:
+            child_indent = len(leading)
+        if len(leading) < child_indent:
+            return unchanged
+        match = TOP_LEVEL_FIELD.match(stripped) if len(leading) == child_indent else None
+        if match is not None:
+            groups.append((match.group(1), [index]))
+        elif groups:
+            groups[-1][1].append(index)
+        else:
+            return unchanged
+
+    def content_indent(index):
+        text = lines[index]
+        if not text.strip() or text.lstrip().startswith("#"):
+            return None
+        return len(text) - len(text.lstrip())
+
+    hoisted = []
+    kept = list(preamble)
+    moved_lines = []
+    moved_origins = []
+    for key, indexes in groups:
+        if key in METADATA_OWN_KEYS or key in top_keys or key in hoisted:
+            kept.extend(indexes)
+            continue
+        hoisted.append(key)
+        # `- item` 可以跟它的鍵同一層縮排；退到頂層後會變成零縮排，而頂層讀法只把
+        # 縮排行當成上一個鍵的內容，所以這種寫法整組往內補兩格。
+        pad = "  " if any(content_indent(index) == child_indent for index in indexes[1:]) else ""
+        moved_lines.append(lines[indexes[0]][child_indent:])
+        for index in indexes[1:]:
+            text = lines[index]
+            if not text.strip():
+                moved_lines.append(text)
+            else:
+                cut = min(child_indent, len(text) - len(text.lstrip()))
+                moved_lines.append(pad + text[cut:])
+        moved_origins.extend(indexes)
+    if not hoisted:
+        return unchanged
+    origins = list(range(start + 1)) + kept + moved_origins + list(range(end, len(lines)))
+    hoisted_lines = (
+        lines[: start + 1] + [lines[index] for index in kept] + moved_lines + lines[end:])
+    return hoisted_lines, origins, tuple(hoisted)
+
+
+def frontmatter_layout(text):
+    """(frontmatter lines, closing index, origins, hoisted keys) of a card's text.
+
+    split_frontmatter plus the two things hoist_metadata_fields knows: which input
+    line each returned line came from (an index into the frontmatter, so add one for
+    the opening boundary to index the card's lines) and which keys were read out of
+    `metadata:`. Frontmatter that never closes is returned as written — the caller is
+    about to reject it, and its "lines" run to the end of the body."""
+    lines, closing = _raw_frontmatter(text)
+    if lines is None:
+        return None, None, [], ()
+    if closing is None:
+        return lines, None, list(range(len(lines))), ()
+    hoisted_lines, origins, hoisted = hoist_metadata_fields(lines)
+    return hoisted_lines, closing, origins, hoisted
+
+
 def split_frontmatter(text):
     """(frontmatter lines, index of the closing line) of a card's text.
 
@@ -2006,7 +2127,16 @@ def split_frontmatter(text):
     opening boundary is never closed, so the caller decides whether that is a
     defect. One rule for every reader — index, lints, action gate — so a card
     cannot be a decision to one tool and prose to another: the BOM and CRLF are
-    tolerated, and `...` closes the frontmatter exactly like `---`."""
+    tolerated, `...` closes the frontmatter exactly like `---`, and fields the host
+    nested under `metadata:` come back as top-level fields (hoist_metadata_fields).
+    The lines are therefore what the readers rule on, not a byte-for-byte copy: a
+    caller that maps a line back into the file takes frontmatter_layout's origins."""
+    lines, closing, _origins, _hoisted = frontmatter_layout(text)
+    return lines, closing
+
+
+def _raw_frontmatter(text):
+    """The frontmatter lines exactly as written; the boundary rules of split_frontmatter."""
     lines = text.lstrip("﻿").splitlines()
     if not lines or lines[0].strip() != FRONTMATTER_BOUNDARY:
         return None, None
@@ -2194,7 +2324,7 @@ def frontmatter_fields(path):
 def frontmatter_text(text):
     """Parse one already-read snapshot with the same rules as frontmatter_fields."""
 
-    front_lines, closing_index = split_frontmatter(text)
+    front_lines, closing_index, origins, _hoisted = frontmatter_layout(text)
     if front_lines is None:
         return {}, None
     if closing_index is None:
@@ -2217,7 +2347,8 @@ def frontmatter_text(text):
         block_indent = None
         block_lines = []
 
-    for line_number, raw_line in enumerate(front_lines, start=2):
+    for origin, raw_line in zip(origins, front_lines):
+        line_number = origin + 2  # 檔案裡的行號，不是搬到頂層之後的位置
         if not raw_line.strip() or raw_line.lstrip().startswith("#"):
             if block_field is not None:
                 block_lines.append("")
@@ -2875,6 +3006,9 @@ CARD_LINT_EMPTY_SEQUENCE_REASON = "{field} 是空序列；選填欄位寫了就�
 CARD_LINT_NOT_ISO_DATE_REASON = "{field}={value} 不是 ISO 日期"
 CARD_LINT_STATUS_REASON = "{field}={value} 不在 {allowed}（{card_type} 型）"
 CARD_LINT_GRANT_NO_EXPIRY_REASON = "缺 {field}＝永久授權；owner 可能就是要它永久有效"
+CARD_LINT_METADATA_NESTED_REASON = (
+    "{fields} 寫在 {parent} 底下一層（宿主寫入器會這樣重排）；已照頂層欄位讀取，閘門與檢索照常生效"
+)
 CARD_LINT_NESTED_ALIASES_REASON = (
     "{field} 有 {count} 個但被排在下一層（宿主寫入器會這樣重排）；搜尋讀得到，頂層仍是規範位置"
 )
@@ -3576,6 +3710,7 @@ _EN = {
     "CARD_LINT_NOT_ISO_DATE_REASON": "{field}={value} is not an ISO date",
     "CARD_LINT_STATUS_REASON": "{field}={value} is not one of {allowed} (type {card_type})",
     "CARD_LINT_GRANT_NO_EXPIRY_REASON": "no {field} means the grant never expires; the owner may well want it that way",
+    "CARD_LINT_METADATA_NESTED_REASON": "{fields} sit one level down under {parent} (host writers reorder cards that way); they are read as top-level fields, so gates and search work as usual",
     "CARD_LINT_NESTED_ALIASES_REASON": "{field} has {count} entries but they sit one level down (host writers reorder it that way); search still reads them, but the top level is the canonical place",
     "CARD_LINT_MISSING_ALIASES_REASON": "no {field} (synonym search comes back empty) → python epitype/alias_batch.py export <vault>, then apply after reviewing suggested",
     "CARD_LINT_NO_CHINESE_REASON": "neither description nor aliases contains a Chinese character, so a Chinese question will not recall this card; the AI in this session may add Chinese aliases on its own (owner ruling 2026-09-06: no need to ask)",

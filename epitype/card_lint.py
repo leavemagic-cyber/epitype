@@ -119,9 +119,10 @@ def _is_bare_term(item):
 def _disarmed_findings(fields, nested):
     """閘門只讀頂層欄位，所以被包進下一層的閘門欄位＝這張卡什麼都不擋。
 
-    2026-09-16：三張剛寫好的裁定卡，欄位全部被包進 `metadata:` 底下一層，卡片外觀完
-    全正常、體檢也過，實測 8 個案例一個都沒擋。假裝武裝的卡比沒有卡更糟——後者至少
-    不會讓人以為有防護。所以這裡判 FAIL，不是 WARN。"""
+    假裝武裝的卡比沒有卡更糟——後者至少不會讓人以為有防護。所以這裡判 FAIL，不是
+    WARN。`metadata:` 區塊底下的不在此列：共用讀法已經把它們攤回頂層，閘門讀得到，
+    傳進來的 `nested` 裡也不會有它們。還會走到這裡的是掛在別的鍵底下、或寫成單行
+    `metadata: {...}` 的——那些閘門真的讀不到。"""
     findings = []
     for key in sorted(nested):
         parent, _, child = key.partition(".")
@@ -883,7 +884,7 @@ def _check_card(path, relative, today, known_cards=None):
         text = path.read_text(encoding="utf-8-sig")
     except (OSError, UnicodeError) as exc:
         return memspec.DEFAULT_CARD_TYPE, [(FAIL, "unreadable", f"{type(exc).__name__}")], None, None
-    front_lines, closing = memspec.split_frontmatter(text)
+    front_lines, closing, _origins, hoisted = memspec.frontmatter_layout(text)
 
     findings = []
     if front_lines is None:
@@ -892,6 +893,13 @@ def _check_card(path, relative, today, known_cards=None):
     if closing is None:
         findings.append((FAIL, "frontmatter", memspec.CARD_LINT_NO_BOUNDARY_REASON))
         return memspec.DEFAULT_CARD_TYPE, findings, None, None
+    # 只報以前巢狀就會出事的那幾個（閘門欄位、別名）。`metadata:` 底下多半是宿主自己的鍵
+    # （node_type、originSessionId…），全報的話真庫四成的卡都會多一條沒有用的訊息。
+    relocated = [key for key in hoisted
+                 if key in memspec.CARD_GATE_FIELDS or key == memspec.ALIASES_FIELD]
+    if relocated:
+        findings.append((INFO, "metadata-nested", memspec.CARD_LINT_METADATA_NESTED_REASON.format(
+            fields=memspec.SLASH_JOINER.join(relocated), parent=memspec.METADATA_FIELD)))
 
     nested, counts = _nested_and_lists(front_lines, path)
     card_type = _card_type(relative, fields, nested)
@@ -1941,7 +1949,8 @@ def _selftest():
             fence_cards = {
                 "fence-good.md": head + "fence_shell: powershell\nfence_langs: [bash, PowerShell]\n" + tail,
                 "fence-pwsh.md": head + "fence_shell: pwsh\n" + tail,
-                "fence-nested.md": head + "metadata:\n  type: feedback\n  fence_shell: powershell\n---\nbody\n",
+                "fence-nested.md": head + "extra:\n  fence_shell: powershell\n" + tail,
+                "fence-metadata.md": head + "metadata:\n  type: feedback\n  fence_shell: powershell\n---\nbody\n",
                 "fence-langs-alone.md": head + "unenforceable: 判斷型\nfence_langs:\n  - bash\n" + tail,
                 "gap-plain-text.md": head + "unenforceable: 結構型：程式碼區塊的數量與語言標記是版面結構，Stop 閘比對的是純文字\n" + tail,
                 "gap-english.md": head + "unenforceable: the gate can't see code fences\n" + tail,
@@ -1974,6 +1983,11 @@ def _selftest():
                 and (FAIL, "disarmed-field") in nested_rules
                 and memspec.FENCE_SHELL_FIELD in _reason_of(fence_report, "fence-nested.md", "disarmed-field")
                 and (FAIL, "fence-pair") in alone_rules,
+            ))
+            metadata_rules, _card = _findings_of(fence_report, "fence-metadata.md")
+            checks.append((
+                "fence_shell 寫在 metadata 底下一層：照頂層讀，不判 disarmed-field 也不判 unarmed",
+                metadata_rules == {(INFO, "metadata-nested")},
             ))
             gap_rules, _card = _findings_of(fence_report, "gap-plain-text.md")
             english_rules, _card = _findings_of(fence_report, "gap-english.md")
@@ -2023,7 +2037,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 55
+    total = 56
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

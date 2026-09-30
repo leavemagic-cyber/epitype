@@ -46,7 +46,7 @@ _RECALL_PART = re.compile(f"[{_CJK_RANGE}]+|[^\\s{_CJK_RANGE}，。！？：；�
 # bigrams indexable while the cards table and returned hit fields stay raw.
 _CJK_BIGRAM_PREFIX = "\ue000"
 _FTS_FORMAT_KEY = "fts_format"
-_FTS_FORMAT_VERSION = "6"
+_FTS_FORMAT_VERSION = "7"
 _CURRENT_DECISION_GUIDANCE = "此題現行決定="
 
 
@@ -200,7 +200,9 @@ def _parse_frontmatter(text):
         block_style = None
         block_lines = []
 
-    for line in text.splitlines():
+    # 這裡自己切行（索引只讀檔頭），所以宿主包進 `metadata:` 的欄位要自己攤回頂層；
+    # 不攤的話 status／superseded_by 在索引裡是空的，被取代的卡照樣被喚回。
+    for line in memspec.hoist_metadata_fields(text.splitlines())[0]:
         stripped = line.strip()
         is_top_level = line == line.lstrip() and ":" in line
         if is_top_level:
@@ -229,13 +231,12 @@ def _parse_frontmatter(text):
             block_lines.append(stripped)
             continue
         if ":" in stripped and not stripped.startswith("-"):
-            # 縮排的鍵。宿主的記憶寫入器會把 `aliases` 重排到 `metadata:` 底下一層，而同義詞
-            # 清單放在哪一層，意思都一樣。只認頂層的後果不是「這次搜不到」，是**下一次索引
-            # 重建時那張卡的別名整組消失**：卡還在、內容還在、用別名就是找不到，而且沒有任何
-            # 訊號。2026-09-19 真庫兩張卡就是這個狀態，當下還搜得到只因為索引那兩列是舊的；
-            # 在複本上重建後，別名欄變空、別名查詢 0 筆。
-            # 武裝欄位不比照放寬：`forbidden` 掛在別的鍵底下就真的不是同一件事（閘只讀頂層），
-            # 體檢判它 FAIL 是刻意的。這裡放寬的只有這一個純檢索用的鍵。
+            # 縮排的鍵。同義詞清單放在哪一層，意思都一樣。只認頂層的後果不是「這次搜不到」，
+            # 是**下一次索引重建時那張卡的別名整組消失**：卡還在、內容還在、用別名就是找
+            # 不到，而且沒有任何訊號。`metadata:` 底下的已經在上面攤回頂層；這裡接的是掛在
+            # 別的鍵底下、以及頂層另有一份時被留在 `metadata:` 裡的那一份。
+            # 武裝欄位不比照放寬：`forbidden` 掛在 `metadata` 以外的鍵底下就真的不是同一
+            # 件事，體檢判它 FAIL 是刻意的。這裡放寬的只有這一個純檢索用的鍵。
             nested_key = stripped.split(":", 1)[0].strip()
             if nested_key == memspec.ALIASES_FIELD:
                 raw = stripped.split(":", 1)[1]

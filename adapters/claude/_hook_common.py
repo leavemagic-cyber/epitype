@@ -404,11 +404,12 @@ def declared_frontmatter(path, field, max_bytes):
     at — half a card's fields could name a ruling that is not there.
 
     Shared by the Stop gate (`decision_key`) and the action guard (`guard_tool`) so a
-    card cannot be a ruling to one gate and prose to the other. A field nested under
-    a parent block is deliberately not a declaration: the gates read top-level fields
-    only, and a card whose fields were wrapped one level deep enforces nothing —
-    2026-09-16 three freshly written decision cards were silently disarmed exactly
-    that way, so the indentation test here is the difference between armed and inert.
+    card cannot be a ruling to one gate and prose to the other. "Top level" is what
+    memspec.split_frontmatter returns, so a field the host's memory writer moved
+    under `metadata:` is a declaration here too — the returned lines carry it at the
+    top level. A field nested under any other parent is deliberately not one: the
+    readers below take top-level fields only, and card_lint fails that card as
+    disarmed.
     """
     try:
         with path.open("rb") as stream:
