@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Replay every selected transcript to its end instead of silently dropping turns after 64 MB.
+
 - Transfer a finished Claude subagent's outstanding browser resources to its root reminder without touching other agents or sessions.
 
 - 夜報漂移自測的合成治理庫補明確設定來源，依 A 的新權限判準驗證；原本「手改生成塊必須抓到漂移」斷言保持不變，不再靠參數首項升格。

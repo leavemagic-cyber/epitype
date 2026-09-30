@@ -29,9 +29,8 @@ for _extra in (str(_REPO_ROOT), str(_REPO_ROOT / "adapters" / "claude")):
 
 from epitype import memspec
 
-# 一次夜跑最多讀幾個對話檔、每個檔最多幾 MB。夢有總預算，重放不該把它吃光。
+# 檔案數受夜跑預算限制；選中的檔案必須讀完，不能把截斷當成零違反。
 MAX_TRANSCRIPTS = 250
-MAX_TRANSCRIPT_BYTES = 64 * 1024 * 1024
 # 排序只要知道每份紀錄從幾點開始：讀開頭幾列就夠，不整份讀。
 FIRST_EVENT_MAX_LINES = 64
 FIRST_EVENT_MAX_BYTES = 4 * 1024 * 1024
@@ -175,7 +174,7 @@ def _present_anywhere(pattern, text, cache):
     return regex is not None and regex.search(text) is not None
 
 
-def _turns(path, max_bytes=MAX_TRANSCRIPT_BYTES):
+def _turns(path):
     """(session, 時間, 閘看到的整回合文字, 這一輪逐段文字, 這一輪的工具呼叫)。
 
     工具呼叫是 (工具名, 閘讀的那一串, 這一次呼叫的時間)。
@@ -191,7 +190,6 @@ def _turns(path, max_bytes=MAX_TRANSCRIPT_BYTES):
     from epitype import transcript as transcript_reader
     from pretooluse_gate import _action_text
 
-    read = 0
     session, stamp = "", ""
     texts, calls = [], []
     try:
@@ -200,9 +198,6 @@ def _turns(path, max_bytes=MAX_TRANSCRIPT_BYTES):
         return
     with stream:
         for line in stream:
-            read += len(line)
-            if read > max_bytes:
-                break
             line = line.strip()
             if not line:
                 continue

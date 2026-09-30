@@ -21,6 +21,21 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "adapters" / "claude")]
 from epitype import compliance, dream, memspec
 
+class LargeTranscriptRegression(unittest.TestCase):
+    def test_replays_turn_after_old_64mb_cutoff(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "large.jsonl"
+            with path.open("w", encoding="utf-8") as stream:
+                skipped = json.dumps({"type": "irrelevant", "padding": "x" * (1024 * 1024)}) + "\n"
+                for _ in range(65):
+                    stream.write(skipped)
+                for row in claude_turn("large", CARD_EPOCH, "問", BANNED):
+                    stream.write(json.dumps(row, ensure_ascii=False) + "\n")
+            turns = list(compliance._turns(path))
+            self.assertEqual(len(turns), 1)
+            self.assertEqual(turns[0][2], BANNED)
+
+
 CARD_EPOCH = datetime(2026, 9, 1, tzinfo=timezone.utc).timestamp()
 BANNED = "這句話不准講"
 
