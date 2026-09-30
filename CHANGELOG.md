@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Track the observed Chrome tabs_create text result by its explicit created Tab ID; report opaque create results as unverified instead of losing ownership.
+
 - Record five manually checked delivery-to-gate examples and refresh the same-record historical recall measurement.
 
 - Add explicit, snapshot-checked migration of legacy env/config keys into official card ownership; preserve host bytes until normal sync applies.

@@ -38,6 +38,7 @@ _CHROME_TRACKED = frozenset(("tabs_context_mcp", "tabs_create_mcp", "tabs_close_
 _CONTROL_OPEN = re.compile(r"(?:create|open|start|launch)", re.I)
 _TAB_CREATED = re.compile(r"Browser tab:\s*([A-Za-z0-9_-]+)\b")
 _CHROME_CLOSED = re.compile(r"\bClosed tab\s+([A-Za-z0-9_-]+)\b", re.I)
+_CHROME_CREATED = re.compile(r"^Created new tab\. Tab ID:\s*(\d+)\s*$", re.M)
 _CREATE_CUA = re.compile(r"\bcua\.createBrowserTab\s*\(")
 _CREATE_BROWSER = re.compile(r"\bcua\.createBrowserTab\s*\(\s*['\"](iab|chrome|edge)['\"]", re.I)
 # 清單只有在「程式最後一個敘述就是這個呼叫本身」時才算完整：REPL 輸出的是最後一個值，
@@ -358,6 +359,9 @@ def _observe_chrome(db, session, call_id, name, tool_input, result_text, objects
     # 群組不見只證明群組本身沒了。
     if name.endswith("tabs_context_mcp") or name.endswith("tabs_create_mcp"):
         previous = state.get("chrome_snapshot")
+        created_result = set(_CHROME_CREATED.findall(result_text)) if name.endswith("tabs_create_mcp") else set()
+        if len(created_result) == 1 and not no_group:
+            _resource(db, session, call_id, "open", "chrome-tab", next(iter(created_result)), now)
         if no_group:
             state["chrome_snapshot"] = []
             state["chrome_group_absent"] = True
@@ -365,6 +369,8 @@ def _observe_chrome(db, session, call_id, name, tool_input, result_text, objects
                 _resource(db, session, call_id, "close", "chrome-group", group_id, now)
             return
         if context is None:
+            if name.endswith("tabs_create_mcp") and not created_result:
+                _unverified_chrome(db, session, call_id, set(), now)
             return
         ids, group = context
         if name.endswith("tabs_context_mcp") and tool_input.get("createIfEmpty") is True:

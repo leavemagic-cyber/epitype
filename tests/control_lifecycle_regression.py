@@ -653,6 +653,19 @@ class ControlLifecycleRegression(unittest.TestCase):
         self.assertEqual(lifecycle.status(self.path, "other")["pending"][0]["agent"], "done")
         self.assertIn("12", lifecycle.reminder({"session_id": "root"}, self.path, "tool"))
 
+    def test_real_tabs_create_text_response_attributes_only_created_tab(self):
+        event = post("real-format", "create", "mcp__claude-in-chrome__tabs_create_mcp", {},
+                     mcp("Created new tab. Tab ID: 123",
+                         "Tab Context:\n- Available tabs:\n  • tabId 456: Existing\n  • tabId 123: New Tab"))
+        lifecycle.observe(event,self.path)
+        self.assertEqual(lifecycle.status(self.path,"real-format")["pending"],
+                         [{"kind":"chrome-tab","id":"123"}])
+        event["tool_use_id"]="unknown"
+        event["tool_response"]=mcp("opaque create response")
+        self.assertIsNotNone(lifecycle.observe(event,self.path))
+        self.assertIn({"kind":"unverified-chrome","id":"unknown"},
+                      lifecycle.status(self.path,"real-format")["pending"])
+
     def test_subagent_cannot_take_the_main_thread_reminder(self):
         # 子代理拿到主線的提醒，會照著「用完請關」去關主線的分頁；主線自己反而收不到。
         self.owned_iab_tab("shared", "main-tab")
