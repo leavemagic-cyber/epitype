@@ -262,7 +262,7 @@ def _card_fields(path):
     if closed:
         block = memspec.hoist_metadata_fields(block)[0]
     frontmatter = "\n".join(block)
-    parsed = memsearch._parse_frontmatter(frontmatter, closed=False)
+    parsed = memsearch._parse_frontmatter(frontmatter, closed=closed)
     aliases = parsed.get(memspec.ALIASES_FIELD, "").strip()
     return bool(DECISION_KEY_REGEX.search(frontmatter)), bool(aliases)
 

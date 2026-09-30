@@ -70,6 +70,30 @@ class MutationTests(unittest.TestCase):
                     memspec.sequence_items(memspec.split_frontmatter(text)[0], memspec.ALIASES_FIELD),
                     ["舊別名甲", "舊別名乙", "新別名"])
 
+    def test_a_blank_line_or_comment_does_not_hide_the_existing_items(self):
+        # 定位在空行或註解停下來的話，後面的舊項目等於不存在：新項目會用猜的縮排插在
+        # 它們前面，跟舊項目不同層，標準 YAML 解析器讀不了那張卡。
+        for label, nested in (
+            ("blank before same-indent items", "  aliases:\n\n  - 舊別名甲\n  - 舊別名乙\n"),
+            ("comment before same-indent items", "  aliases:\n  # 保留\n  - 舊別名甲\n  - 舊別名乙\n"),
+            ("blank between items", "  aliases:\n    - 舊別名甲\n\n    - 舊別名乙\n"),
+            ("trailing comment", "  aliases:\n    - 舊別名甲\n    - 舊別名乙\n    # 結尾\n"),
+        ):
+            with self.subTest(label=label):
+                self.card.write_text(CARD.replace(
+                    "status: active\n", "status: active\nmetadata:\n" + nested + "  type: decision\n"),
+                    encoding="utf-8")
+                self.assertEqual(self.apply_aliases(["新別名"]), 0)
+                text = self.card.read_text(encoding="utf-8")
+                old_item = next(line for line in text.splitlines() if "舊別名乙" in line)
+                new_item = next(line for line in text.splitlines() if "新別名" in line)
+                self.assertEqual(old_item.replace("舊別名乙", "新別名"), new_item)
+                lines = text.splitlines()
+                self.assertEqual(lines.index(new_item), lines.index(old_item) + 1)
+                self.assertEqual(
+                    memspec.sequence_items(memspec.split_frontmatter(text)[0], memspec.ALIASES_FIELD),
+                    ["舊別名甲", "舊別名乙", "新別名"])
+
     def test_an_empty_nested_alias_list_is_filled_in_place(self):
         self.card.write_text(CARD.replace(
             "status: active\n", "status: active\nmetadata:\n  aliases:\n  type: decision\n"),

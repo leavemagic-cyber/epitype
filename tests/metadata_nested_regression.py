@@ -353,8 +353,10 @@ class LintIndexAndRecall(GateFixture):
             "---\nname: unfinished\ndescription: alpha\nmetadata:\n  status: superseded\n"
             "  decision_key: phantom\n  aliases: [alpha]\n", "unfinished.md")
         self.assertEqual(memspec.frontmatter_fields(unclosed)[0], {})
-        self.assertEqual(memsearch._read_card(unclosed)[memspec.DECISION_STATUS_FIELD], "")
-        self.assertFalse(harvest._card_fields(unclosed)[0])
+        indexed = memsearch._read_card(unclosed)
+        self.assertEqual(
+            (indexed[memspec.DECISION_STATUS_FIELD], indexed[memspec.ALIASES_FIELD]), ("", ""))
+        self.assertEqual(harvest._card_fields(unclosed), (False, False))
         closed = self.card(unclosed.read_text(encoding="utf-8") + "---\nbody\n", "finished.md")
         self.assertEqual(memsearch._read_card(closed)[memspec.DECISION_STATUS_FIELD], "superseded")
         self.assertEqual(harvest._card_fields(closed), (True, True))

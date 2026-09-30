@@ -2103,12 +2103,15 @@ confirmed by a test that fails on the code before it:
   top-level list, which then won over the nested one: the gates saw only the new aliases
   and a ruling that matched on the old ones stopped matching, while search, which reads
   both levels, looked normal. New aliases now join the list that is in effect, wherever
-  it is. The rule for any writer: find the field through the shared reading before
+  it is, and a blank line or comment inside the list no longer hides the items after it
+  (the second review round: the new item was written at a guessed indent in front of
+  them). The rule for any writer: find the field through the shared reading before
   deciding it is missing.
 - **Frontmatter that never closes.** The shared reading does not hoist it. The two
   readers that cut the frontmatter themselves (`memsearch._read_card`, `harvest`) did,
   so text running to the end of the file could become a nested `status` or
-  `decision_key`. They now hoist only when they saw the closing line. The index format
+  `decision_key`. They now hoist only when they saw the closing line, and the index's
+  older allowance for an indented `aliases` key applies only then too. The index format
   went to "8" for that.
 - **Line numbers.** `scar_census` numbered its diagnostics by position in the reordered
   lines. It now uses the origins, like `frontmatter_text`.

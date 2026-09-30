@@ -194,11 +194,20 @@ def _locate_aliases_block(front_body_lines):
 
     def shape(index, value):
         if not value:
-            item_end = index + 1
-            while item_end < len(plain):
-                following = plain[item_end]
-                if following[:1].isspace() and following.strip().startswith("-"):
-                    item_end += 1
+            # 空行與註解不結束清單：在那裡停下來會把後面的既有項目當成不存在，新項目
+            # 就用猜的縮排插在它們前面，跟舊項目不同層。插入點只算到最後一個項目之後。
+            key_indent = len(plain[index]) - len(plain[index].lstrip())
+            item_end = probe = index + 1
+            while probe < len(plain):
+                following = plain[probe]
+                stripped = following.strip()
+                if not stripped or stripped.startswith("#"):
+                    probe += 1
+                    continue
+                indent = len(following) - len(following.lstrip())
+                if following[:1].isspace() and stripped.startswith("-") and indent >= key_indent:
+                    probe += 1
+                    item_end = probe
                     continue
                 break
             return "block", index, item_end
@@ -229,7 +238,7 @@ def _existing_item_indent(front_body_lines, key_index, item_end_index):
     for position in range(key_index + 1, item_end_index):
         stripped = front_body_lines[position].rstrip("\r\n")
         leading = stripped[: len(stripped) - len(stripped.lstrip())]
-        if leading:
+        if leading and stripped.lstrip().startswith("-"):
             return leading
     # 還沒有任何項目：比鍵多縮兩格（頂層的鍵就是兩格，包在下一層的跟著往內）。
     key_line = front_body_lines[key_index].rstrip("\r\n")

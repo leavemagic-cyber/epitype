@@ -242,8 +242,9 @@ def _parse_frontmatter(text, closed=True):
             # 別的鍵底下、以及頂層另有一份時被留在 `metadata:` 裡的那一份。
             # 武裝欄位不比照放寬：`forbidden` 掛在 `metadata` 以外的鍵底下就真的不是同一
             # 件事，體檢判它 FAIL 是刻意的。這裡放寬的只有這一個純檢索用的鍵。
+            # 沒收尾的檔頭裡，縮排的鍵一律不算：那可能已經是內文。
             nested_key = stripped.split(":", 1)[0].strip()
-            if nested_key == memspec.ALIASES_FIELD:
+            if closed and nested_key == memspec.ALIASES_FIELD:
                 raw = stripped.split(":", 1)[1]
                 try:
                     aliases.extend(_alias_values(raw))
