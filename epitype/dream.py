@@ -2043,6 +2043,9 @@ def _section_compliance(vaults, today, since_date, config, context=None):
         "errors": errors,
         "note": _coverage_note(covered, frontier, window_reset),
         "delivery": delivery,
+        "rewrite_cost": __import__("epitype.rewrite_cost", fromlist=["report"]).report(
+            [Path(vault) for vault, _rule in all_rules],
+            [row for row in all_rows if compliance._in_window(row.timestamp.isoformat(), since_stamp, until_stamp)]),
     }
 
 
@@ -2390,6 +2393,12 @@ def _render_section(lines, section):
         for item in unclassified:
             lines.append(f"- {item}")
     delivery = section.get("delivery") or {}
+    rewrite_cost = section.get("rewrite_cost") or []
+    if rewrite_cost:
+        lines.append("每條回合擋下的代價（同帳處置重放；內容效益另核對）：")
+        for item in rewrite_cost:
+            lines.append(f"- {item['card']}：擋下 {item['observed_blocks']}／現在處置 {item['same_record_policy_blocks']}／"
+                         f"提醒 {item['observed_notes']}；{item['useful_content']}")
     if delivery.get("armed"):
         lines.append(f"送達後同一場仍被擋或漏擋（前 {len(delivery['armed'])} 條武裝規則）:")
         for item in delivery["armed"]:

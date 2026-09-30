@@ -24,7 +24,7 @@ class ToolSequenceRegression(unittest.TestCase):
                 rows.append({'type': 'response_item', 'payload': {'type': 'function_call',
                     'name': 'exec_command', 'arguments': json.dumps({'cmd': command}), 'call_id': str(number)}})
         path.write_text('\n'.join(json.dumps(row) for row in rows), encoding='utf-8')
-        return {'session_id': 'seq-' + host, 'transcript_path': str(path),
+        return {'session_id': 'seq-' + host + '-' + self.root.name, 'transcript_path': str(path),
                 'last_assistant_message': '完成了', **extra}
 
     def test_three_order_cards_both_hosts_true_allow_and_block(self):

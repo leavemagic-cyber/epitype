@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- 只要求補措辭的 require 可獨立標 `require_on_hit: note`，保留同卡 forbidden 的安全阻擋；夜報逐卡列實際擋下／同帳新處置／提醒數，未核對後續內容的效益明列 UNVERIFIED，不以字數變動假裝換到內容。
+
 - 自審修正新裁定段／壓縮補送的狀態讀法，統一使用既有 `status` 正本欄位；回歸直接用真實 schema，已 superseded 卡不會補送，有效 owner 裁定可產生。
 
 - 用量計可選 `context_meter.handoff_tokens` 提前提醒有界檢查點交接，取指定量與宿主壓縮點 60% 的較低者；獨立標記同一壓縮週期只說一次，沿用輸出失敗釋放／壓縮後重新武裝。宿主壓縮設定不改，接手流程依已確認路徑。

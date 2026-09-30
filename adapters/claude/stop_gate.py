@@ -60,7 +60,7 @@ _DECISION_CACHE_FILENAME = "stop_decisions.json"
 # ruling that gained fields (require_when/require_text/advice) needs no version bump.
 # 7：fence_shell 成為武裝欄位——舊快取把只帶它的卡記成「不是裁定」，不換版就要等輪替才認得。
 # 9：包在 `metadata:` 底下的武裝欄位照頂層讀——同一種舊負例，同一個理由。
-_DECISION_CACHE_VERSION = 10
+_DECISION_CACHE_VERSION = 11
 _KEY = "key"
 _DECIDED_AT = "decided_at"
 _QUOTE = "quote"
@@ -85,10 +85,10 @@ def _turn(texts=(), prompt="", dispatch="", calls_after_dispatch=0):
 _Decision = namedtuple(
     "_Decision",
     "key decided_at quote forbidden aliases path decided_by require_when require_text advice"
-    " applies_to turn_check turn_check_limit on_hit fence_shell fence_langs turn_check_target require_tool_before pair_tools audience",
+    " applies_to turn_check turn_check_limit on_hit fence_shell fence_langs turn_check_target require_tool_before pair_tools audience require_on_hit",
     # 只有最後幾欄有預設值：沒標處置的卡就是「照擋」，沒宣告殼層的卡不查圍籬區塊，
     # 沒寫目標語言的 owner_language 卡用預設語言；既有的建構處不必跟著改。
-    defaults=("", "", (), "", (), (), ""),
+    defaults=("", "", (), "", (), (), "", ""),
 )
 
 
@@ -187,6 +187,7 @@ def _read_decision(path):
         "require_tool_before": sequences["require_tool_before"],
         "pair_tools": sequences["pair_tools"],
         "audience": _one_line(fields.get("audience")).casefold(),
+        "require_on_hit": _one_line(fields.get("require_on_hit")).casefold(),
         memspec.FENCE_SHELL_FIELD: _one_line(fields.get(memspec.FENCE_SHELL_FIELD)).casefold(),
         memspec.FENCE_LANGS_FIELD: [
             _one_line(item).casefold() for item in sequences[memspec.FENCE_LANGS_FIELD]
@@ -225,6 +226,7 @@ def _decision_from_ruling(vault, card_path, ruling):
         require_tool_before=tuple(_strings(ruling.get("require_tool_before"))),
         pair_tools=tuple(_strings(ruling.get("pair_tools"))),
         audience=_one_line(ruling.get("audience")).casefold(),
+        require_on_hit=_one_line(ruling.get("require_on_hit")).casefold(),
     )
 
 
@@ -1173,8 +1175,10 @@ def _verdict(event, message, config, started_at, defects, turn=None):
     verdict = _first_violation(blocking, event, message, config, started_at, defects, turn)
     if verdict is None:
         # 只提醒的卡排在後面：真的要擋的時候，那一輪重寫本來就會把用詞一起帶過。
-        noting = [decision for decision in decisions if decision.on_hit == memspec.ON_HIT_NOTE]
-        noted = _first_violation(noting, event, message, config, started_at, defects, turn)
+        noting = [decision for decision in decisions if decision.on_hit == memspec.ON_HIT_NOTE
+                  or decision.require_on_hit == memspec.ON_HIT_NOTE]
+        noted = _first_violation(noting, event, message, config, started_at, defects, turn,
+                                require_notes=True)
         if noted is not None and _claim_marker(session_id, noted[0].key, message):
             _audit(config, noted[0].key, noted[1], started_at, session_id,
                    _message_digest(message), kind=memspec.STOP_NOTE_LOG_KIND)
@@ -1389,7 +1393,8 @@ def _fence_shell_gap(decision, message, event, started_at, defects, parser=None)
     return None
 
 
-def _first_violation(decisions, event, message, config, started_at, defects, turn=None):
+def _first_violation(decisions, event, message, config, started_at, defects, turn=None,
+                     require_notes=False):
     """這批裁定裡第一個被違反的：(裁定, 哪一類, 要說的話, 命中的字)；都沒有回 None。"""
     verdicts = []
     if turn is not None and turn.prompt:
@@ -1469,6 +1474,8 @@ def _first_violation(decisions, event, message, config, started_at, defects, tur
             break
     if not verdicts:
         for decision in decisions:
+            if decision.require_on_hit == memspec.ON_HIT_NOTE and not require_notes:
+                continue
             trigger = _requirement_gap(decision, message, defects)
             if trigger is None:
                 continue

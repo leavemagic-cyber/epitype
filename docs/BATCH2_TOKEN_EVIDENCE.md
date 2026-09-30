@@ -76,3 +76,18 @@ Same-record counterfactual with original positive growth, carry 68000 for Claude
 Source traces are the same as K1/K3. This measures a replay, not live transfers,
 fact retention, cache reconstruction or billing savings. K1 and K2 reductions are
 not additive. New session setup cost and successful takeover remain UNVERIFIED.
+
+## K5 — rewriting that only adds wording
+
+Same session audit (42cec705) currently contains **9 Stop blocks**. Keep usable prompt
+delivery, readable owner language and substantive no-evasion checks. Move the two
+numbers-scope wording blocks to notes; move the two missing-cause-word blocks to
+`require_on_hit: note`, preserving that card's forbidden suppression hazards.
+Same-audit disposition replay: **9 → 5 blocks**, four fewer (44.44%). This does not
+claim four actual avoided calls or any billed token saving. A previous snapshot's
+six blocks is not the current audit count. Already fixed prompt false positives are
+not credited to this policy change.
+
+Nightly output now counts each rule's observed blocks, notes and current-policy
+replay. It marks useful follow-up content UNVERIFIED when the audit provides no
+content evidence; a change in wording or length is not proof of useful content.
