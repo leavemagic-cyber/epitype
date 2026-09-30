@@ -2045,7 +2045,10 @@ def _section_compliance(vaults, today, since_date, config, context=None):
         "delivery": delivery,
         "rewrite_cost": __import__("epitype.rewrite_cost", fromlist=["report"]).report(
             [Path(vault) for vault, _rule in all_rules],
-            [row for row in all_rows if compliance._in_window(row.timestamp.isoformat(), since_stamp, until_stamp)]),
+            [row for vault in dict.fromkeys(Path(vault) for vault, _rule in all_rules)
+             for row in __import__("epitype.gates_report", fromlist=["load_rows"]).load_rows(
+                 vault / memspec.FTS_INDEX_DIRECTORY / memspec.GATE_LOG_FILENAME)[0]
+             if compliance._in_window(row.timestamp.isoformat(), since_stamp, until_stamp)]),
     }
 
 

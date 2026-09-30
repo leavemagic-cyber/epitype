@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fix nightly rewrite-cost reporting to read full audit rows rather than reconciliation rows without policy labels.
+
 - Replay every selected transcript to its end instead of silently dropping turns after 64 MB.
 
 - Transfer a finished Claude subagent's outstanding browser resources to its root reminder without touching other agents or sessions.
