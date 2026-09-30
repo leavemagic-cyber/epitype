@@ -3124,6 +3124,11 @@ def _selftest():
                 memspec.CONFIG_CORE_FILES_FIELD: [os.fspath(core_block)],
                 memspec.CONFIG_CORE_CAP_BYTES_FIELD: 1000000,
             }
+            # A synthetic governance vault needs the same explicit authority as
+            # a real installation; CLI argument order no longer grants it.
+            drift_scope_config = Path(temp_dir).resolve() / "drift_scope_config.json"
+            drift_scope_config.write_text(json.dumps({"vaults": [os.fspath(drift_vault)]}), encoding="utf-8")
+            os.environ[memspec.EPITYPE_CONFIG_ENV] = os.fspath(drift_scope_config)
             clean_11 = {s["id"]: s for s in build_report(
                 [drift_vault], today=today, config=drift_config)["sections"]}[11]
             core_block.write_text(
@@ -3141,6 +3146,7 @@ def _selftest():
             )))
             no_rules_11 = {s["id"]: s for s in build_report(
                 [cap_vault], today=today, config=drift_config)["sections"]}[11]
+            os.environ[memspec.EPITYPE_CONFIG_ENV] = os.fspath(selftest_config)
             checks.append(("a vault with no rule cards is never reported as drift (an empty assembly compares to nothing)", (
                 no_rules_11["counts"]["drift"] == 0
             )))
