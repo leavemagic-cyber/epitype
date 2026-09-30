@@ -635,7 +635,7 @@ def _recurrence_review(card, target, additions, prospective, patch, started_at, 
     return _deny_value(reason[: memspec.WRITE_GATE_REASON_MAX_CHARS])
 
 
-_Guard = namedtuple("_Guard", "card tool substrings advice path requires unless when write_check")
+_Guard = namedtuple("_Guard", "card tool substrings advice path requires unless when write_check advise_tool advise_fragments advise_text")
 
 
 def _read_guard(path):
@@ -646,7 +646,7 @@ def _read_guard(path):
     bad items instead would leave fewer required fragments and therefore a guard that
     matches *more* than its author wrote."""
     front = declared_frontmatter(
-        path, memspec.ACTION_GUARD_TOOL_FIELD, memspec.STOP_GATE_FRONTMATTER_MAX_BYTES
+        path, (memspec.ACTION_GUARD_TOOL_FIELD, "advise_tool"), memspec.STOP_GATE_FRONTMATTER_MAX_BYTES
     )
     if front is None:
         front = declared_frontmatter(
@@ -664,6 +664,15 @@ def _read_guard(path):
     name = one_line(fields.get(memspec.NAME_FIELD)) or path.stem
     tool = one_line(fields.get(memspec.ACTION_GUARD_TOOL_FIELD))
     write_check = one_line(fields.get(memspec.WRITE_CHECK_FIELD))
+    if not tool and not write_check and fields.get("advise_tool"):
+        fragments = sequence_fields(front, ("advise_all_of",))["advise_all_of"]
+        if any(not isinstance(item, str) or not item.strip() for item in fragments):
+            return memspec.ACTION_GUARD_DEFECT.format(
+                card=name, field="advise_all_of", reason="提醒片段必須是非空字串")
+        return {"card": name, "advise_tool": one_line(fields["advise_tool"]),
+                "advise_fragments": fragments,
+                "advise_text": one_line(fields.get("advise_text") or fields.get("description"))[:240],
+                "expires": one_line(fields.get(memspec.VALID_UNTIL_FIELD))}
     if write_check and write_check not in memspec.WRITE_CHECK_VALUES:
         return memspec.ACTION_GUARD_DEFECT.format(
             card=name, field=memspec.WRITE_CHECK_FIELD,
@@ -858,7 +867,7 @@ def warm_guard_cache(vaults, started_at, deadline=None):
 _WARM_CAP = 1 << 30
 # 欄位形狀增加 write_check；版本不對就整份重讀。
 # 6：包在 `metadata:` 底下的守衛欄位照頂層讀，舊快取把那些卡記成「沒有守衛」。
-_GUARD_CACHE_VERSION = 6
+_GUARD_CACHE_VERSION = 7
 
 
 def _guards(vault, started_at, defects, cap=None, deadline=None):
@@ -961,7 +970,7 @@ def _guards(vault, started_at, defects, cap=None, deadline=None):
             defects.append(entry)
         elif isinstance(entry, dict) and (
             entry.get("substrings") or entry.get("requires") or entry.get("when")
-            or entry.get("write_check")
+            or entry.get("write_check") or entry.get("advise_tool")
         ):
             if memspec.card_expired(entry.get("expires")):
                 # 過期的守衛不再攔人；時限型的規則要自己停下來，不能靠人記得去拔。
@@ -986,6 +995,9 @@ def _guards(vault, started_at, defects, cap=None, deadline=None):
                         and isinstance(pair[1], (list, tuple)) and pair[1]
                     ),
                     entry.get("write_check", ""),
+                    entry.get("advise_tool", ""),
+                    tuple(entry.get("advise_fragments") or ()),
+                    entry.get("advise_text", ""),
                 )
             )
     return found
@@ -1009,7 +1021,7 @@ def _action_text(tool_input):
     return "\n".join(parts)[: memspec.ACTION_GUARD_HAYSTACK_MAX_CHARS]
 
 
-def _guard_review(event, tool_name, tool_input, config, started_at, defects):
+def _guard_review(event, tool_name, tool_input, config, started_at, defects, advisories=None):
     """(deny value, ()) when a scar card's fragments all appear in this call.
 
     Owner 2026-09-16 lifted §34's "cards may not carry an action condition". What is
@@ -1036,6 +1048,10 @@ def _guard_review(event, tool_name, tool_input, config, started_at, defects):
         # 永遠回空集合，而為了拿一個空集合，每一次工具呼叫都要多載 8.3 ms 的模組。
         demoted = frozenset()
         for guard in _guards(vault, started_at, defects):
+            if (advisories is not None and guard.advise_text
+                    and memspec.action_guard_tool_matches(guard.advise_tool, folded_tool)
+                    and all(fragment in haystack for fragment in guard.advise_fragments)):
+                advisories.append((guard.path, guard.card, guard.advise_text))
             if not guard.tool:
                 continue
             if not memspec.action_guard_tool_matches(guard.tool, folded_tool) or guard.card in demoted:
@@ -1609,7 +1625,7 @@ def _context_meter_line(event, config, started_at):
     return found[0], directory, found[1], found[2]
 
 
-def _allow_context(event, notices=(), config=None, started_at=None, meter_claims=None):
+def _allow_context(event, notices=(), config=None, started_at=None, meter_claims=None, advisories=()):
     """Context for a call the gate lets through: the write gate's own advice and
     the rulings whose `forbidden` pattern could not be compiled, each named once
     per session — a ruling that silently stopped being enforced is the failure the
@@ -1627,6 +1643,16 @@ def _allow_context(event, notices=(), config=None, started_at=None, meter_claims
     for notice in list(dict.fromkeys(notices))[: memspec.GATE_DEFECT_MAX_LINES]:
         if _notice_marker(session_id, notice):
             lines.append(notice)
+    shown = 0
+    for path, card, excerpt in advisories:
+        if shown == 2:
+            break
+        line = f"Epitype [{card}]：{excerpt}"
+        if (payload_fits("PreToolUse", "\n".join([*lines, line]),
+                         config[memspec.CONFIG_BUDGET_BYTES_FIELD])
+                and _notice_marker(session_id, "tool-advice:" + str(path.resolve()))):
+            lines.append(line)
+            shown += 1
     try:
         if config is not None and started_at is not None and not expired(started_at):
             lifecycle_path = control_lifecycle.database_path(config_path())
@@ -1749,9 +1775,10 @@ def _handle(event, started_at, defects=None, meter_claims=None):
     config = load_config(started_at)
     if config is None:
         return None
+    advisories = []
     try:
         guard_value = _guard_review(
-            event, tool_name, event.get("tool_input"), config, started_at, defects
+            event, tool_name, event.get("tool_input"), config, started_at, defects, advisories
         )
     except Exception:
         guard_value = None
@@ -1781,7 +1808,7 @@ def _handle(event, started_at, defects=None, meter_claims=None):
         return waste_value
     if waste_notice:
         notices = tuple(notices) + (waste_notice,)
-    return _allow_context(event, notices, config, started_at, meter_claims)
+    return _allow_context(event, notices, config, started_at, meter_claims, advisories)
 
 
 def _selftest():

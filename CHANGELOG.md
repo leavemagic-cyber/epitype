@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- 工具使用前提醒新增 `advise_tool`、`advise_all_of`、`advise_text`；沿用動作守衛的暖快取，每次至多送兩條簡短原文，同場同卡去重，判斷型規則也能在動手時補送。兩宿主以官方 PreToolUse `additionalContext` 交給模型。
+
 - 第二批逐卡分類：四庫 302 張未分類行為卡各留執行層與理由，隔離副本未分類／FAIL 均為 0；43 條 Claude deny 與 10 條 Codex forbidden prefix 遷入對應卡片，字面集合不減少。新增明示原生規則接管工具：先驗 sync 無漂移、舊／新完整禁止集合相等，再接管卡片列出的 deny 並保留舊 rules 原檔備份；其他使用者鍵不接管。
 
 - 自動喚回排除歷史稽核副本（明示 `scope: historical-audit/historical/archive`、`status: archived/historical`，或舊卡自稱 `Historical audit copy`）；手動搜尋仍可取回，已被取代的卡維持既有排除。量測工具可用送達帳重算移除數，不以卡片未被點名斷定規則無用。

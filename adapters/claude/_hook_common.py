@@ -428,7 +428,7 @@ def declared_frontmatter(path, field, max_bytes):
     declares = any(
         line[:1] not in " \t"
         and ":" in line
-        and line.split(":", 1)[0].strip() == field
+        and line.split(":", 1)[0].strip() in ((field,) if isinstance(field, str) else field)
         for line in lines
     )
     return lines if declares else None
