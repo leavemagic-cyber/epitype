@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Stop 閘沿用回合紀錄，新增字面工具先後 `require_tool_before`、開關配對 `pair_tools` 與主／子對話 `audience`。不做跨 hook 計數；只在回合起點可讀時查順序。相同指令的一次呼叫不當成兩次先後證據，目標身分與成功結果未宣告者不假裝已驗。
+
 - 本場喚回／工具提醒／動作擋下的卡片指標寫入 session 規則狀態；PreCompact 保存獨立 `.rules.json` 交接附件，SessionStart(compact) 補送仍有效卡片描述，合計不超過 1,800 bytes，不改模型撰寫的交接正文。
 
 - 工具使用前提醒新增 `advise_tool`、`advise_all_of`、`advise_text`；沿用動作守衛的暖快取，每次至多送兩條簡短原文，同場同卡去重，判斷型規則也能在動手時補送。兩宿主以官方 PreToolUse `additionalContext` 交給模型。

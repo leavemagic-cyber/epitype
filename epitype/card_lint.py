@@ -921,6 +921,16 @@ def _check_card(path, relative, today, known_cards=None):
 
     findings.extend(_disarmed_findings(fields, nested))
     findings.extend(_guard_findings(fields, front_lines))
+    if fields.get("audience", "") not in ("", "root", "sub", "all"):
+        findings.append((FAIL, "audience", "audience 必須是 root、sub 或 all"))
+    from .tool_sequence import gap
+    for field in ("require_tool_before", "pair_tools"):
+        values = list(memspec.sequence_items(front_lines or (), field))
+        try:
+            gap(values if field == "require_tool_before" else (),
+                values if field == "pair_tools" else (), ())
+        except (ValueError, AttributeError) as exc:
+            findings.append((FAIL, "tool-sequence", str(exc)))
     findings.extend(_pattern_findings(fields, front_lines))
     findings.extend(_require_findings(fields))
     findings.extend(_fence_shell_findings(fields, counts))

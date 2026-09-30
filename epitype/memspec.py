@@ -1694,6 +1694,7 @@ TURN_UNVERIFIED_DELEGATION_REASON = (
 # 閘門一律只讀頂層欄位。這幾個欄位一旦被包進下一層，卡片看起來武裝、實際什麼都不擋。
 # 唯一的例外是 `metadata:` 區塊：hoist_metadata_fields 會把它底下的欄位攤回頂層再交給閘門。
 CARD_GATE_FIELDS = (
+    "require_tool_before", "pair_tools",
     DECISION_KEY_FIELD,
     FORBIDDEN_FIELD,
     ACTION_GUARD_TOOL_FIELD,
@@ -1825,6 +1826,7 @@ UNENFORCEABLE_FIELD = "unenforceable"
 CARD_ARMING_TYPES = ("feedback", "correction", "scar", "habit")
 CARD_ARMING_REQUIRED_FROM = "2026-09-16"
 CARD_ARMING_FIELDS = (
+    "require_tool_before", "pair_tools",
     FORBIDDEN_FIELD, ACTION_GUARD_TOOL_FIELD, REQUIRE_WHEN_FIELD, TURN_CHECK_FIELD)
 WRITE_CHECK_FIELD = "write_check"
 WRITE_CHECK_PS51_UTF8_BOM = "ps51_utf8_bom"

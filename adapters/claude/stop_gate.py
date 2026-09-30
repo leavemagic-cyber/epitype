@@ -60,7 +60,7 @@ _DECISION_CACHE_FILENAME = "stop_decisions.json"
 # ruling that gained fields (require_when/require_text/advice) needs no version bump.
 # 7：fence_shell 成為武裝欄位——舊快取把只帶它的卡記成「不是裁定」，不換版就要等輪替才認得。
 # 9：包在 `metadata:` 底下的武裝欄位照頂層讀——同一種舊負例，同一個理由。
-_DECISION_CACHE_VERSION = 9
+_DECISION_CACHE_VERSION = 10
 _KEY = "key"
 _DECIDED_AT = "decided_at"
 _QUOTE = "quote"
@@ -74,7 +74,7 @@ _TURN_CHECK_RULE = "turn_check"
 
 _SELFTEST_HANG_SECONDS = 120
 
-_Turn = namedtuple("_Turn", "texts prompt dispatch calls_after_dispatch")
+_Turn = namedtuple("_Turn", "texts prompt dispatch calls_after_dispatch tools", defaults=((),))
 
 
 def _turn(texts=(), prompt="", dispatch="", calls_after_dispatch=0):
@@ -85,10 +85,10 @@ def _turn(texts=(), prompt="", dispatch="", calls_after_dispatch=0):
 _Decision = namedtuple(
     "_Decision",
     "key decided_at quote forbidden aliases path decided_by require_when require_text advice"
-    " applies_to turn_check turn_check_limit on_hit fence_shell fence_langs turn_check_target",
+    " applies_to turn_check turn_check_limit on_hit fence_shell fence_langs turn_check_target require_tool_before pair_tools audience",
     # 只有最後幾欄有預設值：沒標處置的卡就是「照擋」，沒宣告殼層的卡不查圍籬區塊，
     # 沒寫目標語言的 owner_language 卡用預設語言；既有的建構處不必跟著改。
-    defaults=("", "", (), ""),
+    defaults=("", "", (), "", (), (), ""),
 )
 
 
@@ -122,6 +122,7 @@ def _decision_frontmatter(path):
         memspec.REQUIRE_WHEN_FIELD,
         memspec.TURN_CHECK_FIELD,
         memspec.FENCE_SHELL_FIELD,
+        "require_tool_before", "pair_tools",
     ):
         lines = declared_frontmatter(
             path, field, memspec.STOP_GATE_FRONTMATTER_MAX_BYTES
@@ -157,7 +158,8 @@ def _read_decision(path):
         if not key or status in memspec.STOP_GATE_SILENT_STATUSES:
             return None
     sequences = sequence_fields(
-        front_lines, (memspec.ALIASES_FIELD, memspec.FORBIDDEN_FIELD, memspec.FENCE_LANGS_FIELD))
+        front_lines, (memspec.ALIASES_FIELD, memspec.FORBIDDEN_FIELD, memspec.FENCE_LANGS_FIELD,
+                      "require_tool_before", "pair_tools"))
     decided_by = _one_line(fields.get(memspec.DECIDED_BY_FIELD))
     quote = _one_line(fields.get(memspec.OWNER_QUOTE_FIELD))
     if not quote and decided_by != memspec.OWNER_EXPLICIT_DECIDER:
@@ -182,6 +184,9 @@ def _read_decision(path):
         memspec.TURN_CHECK_LIMIT_FIELD: _one_line(fields.get(memspec.TURN_CHECK_LIMIT_FIELD)),
         memspec.TURN_CHECK_TARGET_FIELD: _one_line(fields.get(memspec.TURN_CHECK_TARGET_FIELD)),
         memspec.ON_HIT_FIELD: _one_line(fields.get(memspec.ON_HIT_FIELD)).casefold(),
+        "require_tool_before": sequences["require_tool_before"],
+        "pair_tools": sequences["pair_tools"],
+        "audience": _one_line(fields.get("audience")).casefold(),
         memspec.FENCE_SHELL_FIELD: _one_line(fields.get(memspec.FENCE_SHELL_FIELD)).casefold(),
         memspec.FENCE_LANGS_FIELD: [
             _one_line(item).casefold() for item in sequences[memspec.FENCE_LANGS_FIELD]
@@ -217,6 +222,9 @@ def _decision_from_ruling(vault, card_path, ruling):
             item.casefold() for item in _strings(ruling.get(memspec.FENCE_LANGS_FIELD))),
         # 舊快取沒有這一欄：get 回 None，檢查時退回預設語言。
         turn_check_target=_one_line(ruling.get(memspec.TURN_CHECK_TARGET_FIELD)),
+        require_tool_before=tuple(_strings(ruling.get("require_tool_before"))),
+        pair_tools=tuple(_strings(ruling.get("pair_tools"))),
+        audience=_one_line(ruling.get("audience")).casefold(),
     )
 
 
@@ -1000,6 +1008,7 @@ def _turn_context(transcript_path):
 
     texts = []
     prompt = ""
+    turn_tools = []
     # 派工的結果進來之後，我自己還動過幾次手。倒著走，遇到派工那一次呼叫就凍結計數。
     dispatch = ""
     calls_after = 0
@@ -1018,6 +1027,7 @@ def _turn_context(transcript_path):
         if kind == transcript_reader.USER:
             prompt = " ".join(piece for piece in row_texts if piece)
             break
+        turn_tools.extend(reversed(tools))
         for name, _payload in reversed(tools):
             if dispatch:
                 break
@@ -1037,7 +1047,7 @@ def _turn_context(transcript_path):
     if not dispatch and memspec.TURN_DISPATCH_NOTICE_MARKER in prompt:
         # 背景子代理跑完是以一則新提問的形式回來的，這一回合裡沒有派工那一次呼叫。
         dispatch = memspec.TURN_DISPATCH_NOTICE_MARKER
-    return _Turn(texts, prompt, dispatch, calls_after)
+    return _Turn(texts, prompt, dispatch, calls_after, tuple(reversed(turn_tools)))
 
 
 def _shingles(text):
@@ -1143,7 +1153,9 @@ def _verdict(event, message, config, started_at, defects, turn=None):
         for card, digests in _exceptions(vault).items():
             excepted.setdefault(card, set()).update(digests)
         demoted |= _demoted(vault)
-    decisions = [decision for decision in decisions if decision.key not in demoted]
+    from epitype import tool_sequence
+    decisions = [decision for decision in decisions if decision.key not in demoted
+                 and tool_sequence.applies(decision.audience, event)]
     # 只管寫檔內容的裁定不在回合結束比對：那一類講的是檔案裡不該出現什麼，不是我不該說什麼。
     decisions = [
         decision for decision in decisions
@@ -1380,6 +1392,16 @@ def _fence_shell_gap(decision, message, event, started_at, defects, parser=None)
 def _first_violation(decisions, event, message, config, started_at, defects, turn=None):
     """這批裁定裡第一個被違反的：(裁定, 哪一類, 要說的話, 命中的字)；都沒有回 None。"""
     verdicts = []
+    if turn is not None and turn.prompt:
+        from epitype import tool_sequence
+        for decision in decisions:
+            try:
+                reason = tool_sequence.gap(decision.require_tool_before, decision.pair_tools, turn.tools)
+            except ValueError as exc:
+                defects.append(f"[{decision.key}] {exc}")
+                continue
+            if reason:
+                return decision, "tool_sequence", f"[{decision.key}] {reason}", ""
     for decision in decisions:
         masked = []
         fragment = _forbidden_fragment(decision, message, defects, masked)
