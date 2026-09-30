@@ -100,6 +100,7 @@ SELFTESTS = (
     Path("tests") / "tool_advice_regression.py",
     Path("tests") / "rule_context_regression.py",
     Path("tests") / "tool_sequence_regression.py",
+    Path("tests") / "lead_transfer_regression.py",
     Path("tests") / "compliance_coverage_regression.py",
     Path("tests") / "metadata_nested_regression.py",
     # 2026-09-09 U-J：git_gate_regression.py 只驗傷疤卡 trigger 的命令比對，那條路徑

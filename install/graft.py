@@ -1577,6 +1577,9 @@ def _doctor(home, dry_run=False, output=sys.stdout, clear_shim_status=False, sch
         native_lines, native_drifted = _native_sync_status(managed, home)
         for line in native_lines:
             print(line, file=output)
+        from epitype import lead_transfer
+        for line in lead_transfer.routes():
+            print(line, file=output)
         repo_root = _validate_repo_root(
             config.get("repo_root") if isinstance(config, dict) else None,
             require_adapters=False,
