@@ -711,6 +711,12 @@ class NativeGuard(_NativeFixture):
         self.assertIn("fb-native.md", reason)
         self.assertIn("epitype sync --apply", reason)
         self.assertIn(memspec.HOST_CLAUDE_ENV_FIELD, reason)
+        config = json.loads(Path(os.environ["EPITYPE_CONFIG"]).read_text(encoding="utf-8"))
+        audit = Path(config["vaults"][0]) / memspec.GATE_LOG_FILENAME
+        rows = [json.loads(line) for line in audit.read_text(encoding="utf-8").splitlines()]
+        self.assertTrue(any(row.get("rule") == "host_native" and
+                            row.get("kind") == memspec.WRITE_GATE_LOG_KIND for row in rows))
+        self.assertNotIn('"new_string"', audit.read_text(encoding="utf-8"))
 
     def test_other_ways_of_changing_managed_keys_are_denied(self):
         settings = json.loads(self.settings.read_text(encoding="utf-8"))

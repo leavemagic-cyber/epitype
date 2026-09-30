@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Record managed native-setting denials in the gate audit without copying settings content.
+
 - Fix nightly rewrite-cost reporting to read full audit rows rather than reconciliation rows without policy labels.
 
 - Replay every selected transcript to its end instead of silently dropping turns after 64 MB.

@@ -1823,6 +1823,10 @@ def _handle(event, started_at, defects=None, meter_claims=None):
     except Exception:
         native_value = None
     if native_value is not None:
+        _best_effort_audit(
+            append_gate_log, governance_vault(config, for_write=True),
+            with_session({"kind": memspec.WRITE_GATE_LOG_KIND, "rule": "host_native",
+                          "tool": tool_name}, event.get("session_id")), started_at)
         return native_value
     try:
         write_value, notices = _write_review(
