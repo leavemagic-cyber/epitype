@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Bound wrapped-command evidence to the report's actual time window even when a long-running transcript started earlier.
+
 - Release tool-advice dedup claims when hook output expires or fails, and record compaction pointers only after successful emission.
 
 - Document official Codex V2 completion and capacity-pressure eviction semantics; keep current App slot release unverified and make no cap changes.

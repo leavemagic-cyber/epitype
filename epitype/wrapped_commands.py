@@ -58,10 +58,11 @@ def candidates(source):
     return found
 
 
-def report(paths, limit=20):
+def report(paths, limit=20, since=None, until=None):
     """Source pointers and digests; candidates never become observed tool calls."""
     import hashlib
     from . import transcript
+    from .compliance import _in_window
     examples, count = [], 0
     for path in paths:
         with path.open(encoding='utf-8', errors='replace') as stream:
@@ -71,6 +72,8 @@ def report(paths, limit=20):
                 try:
                     row = json.loads(line)
                 except ValueError:
+                    continue
+                if not _in_window(row.get('timestamp'), since, until):
                     continue
                 parts = transcript.turn_parts(row)
                 if not parts:
