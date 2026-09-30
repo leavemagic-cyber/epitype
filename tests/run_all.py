@@ -105,6 +105,7 @@ SELFTESTS = (
     Path("tests") / "harvest_owner_regression.py",
     Path("tests") / "context_rotation_regression.py",
     Path("tests") / "rewrite_cost_regression.py",
+    Path("tests") / "wrapped_commands_regression.py",
     Path("tests") / "compliance_coverage_regression.py",
     Path("tests") / "metadata_nested_regression.py",
     # 2026-09-09 U-J：git_gate_regression.py 只驗傷疤卡 trigger 的命令比對，那條路徑

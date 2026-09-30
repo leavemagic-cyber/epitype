@@ -2043,6 +2043,7 @@ def _section_compliance(vaults, today, since_date, config, context=None):
         "errors": errors,
         "note": _coverage_note(covered, frontier, window_reset),
         "delivery": delivery,
+        "wrapped_commands": __import__("epitype.wrapped_commands", fromlist=["report"]).report(transcripts),
         "rewrite_cost": __import__("epitype.rewrite_cost", fromlist=["report"]).report(
             [Path(vault) for vault, _rule in all_rules],
             [row for vault in dict.fromkeys(Path(vault) for vault, _rule in all_rules)

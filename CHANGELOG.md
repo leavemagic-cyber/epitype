@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Include safe literal candidates from wrapped Codex shell calls in nightly evidence, separately from proven executions; never evaluate wrapper code.
+
 - Preserve blocked Stop card paths across compaction while retaining existing decision and action-guard audit identities.
 
 - Read the nightly rewrite-cost audit from the vault's actual ledger path and assert observed block totals end to end.
