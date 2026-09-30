@@ -46,3 +46,13 @@ Codex source: rollout 01a0f201-81fe-71d1-8908-118c1d61e9a9 (2026-09-30).
 10,000 → 97,891; 5,000 → 82,601 (15,290 fewer, 15.62%). Select 5,000.
 Image payloads are excluded from text counts. These are measured record sizes and replay
 counts, not actual savings in future calls. Live runtime read-in remains to be checked.
+
+## K4 — historical recall
+
+Same local delivery ledger: 3,174 rows; 76 historical audit deliveries would be omitted,
+leaving 3,098 (2.39%). Per audit card: v1 49, v2 19, v3 8. Another 19 rows now refer to
+superseded cards, already covered by the existing filter; they are not credited as new
+savings. All source cards readable. This reclassifies an observed ledger with current
+card metadata; past card revisions and live future reread savings are unverified.
+Historical sources remain available through manual search. Rules are not silenced
+merely because the assistant never mentioned their names.

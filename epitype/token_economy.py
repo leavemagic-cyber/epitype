@@ -112,17 +112,62 @@ def codex_output_report(paths):
         "limits": "Byte/4 estimates from stored output, same-record cap replay; live host truncation and later rereads unverified."}
 
 
+def recall_history_report(vault, log):
+    from epitype import memsearch, memspec
+    from collections import Counter
+    total, omitted, superseded, unknown = 0, Counter(), Counter(), 0
+    for line in Path(log).read_text(encoding="utf-8").splitlines():
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        total += 1
+        source_vault = Path(row.get("vault") or vault).resolve()
+        path = (source_vault / str(row.get("card", ""))).resolve()
+        if not path.is_relative_to(source_vault):
+            unknown += 1
+            continue
+        try:
+            raw = path.read_text(encoding="utf-8-sig")
+        except (OSError, UnicodeError):
+            unknown += 1
+            continue
+        front, _ = memspec.split_frontmatter(raw)
+        if front is None:
+            continue
+        fields, _ = memspec.frontmatter_fields(path)
+        description = fields.get("description", "")
+        scope = fields.get("scope", "")
+        status = fields.get("status", "")
+        if status == "superseded":
+            superseded[str(row.get("card"))] += 1
+        elif memsearch.historical_only(description, scope, status):
+            omitted[str(row.get("card"))] += 1
+    return {"delivery_rows_before": total, "same_rows_after_filter": total - sum(omitted.values()),
+        "historical_rows_removed": sum(omitted.values()), "omitted_cards": dict(omitted),
+        "currently_superseded_rows_already_filtered": sum(superseded.values()),
+        "unreadable_rows": unknown, "limits": "Same delivery ledger reclassified using current cards, not live savings; historical card revisions unavailable. Superseded rows are not credited to the new filter."}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("paths", nargs="+", type=Path)
-    parser.add_argument("--host", choices=("claude", "codex"), default="claude")
+    parser.add_argument("--host", choices=("claude", "codex", "recall"), default="claude")
     parser.add_argument("--window", type=int)
     parser.add_argument("--carry", type=int)
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--delivery-log", type=Path)
     args = parser.parse_args()
     if args.host == "claude" and (args.window is None or args.carry is None):
         parser.error("Claude replay requires --window and --carry assumptions")
-    data = codex_output_report(args.paths) if args.host == "codex" else report(args.paths, args.window, args.carry)
+    if args.host == "recall":
+        if not args.delivery_log or len(args.paths) != 1:
+            parser.error("recall replay requires one vault and --delivery-log")
+        data = recall_history_report(args.paths[0], args.delivery_log)
+    elif args.host == "codex":
+        data = codex_output_report(args.paths)
+    else:
+        data = report(args.paths, args.window, args.carry)
     payload = json.dumps(data, indent=2)
     if args.output:
         args.output.write_text(payload + "\n", encoding="utf-8")

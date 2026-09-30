@@ -869,6 +869,17 @@ def _is_superseded(row):
     )
 
 
+def historical_only(description, scope="", status=""):
+    """Audit records remain manually searchable; they are not current guidance.
+
+    Explicit scope/status works for any vault. The legacy description is a
+    self-declaration, not a filename or a host-specific path heuristic.
+    """
+    return (str(scope).strip().casefold() in ("historical-audit", "historical", "archive")
+        or str(status).strip().casefold() in ("archived", "historical")
+        or str(description).strip().casefold().startswith("historical audit copy"))
+
+
 def _successor_path(vault, source_card_path, raw_target, indexed_paths):
     target = posixpath.normpath(str(raw_target or "").strip().replace("\\", "/"))
     if (
@@ -1040,6 +1051,8 @@ def recall_index(vault, prompt, include_superseded=False, include_noncard=False,
         candidates = []
         excluded_links = []
         for row in _rows_for_recall(connection, terms):
+            if historical_only(row["description"], row["fm_scope"], row["status"]):
+                continue
             hits, matched, term_fields = _recall_hits(row, terms)
             if not hits:
                 continue
