@@ -49,8 +49,8 @@ counts, not actual savings in future calls. Live runtime read-in remains to be c
 
 ## K4 — historical recall
 
-Same local delivery ledger: 3,174 rows; 76 historical audit deliveries would be omitted,
-leaving 3,098 (2.39%). Per audit card: v1 49, v2 19, v3 8. Another 19 rows now refer to
+Same local delivery ledger at the 2026-10-01 refresh: 3,237 rows; 80 historical audit deliveries would be omitted,
+leaving 3,157 (2.47%). Per audit card: v1 51, v2 21, v3 8. Another 19 rows now refer to
 superseded cards, already covered by the existing filter; they are not credited as new
 savings. All source cards readable. This reclassifies an observed ledger with current
 card metadata; past card revisions and live future reread savings are unverified.
