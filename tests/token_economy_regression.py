@@ -49,5 +49,18 @@ class Replay(unittest.TestCase):
             self.assertEqual(report["output_limit_replay"], {"10000": 6000, "5000": 5000})
 
 
+    def test_rotation_replay_charges_handoff_and_deduplicates_usage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "usage.jsonl"
+            row = {"type": "event_msg", "payload": {"type": "token_count", "info": {
+                "total_token_usage": {"total_tokens": 12},
+                "last_token_usage": {"input_tokens": 10, "output_tokens": 2}}}}
+            path.write_text(json.dumps(row) + "\n" + json.dumps(row), encoding="utf-8")
+            self.assertEqual(token_economy.codex_usage_trace(path), [{"context": 10, "output": 2}])
+        report = token_economy.rotation_report([{"context": 10, "output": 2}], 30, 20, 5)
+        self.assertEqual(report["before"]["estimated_tokens"], 12)
+        self.assertEqual(report["after"]["estimated_tokens"], 12)
+
+
 if __name__ == "__main__":
     unittest.main()

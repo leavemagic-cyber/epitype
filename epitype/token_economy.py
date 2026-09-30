@@ -64,6 +64,38 @@ def replay_compaction(samples, threshold, carry, summary_tokens=3000):
     return {"estimated_tokens": total, "extra_compactions": compactions}
 
 
+def codex_usage_trace(path):
+    samples, seen = [], set()
+    with Path(path).open(encoding="utf-8") as stream:
+        for line in stream:
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            payload = row.get("payload") or {}
+            if row.get("type") != "event_msg" or payload.get("type") != "token_count":
+                continue
+            info = payload.get("info") or {}
+            usage = info.get("last_token_usage") or {}
+            key = (info.get("total_token_usage") or {}).get("total_tokens")
+            current, output = usage.get("input_tokens"), usage.get("output_tokens")
+            if key is None or key in seen or not all(isinstance(n, int) and n >= 0 for n in (current, output)):
+                continue
+            seen.add(key)
+            samples.append({"context": current, "output": output})
+    return samples
+
+
+def rotation_report(samples, before, after, carry):
+    old = replay_compaction(samples, before, carry, 3000)
+    new = replay_compaction(samples, after, carry, 5000)
+    return {"calls": len(samples), "before_threshold": before, "after_threshold": after,
+            "carry_assumption": carry, "before": old, "after": new,
+            "estimated_reduction_percent": round(100 * (old['estimated_tokens'] - new['estimated_tokens'])
+                                                   / old['estimated_tokens'], 2),
+            "limitation": "Same-record counterfactual. Handoff 5000 tokens and carry assumed; actual takeover, caching and retained facts UNVERIFIED."}
+
+
 def report(paths, window, carry):
     traces, outputs = [], []
     for path in paths:

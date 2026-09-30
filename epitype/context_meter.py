@@ -730,6 +730,24 @@ def codex_due(reading, marker_directory=None, environ=None, home=None, model=Non
 
 # ---------------------------------------------------------------- hook 端
 
+ROTATION_MARKER = ".epitype-context-rotation"
+
+
+def rotation_notice(reading, limit, vault, session_id, transcript, directory, options):
+    """Opt-in Epitype policy; host compaction configuration is not changed."""
+    setting = (_section(options) or {}).get("handoff_tokens")
+    if not _positive_int(setting) or not _positive_int(limit):
+        return None
+    threshold_tokens = min(setting, int(limit * 0.6))
+    _rearm_if_stale(directory, ROTATION_MARKER, reading.tokens, limit)
+    if reading.tokens < threshold_tokens or (Path(directory) / ROTATION_MARKER).exists():
+        return None
+    route = ("由 owner 點新場任務卡" if reading.host != memspec.CONTEXT_METER_HOST_CODEX
+             else "由 owner 開接手場；自動建場路徑尚未驗證")
+    line = (f"目前約 {_k(reading.tokens)} token；到有界檢查點時保存交接 {_handoff(vault, session_id, transcript)}，"
+            f"{route}，確認新主控讀檔接手後舊場才停止。")
+    return line, ROTATION_MARKER, reading.tokens
+
 
 def notice(event, vault, marker_directory, options=None, environ=None, home=None, clock=None):
     """這次呼叫要附的那一行、標記名與當下用量：(line, marker, tokens)；不該說就回 None。
@@ -767,6 +785,10 @@ def notice(event, vault, marker_directory, options=None, environ=None, home=None
         rearmed = _rearm_if_stale(marker_directory, memspec.CONTEXT_METER_MARKER, reading.tokens, limit_now)
         if rearmed is not None:
             _trace_rearm(event, rearmed[0], reading.tokens, rearmed[1])
+        rotation = rotation_notice(reading, limit_now() if callable(limit_now) else limit_now,
+                                   vault, session_id, transcript, marker_directory, options)
+        if rotation is not None:
+            return rotation
         if codex:
             due = codex_due(reading, marker_directory, environ, home, event.get("model"))
             if due is None:

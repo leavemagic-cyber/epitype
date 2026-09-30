@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- 用量計可選 `context_meter.handoff_tokens` 提前提醒有界檢查點交接，取指定量與宿主壓縮點 60% 的較低者；獨立標記同一壓縮週期只說一次，沿用輸出失敗釋放／壓縮後重新武裝。宿主壓縮設定不改，接手流程依已確認路徑。
+
 - harvest 改用共用 `owner_typed_text`：兩宿主貼上／機器區塊後的 owner 請求仍會收割，純機器訊息、未收尾區塊與子代理回報維持排除，修前 2 FAIL→修後 2 PASS。
 
 - 裁定段保護亦檢查 Codex Delete File 與只有移除行的 Update File；刪整檔或刪受管區塊不能因補丁沒有新增行而跳過。

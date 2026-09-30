@@ -56,3 +56,23 @@ savings. All source cards readable. This reclassifies an observed ledger with cu
 card metadata; past card revisions and live future reread savings are unverified.
 Historical sources remain available through manual search. Rules are not silenced
 merely because the assistant never mentioned their names.
+
+## K2 — bounded checkpoint handoff
+
+Epitype policy `context_meter.handoff_tokens: 250000` opts in to a soft checkpoint
+reminder. It takes the lower of that value and 60% of the host's verified compaction
+limit. With K1's candidate 300000 Claude limit it starts at 180000; with Codex's
+210000 limit, at 126000 rather than the existing 166000 preparation point. The reminder
+requires saving the handoff and confirmed takeover; it never creates a task itself.
+
+Same-record counterfactual with original positive growth, carry 68000 for Claude and
+25737 (first observed input) for Codex, handoff overhead 5000 tokens:
+
+| Host | Calls | Before policy replay | Earlier handoff replay | Extra resets before/after | Estimated reduction |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Claude, after K1 300k baseline | 252 | 46,227,275 | 31,031,774 | 2 / 4 | 32.87% |
+| Codex, 166k / 126k | 68 | 6,567,377 | 5,146,757 | 3 / 4 | 21.63% |
+
+Source traces are the same as K1/K3. This measures a replay, not live transfers,
+fact retention, cache reconstruction or billing savings. K1 and K2 reductions are
+not additive. New session setup cost and successful takeover remain UNVERIFIED.
