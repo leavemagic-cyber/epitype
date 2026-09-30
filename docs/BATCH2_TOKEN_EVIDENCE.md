@@ -33,3 +33,16 @@ Codex's local configured threshold is 210,000. Official documentation confirms t
 but the current Claude trace cannot establish a better Codex threshold; retain it.
 Local `[memories] use_memories = true` agrees with the official default (existing memories
 are injected). The nearby “false” comment is stale; this batch does not change the value.
+
+## K3 — tool output limits
+
+Claude's same 252-call trace contains 171 shell results, median 613 characters.
+Observed 254,657 characters; replay at 30,000 preserves 254,657, at 15,000 preserves
+249,752 (4,905 fewer, 1.93%). Select 15,000; full results can be saved to files when needed.
+No `bashOutputMaxChars` override was found in local user settings.
+
+Codex source: rollout 01a0f201-81fe-71d1-8908-118c1d61e9a9 (2026-09-30).
+67 stored text outputs, estimated 98,008 tokens by UTF-8 bytes/4. Same-record cap replay:
+10,000 → 97,891; 5,000 → 82,601 (15,290 fewer, 15.62%). Select 5,000.
+Image payloads are excluded from text counts. These are measured record sizes and replay
+counts, not actual savings in future calls. Live runtime read-in remains to be checked.

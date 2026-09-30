@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- 工具輸出省量加入各宿主官方設定：Claude `BASH_MAX_OUTPUT_LENGTH`（字元、1–150000）與 Codex `tool_output_token_limit`（正整數 token）；唯讀量測工具可重算同批 Codex 工具結果的 10000/5000 上限，並標明估計與真實載入的差別。
+
 - 壓縮省量提供唯讀 `epitype.token_economy` 重放工具，輸出同批呼叫的原始量、30/40/50/60/92% 反事實重放量與新增壓縮次數；不把重放當上線節省或帳單證據。新增官方 Claude `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` 卡片白名單（僅 1–100）。
 
 - `sync` 的全域庫改由設定檔決定（`global_vault`，未指定時沿用設定 `vaults` 首項），不再依 CLI 參數順序或帳本檔判定。只傳專案庫只比對／寫入該專案；缺設定不升格任何庫，也不清空既有全域受管內容。

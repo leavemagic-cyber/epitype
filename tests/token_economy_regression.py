@@ -1,6 +1,8 @@
 import sys; sys.dont_write_bytecode = True
 from pathlib import Path
 import unittest
+import tempfile
+import json
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from epitype import token_economy, memspec
 
@@ -27,6 +29,24 @@ class Replay(unittest.TestCase):
     def test_invalid_threshold_is_not_a_saving(self):
         with self.assertRaises(ValueError):
             token_economy.replay_compaction([{"context": 10, "output": 0}], 5, 5)
+
+    def test_output_limits_are_host_specific_official_keys(self):
+        values, errors = memspec.host_native_values([
+            "host_claude_env:", "  BASH_MAX_OUTPUT_LENGTH: '15000'",
+            "host_codex_config:", "  tool_output_token_limit: 5000"])
+        self.assertEqual(errors, [])
+        self.assertEqual(values[memspec.HOST_CLAUDE_ENV_FIELD]["BASH_MAX_OUTPUT_LENGTH"], "15000")
+        self.assertEqual(values[memspec.HOST_CODEX_CONFIG_FIELD]["tool_output_token_limit"], 5000)
+
+    def test_codex_content_blocks_measure_text_without_image_payloads(self):
+        with tempfile.TemporaryDirectory(prefix="economy-") as directory:
+            path = Path(directory) / "rollout.jsonl"
+            path.write_text(json.dumps({"type": "response_item", "payload": {
+                "type": "custom_tool_call_output", "output": [{"type": "input_text", "text": "x" * 24000},
+                    {"type": "input_image", "image_url": "omitted"}]}}), encoding="utf-8")
+            report = token_economy.codex_output_report([path])
+            self.assertEqual(report["observed_estimated_tokens"], 6000)
+            self.assertEqual(report["output_limit_replay"], {"10000": 6000, "5000": 5000})
 
 
 if __name__ == "__main__":

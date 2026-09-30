@@ -87,14 +87,43 @@ def report(paths, window, carry):
         "limits": "Counterfactual replay, not measured live savings; fixed carry/summary, cache and information loss unverified."}
 
 
+def codex_output_report(paths):
+    sizes = []
+    for path in paths:
+        with Path(path).open(encoding="utf-8") as stream:
+            for line in stream:
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                payload = row.get("payload", {})
+                if row.get("type") != "response_item" or not isinstance(payload, dict):
+                    continue
+                if payload.get("type") not in ("function_call_output", "custom_tool_call_output"):
+                    continue
+                value = payload.get("output")
+                if isinstance(value, list):
+                    value = "\n".join(p.get("text", "") for p in value
+                        if isinstance(p, dict) and p.get("type") in ("text", "input_text", "output_text"))
+                if isinstance(value, str):
+                    sizes.append((len(value.encode("utf-8")) + 3) // 4)
+    return {"host": "codex", "outputs": len(sizes), "observed_estimated_tokens": sum(sizes),
+        "output_limit_replay": {str(cap): sum(min(n, cap) for n in sizes) for cap in (10000, 5000)},
+        "limits": "Byte/4 estimates from stored output, same-record cap replay; live host truncation and later rereads unverified."}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("paths", nargs="+", type=Path)
-    parser.add_argument("--window", type=int, required=True)
-    parser.add_argument("--carry", type=int, required=True)
+    parser.add_argument("--host", choices=("claude", "codex"), default="claude")
+    parser.add_argument("--window", type=int)
+    parser.add_argument("--carry", type=int)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
-    payload = json.dumps(report(args.paths, args.window, args.carry), indent=2)
+    if args.host == "claude" and (args.window is None or args.carry is None):
+        parser.error("Claude replay requires --window and --carry assumptions")
+    data = codex_output_report(args.paths) if args.host == "codex" else report(args.paths, args.window, args.carry)
+    payload = json.dumps(data, indent=2)
     if args.output:
         args.output.write_text(payload + "\n", encoding="utf-8")
     print(payload)

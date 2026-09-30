@@ -3177,6 +3177,8 @@ HOST_SOURCE_MISSING_REASON = (
 HOST_CODEX_CONFIG_POSITIVE_INT = "positive_int"
 HOST_CODEX_CONFIG_STRING = "string"
 HOST_CODEX_CONFIG_ALLOWED = {
+    # https://developers.openai.com/codex/config-reference
+    "tool_output_token_limit": HOST_CODEX_CONFIG_POSITIVE_INT,
     "agents.max_concurrent_threads_per_session": HOST_CODEX_CONFIG_POSITIVE_INT,
     "agents.max_depth": HOST_CODEX_CONFIG_POSITIVE_INT,
     "agents.default_subagent_model": HOST_CODEX_CONFIG_STRING,
@@ -3189,6 +3191,8 @@ HOST_CODEX_CONFIG_ALIASES = {
 # ANTHROPIC_BASE_URL、NODE_TLS_REJECT_UNAUTHORIZED 這種鍵就能繞過寫檔閘改連線端點或關掉
 # TLS 驗證。值在 settings.json 裡一律是字串。
 HOST_CLAUDE_ENV_ALLOWED = {
+    # https://code.claude.com/docs/en/env-vars: characters, maximum 150000.
+    "BASH_MAX_OUTPUT_LENGTH": "output_chars",
     # https://code.claude.com/docs/en/env-vars: 1-100; higher than host default is ignored.
     "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "percentage",
     "CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS": HOST_CODEX_CONFIG_POSITIVE_INT,
@@ -3425,6 +3429,10 @@ def host_native_values(front_lines):
                   and not (re.fullmatch(r"[0-9]+", value) and 1 <= int(value) <= 100)):
                 problems.append(HOST_CLAUDE_ENV_TYPE_REASON.format(
                     field=HOST_CLAUDE_ENV_FIELD, key=key, value=value, expected="1-100 的整數"))
+            elif (HOST_CLAUDE_ENV_ALLOWED[key] == "output_chars"
+                  and not (re.fullmatch(r"[0-9]+", value) and 1 <= int(value) <= 150000)):
+                problems.append(HOST_CLAUDE_ENV_TYPE_REASON.format(
+                    field=HOST_CLAUDE_ENV_FIELD, key=key, value=value, expected="1-150000 的整數"))
             else:
                 env[key] = value
         if env:
