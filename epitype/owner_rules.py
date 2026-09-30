@@ -23,7 +23,8 @@ def render(vaults):
             if str(fields.get('handoff_rule', '')).casefold() != 'true':
                 continue
             if (fields.get('decided_by') != 'owner-explicit'
-                    or fields.get('decision_status') != 'active' or not fields.get('owner_quote')):
+                    or fields.get(memspec.DECISION_STATUS_FIELD) != memspec.ACTIVE_DECISION_STATUS
+                    or not fields.get('owner_quote')):
                 raise ValueError(f'交接裁定必須有有效 owner 原話：{path.name}')
             lines.extend((f"[{path.name}]", fields['owner_quote']))
     lines.append(END)

@@ -42,11 +42,14 @@ class RuleContextRegression(unittest.TestCase):
             rule_context.record(self.vault, 's', f'rule-{number}.md')
         self.write_card('expired.md', name='expired', description='不應補送', valid_until='2000-01-01')
         rule_context.record(self.vault, 's', 'expired.md')
+        self.write_card('retired.md', name='retired', description='已被取代不補送', status='superseded')
+        rule_context.record(self.vault, 's', 'retired.md')
         destination = self.root / 'handoff.md'
         rule_context.snapshot([self.vault], 's', destination)
         result = rule_context.restore(destination, [self.vault])
         self.assertLessEqual(len(result.encode('utf-8')), 1800)
         self.assertNotIn('不應補送', result)
+        self.assertNotIn('已被取代不補送', result)
         self.assertEqual(rule_context.restore(destination, [self.root / 'other']), '')
 
 

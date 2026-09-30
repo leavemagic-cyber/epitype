@@ -69,7 +69,8 @@ def restore(destination, allowed_vaults, budget=1800):
         if not target.is_relative_to(root):
             continue
         fields, _problem = memspec.frontmatter_fields(target)
-        if memspec.card_expired(fields.get('valid_until')) or fields.get('decision_status') in memspec.STOP_GATE_SILENT_STATUSES:
+        if (memspec.card_expired(fields.get('valid_until'))
+                or fields.get(memspec.DECISION_STATUS_FIELD) in memspec.STOP_GATE_SILENT_STATUSES):
             continue
         description = ' '.join(str(fields.get('description', '')).split())[:240]
         if not description:

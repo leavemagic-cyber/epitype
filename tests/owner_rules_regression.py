@@ -14,7 +14,7 @@ class OwnerRules(unittest.TestCase):
 
     def test_generated_block_rewrite_and_removal_denied_both_hosts(self):
         self.write_card('decision-cap.md', name='decision-cap', decision_key='cap',
-                        decision_status='active', decided_by='owner-explicit',
+                        status='active', decided_by='owner-explicit',
                         current_decision_at='2026-10-01', owner_quote='同時最多三個，驗收也算',
                         description='owner 裁定', handoff_rule='true',
                         forbidden=['"唯讀分析與偵察不佔名額"'])
