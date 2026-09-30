@@ -2093,6 +2093,26 @@ The views fingerprint was the one the first pass missed; an independent review f
 One reader does not let the top level win: the search index merges `aliases` from both
 levels, as it did before. That only widens what search finds.
 
+### What the external review added
+
+A Codex review (gpt-6.1-sol, high effort) of the merged fix found three more things, each
+confirmed by a test that fails on the code before it:
+
+- **A writer could undo the reading.** `alias_batch` looked for an existing `aliases`
+  list at the top level only. On a card whose list the host had nested, it added a new
+  top-level list, which then won over the nested one: the gates saw only the new aliases
+  and a ruling that matched on the old ones stopped matching, while search, which reads
+  both levels, looked normal. New aliases now join the list that is in effect, wherever
+  it is. The rule for any writer: find the field through the shared reading before
+  deciding it is missing.
+- **Frontmatter that never closes.** The shared reading does not hoist it. The two
+  readers that cut the frontmatter themselves (`memsearch._read_card`, `harvest`) did,
+  so text running to the end of the file could become a nested `status` or
+  `decision_key`. They now hoist only when they saw the closing line. The index format
+  went to "8" for that.
+- **Line numbers.** `scar_census` numbered its diagnostics by position in the reordered
+  lines. It now uses the origins, like `frontmatter_text`.
+
 `card_lint` reports gate fields and `aliases` read this way as INFO `metadata-nested`, so
 the layout stays visible without counting as a defect.
 

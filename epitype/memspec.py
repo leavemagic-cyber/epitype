@@ -2085,14 +2085,17 @@ def hoist_metadata_fields(front_lines):
         return len(text) - len(text.lstrip())
 
     hoisted = []
+    hoisted_keys = set()
     kept = list(preamble)
     moved_lines = []
     moved_origins = []
     for key, indexes in groups:
-        if key is None or key in METADATA_OWN_KEYS or key in top_keys or key in hoisted:
+        if (key is None or key in METADATA_OWN_KEYS or key in top_keys
+                or key in hoisted_keys):
             kept.extend(indexes)
             continue
         hoisted.append(key)
+        hoisted_keys.add(key)
         # `- item` 可以跟它的鍵同一層縮排；退到頂層後會變成零縮排，而頂層讀法只把
         # 縮排行當成上一個鍵的內容，所以這種寫法整組往內補兩格。
         pad = "  " if any(content_indent(index) == child_indent for index in indexes[1:]) else ""

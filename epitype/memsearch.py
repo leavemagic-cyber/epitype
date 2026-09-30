@@ -46,7 +46,7 @@ _RECALL_PART = re.compile(f"[{_CJK_RANGE}]+|[^\\s{_CJK_RANGE}，。！？：；�
 # bigrams indexable while the cards table and returned hit fields stay raw.
 _CJK_BIGRAM_PREFIX = "\ue000"
 _FTS_FORMAT_KEY = "fts_format"
-_FTS_FORMAT_VERSION = "7"
+_FTS_FORMAT_VERSION = "8"
 _CURRENT_DECISION_GUIDANCE = "此題現行決定="
 
 
@@ -182,7 +182,7 @@ def _alias_items(value):
     return items + ["".join(current).strip()]
 
 
-def _parse_frontmatter(text):
+def _parse_frontmatter(text, closed=True):
     fields = {field: "" for field in _FRONT_FIELDS}
     aliases = []
     list_key = None
@@ -202,7 +202,12 @@ def _parse_frontmatter(text):
 
     # 這裡自己切行（索引只讀檔頭），所以宿主包進 `metadata:` 的欄位要自己攤回頂層；
     # 不攤的話 status／superseded_by 在索引裡是空的，被取代的卡照樣被喚回。
-    for line in memspec.hoist_metadata_fields(text.splitlines())[0]:
+    # 沒收尾的檔頭不攤（跟 memspec.frontmatter_layout 同一條）：那份「檔頭」一路吃到
+    # 檔尾，內文裡長得像 `metadata:` 區塊的文字不該因此變成欄位。
+    lines = text.splitlines()
+    if closed:
+        lines = memspec.hoist_metadata_fields(lines)[0]
+    for line in lines:
         stripped = line.strip()
         is_top_level = line == line.lstrip() and ":" in line
         if is_top_level:
@@ -267,11 +272,13 @@ def _read_card(path):
         if first.startswith(b"\xef\xbb\xbf"):
             first = first[3:]
         frontmatter = b""
+        closed = False
         has_frontmatter = first.strip() == b"---"
         if has_frontmatter:
             chunks = []
             for line in stream:
                 if line.strip() in (b"---", b"..."):
+                    closed = True
                     break
                 chunks.append(line)
             frontmatter = b"".join(chunks)
@@ -280,7 +287,7 @@ def _read_card(path):
             body = (first + stream.read(max(0, memspec.FTS_BODY_SCAN_BYTES - len(first))))[
                 :memspec.FTS_BODY_SCAN_BYTES
             ]
-    fields = _parse_frontmatter(frontmatter.decode("utf-8", errors="replace"))
+    fields = _parse_frontmatter(frontmatter.decode("utf-8", errors="replace"), closed=closed)
     fields["body"] = body.decode("utf-8", errors="replace")
     fields["is_card"] = has_frontmatter and bool(
         fields["name"].strip() or fields["description"].strip()

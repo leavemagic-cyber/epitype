@@ -50,6 +50,37 @@ class MutationTests(unittest.TestCase):
                 for alias in wanted:
                     self.assertIn(alias, actual)
 
+    def test_new_aliases_join_the_list_the_host_nested_under_metadata(self):
+        # 另建一個頂層 aliases 會遮掉原本生效的那一份（同名時頂層優先）：閘門只剩新加的，
+        # 而索引兩層都讀、搜尋看起來正常，所以沒有人會發現。
+        for label, nested, written in (
+            ("block", "  aliases:\n    - 舊別名甲\n    - 舊別名乙\n", "    - 新別名\n"),
+            ("same indent", "  aliases:\n  - 舊別名甲\n  - 舊別名乙\n", "  - 新別名\n"),
+            ("flow", "  aliases: [舊別名甲, 舊別名乙]\n", "  aliases: [舊別名甲, 舊別名乙, 新別名]\n"),
+        ):
+            with self.subTest(label=label):
+                self.card.write_text(CARD.replace(
+                    "status: active\n", "status: active\nmetadata:\n  type: decision\n" + nested),
+                    encoding="utf-8")
+                self.assertEqual(self.apply_aliases(["新別名"]), 0)
+                text = self.card.read_text(encoding="utf-8")
+                self.assertNotIn("\naliases:", text)
+                self.assertIn(written, text)
+                self.assertEqual(
+                    memspec.sequence_items(memspec.split_frontmatter(text)[0], memspec.ALIASES_FIELD),
+                    ["舊別名甲", "舊別名乙", "新別名"])
+
+    def test_an_empty_nested_alias_list_is_filled_in_place(self):
+        self.card.write_text(CARD.replace(
+            "status: active\n", "status: active\nmetadata:\n  aliases:\n  type: decision\n"),
+            encoding="utf-8")
+        self.assertEqual(self.apply_aliases(["新別名"]), 0)
+        text = self.card.read_text(encoding="utf-8")
+        self.assertIn("  aliases:\n    - 新別名\n  type: decision\n", text)
+        self.assertEqual(
+            memspec.sequence_items(memspec.split_frontmatter(text)[0], memspec.ALIASES_FIELD),
+            ["新別名"])
+
     def test_existing_plain_quotes_do_not_merge_aliases(self):
         for first in ("don't", 'plain"quote'):
             self.assertEqual(memsearch._alias_values(f"[{first}, untouched]"), [first, "untouched"])

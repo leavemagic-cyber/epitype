@@ -185,19 +185,18 @@ def _locate_aliases_block(front_body_lines):
     - ("unsupported", None, None)：aliases 鍵存在但不是這兩種形狀（例如純量），
       呼叫端必須整張卡跳過，不得亂猜格式。
     - (None, None, None)：沒有 aliases 鍵。
+
+    「既有」照共用讀法算：頂層沒有、而宿主把它包在 `metadata:` 底下時，生效的就是那一份，
+    新別名要接在那裡。另建一個頂層 aliases 會把它遮掉（同名時頂層優先）——閘門從此只
+    看得到新加的，原本靠舊別名命中的判斷安靜地失效。
     """
-    for index, raw_line in enumerate(front_body_lines):
-        stripped = raw_line.rstrip("\r\n")
-        if not stripped or stripped[0].isspace():
-            continue
-        match = _KEY_LINE_REGEX.match(stripped)
-        if match is None or match.group(1) != memspec.ALIASES_FIELD:
-            continue
-        value = match.group(2).strip()
+    plain = [raw_line.rstrip("\r\n") for raw_line in front_body_lines]
+
+    def shape(index, value):
         if not value:
             item_end = index + 1
-            while item_end < len(front_body_lines):
-                following = front_body_lines[item_end].rstrip("\r\n")
+            while item_end < len(plain):
+                following = plain[item_end]
                 if following[:1].isspace() and following.strip().startswith("-"):
                     item_end += 1
                     continue
@@ -206,6 +205,23 @@ def _locate_aliases_block(front_body_lines):
         if value.startswith("[") and value.endswith("]"):
             return "flow", index, None
         return "unsupported", None, None
+
+    def top_level_aliases(lines):
+        for index, line in enumerate(lines):
+            if not line or line[0].isspace():
+                continue
+            match = _KEY_LINE_REGEX.match(line)
+            if match is not None and match.group(1) == memspec.ALIASES_FIELD:
+                return index, match.group(2).strip()
+        return None
+
+    found = top_level_aliases(plain)
+    if found is not None:
+        return shape(*found)
+    hoisted_lines, origins, hoisted = memspec.hoist_metadata_fields(plain)
+    if memspec.ALIASES_FIELD in hoisted:
+        position, value = top_level_aliases(hoisted_lines)
+        return shape(origins[position], value)
     return None, None, None
 
 
@@ -215,7 +231,9 @@ def _existing_item_indent(front_body_lines, key_index, item_end_index):
         leading = stripped[: len(stripped) - len(stripped.lstrip())]
         if leading:
             return leading
-    return "  "
+    # 還沒有任何項目：比鍵多縮兩格（頂層的鍵就是兩格，包在下一層的跟著往內）。
+    key_line = front_body_lines[key_index].rstrip("\r\n")
+    return key_line[: len(key_line) - len(key_line.lstrip())] + "  "
 
 
 def _insert_into_flow_line(raw_line, new_aliases):

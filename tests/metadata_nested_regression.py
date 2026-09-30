@@ -19,7 +19,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "adapters" / "claude")]
-from epitype import card_lint, memsearch, memspec, views
+from epitype import card_lint, harvest, memsearch, memspec, scar_census, views
 import _hook_common as common
 import pretooluse_gate as pretool
 import recall_hook
@@ -345,6 +345,26 @@ class LintIndexAndRecall(GateFixture):
         self.assertEqual((result["status"], result["current"], result["closed"]), ("written", 0, 1))
         self.assertNotIn("nested-ruling", current_path.read_text(encoding="utf-8"))
         self.assertEqual(views.generate(self.vault)["status"], "unchanged")
+
+    def test_readers_that_cut_the_frontmatter_themselves_do_not_hoist_an_unclosed_one(self):
+        # 沒收尾的「檔頭」一路吃到檔尾。共用讀法不承認它，自己切行的讀取端也不該讓裡面
+        # 的巢狀欄位取得身分——索引會把它當成已取代而排除，盤點會把它算成裁定卡。
+        unclosed = self.card(
+            "---\nname: unfinished\ndescription: alpha\nmetadata:\n  status: superseded\n"
+            "  decision_key: phantom\n  aliases: [alpha]\n", "unfinished.md")
+        self.assertEqual(memspec.frontmatter_fields(unclosed)[0], {})
+        self.assertEqual(memsearch._read_card(unclosed)[memspec.DECISION_STATUS_FIELD], "")
+        self.assertFalse(harvest._card_fields(unclosed)[0])
+        closed = self.card(unclosed.read_text(encoding="utf-8") + "---\nbody\n", "finished.md")
+        self.assertEqual(memsearch._read_card(closed)[memspec.DECISION_STATUS_FIELD], "superseded")
+        self.assertEqual(harvest._card_fields(closed), (True, True))
+
+    def test_the_census_names_the_line_the_problem_is_written_on(self):
+        path = self.card(
+            "---\nmetadata:\n  name: \"沒有收尾\n  type: feedback\n---\nbody\n", "census.md")
+        with self.assertRaises(scar_census.CensusError) as raised:
+            scar_census._frontmatter_fields(path)
+        self.assertIn("L3", str(raised.exception))
 
     def test_the_stale_mark_reads_a_nested_verification_date(self):
         stamp = (date.today() - timedelta(days=97)).isoformat()

@@ -172,7 +172,7 @@ def _frontmatter_fields(path):
         raise CensusError(f"無法以 UTF-8 讀取卡片 {path}: {type(exc).__name__}") from exc
 
     lines = text.splitlines()
-    front_lines, closing_index = _memspec.split_frontmatter(text)
+    front_lines, closing_index, origins, _hoisted = _memspec.frontmatter_layout(text)
     if front_lines is None:
         return {}, text
     if closing_index is None:
@@ -181,7 +181,8 @@ def _frontmatter_fields(path):
     fields = {}
     metadata_indent = None
     metadata_child_indent = None
-    for line_number, raw_line in enumerate(front_lines, start=2):
+    for origin, raw_line in zip(origins, front_lines):
+        line_number = origin + 2  # 檔案裡的行號，不是搬到頂層之後的位置
         if not raw_line.strip() or raw_line.lstrip().startswith("#"):
             continue
         leading = raw_line[: len(raw_line) - len(raw_line.lstrip())]
