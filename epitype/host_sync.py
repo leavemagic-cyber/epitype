@@ -108,28 +108,31 @@ def atomic_write(path, data):
             pass
 
 
-def contract_vaults(vaults):
-    """宿主檔該載入哪一個庫的規則：拿著工作帳本的那一個（治理庫）。
+def contract_vaults(vaults, home=None):
+    """CLI 清單只決定本輪範圍，不授予全域身分。
 
-    宿主檔是跨專案的契約，專案庫的規則卡屬於那個專案，不該被升格成全域規則。從每一個
-    登記庫收會把專案規則寫進使用者的 CLAUDE.md——2026-09-17 拿副本演練時實際看到三條
-    titan 專案規則要被寫進全域契約，常駐條數從 50 變 53。認不出治理庫時退回第一個，
-    因為單庫使用者的那一個本來就是治理庫。
+    既有設定以 vaults 首項指定全域庫；global_vault 可明確指定。設定缺失或本輪沒有
+    選到該庫時不產生全域目標，避免清空既有全域內容與原生受管設定。
     """
-    paths = [Path(vault) for vault in vaults]
-    for path in paths:
-        if (path / memspec.WORK_LEDGER_FILENAME).is_file():
-            return [path]
-    return paths[:1]
+    config = os.environ.get(memspec.EPITYPE_CONFIG_ENV)
+    if not config and home is not None:
+        config = Path(home) / ".epitype" / "config.json"
+    options = memspec.config_options(config)
+    configured = options.get(memspec.CONFIG_VAULTS_FIELD)
+    selected = options.get("global_vault") or (configured[0] if isinstance(configured, list) and configured else None)
+    if not isinstance(selected, str) or not selected.strip():
+        return []
+    key = _dir_key(Path(selected).expanduser().resolve())
+    return [Path(vault) for vault in vaults if _dir_key(Path(vault).expanduser().resolve()) == key][:1]
 
 
-def rules_text(vaults, host):
+def rules_text(vaults, host, home=None):
     """這個宿主實際該載入的規則塊：共用區加它自己的宿主區。
 
     走 core_gen 的 `host_view`，與 `epitype core-gen` 是同一條判斷；兩邊若各寫一份，
     同一張卡會在產生時屬於一個宿主、在同步時屬於另一個。
     """
-    rules, unreadable = core_gen.collect_rules(contract_vaults(vaults))
+    rules, unreadable = core_gen.collect_rules(contract_vaults(vaults, home))
     if unreadable:
         # 讀不到一部分卡就不是「規則少幾條」，是這份規則塊不完整。寧可拒絕同步，也不要
         # 把殘缺的核心寫進宿主檔——少一條規則不會有人發現。
@@ -151,9 +154,9 @@ def _index_of(vault):
     return _normalised("\n".join(lines))
 
 
-def index_text(vaults):
+def index_text(vaults, home=None):
     """短索引的本文：治理庫的 MEMORY.md，去掉它的第一行標題。"""
-    for vault in contract_vaults(vaults):
+    for vault in contract_vaults(vaults, home):
         text = _index_of(vault)
         if text is None:
             continue
@@ -268,8 +271,8 @@ def render(raw, name, wanted):
 def plan_for(host, vaults, home=None):
     """這個宿主檔要改什麼：每塊的現況與應有內容，以及擋住寫入的問題。"""
     return _plan(host, host, None, host_path(host, home), lambda: {
-        memspec.HOST_SYNC_RULES_REGION: rules_text(vaults, host),
-        memspec.HOST_SYNC_INDEX_REGION: index_text(vaults),
+        memspec.HOST_SYNC_RULES_REGION: rules_text(vaults, host, home),
+        memspec.HOST_SYNC_INDEX_REGION: index_text(vaults, home),
     }, home)
 
 
@@ -417,11 +420,11 @@ def project_targets(vaults, hosts=None, home=None):
     （`_known_project_roots`），不是只有這一次的目標。空殼不擋人（空殼不是庫），從來沒被
     開過的專案反查不出根、它的上層也保護不到。
     """
-    governance = {os.path.normcase(os.fspath(Path(item))) for item in contract_vaults(vaults)}
+    governance = {_dir_key(Path(item).expanduser().resolve()) for item in contract_vaults(vaults, home)}
     found, skipped = [], []
     for item in vaults:
         vault = Path(item)
-        if os.path.normcase(os.fspath(vault)) in governance:
+        if _dir_key(vault.expanduser().resolve()) in governance:
             continue
         if not _native_project_vault(vault):
             # 路徑形狀推不出專案根的庫（自己開在別處的庫）不在這條路徑上；它的規則仍由
@@ -490,7 +493,7 @@ def project_plan(host, root, vault, home=None):
 def _plans(vaults, hosts=None, home=None):
     """這一輪要處理的全部目標：兩個全域宿主檔，加上每個專案庫的專案根檔案。"""
     selected = hosts or installed_hosts(home)
-    plans = [plan_for(host, vaults, home) for host in selected]
+    plans = [plan_for(host, vaults, home) for host in selected] if contract_vaults(vaults, home) else []
     targets, skipped = project_targets(vaults, selected, home)
     plans.extend(project_plan(host, root, vault, home) for host, root, vault in targets)
     return plans, skipped
@@ -879,6 +882,7 @@ def _selftest():
             (home / ".codex").mkdir(parents=True)
             vault = root / "vault"
             vault.mkdir()
+            selftest_config.write_text(json.dumps({"vaults": [str(vault)]}), encoding="utf-8")
             (vault / "rule-a.md").write_text(
                 "---\nname: rule-a\ndescription: 2026-09-17 一條底線\nlayer: floor\n"
                 "section: evidence\norder: 10\ntext: Honesty governs this contract.\n"
@@ -991,7 +995,9 @@ def _selftest():
                 "# 入口\n\n" + ("x" * (memspec.HOST_SYNC_REGION_CAP_BYTES + 10)),
                 encoding="utf-8")
             report = io.StringIO()
+            selftest_config.write_text(json.dumps({"vaults": [str(big)]}), encoding="utf-8")
             code = check([big], hosts=["codex"], home=home, output=report)
+            selftest_config.write_text(json.dumps({"vaults": [str(vault)]}), encoding="utf-8")
             checks.append((
                 "區塊超過上限就拒絕，並指名是哪一塊",
                 code == EXIT_REFUSED and "index" in report.getvalue(),
@@ -1126,7 +1132,9 @@ def _selftest():
             (poisoned / memspec.HOST_SYNC_INDEX_FILENAME).write_text(
                 f"# 入口\n\n說明：Epitype 會寫在 {begin} 與 {end} 之間。\n", encoding="utf-8")
             report = io.StringIO()
+            selftest_config.write_text(json.dumps({"vaults": [str(poisoned)]}), encoding="utf-8")
             code = check([poisoned], hosts=["codex"], home=home, output=report)
+            selftest_config.write_text(json.dumps({"vaults": [str(vault)]}), encoding="utf-8")
             checks.append((
                 "要寫的內容自己含標記就拒絕，理由指名是哪一塊",
                 code == EXIT_REFUSED and "區塊標記本身" in report.getvalue(),
@@ -1150,7 +1158,9 @@ def _selftest():
             # 6. 一塊超過上限不該連累另一塊。
             report = io.StringIO()
             fresh("cap", "使用者序言\n")
+            selftest_config.write_text(json.dumps({"vaults": [str(big)]}), encoding="utf-8")
             code = apply([big], hosts=["claude"], home=home, output=report)
+            selftest_config.write_text(json.dumps({"vaults": [str(vault)]}), encoding="utf-8")
             capped = (home / ".claude" / "CLAUDE.md").read_text(encoding="utf-8")
             checks.append((
                 "索引超過上限時，規則塊照樣寫得進去",
@@ -1218,7 +1228,7 @@ def _selftest():
             if _state_path(home).exists():
                 _state_path(home).unlink()
             selftest_config.write_text(
-                json.dumps({memspec.CONFIG_CORE_CAP_BYTES_FIELD: 10}), encoding="utf-8")
+                json.dumps({memspec.CONFIG_CORE_CAP_BYTES_FIELD: 10, "vaults": [str(vault)]}), encoding="utf-8")
             report = io.StringIO()
             code = apply([vault], hosts=["claude"], home=home, output=report)
             written = (home / ".claude" / "CLAUDE.md").read_text(encoding="utf-8")
@@ -1227,7 +1237,7 @@ def _selftest():
                 code == EXIT_REFUSED and memspec.CONFIG_CORE_CAP_BYTES_FIELD in report.getvalue()
                 and begin not in written and "一張卡" in written,
             ))
-            selftest_config.write_text("{}", encoding="utf-8")
+            selftest_config.write_text(json.dumps({"vaults": [str(vault)]}), encoding="utf-8")
             code = apply([vault], hosts=["claude"], home=home, output=io.StringIO())
             checks.append((
                 "上限拿掉後同一份規則寫得進去",

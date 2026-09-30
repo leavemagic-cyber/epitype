@@ -7,6 +7,9 @@ import sys; sys.dont_write_bytecode = True; [getattr(stream, "reconfigure", lamb
 """
 
 import tempfile
+import json
+import os
+from unittest.mock import patch
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -29,6 +32,10 @@ def main():
         root = Path(temp_dir).resolve()
         governance = root / "governance"
         governance.mkdir()
+        config = root / "config.json"
+        config.write_text(json.dumps({"vaults": [str(governance)]}), encoding="utf-8")
+        config_env = patch.dict(os.environ, {memspec.EPITYPE_CONFIG_ENV: str(config)})
+        config_env.start()
         (governance / memspec.WORK_LEDGER_FILENAME).write_text("# 帳本\n", encoding="utf-8")
         (governance / "rule-a.md").write_text(
             _rule("rule-a", "floor", "Honesty governs this contract."), encoding="utf-8")
@@ -58,6 +65,7 @@ def main():
             "上限量的是單一宿主載入的量，與 core-gen 一致",
             dream._core_file_loaded_bytes(out) == max(core_gen.host_loads(text).values()),
         ))
+        config_env.stop()
 
     passed = sum(bool(ok) for _, ok in checks)
     total = 4

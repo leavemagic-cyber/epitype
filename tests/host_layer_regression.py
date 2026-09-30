@@ -369,6 +369,9 @@ class _NativeFixture(_TempVault):
         trust = f"[projects.'{os.fspath(self.project)}']\ntrust_level = \"trusted\"\n"
         self.config.write_bytes((USER_CONFIG + trust).encode("utf-8"))
         self.vaults = [self.governance, self.vault]
+        scope_config = self.home / ".epitype/config.json"
+        scope_config.parent.mkdir(exist_ok=True)
+        scope_config.write_text(json.dumps({"vaults": [str(p) for p in self.vaults]}), encoding="utf-8")
 
     def _run(self, function):
         report = io.StringIO()

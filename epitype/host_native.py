@@ -154,14 +154,14 @@ def targets(vaults, hosts=None, home=None):
 
     base = Path(home) if home else Path.home()
     selected = list(hosts or host_sync.installed_hosts(home))
-    governance = host_sync.contract_vaults(vaults)
+    governance = host_sync.contract_vaults(vaults, home)
     found = []
-    if "claude" in selected:
+    if governance and "claude" in selected:
         found.append(Target("claude", KIND_CLAUDE,
                             base / ".claude" / memspec.HOST_NATIVE_CLAUDE_USER_SETTINGS,
                             f"native:claude/{memspec.HOST_NATIVE_CLAUDE_USER_SETTINGS}",
                             governance, None))
-    if "codex" in selected:
+    if governance and "codex" in selected:
         found.extend(_codex_targets(base / ".codex", "native:codex", governance, None))
     project, _skipped = host_sync.project_targets(vaults, selected, home)
     for host, root, vault in project:

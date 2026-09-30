@@ -70,6 +70,9 @@ class ProjectSync(unittest.TestCase):
             encoding="utf-8")
         (self.governance / memspec.HOST_SYNC_INDEX_FILENAME).write_text(
             "# 通用入口\n\n- [一張卡](a.md)\n", encoding="utf-8")
+        config = self.home / ".epitype/config.json"
+        config.parent.mkdir()
+        config.write_text(json.dumps({"vaults": [str(self.governance)]}), encoding="utf-8")
 
     def _cleanup(self):
         import shutil
