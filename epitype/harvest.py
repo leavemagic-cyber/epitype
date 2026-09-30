@@ -129,12 +129,7 @@ def owner_text(item):
         )
     else:
         return None
-    text = text.strip()
-    # Codex hands the host's own blocks (<user_instructions>, AGENTS.md, environment
-    # context) to the model as user content; a tag-opened turn is never owner speech.
-    if not text or text.startswith("<"):
-        return None
-    return text
+    return memspec.owner_typed_text(text) or None
 
 
 def utterances(path):

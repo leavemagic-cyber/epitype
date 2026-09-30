@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- harvest 改用共用 `owner_typed_text`：兩宿主貼上／機器區塊後的 owner 請求仍會收割，純機器訊息、未收尾區塊與子代理回報維持排除，修前 2 FAIL→修後 2 PASS。
+
 - 裁定段保護亦檢查 Codex Delete File 與只有移除行的 Update File；刪整檔或刪受管區塊不能因補丁沒有新增行而跳過。
 
 - 交接裁定段由 `epitype.owner_rules` 從有效 `owner-explicit` 裁定卡的逐字 `owner_quote` 產生（`handoff_rule: true`）；寫檔閘拒絕改寫／刪除受管段，進度正文仍可更新，既有 forbidden 繼續擋與裁定相反的片段。不碰其他主控正在寫的交接檔。
