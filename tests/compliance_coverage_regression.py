@@ -176,6 +176,7 @@ class CodexIsReplayed(Fixture):
         self.assertEqual((counts["transcripts_claude"], counts["transcripts_codex"]), (1, 3))
         self.assertEqual(counts["hits"], 4)
         self.assertEqual(counts["blocked"], 2)
+        self.assertEqual(sum(item["observed_blocks"] for item in result["rewrite_cost"]), 2)
         self.assertEqual(counts["missed"], 2)
         self.assertEqual(sorted(item["session"] for item in result["examples"]),
                          sorted([archived, "claude-1"]))

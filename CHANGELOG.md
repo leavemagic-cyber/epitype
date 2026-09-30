@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Read the nightly rewrite-cost audit from the vault's actual ledger path and assert observed block totals end to end.
+
 - Record managed native-setting denials in the gate audit without copying settings content.
 
 - Fix nightly rewrite-cost reporting to read full audit rows rather than reconciliation rows without policy labels.
