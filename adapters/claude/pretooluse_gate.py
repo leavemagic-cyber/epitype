@@ -1109,6 +1109,7 @@ def _guard_review(event, tool_name, tool_input, config, started_at, defects, adv
                         "kind": memspec.ACTION_GUARD_LOG_KIND,
                         "rule": memspec.ACTION_GUARD_RULE,
                         "card": guard.card,
+                        "card_path": str(guard.path.relative_to(vault)),
                         "tool": tool_name,
                         # 夜間重放靠它分辨「這張卡放行了」與「同一次呼叫被別張卡擋下」。
                         "digest": hashlib.sha256(
@@ -1653,6 +1654,14 @@ def _allow_context(event, notices=(), config=None, started_at=None, meter_claims
                 and _notice_marker(session_id, "tool-advice:" + str(path.resolve()))):
             lines.append(line)
             shown += 1
+            try:
+                from epitype import rule_context
+                for vault in resolve_vaults(config, event):
+                    if path.resolve().is_relative_to(vault.resolve()):
+                        rule_context.record(vault, session_id, path.relative_to(vault))
+                        break
+            except (OSError, ValueError):
+                pass
     try:
         if config is not None and started_at is not None and not expired(started_at):
             lifecycle_path = control_lifecycle.database_path(config_path())

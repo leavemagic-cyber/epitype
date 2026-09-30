@@ -131,6 +131,9 @@ def _handle(event, started_at, learn=True, trace=None):
     # 地圖檔名（session＋transcript 路徑雜湊）：跟 SessionStart 找的那個對不上，追蹤裡一眼看得出來。
     trace["stem"] = destination.stem
     handoff = compact_map.handoff_destination(vault, session_id, transcript)
+    from epitype import rule_context
+    from _hook_common import resolve_vaults
+    rule_context.snapshot(resolve_vaults(config, event), session_id, handoff)
     compact_map.build_map(
         transcript,
         destination,

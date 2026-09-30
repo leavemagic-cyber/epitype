@@ -442,6 +442,15 @@ def _handle(event, started_at, deliveries=None, trace=None):
         trace["handoff"] = bool(handoff)
         if handoff:
             pieces.append(handoff[0])
+        from epitype import rule_context
+        transcript_value = event.get("transcript_path")
+        if isinstance(transcript_value, str) and transcript_value:
+            destination = compact_map.handoff_destination(
+                governance, event.get("session_id", event.get("sessionId", "")),
+                Path(transcript_value).expanduser().resolve())
+            restored = rule_context.restore(destination, resolved)
+            if restored:
+                pieces.append(restored)
     if _soft_remaining(started_at) > 0:
         try:
             _dream_spawn(dream, governance_vault(config, for_write=True), started_at, source=source)

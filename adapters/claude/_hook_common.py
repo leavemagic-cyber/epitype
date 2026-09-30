@@ -525,6 +525,12 @@ def append_gate_log(vault, row, started_at):
             stream.flush()
             os.fsync(stream.fileno())
 
+    try:
+        from epitype import rule_context
+        rule_context.record(vault, row.get("session_id"), row.get("card_path") or row.get("card"))
+    except (OSError, ValueError):
+        pass
+
 
 def append_recall_deliveries(vault, rows, started_at):
     """喚回送達帳：一次提問送出的每張卡一列，同一把檔案鎖寫完（並行的提問不會交錯）。
@@ -542,6 +548,12 @@ def append_recall_deliveries(vault, rows, started_at):
     )
     if not lines:
         return
+    from epitype import rule_context
+    for row in rows:
+        try:
+            rule_context.record(vault, row.get("session_id"), row.get("card"))
+        except (OSError, ValueError):
+            pass
     target.parent.mkdir(parents=True, exist_ok=True)
     with memspec.file_lock(target, min(0.25, remaining)) as acquired:
         if not acquired:
