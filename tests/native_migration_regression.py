@@ -66,5 +66,26 @@ class Migration(unittest.TestCase):
         self.assertEqual(generated, native_migration.prefix_patterns((fixture / 'legacy.rules').read_text(encoding='utf-8')))
 
 
+    def test_explicit_key_takeover_checks_snapshot_and_preserves_settings(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            vault, _legacy = self.fixture(root)
+            (vault/'env.md').write_text('---\nname: env\ndescription: official limit\nhost_claude_env:\n  BASH_MAX_OUTPUT_LENGTH: "15000"\nhost_source: https://code.claude.com/docs/en/env-vars\nmetadata:\n  type: feedback\n---\n',encoding='utf-8')
+            settings = root/'.claude/settings.json'
+            value = json.loads(settings.read_text(encoding='utf-8'))
+            value['env'] = {'BASH_MAX_OUTPUT_LENGTH':'30000','OTHER':'kept'}
+            settings.write_text(json.dumps(value),encoding='utf-8')
+            before = settings.read_bytes()
+            expected = [{'path':str(settings),'section':'env','key':'BASH_MAX_OUTPUT_LENGTH','before':'30000'}]
+            self.assertEqual(native_migration.adopt_values([vault],expected,home=root),1)
+            self.assertEqual(settings.read_bytes(),before)
+            self.assertTrue(host_native.load_state(root)[host_native._key(settings)]['env']['BASH_MAX_OUTPUT_LENGTH']['owned'])
+            expected[0]['before']='stale'
+            state_before=host_native.state_path(root).read_bytes()
+            with self.assertRaises(ValueError):
+                native_migration.adopt_values([vault],expected,home=root)
+            self.assertEqual(host_native.state_path(root).read_bytes(),state_before)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -38,7 +38,9 @@ def adopt_existing(vaults, home=None, legacy_rules=None):
     Unrelated user settings and other .rules files remain outside this operation.
     """
     state_file = host_native.state_path(home)
-    with memspec.file_lock(state_file, 2.0):
+    with memspec.file_lock(state_file, 2.0) as acquired:
+        if not acquired:
+            raise TimeoutError('native migration lock unavailable')
         plans, state = host_native._plans(vaults, home=home)
         if any(p.problems or p.damaged or any(e.status != host_native.OK for e in p.entries) for p in plans):
             raise ValueError('sync must have no native drift before adoption')
@@ -73,13 +75,64 @@ def adopt_existing(vaults, home=None, legacy_rules=None):
         return adopted
 
 
+def adopt_values(vaults, expected, home=None):
+    """Explicit legacy-key takeover with exact before values; does not write settings.
+
+    expected is a list of {path, section, key, before}. Only officially supported
+    card-declared env/config keys can be adopted; unrelated keys stay unowned.
+    Call ordinary sync afterward to apply the card policy.
+    """
+    with memspec.file_lock(host_native.state_path(home), 2.0) as acquired:
+        if not acquired:
+            raise TimeoutError('native migration lock unavailable')
+        plans, state = host_native._plans(vaults, home=home)
+        candidates = {}
+        for plan in plans:
+            conflicts = {memspec.HOST_NATIVE_CONFLICT_REASON.format(
+                key=host_native._entry_name(plan.target, entry), have=host_native._shown(entry.have),
+                card=entry.card, want=host_native._shown(entry.want))
+                for entry in plan.entries if entry.status == host_native.CONFLICT}
+            if plan.damaged or any(problem not in conflicts for problem in plan.problems):
+                raise ValueError('invalid native migration plan')
+            for entry in plan.entries:
+                if entry.section in (host_native.SECTION_ENV, host_native.SECTION_CONFIG):
+                    candidates[(host_native._key(plan.target.path), entry.section, entry.key)] = (plan, entry)
+        selected, seen = [], set()
+        for item in expected:
+            key = (host_native._key(Path(item['path'])), item['section'], item['key'])
+            if key in seen or key not in candidates:
+                raise ValueError('migration key must be unique and declared by an official card')
+            seen.add(key)
+            plan, entry = candidates[key]
+            parsed = host_native._parse(plan.target.kind, host_native._read(plan.target.path)[1])
+            dotted = ('env.' + entry.key) if entry.section == host_native.SECTION_ENV else entry.key
+            have, present, _shape = host_native._lookup(parsed, dotted)
+            if not present or have != item['before']:
+                raise ValueError('legacy value changed since review')
+            selected.append((key, entry))
+        for (path, section, key), entry in selected:
+            record = dict(state.get(path) or {})
+            section_record = dict(record.get(section) or {})
+            section_record[key] = {'card':entry.card, 'owned':True}
+            record[section] = section_record
+            state[path] = record
+        host_native._save_state(home, state)
+        return len(selected)
+
+
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('vaults', nargs='+')
     parser.add_argument('--legacy-rules')
     parser.add_argument('--apply', action='store_true')
+    parser.add_argument('--expected-values', type=Path)
     args = parser.parse_args()
     if not args.apply:
         parser.error('adoption requires --apply after epitype sync --apply')
-    print('ADOPTED', adopt_existing(args.vaults, legacy_rules=args.legacy_rules))
+    if args.expected_values:
+        import json
+        print('ADOPTED VALUES', adopt_values(args.vaults,
+              json.loads(args.expected_values.read_text(encoding='utf-8'))))
+    else:
+        print('ADOPTED', adopt_existing(args.vaults, legacy_rules=args.legacy_rules))

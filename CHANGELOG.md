@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add explicit, snapshot-checked migration of legacy env/config keys into official card ownership; preserve host bytes until normal sync applies.
+
 - Bound wrapped-command evidence to the report's actual time window even when a long-running transcript started earlier.
 
 - Release tool-advice dedup claims when hook output expires or fails, and record compaction pointers only after successful emission.
