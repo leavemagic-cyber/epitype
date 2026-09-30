@@ -1463,6 +1463,24 @@ def _review_one_target(event, config, target, additions, prospective, started_at
         return len(text.encode("utf-8", errors="replace")) > memspec.WRITE_GATE_MAX_CONTENT_BYTES
 
     notices = []
+    if target.suffix.casefold() == ".md":
+        from epitype import owner_rules
+        try:
+            before = target.read_text(encoding="utf-8-sig") if target.is_file() else ""
+            after = prospective
+            if after is None and patch is not None:
+                after = patch_envelope.apply_update(patch, before)
+            if after is not None:
+                reason = owner_rules.violation(before, after, resolve_vaults(config, event))
+                if reason:
+                    _best_effort_audit(append_gate_log, governance_vault(config),
+                        with_session({"kind": "write_block", "rule": "owner_rulings",
+                                      "target": str(target)}, session_id), started_at)
+                    return _deny_value(reason), notices
+        except (OSError, UnicodeError, ValueError) as exc:
+            if (owner_rules.BEGIN in str(prospective or "")
+                    or owner_rules.BEGIN in locals().get("before", "")):
+                return _deny_value(f"交接裁定段無法驗證：{type(exc).__name__}"), notices
     # 編碼守衛只看 BOM 與 ASCII，成本與內容大小無關，因此不隨大檔豁免：>256KB 的
     # .ps1/.psm1/.psd1 若沒有 BOM 且含非 ASCII，PowerShell 5.1 一樣會用 cp950 讀壞。
     write_check = _write_check_review(event, config, target, prospective, patch, started_at)

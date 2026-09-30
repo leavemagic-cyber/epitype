@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- 交接裁定段由 `epitype.owner_rules` 從有效 `owner-explicit` 裁定卡的逐字 `owner_quote` 產生（`handoff_rule: true`）；寫檔閘拒絕改寫／刪除受管段，進度正文仍可更新，既有 forbidden 繼續擋與裁定相反的片段。不碰其他主控正在寫的交接檔。
+
 - 共用交接流程提供 `epitype.lead_transfer` 的保存版本／接手確認／可停止檢查，doctor 列兩宿主已確認與未驗證的路徑；不同接手場與當前檔案雜湊缺一不可，不自行建立宿主對話或停止程序。
 
 - Stop 閘沿用回合紀錄，新增字面工具先後 `require_tool_before`、開關配對 `pair_tools` 與主／子對話 `audience`。不做跨 hook 計數；只在回合起點可讀時查順序。相同指令的一次呼叫不當成兩次先後證據，目標身分與成功結果未宣告者不假裝已驗。
