@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Transfer a finished Claude subagent's outstanding browser resources to its root reminder without touching other agents or sessions.
+
 - 夜報漂移自測的合成治理庫補明確設定來源，依 A 的新權限判準驗證；原本「手改生成塊必須抓到漂移」斷言保持不變，不再靠參數首項升格。
 
 - 只要求補措辭的 require 可獨立標 `require_on_hit: note`，保留同卡 forbidden 的安全阻擋；夜報逐卡列實際擋下／同帳新處置／提醒數，未核對後續內容的效益明列 UNVERIFIED，不以字數變動假裝換到內容。

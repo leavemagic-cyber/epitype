@@ -2371,6 +2371,9 @@ def main():
             if config is not None and not expired(_STARTED_AT):
                 vault = governance_vault(config, for_write=True)
                 if str(event.get("hook_event_name") or "") == memspec.SUBAGENT_STOP_EVENT:
+                    from epitype import control_lifecycle
+                    control_lifecycle.finish_subagent(
+                        event, control_lifecycle.database_path(config_path()))
                     # 子代理說過的話哪裡都沒有：不在宿主的對話紀錄裡，它自己的工作檔是
                     # 0 位元組。這個時機是唯一看得見那句話的地方，所以在這裡落檔——
                     # 不落檔就等於「當下擋得住、事後查不到」，檢討對子代理整段是盲的。

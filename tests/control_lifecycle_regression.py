@@ -638,6 +638,21 @@ class ControlLifecycleRegression(unittest.TestCase):
         self.assertEqual(lifecycle.status(self.path, "drag")["pending"],
                          [{"kind": "chrome-tab", "id": "2"}])
 
+    def test_finished_subagent_resources_transfer_only_within_its_session(self):
+        for session, agent in (("root", "done"), ("root", "working"), ("other", "done")):
+            ids = [12, 13] if agent == "working" else [12]
+            event = post(session, agent, "mcp__claude-in-chrome__tabs_create_mcp", {},
+                         mcp(json.dumps({"availableTabs": [{"tabId": i} for i in ids]})))
+            event["agent_id"] = agent
+            lifecycle.observe(event, self.path)
+        self.assertEqual(lifecycle.finish_subagent({"session_id": "root"}, self.path), 0)
+        self.assertEqual(lifecycle.finish_subagent({"session_id": "root", "agent_id": "done"}, self.path), 1)
+        rows = lifecycle.status(self.path, "root")["pending"]
+        self.assertIn({"kind": "chrome-tab", "id": "12"}, rows)
+        self.assertIn({"kind": "chrome-tab", "id": "13", "agent": "working"}, rows)
+        self.assertEqual(lifecycle.status(self.path, "other")["pending"][0]["agent"], "done")
+        self.assertIn("12", lifecycle.reminder({"session_id": "root"}, self.path, "tool"))
+
     def test_subagent_cannot_take_the_main_thread_reminder(self):
         # 子代理拿到主線的提醒，會照著「用完請關」去關主線的分頁；主線自己反而收不到。
         self.owned_iab_tab("shared", "main-tab")

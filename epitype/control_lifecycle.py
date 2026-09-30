@@ -568,6 +568,19 @@ def _summary(pending):
     return "、".join(parts)
 
 
+def finish_subagent(event: dict, path: Path) -> int:
+    """Transfer only the finished agent's open resources to its root session."""
+    session = event.get("session_id", event.get("sessionId"))
+    agent = _agent(event)
+    if not session or not agent or not path.is_file():
+        return 0
+    with _database(path) as db:
+        return db.execute(
+            "UPDATE resources SET agent='',changed=? WHERE session=? AND agent=? "
+            "AND status='open'", (_now(), session, agent)
+        ).rowcount
+
+
 def reminder(event: dict, path: Path, stage: str, *, claim=True) -> str | None:
     """Remind about outstanding resources, at most REMINDER_LIMITS[stage] times each.
 
