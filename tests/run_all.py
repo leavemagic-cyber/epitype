@@ -96,6 +96,7 @@ SELFTESTS = (
     Path("tests") / "batch2_sync_regression.py",
     Path("tests") / "token_economy_regression.py",
     Path("tests") / "recall_history_regression.py",
+    Path("tests") / "native_migration_regression.py",
     Path("tests") / "compliance_coverage_regression.py",
     Path("tests") / "metadata_nested_regression.py",
     # 2026-09-09 U-J：git_gate_regression.py 只驗傷疤卡 trigger 的命令比對，那條路徑

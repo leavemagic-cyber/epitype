@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- 第二批逐卡分類：四庫 302 張未分類行為卡各留執行層與理由，隔離副本未分類／FAIL 均為 0；43 條 Claude deny 與 10 條 Codex forbidden prefix 遷入對應卡片，字面集合不減少。新增明示原生規則接管工具：先驗 sync 無漂移、舊／新完整禁止集合相等，再接管卡片列出的 deny 並保留舊 rules 原檔備份；其他使用者鍵不接管。
+
 - 自動喚回排除歷史稽核副本（明示 `scope: historical-audit/historical/archive`、`status: archived/historical`，或舊卡自稱 `Historical audit copy`）；手動搜尋仍可取回，已被取代的卡維持既有排除。量測工具可用送達帳重算移除數，不以卡片未被點名斷定規則無用。
 
 - 工具輸出省量加入各宿主官方設定：Claude `BASH_MAX_OUTPUT_LENGTH`（字元、1–150000）與 Codex `tool_output_token_limit`（正整數 token）；唯讀量測工具可重算同批 Codex 工具結果的 10000/5000 上限，並標明估計與真實載入的差別。

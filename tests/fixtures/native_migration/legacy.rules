@@ -1,0 +1,12 @@
+# Epitype guard rules (owner-authorized 2026-09-09): forbid irreversible commands natively in Codex.
+# Mirrors Claude Code permissions.deny. Prefix rules only match bare argv; PowerShell -Command strings are not matched.
+prefix_rule(pattern=["git", "reset", "--hard"], decision="forbidden")
+prefix_rule(pattern=["git", "clean"], decision="forbidden")
+prefix_rule(pattern=["git", "push", ["--force", "-f", "--force-with-lease"]], decision="forbidden")
+prefix_rule(pattern=["git", "add", ["-A", "--all", "."]], decision="forbidden")
+prefix_rule(pattern=["git", "commit", ["-a", "--all"]], decision="forbidden")
+prefix_rule(pattern=["git", ["checkout", "restore"], "--"], decision="forbidden")
+prefix_rule(pattern=["taskkill"], decision="forbidden")
+prefix_rule(pattern=["pskill"], decision="forbidden")
+prefix_rule(pattern=["Stop-Process"], decision="forbidden")
+prefix_rule(pattern=[["cat", "type", "Get-Content", "more", "less", "head", "tail"], [".env", ".env.local", ".env.production", "brain.json"]], decision="forbidden")
