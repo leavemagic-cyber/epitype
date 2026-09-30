@@ -3189,6 +3189,8 @@ HOST_CODEX_CONFIG_ALIASES = {
 # ANTHROPIC_BASE_URL、NODE_TLS_REJECT_UNAUTHORIZED 這種鍵就能繞過寫檔閘改連線端點或關掉
 # TLS 驗證。值在 settings.json 裡一律是字串。
 HOST_CLAUDE_ENV_ALLOWED = {
+    # https://code.claude.com/docs/en/env-vars: 1-100; higher than host default is ignored.
+    "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "percentage",
     "CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS": HOST_CODEX_CONFIG_POSITIVE_INT,
     "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": HOST_CODEX_CONFIG_POSITIVE_INT,
 }
@@ -3419,6 +3421,10 @@ def host_native_values(front_lines):
                 problems.append(HOST_CLAUDE_ENV_TYPE_REASON.format(
                     field=HOST_CLAUDE_ENV_FIELD, key=key, value=value,
                     expected=HOST_CODEX_CONFIG_TYPE_NAMES[HOST_CLAUDE_ENV_ALLOWED[key]]))
+            elif (HOST_CLAUDE_ENV_ALLOWED[key] == "percentage"
+                  and not (re.fullmatch(r"[0-9]+", value) and 1 <= int(value) <= 100)):
+                problems.append(HOST_CLAUDE_ENV_TYPE_REASON.format(
+                    field=HOST_CLAUDE_ENV_FIELD, key=key, value=value, expected="1-100 的整數"))
             else:
                 env[key] = value
         if env:
