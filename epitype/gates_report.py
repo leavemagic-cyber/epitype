@@ -8,7 +8,6 @@ stop_block（Stop 閘）、write_block（寫檔閘）。`parse_defect` 是卡片
 
 import argparse
 from collections import Counter
-from . import memspec
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 import json
@@ -64,7 +63,7 @@ def _parse_timestamp(raw):
 
 
 def _row_label(record):
-    if record.get("kind") == memspec.ACTION_GUARD_LOG_KIND and record.get("card"):
+    if record.get("kind") == "action_block" and record.get("card"):
         return record["card"]
     for key in ("decision", "card_path", "card", "filename"):
         value = record.get(key)

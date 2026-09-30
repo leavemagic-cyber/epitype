@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Keep the gate-report standalone entrypoint usable while preserving action-guard identities.
+
 - Track the observed Chrome tabs_create text result by its explicit created Tab ID; report opaque create results as unverified instead of losing ownership.
 
 - Record five manually checked delivery-to-gate examples and refresh the same-record historical recall measurement.

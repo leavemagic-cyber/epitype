@@ -14,3 +14,5 @@ advise_text: 如果 owner 說資料存在，先查能讀的來源，再說資料
 驗證：`tests/tool_advice_regression.py` 三題通過，Bash 與 exec_command 各三張文字卡，整個測試 0.230 秒，各次 hook 均小於 2 秒。同場去重、兩條上限與未命中不送均有斷言。這是 hook 介面驗證，真實宿主模型採用仍未驗證。
 
 宿主依據：[Claude hooks](https://code.claude.com/docs/en/hooks)、[Codex hooks](https://learn.chatgpt.com/docs/hooks) 的 PreToolUse `hookSpecificOutput.additionalContext`。規則會進模型上下文，宿主不保證顯示成聊天訊息。
+
+整庫副本實測：三張既有純文字卡（sources-outrank-recall、reuse-before-building、token-economy）先走正式 SessionStart 的暖快取函式，再用兩宿主工具格式各呼叫三次：0.2649／0.1646／0.1987 秒、0.2129／0.1632／0.1547 秒；六次均有對應規則上下文，同場第二次均不重送。冷快取只暖一個普通工具呼叫不足以遍歷 591 張卡；不能省略 SessionStart 暖快取而宣稱首次全面送達。
