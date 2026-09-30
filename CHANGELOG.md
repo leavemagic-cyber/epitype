@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Document official Codex V2 completion and capacity-pressure eviction semantics; keep current App slot release unverified and make no cap changes.
+
 - Include safe literal candidates from wrapped Codex shell calls in nightly evidence, separately from proven executions; never evaluate wrapper code.
 
 - Preserve blocked Stop card paths across compaction while retaining existing decision and action-guard audit identities.
