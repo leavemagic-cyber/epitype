@@ -36,6 +36,18 @@ class RuleContextRegression(unittest.TestCase):
         self.assertEqual(result['hookSpecificOutput']['permissionDecision'], 'deny')
         self.assertEqual(json.loads(rule_context.state_path(self.vault, 'blocked').read_text()), ['guard.md'])
 
+    def test_stop_audit_records_path_without_changing_decision_identity(self):
+        import stop_gate
+        from epitype import gates_report, memspec
+        self.write_card('different-filename.md', name='different-filename', description='不要重開裁定')
+        stop_gate._audit({memspec.CONFIG_VAULTS_FIELD: [self.vault]}, 'owner-key', 'forbidden',
+                         time.monotonic(), 'stop-record', card_path=self.vault / 'different-filename.md')
+        self.assertEqual(json.loads(rule_context.state_path(self.vault, 'stop-record').read_text()),
+                         ['different-filename.md'])
+        self.assertEqual(gates_report.load_rows(self.vault / memspec.GATE_LOG_FILENAME)[0][-1].label, 'owner-key')
+        self.assertEqual(gates_report._row_label({'kind': memspec.ACTION_GUARD_LOG_KIND,
+                        'card': 'guard', 'card_path': 'guard.md'}), 'guard')
+
     def test_budget_expiry_and_path_boundary(self):
         for number in range(20):
             self.write_card(f'rule-{number}.md', name=f'rule-{number}', description='規則描述' * 90)

@@ -953,7 +953,7 @@ def _claim_marker(session_id, decision_key, message):
 
 
 def _audit(config, decision_key, rule, started_at, session_id=None, digest="",
-           kind=memspec.STOP_GATE_LOG_KIND):
+           kind=memspec.STOP_GATE_LOG_KIND, card_path=None):
     """The blocked message's digest goes on the row, never the message.
 
     The nightly replay has to tell "this ruling let something through" from "the turn
@@ -961,6 +961,14 @@ def _audit(config, decision_key, rule, started_at, session_id=None, digest="",
     per turn and stops, so without the digest every second violation in a blocked
     message reads as a miss."""
     try:
+        if card_path is not None:
+            from epitype import rule_context
+            target = Path(card_path).resolve()
+            for vault in config[memspec.CONFIG_VAULTS_FIELD]:
+                root = Path(vault).resolve()
+                if target.is_relative_to(root):
+                    rule_context.record(root, session_id, target.relative_to(root).as_posix())
+                    break
         row = {
             "kind": kind,
             "decision": decision_key,
@@ -1181,7 +1189,7 @@ def _verdict(event, message, config, started_at, defects, turn=None):
                                 require_notes=True)
         if noted is not None and _claim_marker(session_id, noted[0].key, message):
             _audit(config, noted[0].key, noted[1], started_at, session_id,
-                   _message_digest(message), kind=memspec.STOP_NOTE_LOG_KIND)
+                   _message_digest(message), kind=memspec.STOP_NOTE_LOG_KIND, card_path=noted[0].path)
             # 擋人用的那句話寫著「請改寫」；提醒要講的正好相反，所以字面規則另給一句短的。
             _best_effort_audit(leave_note, config, session_id, (
                 memspec.STOP_NOTE_FORBIDDEN.format(fragment=noted[3], decision=noted[0].key)
@@ -1192,7 +1200,7 @@ def _verdict(event, message, config, started_at, defects, turn=None):
     decision, rule, reason, _fragment = verdict
     if not _claim_marker(session_id, decision.key, message):
         return None
-    _audit(config, decision.key, rule, started_at, session_id, _message_digest(message))
+    _audit(config, decision.key, rule, started_at, session_id, _message_digest(message), card_path=decision.path)
     # 留著這一段，下一輪才比得出「重寫的東西跟 owner 已經看過的那一段一不一樣」。
     _best_effort_audit(_remember_blocked, config, session_id, message)
     return {"decision": "block", "reason": reason + memspec.STOP_GATE_REWRITE_HINT}

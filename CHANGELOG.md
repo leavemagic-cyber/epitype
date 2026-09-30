@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Preserve blocked Stop card paths across compaction while retaining existing decision and action-guard audit identities.
+
 - Read the nightly rewrite-cost audit from the vault's actual ledger path and assert observed block totals end to end.
 
 - Record managed native-setting denials in the gate audit without copying settings content.
