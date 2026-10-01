@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Accept the suite's --selftest entry point in the new batch-two unittest scripts without changing assertions.
+
 - Check owner-ruling removal on Markdown deletes without treating deletion as an empty replacement card.
 
 - Give nightly replacement fixtures explicit governance configuration while preserving all replacement, backup, cap, and read-only assertions.

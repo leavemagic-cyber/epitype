@@ -59,4 +59,6 @@ class ConfiguredScope(unittest.TestCase):
 
 
 if __name__ == "__main__":
+    if '--selftest' in sys.argv:
+        sys.argv.remove('--selftest')
     unittest.main()
