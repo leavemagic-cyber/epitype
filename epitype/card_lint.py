@@ -481,7 +481,7 @@ def _pattern_findings(fields, front_lines):
                     pattern=pattern[:60], reason=problem),
             ))
     tool = fields.get(memspec.ACTION_GUARD_TOOL_FIELD, "").strip()
-    if tool and tool.casefold() not in memspec.ACTION_GUARD_KNOWN_TOOLS:
+    if tool and not memspec.action_guard_tool_known(tool):
         findings.append((
             WARN, "guard-tool",
             memspec.CARD_GUARD_TOOL_UNKNOWN_REASON.format(

@@ -20,6 +20,10 @@
 
 - Correlate actual tool calls with host result IDs, cwd, and causal completion; reject conflicting IDs and preserve unknown outcomes.
 
+- Judge each step of an MCP batch call (such as `browser_batch`) against action guards under its full `mcp__<server>__<tool>` name, so wrapping a call in a batch no longer skips its guard.
+
+- Let action guards name MCP tools as `mcp__<server>__<tool>` or a whole server as `mcp__<server>__*`; any other wildcard matches nothing, and card lint flags MCP guards without `hosts` as Codex-unverified.
+
 - Allow read-only JSON serialization in native-setting audits while continuing to block stream dumps and file writes of managed keys.
 
 - Support official Codex root TOML keys while preserving unrelated tables and comments during insertion, update, and removal.
