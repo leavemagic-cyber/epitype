@@ -412,6 +412,45 @@ class ActionGuardRegression(unittest.TestCase):
             self.assertIsNone(self.denial(self.call(self.CHROME_NAVIGATE, {"url": "https://x"})), pattern)
             self.assertIsNone(self.denial(self.call("Bash", {"command": "ls"})), pattern)
 
+    CHROME_BATCH = "mcp__claude-in-chrome__browser_batch"
+
+    def batch(self, *steps):
+        return {"actions": [{"name": name, "input": step_input} for name, step_input in steps]}
+
+    def test_a_navigate_without_a_tab_id_inside_a_batch_is_denied(self):
+        # 包進 browser_batch 的 navigate 由宿主照單獨呼叫執行，守衛不能因為被包起來就看不到。
+        self.tab_card()
+        reason = self.denial(self.call(self.CHROME_BATCH, self.batch(
+            ("computer", {"action": "screenshot", "tabId": 7}),
+            ("navigate", {"url": "https://colab.research.google.com"}),
+        )))
+        self.assertIsNotNone(reason)
+        self.assertIn("tabId", reason)
+        self.assertIn(self.CHROME_NAVIGATE, reason)
+
+    def test_a_batch_whose_navigate_carries_a_tab_id_passes(self):
+        self.tab_card()
+        self.assertIsNone(self.denial(self.call(self.CHROME_BATCH, self.batch(
+            ("navigate", {"url": "https://x", "tabId": 1693812473}),
+            ("computer", {"action": "screenshot"}),
+        ))))
+
+    def test_a_built_in_browser_batch_is_not_judged_by_a_chrome_card(self):
+        self.tab_card()
+        self.assertIsNone(self.denial(self.call("mcp__Claude_Browser__browser_batch", self.batch(
+            ("navigate", {"url": "https://x"}),
+        ))))
+
+    def test_malformed_batch_steps_are_skipped_not_guessed(self):
+        self.tab_card()
+        for actions in ("navigate", ["navigate"], [{"input": {"url": "https://x"}}],
+                        [{"name": "mcp__claude-in-chrome__navigate", "input": {"url": "x"}}]):
+            self.assertIsNone(self.denial(self.call(self.CHROME_BATCH, {"actions": actions})), actions)
+
+    def test_a_step_without_input_counts_as_missing_the_field(self):
+        self.tab_card()
+        self.assertIsNotNone(self.denial(self.call(self.CHROME_BATCH, {"actions": [{"name": "navigate"}]})))
+
     def test_fragments_and_required_fields_declared_together_must_both_hold(self):
         self.dispatch_card(guard_all_of=['"deploy"'])
         self.assertIsNone(self.denial(self.call("Task", {"prompt": "查個檔"})))

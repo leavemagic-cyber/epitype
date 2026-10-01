@@ -1835,6 +1835,10 @@ def _handle(event, started_at, defects=None, meter_claims=None, advice_claims=No
         guard_value = _guard_review(
             event, tool_name, event.get("tool_input"), config, started_at, defects, advisories
         )
+        for step_tool, step_input in memspec.nested_tool_calls(tool_name, event.get("tool_input")):
+            if guard_value is not None:
+                break
+            guard_value = _guard_review(event, step_tool, step_input, config, started_at, defects)
     except Exception:
         guard_value = None
     if guard_value is not None:

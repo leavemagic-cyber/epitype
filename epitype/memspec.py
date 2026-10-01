@@ -1938,6 +1938,34 @@ def action_guard_tool_matches(card_tool, event_tool):
     return any(card_tool in group and event_tool in group for group in ACTION_GUARD_TOOL_EQUIVALENTS)
 
 
+ACTION_GUARD_BATCH_ACTIONS_FIELD = "actions"
+
+
+def nested_tool_calls(tool_name, tool_input):
+    """(tool, input) for each step of an MCP batch call such as browser_batch.
+
+    A batch step names its tool without the server prefix (`navigate`), and the host
+    runs it exactly as a standalone call, so a guard on `mcp__<server>__navigate` must
+    see it under that full name — otherwise wrapping the call in a batch skips the guard."""
+    mcp = mcp_guard_tool_parts(tool_name) if isinstance(tool_name, str) else None
+    if mcp is None or not isinstance(tool_input, dict):
+        return []
+    actions = tool_input.get(ACTION_GUARD_BATCH_ACTIONS_FIELD)
+    if not isinstance(actions, list):
+        return []
+    prefix = ACTION_GUARD_MCP_PREFIX + mcp[0] + ACTION_GUARD_MCP_SEPARATOR
+    calls = []
+    for step in actions:
+        if not isinstance(step, dict):
+            continue
+        name = step.get("name")
+        if not isinstance(name, str) or not name.strip() or ACTION_GUARD_MCP_SEPARATOR in name:
+            continue
+        step_input = step.get("input")
+        calls.append((prefix + name.strip(), step_input if isinstance(step_input, dict) else {}))
+    return calls
+
+
 def action_guard_tool_known(card_tool):
     return card_tool.casefold() in ACTION_GUARD_KNOWN_TOOLS or mcp_guard_tool_parts(card_tool) is not None
 
