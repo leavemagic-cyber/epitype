@@ -55,8 +55,13 @@ def repository(path):
                 if not directory.is_absolute():
                     directory = root / directory
                 common = directory / 'commondir'
-                git_common = directory / common.read_text(encoding='utf-8').strip() if common.is_file() else directory
-                return canonical(str(root)), canonical(str(git_common.resolve().parent))
+                if not common.is_file():
+                    return canonical(str(root)), canonical(str(root))
+                git_common = (directory / common.read_text(encoding='utf-8').strip()).resolve()
+                # A common Git directory outside the usual .git location does
+                # not identify its main checkout by its parent; keep it unknown.
+                main = canonical(str(git_common.parent)) if git_common.name=='.git' else ''
+                return canonical(str(root)), main
             except (OSError, ValueError):
                 return '', ''
     return '', ''
@@ -165,7 +170,12 @@ def actions(name, payload, cwd='', *, live=True):
                 result.append(Action('git.main_update',main,main))
             elif sub == 'update-ref' and main:
                 try:
-                    branch = (Path(main)/'.git/HEAD').read_text(encoding='utf-8').strip().removeprefix('ref: ')
+                    metadata=Path(main)/'.git'
+                    if metadata.is_file():
+                        link=metadata.read_text(encoding='utf-8').strip()
+                        if not link.startswith('gitdir: '): continue
+                        metadata=Path(main)/link[len('gitdir: '):]
+                    branch = (metadata/'HEAD').read_text(encoding='utf-8').strip().removeprefix('ref: ')
                 except OSError:
                     branch = ''
                 if branch and branch in words[index+1:]:

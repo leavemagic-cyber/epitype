@@ -50,6 +50,16 @@ class Targets(unittest.TestCase):
         fresh,=targets.actions('Write',{'file_path':'new.md'},str(self.main))
         self.assertEqual(fresh.kind,'file.create')
 
+    def test_separate_git_directory_is_its_own_primary_checkout(self):
+        checkout=self.root/'separate';checkout.mkdir()
+        metadata=self.root/'metadata';metadata.mkdir()
+        (metadata/'HEAD').write_text('ref: refs/heads/main')
+        (checkout/'.git').write_text('gitdir: ../metadata')
+        self.assertEqual(targets.repository(str(checkout)),(targets.canonical(str(checkout)),)*2)
+        action,=targets.actions('exec_command',{'cmd':'git update-ref refs/heads/main abc'},str(checkout))
+        self.assertEqual(action.kind,'git.main_update')
+        self.assertEqual(action.target,targets.canonical(str(checkout)))
+
 
 if __name__=='__main__':
     if '--selftest' in sys.argv: sys.argv.remove('--selftest')
