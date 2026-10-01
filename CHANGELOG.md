@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Correlate actual tool calls with host result IDs, cwd, and causal completion; reject conflicting IDs and preserve unknown outcomes.
+
 - Allow read-only JSON serialization in native-setting audits while continuing to block stream dumps and file writes of managed keys.
 
 - Support official Codex root TOML keys while preserving unrelated tables and comments during insertion, update, and removal.
