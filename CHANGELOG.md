@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Check same-target prerequisites from completed Pre/PostToolUse receipts in both hosts, including nested code-mode tools; missing signals stay unverified and old actions do not permanently block later turns.
+
 - Keep tool evidence within its actual actor and role, and distinguish process headers from arbitrary final-output data.
 
 - Resolve literal actions to the actual file and main checkout, preserve Windows paths, and exclude multi-statement success guesses and new-file writes.

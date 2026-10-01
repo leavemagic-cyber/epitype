@@ -3115,6 +3115,8 @@ def main():
     try:
         event = read_event(sys.stdin)
         if event.get("hook_event_name") == "PostToolUse":
+            from epitype import action_receipts
+            action_receipts.finish(event, action_receipts.database_path(config_path()))
             # 截圖、點擊這類每步都觸發的操控改不了帳本：在讀設定、開 SQLite 之前就回去，
             # 否則每個瀏覽器動作都白付一次設定載入。
             if not control_lifecycle.is_tracked_tool(event.get("tool_name")):
@@ -3141,6 +3143,9 @@ def main():
         if value is None or value.get("hookSpecificOutput", {}).get(
                 "permissionDecision") != "deny":
             _best_effort_record(event)
+            from epitype import action_receipts
+            if config_path().exists():
+                action_receipts.begin(event, action_receipts.database_path(config_path()))
         # A guard card that stopped being enforced is the silent failure §34 warned
         # about, so it is named on stderr rather than swallowed.
         for line in defects[: memspec.GATE_DEFECT_MAX_LINES]:

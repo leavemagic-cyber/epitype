@@ -19,7 +19,7 @@ class Action:
     repository: str = ''
 
 
-def canonical(value, cwd=''):
+def canonical(value, cwd='', *, resolve=True):
     if not isinstance(value, str) or not value or any(part in value for part in ('$', '`', '*', '?')):
         return ''
     value = value.strip('"\'')
@@ -31,7 +31,7 @@ def canonical(value, cwd=''):
             return ''
         path = Path(cwd) / path
     try:
-        return os.path.normcase(str(path.resolve()))
+        return os.path.normcase(str(path.resolve()) if resolve else os.path.abspath(path))
     except (OSError, ValueError):
         return ''
 
@@ -63,6 +63,14 @@ def repository(path):
 
 def _words(source, powershell=False):
     try:
+        if not powershell:
+            quote=''
+            for char in source:
+                if char in (chr(34), chr(39)):
+                    if quote==char: quote=''
+                    elif not quote: quote=char
+                elif char==chr(92) and not quote:
+                    return []
         if powershell:
             # POSIX shlex consumes unquoted Windows backslashes as escapes.
             return [word[1:-1] if len(word)>1 and word[0]==word[-1] and word[0] in "\"'" else word
@@ -88,13 +96,14 @@ def _literal_commands(source):
 
 def actions(name, payload, cwd='', *, live=True):
     """Resolved actions; a shell mentioning a command is never an invocation."""
+    normalize = lambda value, directory="": canonical(value, directory, resolve=live)
     payload = payload if isinstance(payload, dict) else {}
     cwd = payload.get('workdir') or payload.get('cwd') or cwd
     name = name.casefold().rsplit('.', 1)[-1]
     direct = {'read':'file.read', 'write':'file.change', 'edit':'file.change', 'multiedit':'file.change'}
     result = []
     if name in direct:
-        target = canonical(payload.get('file_path') or payload.get('path'), cwd)
+        target = normalize(payload.get('file_path') or payload.get('path'), cwd)
         if target:
             kind = direct[name]
             if name == 'write' and live and not Path(target).exists():
@@ -106,7 +115,7 @@ def actions(name, payload, cwd='', *, live=True):
         if isinstance(source, list):
             source = '\n'.join(str(item) for item in source)
         for entry in patch_envelope.parse(source):
-            target = canonical(entry.path, cwd)
+            target = normalize(entry.path, cwd)
             # Creating a new file is not changing an existing named file.
             if target and entry.op != 'add':
                 result.append(Action('file.change', target, repository(target)[0] if live else ''))
@@ -120,7 +129,7 @@ def actions(name, payload, cwd='', *, live=True):
     if re.search(r'(?m)\b(?:foreach|function|while|for)\b|@\x27|@"', source):
         return result
     for command in _literal_commands(source):
-        powershell = name == 'powershell' or (name == 'exec_command' and 'bash' not in str(payload.get('shell', '')).casefold())
+        powershell = name == 'powershell' or 'powershell' in str(payload.get('shell', '')).casefold() or (name == 'exec_command' and 'bash' not in str(payload.get('shell', '')).casefold())
         words = _words(command, powershell)
         if not words:
             continue
@@ -133,7 +142,7 @@ def actions(name, payload, cwd='', *, live=True):
             for operand in operands:
                 if operand.startswith('-'):
                     continue
-                target = canonical(operand, cwd)
+                target = normalize(operand, cwd)
                 if target:
                     result.append(Action('file.read',target,repository(target)[0] if live else ''))
         elif program == 'git':
@@ -141,17 +150,17 @@ def actions(name, payload, cwd='', *, live=True):
             while index < len(words) and words[index] == '-C':
                 if index+1 == len(words):
                     break
-                directory = canonical(words[index+1], directory)
+                directory = normalize(words[index+1], directory)
                 index += 2
             if index >= len(words) or not directory:
                 continue
             sub = words[index]
-            checkout, main = repository(directory) if live else (canonical(directory), '')
-            if sub == 'status':
-                result.append(Action('git.status',checkout or canonical(directory),main))
+            checkout, main = repository(directory) if live else (normalize(directory), '')
+            if sub == 'status' and not any(w in ('-h','--help','--','-uno','--untracked-files=no') or not w.startswith('-') for w in words[index+1:]):
+                result.append(Action('git.status',checkout or normalize(directory),main))
             elif words[index:index+3] == ['worktree','list','--porcelain'] or words[index:index+2] == ['worktree','list']:
-                result.append(Action('git.worktrees',main or canonical(directory),main))
-            elif sub in ('merge','cherry-pick','pull') and checkout and checkout == main:
+                result.append(Action('git.worktrees',main or normalize(directory),main))
+            elif sub in ('merge','cherry-pick','pull') and checkout and checkout == main and not any(w in ('--help','-h','--abort','--quit','--dry-run') for w in words[index+1:]):
                 result.append(Action('git.main_update',main,main))
             elif sub == 'update-ref' and main:
                 try:
@@ -163,7 +172,7 @@ def actions(name, payload, cwd='', *, live=True):
         elif program in ('rm', 'rmdir', 'remove-item'):
             operands = [w for w in words[1:] if not w.startswith('-')]
             for operand in operands:
-                target = canonical(operand, cwd)
+                target = normalize(operand, cwd)
                 if target and (not live or Path(target).is_dir()):
                     result.append(Action('directory.delete',target,repository(target)[1] if live else ''))
     return list(dict.fromkeys(result))

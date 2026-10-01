@@ -26,6 +26,13 @@ def gap(before, pairs, calls):
         prerequisite, separator, action = item.partition('=>')
         if not separator or not prerequisite.strip() or not action.strip():
             raise ValueError('require_tool_before 必須是 Y => X')
+        if prerequisite.strip().startswith('@') or action.strip().startswith('@'):
+            try:
+                from .action_sequence import rule
+            except ImportError:
+                from action_sequence import rule
+            rule(item)
+            continue
         seen = False
         for call in calls:
             # One shell call is not evidence of ordering within its command text.

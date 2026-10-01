@@ -74,7 +74,7 @@ _TURN_CHECK_RULE = "turn_check"
 
 _SELFTEST_HANG_SECONDS = 120
 
-_Turn = namedtuple("_Turn", "texts prompt dispatch calls_after_dispatch tools", defaults=((),))
+_Turn = namedtuple("_Turn", "texts prompt dispatch calls_after_dispatch tools call_ids", defaults=((), ()))
 
 
 def _turn(texts=(), prompt="", dispatch="", calls_after_dispatch=0):
@@ -1019,6 +1019,7 @@ def _turn_context(transcript_path):
     texts = []
     prompt = ""
     turn_tools = []
+    evidence_rows = []
     # 派工的結果進來之後，我自己還動過幾次手。倒著走，遇到派工那一次呼叫就凍結計數。
     dispatch = ""
     calls_after = 0
@@ -1037,6 +1038,7 @@ def _turn_context(transcript_path):
         if kind == transcript_reader.USER:
             prompt = " ".join(piece for piece in row_texts if piece)
             break
+        evidence_rows.append(row)
         turn_tools.extend(reversed(tools))
         for name, _payload in reversed(tools):
             if dispatch:
@@ -1057,7 +1059,9 @@ def _turn_context(transcript_path):
     if not dispatch and memspec.TURN_DISPATCH_NOTICE_MARKER in prompt:
         # 背景子代理跑完是以一則新提問的形式回來的，這一回合裡沒有派工那一次呼叫。
         dispatch = memspec.TURN_DISPATCH_NOTICE_MARKER
-    return _Turn(texts, prompt, dispatch, calls_after, tuple(reversed(turn_tools)))
+    from epitype import tool_evidence
+    identities = tuple(call.call_id for call in tool_evidence.calls(reversed(evidence_rows)))
+    return _Turn(texts, prompt, dispatch, calls_after, tuple(reversed(turn_tools)), identities)
 
 
 def _shingles(text):
@@ -1406,10 +1410,21 @@ def _first_violation(decisions, event, message, config, started_at, defects, tur
     """這批裁定裡第一個被違反的：(裁定, 哪一類, 要說的話, 命中的字)；都沒有回 None。"""
     verdicts = []
     if turn is not None and turn.prompt:
-        from epitype import tool_sequence
+        from epitype import tool_sequence, action_receipts, action_sequence
+        semantic = any(any(item.strip().startswith('@') for item in d.require_tool_before) for d in decisions)
+        facts = action_receipts.read(event, action_receipts.database_path(config_path())) if semantic else ()
         for decision in decisions:
             try:
                 reason = tool_sequence.gap(decision.require_tool_before, decision.pair_tools, turn.tools)
+                if not reason:
+                    active = ({f.call_id for f in facts if f.turn == event["turn_id"]} if event.get("turn_id") else set(turn.call_ids))
+                    judgments = action_sequence.check(decision.require_tool_before, facts, active)
+                    if any(item.strip().startswith("@") for item in decision.require_tool_before) and turn.tools and not judgments:
+                        defects.append(f"[{decision.key}] UNVERIFIED: 此回合沒有可判讀的目標／完成回條")
+                    blocked = next((j for j in judgments if j.verdict == 'block'), None)
+                    reason = blocked.reason if blocked else None
+                    for unknown in (j for j in judgments if j.verdict == 'unverified'):
+                        defects.append(f"[{decision.key}] UNVERIFIED: {unknown.reason}")
             except ValueError as exc:
                 defects.append(f"[{decision.key}] {exc}")
                 continue
