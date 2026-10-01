@@ -58,6 +58,23 @@ class Replay(unittest.TestCase):
         expired=sequence_replay.report([card],[path],deadline=time.monotonic()-1)
         self.assertFalse(expired['complete']);self.assertEqual(expired['read_files'],0)
 
+    def test_nightly_reader_scope_and_opaque_zero_are_explicit(self):
+        from epitype import compliance
+        temp=tempfile.TemporaryDirectory();self.addCleanup(temp.cleanup)
+        path=Path(temp.name)/'rows.jsonl'
+        rows=self.call('outer','exec',{'input':'if(false) await tool.read()'},'')
+        rows+=self.call('write','Write',{'file_path':'unknown.md'},'written')
+        rows+=self.call('edit','Edit',{'file_path':'a.md'},'changed',agentId='worker')
+        for row in rows: row['timestamp']='2026-09-30T00:00:00Z'
+        path.write_text('\n'.join(json.dumps(row) for row in rows),encoding='utf-8')
+        card=compliance.Rule('root-only','sequence',path,0,[], '', '', '', ('@file.read => @file.change',),'root')
+        report=sequence_replay.report([card],[path],since=0)
+        self.assertEqual(report['counts'],{})
+        self.assertEqual(report['opaque_calls'],1)
+        self.assertEqual(report['unresolved_writes'],1)
+        worker=sequence_replay.report([card._replace(audience='sub')],[path],since=0)
+        self.assertEqual(worker['counts'],{'block':1})
+
 
 if __name__=='__main__':
     if '--selftest' in sys.argv:sys.argv.remove('--selftest')

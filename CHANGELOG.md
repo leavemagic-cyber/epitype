@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Preserve root/sub reader scope in nightly sequence checks and expose opaque calls beside zero-hit results.
+
 - Close the nightly gate-health staging file before its atomic replacement, avoiding leaked handles on Windows.
 
 - Deliver the original rule as bounded model-visible advice when target-sequence evidence is incomplete, preserving the existing per-session delivery budget.

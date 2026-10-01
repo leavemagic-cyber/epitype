@@ -93,19 +93,24 @@ def judgments(items,replay):
 def report(cards,paths,since=None,until=None,deadline=None):
     from collections import Counter
     import time
-    from . import compliance
-    counts=Counter();by_card={};read_files=0
+    from . import compliance, tool_sequence
+    counts=Counter();by_card={};read_files=0;opaque_calls=unresolved_writes=0
     if not cards: return {'cards':0,'read_files':0,'counts':{},'by_card':{},'complete':True}
     for path in paths:
         if deadline is not None and time.monotonic()>=deadline: break
         replay=read(path);read_files+=1
         by_id={(call.call_id,call.actor):call for call in replay.calls}
+        window=[call for call in replay.calls if call.stamp and compliance._in_window(call.stamp,since,until)]
+        opaque_calls+=sum(call.call_id in replay.opaque for call in window)
+        unresolved_writes+=sum(call.call_id in replay.unresolved for call in window)
         for card in cards:
             measured=by_card.setdefault(card.card,Counter())
             for result in judgments(card.fragments,replay):
                 call=by_id[(result.call_id,result.actor)]
+                if not tool_sequence.applies(card.audience, {'agent_id':call.actor}): continue
                 if not call.stamp or not compliance._in_window(call.stamp,since,until): continue
                 if card.mtime and compliance._epoch_of(call.stamp)<card.mtime: continue
                 measured[result.verdict]+=1;counts[result.verdict]+=1
     return {'cards':len(cards),'read_files':read_files,'counts':dict(counts),
-            'by_card':{key:dict(value) for key,value in by_card.items()},'complete':read_files==len(paths)}
+            'by_card':{key:dict(value) for key,value in by_card.items()},'complete':read_files==len(paths),
+            'opaque_calls':opaque_calls,'unresolved_writes':unresolved_writes}

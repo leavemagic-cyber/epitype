@@ -2407,6 +2407,8 @@ def _render_section(lines, section):
         lines.append('工具順序證據：放行 %d、違反 %d、未驗證 %d；檔案覆蓋 %d，完整=%s。' % (
             measured.get('allow',0),measured.get('block',0),measured.get('unverified',0),
             sequence.get('read_files',0),sequence.get('complete',False)))
+        lines.append('另有 %d 筆不透明工具呼叫、%d 筆寫入類型不明；零命中不能證明這些操作符合規則。' % (
+            sequence.get('opaque_calls',0),sequence.get('unresolved_writes',0)))
     rewrite_cost = section.get("rewrite_cost") or []
     if rewrite_cost:
         lines.append("每條回合擋下的代價（同帳處置重放；內容效益另核對）：")

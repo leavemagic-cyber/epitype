@@ -42,7 +42,7 @@ COVERAGE_STATUS_INCOMPLETE = "不完整"
 # 一張卡連續幾天完全沒命中，就值得回頭看它是不是當初就寫廢了。
 STALE_CARD_DAYS = 30
 
-Rule = namedtuple("Rule", "card kind path mtime forbidden require_when require_text tool fragments")
+Rule = namedtuple("Rule", "card kind path mtime forbidden require_when require_text tool fragments audience", defaults=('all',))
 Hit = namedtuple("Hit", "card kind session at fragment digest final text")
 GateRow = namedtuple("GateRow", "session card at digest kind")
 
@@ -118,7 +118,8 @@ def armed_rules(vault):
                 rules.append(Rule(name, "require", path, mtime, [], when, text, "", ()))
             sequences=tuple(item for item in ruling.get('require_tool_before',()) if item.strip().startswith('@'))
             if sequences:
-                rules.append(Rule(name,'sequence',path,mtime,[], '', '', '', sequences))
+                rules.append(Rule(name,'sequence',path,mtime,[], '', '', '', sequences,
+                                  ruling.get('audience') or 'all'))
             # 內建檢查（報告長度、引了沒打開過的檔）也算武裝。不算的話，夜間報表會把
             # 它們數成「沒武裝」，而它們每一回合都在擋。
             if _one_line(ruling.get(memspec.TURN_CHECK_FIELD)) in memspec.TURN_CHECK_NAMES:
