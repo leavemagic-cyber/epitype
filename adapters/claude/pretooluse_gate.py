@@ -1481,6 +1481,9 @@ def _review_one_target(event, config, target, additions, prospective, started_at
             if (owner_rules.BEGIN in str(prospective or "")
                     or owner_rules.BEGIN in locals().get("before", "")):
                 return _deny_value(f"交接裁定段無法驗證：{type(exc).__name__}"), notices
+    if patch is not None and patch.op == "delete":
+        # Owner ruling removal was checked above; deletion creates no card content.
+        return None, notices
     # 編碼守衛只看 BOM 與 ASCII，成本與內容大小無關，因此不隨大檔豁免：>256KB 的
     # .ps1/.psm1/.psd1 若沒有 BOM 且含非 ASCII，PowerShell 5.1 一樣會用 cp950 讀壞。
     write_check = _write_check_review(event, config, target, prospective, patch, started_at)
@@ -1590,7 +1593,7 @@ def _envelope_review(event, tool_input, config, started_at):
         if entry.op == "delete":
             if target.suffix.casefold() == ".md":
                 deny, _advice = _review_one_target(
-                    event, config, target, [], "", started_at, session_id)
+                    event, config, target, [], "", started_at, session_id, patch=entry)
                 if deny is not None:
                     return deny, []
             continue

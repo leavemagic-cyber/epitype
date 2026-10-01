@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Check owner-ruling removal on Markdown deletes without treating deletion as an empty replacement card.
+
 - Give nightly replacement fixtures explicit governance configuration while preserving all replacement, backup, cap, and read-only assertions.
 
 - Save recalled project-card compaction pointers under their source vault rather than the shared delivery ledger's vault.
