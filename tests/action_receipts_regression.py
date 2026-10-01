@@ -11,7 +11,7 @@ class Receipts(unittest.TestCase):
         temp=tempfile.TemporaryDirectory(); self.addCleanup(temp.cleanup)
         self.root=Path(temp.name).resolve(); self.db=self.root/'facts.db'
         self.file=self.root/'old.md'; self.file.write_text('old')
-        self.event={'session_id':'root','transcript_path':'/home/.claude/projects/p/session.jsonl',
+        self.event={'session_id':'root','transcript_path':str(self.root/'.claude/projects/p/session.jsonl'),
                     'tool_use_id':'read','tool_name':'Read','tool_input':{'file_path':str(self.file)},'cwd':str(self.root)}
 
     def test_causal_success_and_no_raw_body(self):
@@ -25,7 +25,7 @@ class Receipts(unittest.TestCase):
         self.assertFalse(receipts.finish(result,self.db))
 
     def test_failed_pending_conflict_and_sibling_are_not_credit(self):
-        event={**self.event,'turn_id':'turn','transcript_path':'/home/.codex/sessions/one.jsonl'}
+        event={**self.event,'turn_id':'turn','transcript_path':str(self.root/'.codex/sessions/one.jsonl')}
         receipts.begin(event,self.db)
         self.assertEqual(receipts.read({**event,'agent_id':'other'},self.db),())
         self.assertFalse(receipts.finish({**event,'agent_id':'other','tool_response':{'exit_code':0}},self.db))

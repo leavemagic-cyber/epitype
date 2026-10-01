@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Derive receipt test transcript paths from their temporary fixtures, keeping public examples portable and privacy-clean.
+
 - Preserve root/sub reader scope in nightly sequence checks and expose opaque calls beside zero-hit results.
 
 - Close the nightly gate-health staging file before its atomic replacement, avoiding leaked handles on Windows.
