@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Replay target sequences from historical result IDs and recorded inventories, register them as armed rules, and report allow/block/unknown coverage in nightly reports.
+
 - Prevent provable prerequisite omissions before a tool runs while preserving explicit unknown coverage for resumed sessions, opaque programs, self-authored drafts, and possible host-loaded sources.
 
 - Index completed prerequisites once per check and parse both official Git inventory formats, keeping long-session checks bounded.

@@ -116,6 +116,9 @@ def armed_rules(vault):
             text = _one_line(ruling.get("require_text"))
             if when and text:
                 rules.append(Rule(name, "require", path, mtime, [], when, text, "", ()))
+            sequences=tuple(item for item in ruling.get('require_tool_before',()) if item.strip().startswith('@'))
+            if sequences:
+                rules.append(Rule(name,'sequence',path,mtime,[], '', '', '', sequences))
             # 內建檢查（報告長度、引了沒打開過的檔）也算武裝。不算的話，夜間報表會把
             # 它們數成「沒武裝」，而它們每一回合都在擋。
             if _one_line(ruling.get(memspec.TURN_CHECK_FIELD)) in memspec.TURN_CHECK_NAMES:

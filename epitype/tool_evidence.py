@@ -18,6 +18,7 @@ class Call:
     response: object = None
     stamp: str = ""
     actor: str = ""
+    result_kind: str = ""
 
 
 def outcome(value):
@@ -119,6 +120,8 @@ def calls(rows):
             if call.finished and (call.success != status or call.response != response):
                 call.success, call.finished = None, -1
                 continue
+            meta=row.get("toolUseResult")
+            if isinstance(meta,dict): call.result_kind=str(meta.get("type") or "")
             call.success, call.finished, call.response = status, position, response
     return ordered
 

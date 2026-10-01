@@ -2043,6 +2043,9 @@ def _section_compliance(vaults, today, since_date, config, context=None):
         "errors": errors,
         "note": _coverage_note(covered, frontier, window_reset),
         "delivery": delivery,
+        "sequences": __import__("epitype.sequence_replay", fromlist=["report"]).report(
+            [rule for _vault,rule in all_rules if rule.kind=='sequence'],transcripts,
+            since=since_stamp,until=until_stamp,deadline=context.get('deadline')),
         "wrapped_commands": __import__("epitype.wrapped_commands", fromlist=["report"]).report(
             transcripts, since=since_stamp, until=until_stamp),
         "rewrite_cost": __import__("epitype.rewrite_cost", fromlist=["report"]).report(
@@ -2398,6 +2401,12 @@ def _render_section(lines, section):
         for item in unclassified:
             lines.append(f"- {item}")
     delivery = section.get("delivery") or {}
+    sequence=section.get('sequences') or {}
+    if sequence.get('cards'):
+        measured=sequence.get('counts') or {}
+        lines.append('工具順序證據：放行 %d、違反 %d、未驗證 %d；檔案覆蓋 %d，完整=%s。' % (
+            measured.get('allow',0),measured.get('block',0),measured.get('unverified',0),
+            sequence.get('read_files',0),sequence.get('complete',False)))
     rewrite_cost = section.get("rewrite_cost") or []
     if rewrite_cost:
         lines.append("每條回合擋下的代價（同帳處置重放；內容效益另核對）：")
