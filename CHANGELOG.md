@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Resolve literal actions to the actual file and main checkout, preserve Windows paths, and exclude multi-statement success guesses and new-file writes.
+
 - Correlate actual tool calls with host result IDs, cwd, and causal completion; reject conflicting IDs and preserve unknown outcomes.
 
 - Allow read-only JSON serialization in native-setting audits while continuing to block stream dumps and file writes of managed keys.
