@@ -635,7 +635,7 @@ def _recurrence_review(card, target, additions, prospective, patch, started_at, 
     return _deny_value(reason[: memspec.WRITE_GATE_REASON_MAX_CHARS])
 
 
-_Guard = namedtuple("_Guard", "card tool substrings advice path requires unless when write_check advise_tool advise_fragments advise_text")
+_Guard = namedtuple("_Guard", "card tool substrings advice path requires unless when write_check advise_tool advise_fragments advise_text sequence audience", defaults=((), ""))
 
 
 def _read_guard(path):
@@ -646,7 +646,7 @@ def _read_guard(path):
     bad items instead would leave fewer required fragments and therefore a guard that
     matches *more* than its author wrote."""
     front = declared_frontmatter(
-        path, (memspec.ACTION_GUARD_TOOL_FIELD, "advise_tool"), memspec.STOP_GATE_FRONTMATTER_MAX_BYTES
+        path, (memspec.ACTION_GUARD_TOOL_FIELD, "advise_tool", "require_tool_before"), memspec.STOP_GATE_FRONTMATTER_MAX_BYTES
     )
     if front is None:
         front = declared_frontmatter(
@@ -664,6 +664,16 @@ def _read_guard(path):
     name = one_line(fields.get(memspec.NAME_FIELD)) or path.stem
     tool = one_line(fields.get(memspec.ACTION_GUARD_TOOL_FIELD))
     write_check = one_line(fields.get(memspec.WRITE_CHECK_FIELD))
+    if not tool and not write_check and fields.get('require_tool_before') is not None:
+        from epitype import action_sequence
+        items=sequence_fields(front,('require_tool_before',))['require_tool_before']
+        try:
+            items=[item for item in items if action_sequence.rule(item) is not None]
+        except ValueError as exc:
+            return memspec.ACTION_GUARD_DEFECT.format(card=name,field='require_tool_before',reason=str(exc))
+        if not items: return None
+        return {'card':name,'sequence':items,'audience':one_line(fields.get('audience')),
+                'expires':one_line(fields.get(memspec.VALID_UNTIL_FIELD))}
     if not tool and not write_check and fields.get("advise_tool"):
         fragments = sequence_fields(front, ("advise_all_of",))["advise_all_of"]
         if any(not isinstance(item, str) or not item.strip() for item in fragments):
@@ -867,7 +877,7 @@ def warm_guard_cache(vaults, started_at, deadline=None):
 _WARM_CAP = 1 << 30
 # 欄位形狀增加 write_check；版本不對就整份重讀。
 # 6：包在 `metadata:` 底下的守衛欄位照頂層讀，舊快取把那些卡記成「沒有守衛」。
-_GUARD_CACHE_VERSION = 7
+_GUARD_CACHE_VERSION = 8
 
 
 def _guards(vault, started_at, defects, cap=None, deadline=None):
@@ -970,7 +980,7 @@ def _guards(vault, started_at, defects, cap=None, deadline=None):
             defects.append(entry)
         elif isinstance(entry, dict) and (
             entry.get("substrings") or entry.get("requires") or entry.get("when")
-            or entry.get("write_check") or entry.get("advise_tool")
+            or entry.get("write_check") or entry.get("advise_tool") or entry.get("sequence")
         ):
             if memspec.card_expired(entry.get("expires")):
                 # 過期的守衛不再攔人；時限型的規則要自己停下來，不能靠人記得去拔。
@@ -998,6 +1008,8 @@ def _guards(vault, started_at, defects, cap=None, deadline=None):
                     entry.get("advise_tool", ""),
                     tuple(entry.get("advise_fragments") or ()),
                     entry.get("advise_text", ""),
+                    tuple(entry.get("sequence") or ()),
+                    entry.get("audience", ""),
                 )
             )
     return found
@@ -1048,6 +1060,29 @@ def _guard_review(event, tool_name, tool_input, config, started_at, defects, adv
         # 永遠回空集合，而為了拿一個空集合，每一次工具呼叫都要多載 8.3 ms 的模組。
         demoted = frozenset()
         for guard in _guards(vault, started_at, defects):
+            if guard.sequence:
+                from epitype import action_receipts, action_sequence, tool_sequence
+                if not tool_sequence.applies(guard.audience,event): continue
+                actions=action_receipts.projected(event)
+                mutations={item.partition('=>')[2].strip()[1:] for item in guard.sequence}
+                if any(action.kind in mutations for action in actions):
+                    facts=action_receipts.read(event,action_receipts.database_path(config_path()))
+                    start=max((max(f.started,f.finished) for f in facts),default=0)+1
+                    # This is a proposed operation, not persisted execution evidence.
+                    proposed=action_receipts.Fact('__proposed__',start,start+1,True,tuple(actions))
+                    judgments=action_sequence.check(guard.sequence,(*facts,proposed),{'__proposed__'},
+                        covered=action_receipts.coverage(event,action_receipts.database_path(config_path())))
+                    missing=next((j for j in judgments if j.verdict=='block'),None)
+                    if missing:
+                        _best_effort_audit(append_gate_log,vault,with_session({
+                            'kind':memspec.ACTION_GUARD_LOG_KIND,'rule':'tool_sequence','card':guard.card,
+                            'card_path':str(guard.path.relative_to(vault)),'tool':tool_name,
+                            'digest':hashlib.sha256(haystack.encode('utf-8',errors='replace')).hexdigest()[:16]},
+                            event.get('session_id')),started_at)
+                        return _deny_value(f'[{guard.card}] {missing.reason}')
+                    for unknown in (j for j in judgments if j.verdict=='unverified'):
+                        defects.append(f'[{guard.card}] UNVERIFIED: {unknown.reason}')
+                continue
             if (advisories is not None and guard.advise_text
                     and memspec.action_guard_tool_matches(guard.advise_tool, folded_tool)
                     and all(fragment in haystack for fragment in guard.advise_fragments)):

@@ -35,6 +35,7 @@ class Integration(unittest.TestCase):
                     rows=[{'type':'response_item','payload':{'type':'message','role':'user','content':[{'type':'input_text','text':'do it'}]}},
                           {'type':'response_item','payload':{'type':'function_call','call_id':'outer','name':'functions_exec','arguments':'{"code":"await tool()"}'}}]
                 path.write_text('\n'.join(json.dumps(r) for r in rows),encoding='utf-8')
+                action_receipts.initialize({**meta,"source":"startup"},action_receipts.database_path(self.config))
                 for identity,name in ([('read','Read')] if allowed else [])+[('edit','Edit')]:
                     event={**meta,'tool_use_id':identity,'tool_name':name,'tool_input':{'file_path':str(file)},'hook_event_name':'PreToolUse'}
                     self.invoke(event)
@@ -57,6 +58,36 @@ class Integration(unittest.TestCase):
         defects=[]
         self.assertIsNone(stop_gate._handle({'session_id':'missing','transcript_path':str(path),'last_assistant_message':'done'},time.monotonic(),defects))
         self.assertTrue(any('UNVERIFIED' in defect for defect in defects))
+
+    def test_prevents_action_but_partial_history_is_not_false_block(self):
+        self.write_card('read.md',name='read-first',require_tool_before=['@file.read => @file.change'],audience='root')
+        file=self.root/'old.md'; file.write_text('old')
+        event={'session_id':'pre-'+self.root.name,'transcript_path':str(self.root/'.claude/one.jsonl'),
+               'cwd':str(self.root),'tool_use_id':'edit','tool_name':'Edit','tool_input':{'file_path':str(file)}}
+        defects=[]
+        self.assertIsNone(pretool._handle(event,time.monotonic(),defects))
+        self.assertTrue(any('UNVERIFIED' in d for d in defects))
+        action_receipts.initialize({**event,'source':'startup'},action_receipts.database_path(self.config))
+        denied=pretool._handle(event,time.monotonic(),[])
+        self.assertEqual(denied['hookSpecificOutput']['permissionDecision'],'deny')
+        read={**event,'tool_use_id':'read','tool_name':'Read'}
+        action_receipts.begin(read,action_receipts.database_path(self.config))
+        action_receipts.finish({**read,'tool_response':{}},action_receipts.database_path(self.config))
+        self.assertIsNone(pretool._handle(event,time.monotonic(),[]))
+        self.assertIsNone(pretool._handle({**event,'agent_id':'other'},time.monotonic(),[]))
+
+    def test_missing_pre_and_opaque_program_cannot_prove_absence(self):
+        self.write_card('read.md',name='read-first',require_tool_before=['@file.read => @file.change'])
+        file=self.root/'old.md';file.write_text('old')
+        event={'session_id':'missing-'+self.root.name,'transcript_path':str(self.root/'.claude/one.jsonl'),
+               'cwd':str(self.root),'tool_use_id':'edit','tool_name':'Edit','tool_input':{'file_path':str(file)}}
+        path=action_receipts.database_path(self.config)
+        action_receipts.initialize({**event,'source':'startup'},path)
+        shell={**event,'tool_use_id':'shell','tool_name':'Bash','tool_input':{'command':'if true; then cat old.md; fi'}}
+        action_receipts.begin(shell,path);action_receipts.finish({**shell,'tool_response':{}},path)
+        self.assertIsNone(pretool._handle(event,time.monotonic(),[]))
+        action_receipts.finish({**event,'tool_response':{}},path)
+        self.assertFalse(action_receipts.coverage(event,path))
 
 
 if __name__=='__main__':

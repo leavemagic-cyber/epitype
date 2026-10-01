@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Prevent provable prerequisite omissions before a tool runs while preserving explicit unknown coverage for resumed sessions, opaque programs, self-authored drafts, and possible host-loaded sources.
+
 - Index completed prerequisites once per check and parse both official Git inventory formats, keeping long-session checks bounded.
 
 - Check same-target prerequisites from completed Pre/PostToolUse receipts in both hosts, including nested code-mode tools; missing signals stay unverified and old actions do not permanently block later turns.

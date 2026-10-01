@@ -19,6 +19,7 @@ from epitype import compact_map, memspec
 from _hook_common import (
     isolated_temp_root,
     bounded_context,
+    config_path,
     emit,
     expired,
     failure_reason,
@@ -1558,6 +1559,9 @@ def main():
     trace = {"outcome": "unknown", "map": False, "handoff": False, "lines": []}
     try:
         event = read_event(sys.stdin)
+        if config_path().exists():
+            from epitype import action_receipts
+            action_receipts.initialize(event, action_receipts.database_path(config_path()))
         if isinstance(event, dict) and event.get("source") == "compact":
             trace_hook("SessionStart", event, _STARTED_AT, phase="start", run=run)
         deliveries = []

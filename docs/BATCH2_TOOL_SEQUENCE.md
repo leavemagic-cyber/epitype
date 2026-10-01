@@ -31,3 +31,5 @@ require_tool_before 可使用 @file.read => @file.change、@git.status => @git.m
 官方依據：[Claude hooks](https://code.claude.com/docs/en/hooks#posttooluse) 的 PostToolUse 是成功事件；[Codex hooks](https://learn.chatgpt.com/docs/hooks) 包含非零 shell 結果及 code mode 真內層工具，所以必須各自判讀。兩邊使用既有事件與 matcher。[Git worktree](https://git-scm.com/docs/git-worktree) 的 gitdir／commondir 區分主／側樹，porcelain inventory 提供具體工作樹路徑。
 
 文字摘要／評斷、何謂大量變更，以及複雜腳本未提供可驗證的內層結果，仍需人的判斷或標未驗證；不擅自設數字門檻。上述欄位不替代原卡全文，也不代表回條能證明工具結果內容正確。
+
+新場才從完整起點記錄；resume／compact 不追造遺失紀錄。中途安裝、少了 Pre 回條或先前不透明程式，沒有先做證據時列 UNVERIFIED。已完成、同一目標的正向證據仍可放行。相同 typed 欄位在 PreToolUse 先檢查，避免操作後才補讀；Stop 繼續檢查實際完成結果。兩處共用同一個關係引擎和既有守衛快取，沒有新增宿主 matcher。

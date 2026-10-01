@@ -60,6 +60,15 @@ class Sequence(unittest.TestCase):
         self.assertEqual(len(inventory),2)
         self.assertIn('a b',inventory[1])
 
+    def test_self_authored_draft_and_possible_host_loaded_source_are_unverified(self):
+        draft=fact('create','file.create','new.md',1,2)
+        edited=fact('edit','file.change','new.md',3,4)
+        result,=action_sequence.check(['@file.read => @file.change'],[draft,edited])
+        self.assertEqual(result.verdict,'unverified')
+        source=fact('edit','file.change','MEMORY.md',3,4)
+        self.assertEqual(action_sequence.check(['@file.read => @file.change'],[source])[0].verdict,'unverified')
+        self.assertEqual(action_sequence.check(['@file.read => @file.change'],[edited],covered=False)[0].verdict,'unverified')
+
 
 if __name__=='__main__':
     if '--selftest' in sys.argv: sys.argv.remove('--selftest')

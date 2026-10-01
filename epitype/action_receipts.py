@@ -50,6 +50,7 @@ def _db(path):
         db.execute('CREATE TABLE IF NOT EXISTS clock (id INTEGER PRIMARY KEY, value INTEGER NOT NULL)')
         db.execute('INSERT OR IGNORE INTO clock VALUES(1,0)')
         db.execute('CREATE INDEX IF NOT EXISTS facts_actor ON facts(actor,started)')
+        db.execute('CREATE TABLE IF NOT EXISTS actors (actor TEXT PRIMARY KEY, complete INTEGER NOT NULL)')
         with db: yield db
 
 
@@ -57,6 +58,19 @@ def _tick(db):
     db.execute('UPDATE clock SET value=value+1 WHERE id=1')
     return db.execute('SELECT value FROM clock WHERE id=1').fetchone()[0]
 
+
+
+def initialize(event,path):
+    if not event.get('session_id'): return
+    with _db(path) as db:
+        db.execute('INSERT OR IGNORE INTO actors VALUES(?,?)',(actor(event),int(event.get('source')=='startup')))
+
+
+def coverage(event,path):
+    if not Path(path).exists(): return False
+    with _db(path) as db:
+        row=db.execute('SELECT complete FROM actors WHERE actor=?',(actor(event),)).fetchone()
+    return bool(row and row[0])
 
 def signature(event):
     data=json.dumps([event.get('tool_name'),event.get('tool_input')],sort_keys=True,separators=(',',':'),ensure_ascii=False)
@@ -67,7 +81,11 @@ def begin(event,path):
     identity=event.get('tool_use_id')
     if not identity or not event.get('session_id'): return False
     actions=projected(event)
-    if not actions: return False
+    if not actions:
+        name=str(event.get('tool_name','')).casefold().rsplit('.',1)[-1]
+        if name not in ('bash','powershell','exec_command','local_shell_call','shell_command','grep','glob'): return False
+        actions=[action_targets.Action('evidence.opaque','','')]
+
     encoded=json.dumps([(a.kind,a.target,a.repository) for a in actions],separators=(',',':'))
     with _db(path) as db:
         prior=db.execute('SELECT signature FROM facts WHERE actor=? AND call_id=?',(actor(event),identity)).fetchone()
@@ -125,12 +143,15 @@ def status(event):
 def finish(event,path):
     identity=event.get('tool_use_id')
     name=str(event.get('tool_name','')).casefold().rsplit('.',1)[-1]
-    if name not in ('read','write','edit','multiedit','apply_patch','bash','powershell','exec_command','local_shell_call','shell_command'):
+    if name not in ('read','write','edit','multiedit','apply_patch','bash','powershell','exec_command','local_shell_call','shell_command','grep','glob'):
         return False
     if not identity or not event.get('session_id') or not Path(path).exists(): return False
     with _db(path) as db:
         prior=db.execute('SELECT actions,finished,success,signature FROM facts WHERE actor=? AND call_id=?',(actor(event),identity)).fetchone()
-        if prior is None or prior[1]==-1: return False
+        if prior is None:
+            db.execute('INSERT OR REPLACE INTO actors VALUES(?,0)',(actor(event),))
+            return False
+        if prior[1]==-1: return False
         if prior[3]!=signature(event):
             db.execute('UPDATE facts SET finished=-1,success=NULL WHERE actor=? AND call_id=?',(actor(event),identity))
             return False

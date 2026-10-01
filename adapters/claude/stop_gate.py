@@ -1413,12 +1413,14 @@ def _first_violation(decisions, event, message, config, started_at, defects, tur
         from epitype import tool_sequence, action_receipts, action_sequence
         semantic = any(any(item.strip().startswith('@') for item in d.require_tool_before) for d in decisions)
         facts = action_receipts.read(event, action_receipts.database_path(config_path())) if semantic else ()
+        covered = action_receipts.coverage(event, action_receipts.database_path(config_path())) if semantic else False
         for decision in decisions:
             try:
                 reason = tool_sequence.gap(decision.require_tool_before, decision.pair_tools, turn.tools)
                 if not reason:
                     active = ({f.call_id for f in facts if f.turn == event["turn_id"]} if event.get("turn_id") else set(turn.call_ids))
-                    judgments = action_sequence.check(decision.require_tool_before, facts, active)
+                    judgments = action_sequence.check(decision.require_tool_before, facts, active,
+                                                       covered=covered)
                     if any(item.strip().startswith("@") for item in decision.require_tool_before) and turn.tools and not judgments:
                         defects.append(f"[{decision.key}] UNVERIFIED: 此回合沒有可判讀的目標／完成回條")
                     blocked = next((j for j in judgments if j.verdict == 'block'), None)
