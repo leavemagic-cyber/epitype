@@ -51,6 +51,10 @@ def _db(path):
         db.execute('INSERT OR IGNORE INTO clock VALUES(1,0)')
         db.execute('CREATE INDEX IF NOT EXISTS facts_actor ON facts(actor,started)')
         db.execute('CREATE TABLE IF NOT EXISTS actors (actor TEXT PRIMARY KEY, complete INTEGER NOT NULL)')
+        columns={row[1] for row in db.execute('PRAGMA table_info(facts)')}
+        for name in ('source_id','source_signature'):
+            if name not in columns: db.execute('ALTER TABLE facts ADD COLUMN '+name+' TEXT DEFAULT ""')
+        db.execute('CREATE INDEX IF NOT EXISTS facts_source ON facts(actor,source_id)')
         with db: yield db
 
 
@@ -93,8 +97,11 @@ def begin(event,path):
             if prior[0]!=signature(event):
                 db.execute('UPDATE facts SET success=NULL,finished=-1 WHERE actor=? AND call_id=?',(actor(event),identity))
             return False
-        db.execute('INSERT INTO facts(actor,call_id,turn,started,actions,signature,seen) VALUES(?,?,?,?,?,?,?)',
-                   (actor(event),identity,event.get('turn_id',''),_tick(db),encoded,signature(event),time.time()))
+        source=event.get('_epitype_source') or ('','')
+        if source[0] and db.execute('SELECT 1 FROM facts WHERE actor=? AND source_id=?',(actor(event),source[0])).fetchone():
+            source=('','')
+        db.execute('INSERT INTO facts(actor,call_id,turn,started,actions,signature,seen,source_id,source_signature) VALUES(?,?,?,?,?,?,?,?,?)',
+                   (actor(event),identity,event.get('turn_id',''),_tick(db),encoded,signature(event),time.time(),*source))
     return True
 
 
@@ -173,3 +180,57 @@ def read(event,path):
     return tuple(Fact(i,s,f,None if ok is None else bool(ok),
                       tuple(action_targets.Action(*a) for a in json.loads(actions)),turn,tuple(json.loads(scopes)))
                  for i,s,f,ok,actions,turn,scopes in rows)
+
+
+def _source_signature(call):
+    data=json.dumps([call.name,call.payload,call.cwd],sort_keys=True,separators=(',',':'),ensure_ascii=False)
+    return hashlib.sha256(data.encode('utf-8')).hexdigest()
+
+
+def refresh(event,path):
+    """Complete ID-bound native facts through the existing transcript interface.
+
+    Existing Post matchers may cover only browsers. Bind the pending actual call
+    at Pre, then accept only its unchanged arguments and correlated host result.
+    This reads at most 1 MiB; an absent/truncated result stays pending.
+    """
+    from . import memspec
+    transcript=event.get('transcript_path')
+    if not transcript: return event
+    try: calls=tool_evidence.recent(Path(transcript),event.get('cwd',''))
+    except OSError: return event
+    agent=str(event.get('agent_id') or event.get('agentId') or '')
+    calls=[call for call in calls if call.actor==agent]
+    if Path(path).exists():
+        with _db(path) as db:
+            for call in sorted(calls,key=lambda c:c.finished):
+                if call.finished<=0: continue
+                prior=db.execute('SELECT call_id,actions,finished,success,source_signature FROM facts WHERE actor=? AND source_id=?',
+                                 (actor(event),call.call_id)).fetchone()
+                if not prior or prior[2]==-1: continue
+                if prior[4]!=_source_signature(call):
+                    db.execute('UPDATE facts SET finished=-1,success=NULL WHERE actor=? AND call_id=?',(actor(event),prior[0]));continue
+                if call.success is None: continue
+                if prior[2]:
+                    if bool(prior[3])!=call.success:
+                        db.execute('UPDATE facts SET finished=-1,success=NULL WHERE actor=? AND call_id=?',(actor(event),prior[0]))
+                    continue
+                scopes=inventory(call.response,call.cwd) if call.success is True and any(a[0]=='git.worktrees' for a in json.loads(prior[1])) else ()
+                db.execute('UPDATE facts SET finished=?,success=?,inventory=? WHERE actor=? AND call_id=?',
+                           (_tick(db),call.success,json.dumps(scopes),actor(event),prior[0]))
+    if event.get('hook_event_name') not in (None,'PreToolUse'): return event
+    payload=event.get('tool_input') or {};name=str(event.get('tool_name') or '')
+    pending=[]
+    latest=max((call.started for call in calls),default=0)
+    for call in calls:
+        if call.finished or call.started!=latest or not memspec.action_guard_tool_matches(name,call.name): continue
+        direct=call.call_id==event.get('tool_use_id') and call.payload==payload
+        shell=call.name.casefold()=='exec_command' and (payload.get('command') or payload.get('cmd'))==call.payload.get('cmd')
+        patch=call.name.casefold()=='apply_patch' and (payload.get('input') or payload.get('patch'))==call.payload.get('input')
+        if direct or shell or patch: pending.append(call)
+    if len(pending)!=1: return event
+    call=pending[0]
+    enriched={**event,'_epitype_source':(call.call_id,_source_signature(call))}
+    if call.payload.get('workdir'):
+        enriched['tool_input']={**payload,'workdir':call.payload['workdir']}
+    return enriched

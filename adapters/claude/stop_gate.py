@@ -1412,6 +1412,7 @@ def _first_violation(decisions, event, message, config, started_at, defects, tur
     if turn is not None and turn.prompt:
         from epitype import tool_sequence, action_receipts, action_sequence
         semantic = any(any(item.strip().startswith('@') for item in d.require_tool_before) for d in decisions)
+        if semantic: action_receipts.refresh(event,action_receipts.database_path(config_path()))
         facts = action_receipts.read(event, action_receipts.database_path(config_path())) if semantic else ()
         covered = action_receipts.coverage(event, action_receipts.database_path(config_path())) if semantic else False
         for decision in decisions:

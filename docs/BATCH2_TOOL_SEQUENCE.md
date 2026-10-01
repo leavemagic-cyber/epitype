@@ -33,3 +33,7 @@ require_tool_before 可使用 @file.read => @file.change、@git.status => @git.m
 文字摘要／評斷、何謂大量變更，以及複雜腳本未提供可驗證的內層結果，仍需人的判斷或標未驗證；不擅自設數字門檻。上述欄位不替代原卡全文，也不代表回條能證明工具結果內容正確。
 
 新場才從完整起點記錄；resume／compact 不追造遺失紀錄。中途安裝、少了 Pre 回條或先前不透明程式，沒有先做證據時列 UNVERIFIED。已完成、同一目標的正向證據仍可放行。相同 typed 欄位在 PreToolUse 先檢查，避免操作後才補讀；Stop 繼續檢查實際完成結果。兩處共用同一個關係引擎和既有守衛快取，沒有新增宿主 matcher。
+
+實際宿主接線另驗出：現有 PostToolUse matcher 只涵蓋瀏覽器，因此一般工具不會送完成回條。既有 Pre／Stop 現會從原生 transcript 補查已綁定的 call ID 與原參數摘要；只認相同 actor 的真正結果。Code mode 只接受單一、字面參數的 `text(await tools.exec_command(...))` 原生結果轉送，分支、多呼叫、變數與自行印出的成功字樣均不算執行證據。工作目錄取真正呼叫的 workdir，不能拿 hook 的 session cwd 冒充。查補最多讀最近 1 MiB，找不到完整來源便保持未驗證；夜間重放仍讀全檔。此相容解析按本機實際 call/output 格式驗證，不宣稱所有版本或所有 JavaScript 都可判讀。沒有改 hooks.json 或模板的 matcher。
+
+Pre 的 `sequence_allow` 稽核列代表該次工具前置檢查真正放行；操作成功仍另看完成結果。它不算違規或擋下次數。

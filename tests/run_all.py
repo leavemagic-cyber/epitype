@@ -109,6 +109,7 @@ SELFTESTS = (
     Path("tests") / "tool_evidence_regression.py",
     Path("tests") / "action_targets_regression.py",
     Path("tests") / "action_receipts_regression.py",
+    Path("tests") / "native_completion_regression.py",
     Path("tests") / "action_sequence_regression.py",
     Path("tests") / "action_receipts_integration_regression.py",
     Path("tests") / "sequence_replay_regression.py",

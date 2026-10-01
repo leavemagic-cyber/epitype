@@ -1081,6 +1081,12 @@ def _guard_review(event, tool_name, tool_input, config, started_at, defects, adv
                             'digest':hashlib.sha256(haystack.encode('utf-8',errors='replace')).hexdigest()[:16]},
                             event.get('session_id')),started_at)
                         return _deny_value(f'[{guard.card}] {missing.reason}')
+                    for allowed in (j for j in judgments if j.verdict=='allow'):
+                        _best_effort_audit(append_gate_log,vault,with_session({
+                            'kind':'sequence_allow','rule':'tool_sequence','card':guard.card,
+                            'card_path':str(guard.path.relative_to(vault)),'tool':tool_name,
+                            'target_digest':hashlib.sha256(allowed.target.encode('utf-8')).hexdigest()[:16],
+                            'tool_use_id':event.get('tool_use_id')},event.get('session_id')),started_at)
                     for unknown in (j for j in judgments if j.verdict=='unverified'):
                         defects.append(f'[{guard.card}] UNVERIFIED: {unknown.reason}')
                         if advisories is not None and guard.advice:
@@ -3179,6 +3185,9 @@ def main():
                     print(memspec.GATE_DEGRADED_NOTICE.format(
                         gate="PostToolUse", reason=type(exc).__name__), file=sys.stderr)
             return 0
+        from epitype import action_receipts
+        if config_path().exists():
+            event=action_receipts.refresh(event,action_receipts.database_path(config_path()))
         value = _handle(event, _STARTED_AT, defects, meter_claims, advice_claims)
         # 這一次呼叫碰到哪些檔，附記給回合閘用：說「我查過某個檔」的時候，那個檔名
         # 必須在這裡出現過。擋下的呼叫不記——那個檔根本沒被打開。

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Complete ID-bound tool facts from actual transcripts when existing PostToolUse matchers only cover browsers; accept a single literal forwarded native result, preserve its workdir, and keep missing or opaque evidence unknown without changing hook registrations.
+
 - Derive receipt test transcript paths from their temporary fixtures, keeping public examples portable and privacy-clean.
 
 - Preserve root/sub reader scope in nightly sequence checks and expose opaque calls beside zero-hit results.

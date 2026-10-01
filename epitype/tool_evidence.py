@@ -61,13 +61,13 @@ def outcome(value):
     return None
 
 
-def calls(rows):
+def calls(rows, cwd=''):
     """Preserve call/result IDs, cwd, and causal positions across owner turns.
 
     A later result cannot satisfy a prerequisite that was still pending when the
     action started. Reused IDs with different arguments invalidate the evidence.
     """
-    cwd, indexed, ordered = '', {}, []
+    indexed, ordered = {}, []
     for position, row in enumerate(rows, 1):
         if not isinstance(row, dict) or row.get('isMeta') or row.get('isCompactSummary'):
             continue
@@ -123,7 +123,8 @@ def calls(rows):
             meta=row.get("toolUseResult")
             if isinstance(meta,dict): call.result_kind=str(meta.get("type") or "")
             call.success, call.finished, call.response = status, position, response
-    return ordered
+    from .tool_forwarding import normalize
+    return [normalize(call) for call in ordered]
 
 
 def read(path):
@@ -135,3 +136,15 @@ def read(path):
                 except ValueError:
                     continue
     return calls(rows())
+
+
+def recent(path,cwd='',budget=1024*1024):
+    """Bounded live completion lookup; missing prefix is never proof of absence."""
+    with path.open('rb') as stream:
+        stream.seek(0,2);size=stream.tell();stream.seek(max(0,size-budget))
+        body=stream.read()
+    rows=[]
+    for line in body.splitlines():
+        try: rows.append(json.loads(line))
+        except (ValueError,UnicodeError): continue
+    return calls(rows,cwd)
