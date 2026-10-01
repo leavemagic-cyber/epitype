@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Give nightly replacement fixtures explicit governance configuration while preserving all replacement, backup, cap, and read-only assertions.
+
 - Save recalled project-card compaction pointers under their source vault rather than the shared delivery ledger's vault.
 
 - Keep tool-sequence validation available to the standalone card-lint CLI as well as package imports.

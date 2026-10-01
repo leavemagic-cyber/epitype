@@ -7,6 +7,7 @@ import sys; sys.dont_write_bytecode = True; [getattr(stream, "reconfigure", lamb
 """
 
 import io
+import json
 import os
 import tempfile
 from datetime import date
@@ -31,6 +32,8 @@ def _fixture(root, host_body):
     (home / ".claude").mkdir(parents=True)
     vault = root / "vault"
     vault.mkdir()
+    (home / '.epitype').mkdir()
+    (home / '.epitype/config.json').write_text(json.dumps({'vaults':[str(vault)]}), encoding='utf-8')
     (vault / "rule-a.md").write_text(RULE_CARD, encoding="utf-8")
     (vault / memspec.WORK_LEDGER_FILENAME).write_text("# 帳本\n", encoding="utf-8")
     (vault / memspec.HOST_SYNC_INDEX_FILENAME).write_text(
@@ -48,7 +51,9 @@ def _night(home, vault, config_text=None):
     """跑一次夜間第 14 節；家目錄與設定都指到臨時目錄。"""
     saved = os.environ.get(memspec.EPITYPE_CONFIG_ENV)
     config = home.parent / "config.json"
-    config.write_text(config_text or "{}", encoding="utf-8")
+    options = json.loads(config_text or "{}")
+    options['vaults'] = [str(vault)]
+    config.write_text(json.dumps(options), encoding="utf-8")
     original_home = Path.home
     try:
         os.environ[memspec.EPITYPE_CONFIG_ENV] = str(config)
