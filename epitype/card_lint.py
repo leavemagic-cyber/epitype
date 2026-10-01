@@ -925,7 +925,10 @@ def _check_card(path, relative, today, known_cards=None):
         findings.append((FAIL, "audience", "audience 必須是 root、sub 或 all"))
     if fields.get("require_on_hit", "") not in ("", "block", "note"):
         findings.append((FAIL, "require-on-hit", "require_on_hit 必須是 block 或 note"))
-    from .tool_sequence import gap
+    try:
+        from .tool_sequence import gap
+    except ImportError:  # Direct script entrypoint.
+        from tool_sequence import gap
     for field in ("require_tool_before", "pair_tools"):
         values = list(memspec.sequence_items(front_lines or (), field))
         try:

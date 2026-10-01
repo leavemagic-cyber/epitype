@@ -1,5 +1,8 @@
 """Literal, per-turn tool ordering; never a cross-hook running counter."""
-from . import memspec
+try:
+    from . import memspec
+except ImportError:  # Used by the standalone card-lint CLI.
+    import memspec
 
 
 def applies(audience, event):

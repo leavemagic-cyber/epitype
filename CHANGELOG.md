@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Keep tool-sequence validation available to the standalone card-lint CLI as well as package imports.
+
 - Record complete seven-day transcript coverage and retain target-identity sequence gaps instead of claiming unsupported live enforcement.
 
 - Keep the gate-report standalone entrypoint usable while preserving action-guard identities.
