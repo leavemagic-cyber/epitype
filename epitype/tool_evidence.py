@@ -16,6 +16,8 @@ class Call:
     finished: int = 0
     success: bool | None = None
     response: object = None
+    stamp: str = ""
+    actor: str = ""
 
 
 def outcome(value):
@@ -51,6 +53,7 @@ def outcome(value):
         if isinstance(parsed, (dict, list)):
             return outcome(parsed)
         # Anchored host process metadata, not an arbitrary mention of an exit code.
+        value = value.split('Final output:', 1)[0]
         codes = re.findall(r'(?m)^(?:Process exited with code|Exit code:)\s*(-?\d+)\s*$', value)
         if codes:
             return all(int(code) == 0 for code in codes)
@@ -65,7 +68,7 @@ def calls(rows):
     """
     cwd, indexed, ordered = '', {}, []
     for position, row in enumerate(rows, 1):
-        if not isinstance(row, dict):
+        if not isinstance(row, dict) or row.get('isMeta') or row.get('isCompactSummary'):
             continue
         if isinstance(row.get('cwd'), str):
             cwd = row['cwd']
@@ -89,24 +92,27 @@ def calls(rows):
             if not isinstance(content, list):
                 continue
             items = [(block.get('id'), block.get('name'), block.get('input')) for block in content
-                     if isinstance(block, dict) and block.get('type') == 'tool_use']
+                     if row.get('type') == 'assistant' and isinstance(block, dict) and block.get('type') == 'tool_use']
             results = [(block.get('tool_use_id'), block) for block in content
-                       if isinstance(block, dict) and block.get('type') == 'tool_result']
+                       if row.get('type') == 'user' and isinstance(block, dict) and block.get('type') == 'tool_result']
+        agent=str(row.get('agentId') or row.get('agent_id') or ('UNVERIFIED-SIDECHAIN' if row.get('isSidechain') else ''))
         for identity, name, arguments in items:
             if not isinstance(identity, str) or not identity or not isinstance(arguments, dict):
                 continue
             local_cwd = arguments.get('workdir') or arguments.get('cwd') or cwd
-            prior = indexed.get(identity)
+            prior = indexed.get((agent,identity))
             if prior is not None:
                 if (prior.name, prior.payload, prior.cwd) != (name, arguments, local_cwd):
                     prior.success = None
                     prior.finished = -1
                 continue
             call = Call(identity, str(name or ''), arguments, str(local_cwd or ''), position)
-            indexed[identity] = call
+            call.stamp = str(row.get("timestamp") or "")
+            call.actor = agent
+            indexed[(agent,identity)] = call
             ordered.append(call)
         for identity, response in results:
-            call = indexed.get(identity)
+            call = indexed.get((agent,identity))
             if call is None or call.finished == -1:
                 continue
             status = outcome(response)

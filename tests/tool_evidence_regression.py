@@ -46,6 +46,16 @@ class Evidence(unittest.TestCase):
         self.assertIsNone(item.success)
         self.assertEqual(item.finished,-1)
 
+    def test_user_paste_and_sibling_result_are_not_own_execution(self):
+        block={'type':'tool_use','id':'x','name':'Read','input':{'file_path':'a.md'}}
+        result={'type':'tool_result','tool_use_id':'x','content':'file'}
+        self.assertEqual(tool_evidence.calls([{'type':'user','message':{'content':[block]}}]),[])
+        rows=[{'type':'assistant','message':{'content':[block]}},
+              {'type':'user','agentId':'sibling','message':{'content':[result]}}]
+        call,=tool_evidence.calls(rows)
+        self.assertIsNone(call.success)
+        self.assertEqual(call.finished,0)
+
 
 if __name__ == '__main__':
     if '--selftest' in sys.argv:

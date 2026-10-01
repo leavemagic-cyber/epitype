@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Keep tool evidence within its actual actor and role, and distinguish process headers from arbitrary final-output data.
+
 - Resolve literal actions to the actual file and main checkout, preserve Windows paths, and exclude multi-statement success guesses and new-file writes.
 
 - Correlate actual tool calls with host result IDs, cwd, and causal completion; reject conflicting IDs and preserve unknown outcomes.
