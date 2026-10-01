@@ -28,6 +28,23 @@ def rule(item):
 
 
 def check(items,facts,active_ids=None):
+    from bisect import bisect_left
+    # Index completed facts once. A long session must not cost a full scan for
+    # every modification, and a pending result must retain its causal boundary.
+    completed={}; unknown={}; updates={}
+    for fact in facts:
+        for action in fact.actions:
+            key=(action.kind,action.target,fact.actor)
+            if fact.success is True and fact.finished>0:
+                if action.kind!='git.worktrees' or fact.inventory:
+                    completed.setdefault(key,[]).append(fact.finished)
+                else:
+                    unknown[key]=min(unknown.get(key,fact.started),fact.started)
+                if action.kind=='git.main_update':
+                    updates.setdefault((action.target,fact.actor),[]).append(fact.finished)
+            elif fact.success is None or fact.finished==0:
+                unknown[key]=min(unknown.get(key,fact.started),fact.started)
+    for values in (*completed.values(),*updates.values()): values.sort()
     judgments=[]
     for item in items:
         pair=rule(item)
@@ -45,21 +62,15 @@ def check(items,facts,active_ids=None):
                 if not key:
                     judgments.append(Judgment(item,current.call_id,action.target,'unverified','無法確認相關 repo',current.actor))
                     continue
-                candidates=[]; unknown=False
-                changed=0
-                for prior in facts:
-                    if prior.call_id==current.call_id or prior.actor!=current.actor: continue
-                    for observed in prior.actions:
-                        if mutation=='git.main_update' and observed.kind==mutation and observed.target==action.target and prior.success is True and 0<prior.finished<current.started:
-                            changed=max(changed,prior.finished)
-                        if observed.kind!=prerequisite or observed.target!=key: continue
-                        if prior.started<current.started and (prior.success is None or not prior.finished):
-                            unknown=True
-                        if prior.success is True and 0<prior.finished<current.started:
-                            if prerequisite=='git.worktrees' and not prior.inventory:
-                                unknown=True
-                            else: candidates.append(prior.finished)
-                verdict='allow' if any(end>changed for end in candidates) else ('unverified' if unknown else 'block')
+                identity=(prerequisite,key,current.actor)
+                candidates=completed.get(identity,())
+                index=bisect_left(candidates,current.started)
+                end=candidates[index-1] if index else 0
+                changes=updates.get((action.target,current.actor),()) if mutation=='git.main_update' else ()
+                index=bisect_left(changes,current.started)
+                changed=changes[index-1] if index else 0
+                uncertainty=unknown.get(identity,current.started)<current.started
+                verdict='allow' if end>changed else ('unverified' if uncertainty else 'block')
                 reason='' if verdict=='allow' else ('先前工具結果未驗證' if verdict=='unverified' else '缺少同一目標在操作開始前成功完成的 '+prerequisite)
                 judgments.append(Judgment(item,current.call_id,action.target,verdict,reason,current.actor))
     return judgments

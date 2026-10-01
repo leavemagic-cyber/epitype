@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Index completed prerequisites once per check and parse both official Git inventory formats, keeping long-session checks bounded.
+
 - Check same-target prerequisites from completed Pre/PostToolUse receipts in both hosts, including nested code-mode tools; missing signals stay unverified and old actions do not permanently block later turns.
 
 - Keep tool evidence within its actual actor and role, and distinguish process headers from arbitrary final-output data.

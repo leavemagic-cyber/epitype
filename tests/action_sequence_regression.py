@@ -48,6 +48,18 @@ class Sequence(unittest.TestCase):
         self.assertEqual(result.verdict,'unverified')
         with self.assertRaises(ValueError): action_sequence.rule('@file.read => @unknown')
 
+    def test_long_sessions_and_default_inventory_have_same_verdict(self):
+        import time
+        facts=[fact(str(i),'file.read',str(i),i*2+1,i*2+2) for i in range(10000)]
+        facts.append(fact('action','file.change','9000',30000,30001))
+        started=time.monotonic()
+        result,=action_sequence.check(['@file.read => @file.change'],facts,{'action'})
+        self.assertEqual(result.verdict,'allow')
+        print('10001 facts indexed in %.4fs'%(time.monotonic()-started))
+        inventory=action_receipts.inventory('C:/bare (bare)\nC:/a b  abcd1234 [main]\n',live=False)
+        self.assertEqual(len(inventory),2)
+        self.assertIn('a b',inventory[1])
+
 
 if __name__=='__main__':
     if '--selftest' in sys.argv: sys.argv.remove('--selftest')

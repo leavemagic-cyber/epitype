@@ -93,8 +93,12 @@ def text(response):
 def inventory(response,cwd='', *, live=True):
     import re
     # Git's documented porcelain format is unambiguous even for spaces.
-    return tuple(filter(None,(action_targets.canonical(path,cwd,resolve=live)
-                              for path in re.findall(r'(?m)^worktree ([^\r\n\x00]+)',text(response)))))
+    body=text(response).replace(chr(0),chr(10))
+    paths=re.findall(r'(?m)^worktree ([^\r\n\x00]+)',body)
+    if not paths:
+        # Git's documented default format: path, abbreviated HEAD, branch.
+        paths=re.findall(r'(?m)^(.+?)\s+(?:[0-9a-f]{7,40}\s+(?:\[.*\]|\(detached HEAD\))|\(bare\)).*$',body)
+    return tuple(filter(None,(action_targets.canonical(path,cwd,resolve=live) for path in paths)))
 
 
 def status(event):
