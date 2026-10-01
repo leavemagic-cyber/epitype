@@ -1197,10 +1197,9 @@ def update_health(vault, rules, hits, today, noops=(), rehearsed=None):
         target = health_path(vault)
         target.parent.mkdir(parents=True, exist_ok=True)
         staging = target.with_name(f".{target.name}.tmp-{os.getpid()}")
-        io.open(staging, "w", encoding="utf-8", newline="\n").write(
-            json.dumps({"version": 1, "updated": stamp, "cards": cards},
-                       ensure_ascii=False, separators=(",", ":"))
-        )
+        with io.open(staging, "w", encoding="utf-8", newline="\n") as stream:
+            stream.write(json.dumps({"version": 1, "updated": stamp, "cards": cards},
+                                    ensure_ascii=False, separators=(",", ":")))
         os.replace(staging, target)
     except OSError:
         pass

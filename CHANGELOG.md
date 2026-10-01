@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Close the nightly gate-health staging file before its atomic replacement, avoiding leaked handles on Windows.
+
 - Deliver the original rule as bounded model-visible advice when target-sequence evidence is incomplete, preserving the existing per-session delivery budget.
 
 - Replay target sequences from historical result IDs and recorded inventories, register them as armed rules, and report allow/block/unknown coverage in nightly reports.
