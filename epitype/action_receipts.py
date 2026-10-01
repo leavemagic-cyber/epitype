@@ -90,7 +90,7 @@ def begin(event,path):
         if name not in ('bash','powershell','exec_command','local_shell_call','shell_command','grep','glob'): return False
         actions=[action_targets.Action('evidence.opaque','','')]
 
-    encoded=json.dumps([(a.kind,a.target,a.repository) for a in actions],separators=(',',':'))
+    encoded=json.dumps([(a.kind,a.target,a.repository,a.checkout) for a in actions],separators=(',',':'))
     with _db(path) as db:
         prior=db.execute('SELECT signature FROM facts WHERE actor=? AND call_id=?',(actor(event),identity)).fetchone()
         if prior:

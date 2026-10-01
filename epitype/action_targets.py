@@ -17,6 +17,7 @@ class Action:
     kind: str
     target: str
     repository: str = ''
+    checkout: str = ''
 
 
 def canonical(value, cwd='', *, resolve=True):
@@ -174,5 +175,6 @@ def actions(name, payload, cwd='', *, live=True):
             for operand in operands:
                 target = normalize(operand, cwd)
                 if target and (not live or Path(target).is_dir()):
-                    result.append(Action('directory.delete',target,repository(target)[1] if live else ''))
+                    checkout,main=repository(target) if live else ('','')
+                    result.append(Action('directory.delete',target,main,checkout))
     return list(dict.fromkeys(result))

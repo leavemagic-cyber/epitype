@@ -47,7 +47,7 @@ def read(path):
             checkout,main=ownership(action.target)
             if action.kind=='git.status': action=action_targets.Action(action.kind,checkout or action.target,main)
             elif action.kind=='git.worktrees': action=action_targets.Action(action.kind,main or action.target,main)
-            elif action.kind=='directory.delete': action=action_targets.Action(action.kind,action.target,main)
+            elif action.kind=='directory.delete': action=action_targets.Action(action.kind,action.target,main,checkout)
             normalized.append(action)
         # live=False deliberately cannot identify a historical main update.
         # A recorded inventory plus a literal invocation supplies that identity.

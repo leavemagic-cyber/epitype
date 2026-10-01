@@ -69,6 +69,20 @@ class Sequence(unittest.TestCase):
         self.assertEqual(action_sequence.check(['@file.read => @file.change'],[source])[0].verdict,'unverified')
         self.assertEqual(action_sequence.check(['@file.read => @file.change'],[edited],covered=False)[0].verdict,'unverified')
 
+    def test_unknown_main_update_and_new_nested_checkout_do_not_reuse_stale_proof(self):
+        status=fact('status','git.status','main',1,2)
+        pending=fact('pending','git.main_update','main',3,0,None)
+        again=fact('again','git.main_update','main',5,6)
+        result,=action_sequence.check(['@git.status => @git.main_update'],[status,pending,again],{'again'})
+        self.assertEqual(result.verdict,'unverified')
+        inventory=fact('inventory','git.worktrees','main',1,2,inventory=('main',))
+        target=action_targets.Action('directory.delete','main/nested/owned','main','main/nested')
+        deletion=action_receipts.Fact('delete',3,4,True,(target,))
+        result,=action_sequence.check(['@git.worktrees => @directory.delete'],[inventory,deletion])
+        self.assertEqual(result.verdict,'unverified')
+        known=fact('inventory','git.worktrees','main',1,2,inventory=('main','main/nested'))
+        self.assertEqual(action_sequence.check(['@git.worktrees => @directory.delete'],[known,deletion])[0].verdict,'allow')
+
 
 if __name__=='__main__':
     if '--selftest' in sys.argv: sys.argv.remove('--selftest')

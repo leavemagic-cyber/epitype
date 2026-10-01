@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Reject stale Git prerequisites after an unresolved main update or when a new nested linked checkout is absent from the recorded inventory.
+
 - Complete ID-bound tool facts from actual transcripts when existing PostToolUse matchers only cover browsers; accept a single literal forwarded native result, preserve its workdir, and keep missing or opaque evidence unknown without changing hook registrations.
 
 - Derive receipt test transcript paths from their temporary fixtures, keeping public examples portable and privacy-clean.

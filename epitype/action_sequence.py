@@ -31,7 +31,7 @@ def check(items,facts,active_ids=None, *, covered=True):
     from bisect import bisect_left
     # Index completed facts once. A long session must not cost a full scan for
     # every modification, and a pending result must retain its causal boundary.
-    completed={}; unknown={}; updates={}; opaque={}; inventories={}; created={}
+    completed={}; unknown={}; updates={}; opaque={}; inventories={}; created={};uncertain_updates={}
     for fact in facts:
         for action in fact.actions:
             key=(action.kind,action.target,fact.actor)
@@ -49,6 +49,8 @@ def check(items,facts,active_ids=None, *, covered=True):
                     updates.setdefault((action.target,fact.actor),[]).append(fact.finished)
             elif fact.success is None or fact.finished==0:
                 unknown[key]=min(unknown.get(key,fact.started),fact.started)
+                if action.kind=='git.main_update':
+                    uncertain_updates.setdefault((action.target,fact.actor),[]).append((fact.started,fact.finished))
     for values in (*completed.values(),*updates.values(),*opaque.values(),*inventories.values()): values.sort()
     judgments=[]
     for item in items:
@@ -76,6 +78,9 @@ def check(items,facts,active_ids=None, *, covered=True):
                 changed=changes[index-1] if index else 0
                 uncertainty=not covered or unknown.get(identity,current.started)<current.started
                 uncertainty=uncertainty or any(position<current.started for position in opaque.get(current.actor,()))
+                if mutation=='git.main_update' and any(start<current.started and (not finish or finish>=end)
+                    for start,finish in uncertain_updates.get((action.target,current.actor),())):
+                    end=0;uncertainty=True
                 if prerequisite=='git.worktrees' and end:
                     eligible=[scope for finished,scope in inventories.get(identity,()) if finished==end]
                     # The inventory must contain a worktree overlapping this concrete
@@ -85,6 +90,8 @@ def check(items,facts,active_ids=None, *, covered=True):
                     overlap=any(Path(action.target).is_relative_to(path) or Path(path).is_relative_to(action.target)
                                 for scopes in eligible for path in scopes)
                     if not overlap: end=0;uncertainty=True
+                    if action.checkout and not any(action.checkout in scope for scope in eligible):
+                        end=0;uncertainty=True
                 if prerequisite=='file.read' and not end:
                     from pathlib import Path
                     own_draft=created.get((action.target,current.actor),current.started)<current.started
