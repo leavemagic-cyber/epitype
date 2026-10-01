@@ -387,6 +387,21 @@ class _NativeFixture(_TempVault):
 class NativeSync(_NativeFixture):
     """D3／D4／D6：卡片→兩邊設定，只動自己寫的鍵，漂移點名到卡片與鍵，拿得回來。"""
 
+    def test_root_official_key_sync_and_removal(self):
+        self.global_card.write_text(_card(FEEDBACK_HEAD.format(stem='fb-native')
+            + 'host_codex_config:\n  tool_output_token_limit: 5000\n'
+            + 'host_source: https://developers.openai.com/codex/config-reference\n'), encoding='utf-8')
+        code, report = self._run(host_sync.apply)
+        self.assertEqual(code, host_sync.EXIT_OK, report)
+        text = self.config.read_text(encoding='utf-8')
+        self.assertEqual(tomllib.loads(text)['tool_output_token_limit'], 5000)
+        state = host_native.load_state(self.home)
+        self.assertNotIn('tool_output_token_limit', state[host_native._key(self.config)].get('created', []))
+        self.global_card.unlink()
+        code, report = self._run(host_sync.apply)
+        self.assertEqual(code, host_sync.EXIT_OK, report)
+        self.assertEqual(self.config.read_text(encoding='utf-8'), text.replace('tool_output_token_limit = 5000\n', ''))
+
     def test_the_whole_round_trip(self):
         before = self._snapshot()
         code, report = self._run(host_sync.check)
@@ -848,6 +863,26 @@ class DoctorSeesNativeDrift(unittest.TestCase):
         self.assertEqual(code, 1, text[-800:])
         self.assertIn("env.CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS 與卡片 fb-native.md 不一致："
                       "卡片要 \"4\"，檔案是 \"8\"", text)
+
+
+class RootTomlValues(unittest.TestCase):
+    def test_root_insert_update_remove_preserves_tables_and_comments(self):
+        original = '# user comment\nmodel = "synthetic"\n\n[memories]\nuse_memories = true\n'
+        inserted = host_native._toml_set(original, 'tool_output_token_limit', 5000)
+        import tomllib
+        self.assertEqual(tomllib.loads(inserted)['tool_output_token_limit'], 5000)
+        self.assertEqual(host_native._toml_remove(inserted, 'tool_output_token_limit'), original)
+        existing = 'tool_output_token_limit = 10000 # keep\n' + original
+        changed = host_native._toml_set(existing, 'tool_output_token_limit', 5000)
+        self.assertEqual(changed, existing.replace('10000', '5000'))
+        self.assertEqual(tomllib.loads(changed)['memories'], {'use_memories': True})
+
+    def test_root_key_before_first_table_and_in_empty_document(self):
+        import tomllib
+        for original in ('', '[memories]\nuse_memories = true\n'):
+            inserted = host_native._toml_set(original, 'tool_output_token_limit', 5000)
+            self.assertEqual(tomllib.loads(inserted)['tool_output_token_limit'], 5000)
+            self.assertEqual(host_native._toml_remove(inserted, 'tool_output_token_limit'), original)
 
 
 def _selftest():

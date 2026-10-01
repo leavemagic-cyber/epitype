@@ -528,6 +528,11 @@ def _newline_of(text):
 
 
 def _table_span(lines, table):
+    if not table:
+        # Root assignments end at the first table, including array tables.
+        end = next((index for index, line in enumerate(lines)
+                    if _TOML_ANY_HEADER.match(line.rstrip("\r\n"))), len(lines))
+        return -1, end
     start = None
     for index, line in enumerate(lines):
         body = line.rstrip("\r\n")
@@ -545,7 +550,9 @@ def _toml_value(value):
 
 
 def _toml_set(text, dotted, value):
-    table, leaf = dotted.split(".", 1)
+    table, separator, leaf = dotted.partition(".")
+    if not separator:
+        table, leaf = "", table
     newline = _newline_of(text)
     lines = text.splitlines(keepends=True)
     rendered = f"{leaf} = {_toml_value(value)}"
@@ -571,14 +578,16 @@ def _toml_set(text, dotted, value):
     for index in range(start + 1, end):
         if lines[index].strip():
             last = index
-    if not lines[last].endswith(("\n", "\r")):
+    if last >= 0 and not lines[last].endswith(("\n", "\r")):
         lines[last] += newline
     lines.insert(last + 1, rendered + newline)
     return "".join(lines)
 
 
 def _toml_remove(text, dotted, drop_table=False):
-    table, leaf = dotted.split(".", 1)
+    table, separator, leaf = dotted.partition(".")
+    if not separator:
+        table, leaf = "", table
     lines = text.splitlines(keepends=True)
     span = _table_span(lines, table)
     if span is None:
@@ -590,7 +599,7 @@ def _toml_remove(text, dotted, drop_table=False):
             del lines[index]
             end -= 1
             break
-    if drop_table and not any(
+    if table and drop_table and not any(
             line.strip() and not line.strip().startswith("#") for line in lines[start + 1:end]):
         # 只有這個表是 Epitype 建的才整塊拿掉；拿掉時連同我們當初在它前面加的那一行空白。
         del lines[start:end]
@@ -706,14 +715,14 @@ def _render(item, record):
         else:
             keys = entry.key.split(".")
             touched.append((keys, None))
-            table = keys[0]
+            table = keys[0] if len(keys) > 1 else ""
             if entry.status in (MISSING, DRIFT):
-                if table not in before and table not in created:
+                if table and table not in before and table not in created:
                     created.append(table)
                 updated = _toml_set(updated, entry.key, entry.want)
                 owned = True
             elif entry.status == STALE:
-                drop = table in created and len([
+                drop = bool(table) and table in created and len([
                     other for other in remembered[section]
                     if other.split(".")[0] == table and other != entry.key]) == 0
                 updated = _toml_remove(updated, entry.key, drop_table=drop)
