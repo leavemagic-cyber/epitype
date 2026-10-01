@@ -14,7 +14,7 @@ audience: root
 
 三張獨立順序卡（inspect→mutate、backup→replace、test→commit）的測試在兩宿主各驗證該放行與該擋下；配對與主／子範圍另測。`tests/tool_sequence_regression.py` 3/3，既有 turn_check 46/46、card_lint 56/56。
 
-七天真實重放與目標身分驗收未完成前，不把「讀對檔、查主樹、关對分頁」的產品缺口轉成已強制。原有 gap 保留。這些新欄位不能降低原本要求。
+以下至「成功回條與同一目標」之前，是初次驗收的歷史結果；其產品缺口已由後續同目標完成事實機制修復，最新驗證見文末。初次字面欄位不能降低原本要求。
 
 2026-10-01 已讀七天窗口的全部 667/667 份可選紀錄，得到 3,097 個回合、79,137 筆紀錄中的工具呼叫；另有 29,294 個包裝內字面指令候選，執行狀態未驗證。範圍是台北時間 09-25 00:00 至 10-02 00:00；含尚未走完的當日，後續列持續增加。這是完整讀取證據，**不是三張真實順序卡零誤擋的驗收**。
 
@@ -37,3 +37,11 @@ require_tool_before 可使用 @file.read => @file.change、@git.status => @git.m
 實際宿主接線另驗出：現有 PostToolUse matcher 只涵蓋瀏覽器，因此一般工具不會送完成回條。既有 Pre／Stop 現會從原生 transcript 補查已綁定的 call ID 與原參數摘要；只認相同 actor 的真正結果。Code mode 只接受單一、字面參數的 `text(await tools.exec_command(...))` 原生結果轉送，分支、多呼叫、變數與自行印出的成功字樣均不算執行證據。工作目錄取真正呼叫的 workdir，不能拿 hook 的 session cwd 冒充。查補最多讀最近 1 MiB，找不到完整來源便保持未驗證；夜間重放仍讀全檔。此相容解析按本機實際 call/output 格式驗證，不宣稱所有版本或所有 JavaScript 都可判讀。沒有改 hooks.json 或模板的 matcher。
 
 Pre 的 `sequence_allow` 稽核列代表該次工具前置檢查真正放行；操作成功仍另看完成結果。它不算違規或擋下次數。
+
+## 實際部署與重放結果（2026-10-01 最新）
+
+具名檔修改、主 checkout 更新、刪目錄前核對 worktree 三張既有規則已轉用同目標欄位，原正文保留。真實 Codex 工具在本次自建 Git fixture 各產生一次 `sequence_allow`：Read 成功後修改同檔且重讀確認；主樹 status 成功後真正 FF；worktree inventory 成功後刪除自己的空目錄。合併、inventory、刪除均有成功完成回條；apply_patch 原生輸出缺少可證成功 metadata，故該筆完成事實仍 pending，成功改檔另由實際重讀確認。不得把 Pre 放行當操作成功。
+
+完整已走完七日窗口為台北 09-24 00:00 至 10-01 00:00：803/803 文件，91,724 個實際呼叫，讀檔→修改 1,132 次正向放行、1,326 次證據不足、0 次判違規；五個放行樣本逐一核對同檔、同 actor 與成功完成先後。另兩條規則缺可識別歷史命中，不能以零命中聲稱零誤擋。62,637 個不透明程式呼叫與 721 個未知 Write 如實保留，沒有把字面候選當完成結果，也沒有追造過去缺失資料。新資料的三次真放行與回歸證據補上原先未接線的機制，歷史覆蓋上限仍須明列。
+
+未完成的主樹更新會使舊 status 失效；新 nested linked checkout 未出現在舊 inventory 時不能抵用。獨立 `.git` 檔案指向另一 metadata 目錄，仍是自己的主 checkout；linked commondir 的非標準位置若不能確認主樹則保留未知。[Git repository layout](https://git-scm.com/docs/gitrepository-layout) 是 gitfile／commondir 的官方依據。

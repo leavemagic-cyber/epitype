@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Record actual Claude/Codex advice delivery, native compaction restoration, complete entrypoint timings and target-aware replay coverage; supersede the earlier partial acceptance statements without discarding their history.
+
 - Read each action-card header once while discovering guards, advice, sequences and write checks; preserve every declaration and the existing refresh coverage.
 
 - Identify standalone gitfile checkouts separately from linked worktrees, including their primary HEAD for ref updates; keep nonstandard shared-directory ownership unknown.
