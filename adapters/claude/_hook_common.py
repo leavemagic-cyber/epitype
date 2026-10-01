@@ -551,7 +551,7 @@ def append_recall_deliveries(vault, rows, started_at):
     from epitype import rule_context
     for row in rows:
         try:
-            rule_context.record(vault, row.get("session_id"), row.get("card"))
+            rule_context.record(Path(row.get("vault") or vault), row.get("session_id"), row.get("card"))
         except (OSError, ValueError):
             pass
     target.parent.mkdir(parents=True, exist_ok=True)

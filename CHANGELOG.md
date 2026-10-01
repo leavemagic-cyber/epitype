@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Save recalled project-card compaction pointers under their source vault rather than the shared delivery ledger's vault.
+
 - Keep tool-sequence validation available to the standalone card-lint CLI as well as package imports.
 
 - Record complete seven-day transcript coverage and retain target-identity sequence gaps instead of claiming unsupported live enforcement.

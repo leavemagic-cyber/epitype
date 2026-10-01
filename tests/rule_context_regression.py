@@ -64,6 +64,16 @@ class RuleContextRegression(unittest.TestCase):
         self.assertNotIn('已被取代不補送', result)
         self.assertEqual(rule_context.restore(destination, [self.root / 'other']), '')
 
+    def test_project_delivery_pointer_uses_source_vault_not_ledger_vault(self):
+        import _hook_common as common
+        project = self.root / 'project-vault'
+        project.mkdir()
+        (project / 'project-rule.md').write_text('---\nname: project-rule\ndescription: 專案規則\n---\n', encoding='utf-8')
+        common.append_recall_deliveries(self.vault, [{'session_id':'project-recall',
+             'vault':str(project), 'card':'project-rule.md','host':'codex','mode':'card'}], time.monotonic())
+        self.assertEqual(json.loads(rule_context.state_path(project,'project-recall').read_text()), ['project-rule.md'])
+        self.assertFalse(rule_context.state_path(self.vault,'project-recall').exists())
+
 
 if __name__ == '__main__':
     unittest.main()
