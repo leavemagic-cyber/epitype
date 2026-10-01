@@ -673,6 +673,7 @@ def _read_guard(path):
             return memspec.ACTION_GUARD_DEFECT.format(card=name,field='require_tool_before',reason=str(exc))
         if not items: return None
         return {'card':name,'sequence':items,'audience':one_line(fields.get('audience')),
+                'advice':one_line(fields.get('description'))[:240],
                 'expires':one_line(fields.get(memspec.VALID_UNTIL_FIELD))}
     if not tool and not write_check and fields.get("advise_tool"):
         fragments = sequence_fields(front, ("advise_all_of",))["advise_all_of"]
@@ -1082,6 +1083,8 @@ def _guard_review(event, tool_name, tool_input, config, started_at, defects, adv
                         return _deny_value(f'[{guard.card}] {missing.reason}')
                     for unknown in (j for j in judgments if j.verdict=='unverified'):
                         defects.append(f'[{guard.card}] UNVERIFIED: {unknown.reason}')
+                        if advisories is not None and guard.advice:
+                            advisories.append((guard.path,guard.card,f'未驗證：{unknown.reason}。{guard.advice}'))
                 continue
             if (advisories is not None and guard.advise_text
                     and memspec.action_guard_tool_matches(guard.advise_tool, folded_tool)

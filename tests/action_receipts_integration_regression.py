@@ -89,6 +89,19 @@ class Integration(unittest.TestCase):
         action_receipts.finish({**event,'tool_response':{}},path)
         self.assertFalse(action_receipts.coverage(event,path))
 
+    def test_unknown_advice_delivers_the_original_rule_without_deny(self):
+        self.write_card('read.md',name='read-first',description='Read the named source before changing it',
+                        require_tool_before=['@file.read => @file.change'])
+        file=self.root/'old.md';file.write_text('old')
+        event={'session_id':'advice-'+self.root.name,'transcript_path':str(self.root/'.claude/one.jsonl'),
+               'cwd':str(self.root),'tool_use_id':'edit','tool_name':'Edit','tool_input':{'file_path':str(file)}}
+        claims=[]
+        result=pretool._handle(event,time.monotonic(),[],advice_claims=claims)
+        context=result['hookSpecificOutput']['additionalContext']
+        self.assertIn('Read the named source before changing it',context)
+        self.assertNotIn('permissionDecision',result['hookSpecificOutput'])
+        pretool._finish_advice(claims,False)
+
 
 if __name__=='__main__':
     if '--selftest' in sys.argv: sys.argv.remove('--selftest')

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Deliver the original rule as bounded model-visible advice when target-sequence evidence is incomplete, preserving the existing per-session delivery budget.
+
 - Replay target sequences from historical result IDs and recorded inventories, register them as armed rules, and report allow/block/unknown coverage in nightly reports.
 
 - Prevent provable prerequisite omissions before a tool runs while preserving explicit unknown coverage for resumed sessions, opaque programs, self-authored drafts, and possible host-loaded sources.
