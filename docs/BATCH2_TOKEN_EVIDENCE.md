@@ -7,7 +7,7 @@ https://developers.openai.com/codex/config-reference . Claude's percentage appli
 its auto-compact window and cannot raise the host default. Codex exposes an absolute
 `model_auto_compact_token_limit`; these are separate host mechanisms.
 
-Local read-only source: Claude 42cec705-eaf3-4537-9952-8d7e99a81bcc, inspected 2026-10-01.
+Local read-only source: Claude trace A, inspected 2026-10-01. The exact private source mapping is retained outside the repository in the local batch evidence.
 252 distinct assistant message IDs; observed input plus output 89,824,135 tokens.
 This source has continued since the handoff's 248-call snapshot.
 
@@ -41,7 +41,7 @@ Observed 254,657 characters; replay at 30,000 preserves 254,657, at 15,000 prese
 249,752 (4,905 fewer, 1.93%). Select 15,000; full results can be saved to files when needed.
 No `bashOutputMaxChars` override was found in local user settings.
 
-Codex source: rollout 01a0f201-81fe-71d1-8908-118c1d61e9a9 (2026-09-30).
+Codex source: local trace B (2026-09-30), mapped in the private batch evidence.
 67 stored text outputs, estimated 98,008 tokens by UTF-8 bytes/4. Same-record cap replay:
 10,000 → 97,891; 5,000 → 82,601 (15,290 fewer, 15.62%). Select 5,000.
 Image payloads are excluded from text counts. These are measured record sizes and replay

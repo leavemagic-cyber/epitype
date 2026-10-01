@@ -2,8 +2,10 @@
 
 沒有為了驗證另開瀏覽器。讀取既有 Claude 紀錄並以 tool_use_id 對上工具回傳：
 
-- daipai 的 26efcf1b-fe70-4e79-b9cf-10a0f206d046.jsonl：呼叫行 11248、回傳行 11250。
-- 全域的 660283fa-ed46-4705-ab3a-f1013db22cd8.jsonl：呼叫行 1244、回傳行 1246。
+- daipai 的本機樣本 D：呼叫行 11248、回傳行 11250。
+- 全域的本機樣本 E：呼叫行 1244、回傳行 1246。
+
+私有場次編號與原檔路徑保留在 repo 外的本機批次證據，公開文件只用樣本代號。
 
 兩份回傳都是 text blocks；明確建立結果為「Created new tab. Tab ID: 數字」，接著是文字 Tab Context／Available tabs；並沒有程式原先只接受的 availableTabs JSON。既有分頁也在清單中，不能把整張清單當作本次新建。
 

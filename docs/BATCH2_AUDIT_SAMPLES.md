@@ -1,6 +1,6 @@
 # J：送達後違反的五例核對
 
-2026-10-01 逐列讀取兩本原帳。送達帳：治理庫 .epitype/recall_deliveries.jsonl；閘帳：治理庫 _GATE_LOG.jsonl。五例共同場次 6e25ff55-f1af-4172-88c4-fda8f170eae2；時間皆 UTC。卡名與 decision_key／name／stem 對照，同場且送達早於擋下才成立。
+2026-10-01 逐列讀取兩本原帳。送達帳：治理庫 .epitype/recall_deliveries.jsonl；閘帳：治理庫 _GATE_LOG.jsonl。五例共同場次以本機證據的樣本 C 指向原檔，私有場次編號不進公開 repo；時間皆 UTC。卡名與 decision_key／name／stem 對照，同場且送達早於擋下才成立。
 
 |規則|送達行／時間（09-29）|閘帳行／時間|指紋|核對|
 |---|---|---|---|---|

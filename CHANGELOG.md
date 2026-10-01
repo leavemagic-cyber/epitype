@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Keep private session identifiers in local evidence and use sample aliases in public batch-two documents.
+
 - Accept the suite's --selftest entry point in the new batch-two unittest scripts without changing assertions.
 
 - Check owner-ruling removal on Markdown deletes without treating deletion as an empty replacement card.
