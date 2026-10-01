@@ -361,6 +361,57 @@ class ActionGuardRegression(unittest.TestCase):
         self.assertIsNone(self.denial(self.call(
             "spawn_agent", {"subagent_type": "fork", "message": "x"})))
 
+    # ---- 外掛（MCP）工具：宿主送進 hook 的是 mcp__<server>__<tool> 原名 ----
+
+    CHROME_NAVIGATE = "mcp__claude-in-chrome__navigate"
+
+    def tab_card(self, guard_tool=CHROME_NAVIGATE):
+        self.write_card(
+            "scar-colab-tab.md",
+            name="導頁要指定分頁",
+            description="navigate 不帶 tabId 會導走作用中的 Colab 分頁",
+            guard_tool=guard_tool,
+            guard_requires=["tabId"],
+            guard_advice="先開新分頁再帶它的 tabId",
+        )
+
+    def test_an_mcp_navigate_without_a_tab_id_is_denied(self):
+        self.tab_card()
+        reason = self.denial(self.call(self.CHROME_NAVIGATE, {"url": "https://example.com"}))
+        self.assertIsNotNone(reason)
+        self.assertIn("tabId", reason)
+        self.assertIn("導頁要指定分頁", reason)
+
+    def test_an_mcp_navigate_carrying_a_numeric_tab_id_passes(self):
+        self.tab_card()
+        self.assertIsNone(self.denial(self.call(
+            self.CHROME_NAVIGATE, {"url": "https://example.com", "tabId": 1693812473})))
+
+    def test_an_exact_mcp_card_leaves_other_tools_of_the_same_server_alone(self):
+        self.tab_card()
+        self.assertIsNone(self.denial(self.call("mcp__claude-in-chrome__computer", {"action": "screenshot"})))
+
+    def test_a_chrome_card_does_not_touch_the_built_in_browser(self):
+        # owner 2026-10-01：內外部瀏覽器都可以用。守外部 Chrome 的卡不得擋內建瀏覽器。
+        self.tab_card()
+        self.assertIsNone(self.denial(self.call("mcp__Claude_Browser__navigate", {"url": "https://example.com"})))
+        self.tab_card("mcp__claude-in-chrome__*")
+        self.assertIsNone(self.denial(self.call("mcp__Claude_Browser__navigate", {"url": "https://example.com"})))
+
+    def test_a_server_wildcard_guards_every_tool_of_that_server_only(self):
+        self.tab_card("mcp__claude-in-chrome__*")
+        self.assertIsNotNone(self.denial(self.call(self.CHROME_NAVIGATE, {"url": "https://x"})))
+        self.assertIsNotNone(self.denial(self.call("mcp__claude-in-chrome__computer", {"action": "screenshot"})))
+        self.assertIsNone(self.denial(self.call("mcp__claude-in-chrome-evil__navigate", {"url": "https://x"})))
+        self.assertIsNone(self.denial(self.call("Bash", {"command": "git status"})))
+
+    def test_a_wildcard_outside_the_tool_part_matches_nothing(self):
+        # 裸 * 或 mcp__* 會讓一張卡擋下所有工具；只認整個 tool 段的萬用字元。
+        for pattern in ("*", "mcp__*", "mcp__*__navigate", "mcp__claude-in-chrome__nav*"):
+            self.tab_card(pattern)
+            self.assertIsNone(self.denial(self.call(self.CHROME_NAVIGATE, {"url": "https://x"})), pattern)
+            self.assertIsNone(self.denial(self.call("Bash", {"command": "ls"})), pattern)
+
     def test_fragments_and_required_fields_declared_together_must_both_hold(self):
         self.dispatch_card(guard_all_of=['"deploy"'])
         self.assertIsNone(self.denial(self.call("Task", {"prompt": "查個檔"})))
@@ -1069,6 +1120,32 @@ class GuardCardLint(unittest.TestCase):
             "aliases: [壞工具]\n---\nbody\n",
         )
         self.assertIn(("WARN", "guard-tool"), rules)
+
+    def mcp_guard_card(self, tool, hosts=""):
+        return (
+            "---\nname: 導頁要指定分頁\ndescription: 2026-10-01 navigate 不帶 tabId 導走 Colab 分頁\n"
+            f"guard_tool: {tool}\nguard_requires:\n  - tabId\n{hosts}"
+            "guard_advice: 先開新分頁\naliases: [Colab 分頁]\n---\nbody\n"
+        )
+
+    def test_an_mcp_guard_tool_is_recognised(self):
+        for tool in ("mcp__claude-in-chrome__navigate", "mcp__claude-in-chrome__*"):
+            rules, findings = self.findings("scar-mcp.md", self.mcp_guard_card(tool, "hosts:\n  - Claude\n"))
+            self.assertNotIn(("WARN", "guard-tool"), rules, findings)
+            self.assertNotIn(("WARN", "guard-tool-host"), rules, findings)
+            self.assertNotIn(("FAIL", "guard"), rules, findings)
+
+    def test_a_malformed_mcp_guard_tool_is_still_reported(self):
+        for tool in ("mcp__claude-in-chrome", "mcp__*", "mcp__claude-in-chrome__nav*"):
+            rules, _ = self.findings("scar-mcp.md", self.mcp_guard_card(tool))
+            self.assertIn(("WARN", "guard-tool"), rules, tool)
+
+    def test_an_mcp_guard_without_hosts_names_codex_as_the_gap(self):
+        rules, findings = self.findings("scar-mcp.md", self.mcp_guard_card("mcp__claude-in-chrome__navigate"))
+        self.assertIn(("WARN", "guard-tool-host"), rules)
+        reason = next(r for _lvl, rule, r in findings if rule == "guard-tool-host")
+        self.assertIn("Codex", reason)
+        self.assertNotIn("Claude", reason)
 
     def test_a_usable_pattern_raises_no_pattern_finding(self):
         _rules, findings = self.findings(

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Let action guards name MCP tools as `mcp__<server>__<tool>` or a whole server as `mcp__<server>__*`; any other wildcard matches nothing, and card lint flags MCP guards without `hosts` as Codex-unverified.
+
 - Allow read-only JSON serialization in native-setting audits while continuing to block stream dumps and file writes of managed keys.
 
 - Support official Codex root TOML keys while preserving unrelated tables and comments during insertion, update, and removal.

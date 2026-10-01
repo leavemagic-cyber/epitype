@@ -1903,11 +1903,43 @@ ACTION_GUARD_TOOL_EQUIVALENTS = (
 )
 
 
+ACTION_GUARD_MCP_PREFIX = "mcp__"
+ACTION_GUARD_MCP_SEPARATOR = "__"
+ACTION_GUARD_MCP_WILDCARD = "*"
+
+
+def mcp_guard_tool_parts(card_tool):
+    """(server, tool) for `mcp__<server>__<tool>`, tool `*` for a whole server; else None.
+
+    The wildcard is accepted only as the whole tool part: a bare `*` or `mcp__*` would
+    let one card block every MCP tool, and an over-blocking guard is not reported by
+    anyone — the blocked caller just works around it."""
+    name = card_tool.casefold()
+    if not name.startswith(ACTION_GUARD_MCP_PREFIX):
+        return None
+    server, separator, tool = name[len(ACTION_GUARD_MCP_PREFIX):].partition(ACTION_GUARD_MCP_SEPARATOR)
+    if not separator or not server or not tool or ACTION_GUARD_MCP_WILDCARD in server:
+        return None
+    if any(char.isspace() for char in name):
+        return None
+    if ACTION_GUARD_MCP_WILDCARD in tool and tool != ACTION_GUARD_MCP_WILDCARD:
+        return None
+    return server, tool
+
+
 def action_guard_tool_matches(card_tool, event_tool):
     card_tool, event_tool = card_tool.casefold(), event_tool.casefold()
     if card_tool == event_tool:
         return True
+    mcp = mcp_guard_tool_parts(card_tool)
+    if mcp is not None and mcp[1] == ACTION_GUARD_MCP_WILDCARD:
+        prefix = ACTION_GUARD_MCP_PREFIX + mcp[0] + ACTION_GUARD_MCP_SEPARATOR
+        return event_tool.startswith(prefix) and len(event_tool) > len(prefix)
     return any(card_tool in group and event_tool in group for group in ACTION_GUARD_TOOL_EQUIVALENTS)
+
+
+def action_guard_tool_known(card_tool):
+    return card_tool.casefold() in ACTION_GUARD_KNOWN_TOOLS or mcp_guard_tool_parts(card_tool) is not None
 
 
 # 兩宿主各自認得的動作工具（casefold）。Codex 沒有 Read（讀檔走 shell）、沒有 PowerShell，
@@ -1930,6 +1962,10 @@ HOST_TOOL_NAMES = {
 def hosts_without_tool(card_tool):
     """這個 guard_tool 沒有對應工具（含等價別名）的宿主清單；兩宿主都有回空清單。"""
     tool = card_tool.casefold()
+    # Claude 把外掛工具以 mcp__<server>__<tool> 原名送進 hook；Codex 那邊送不送、叫什麼名字
+    # 沒有查證過，所以照樣點名 Codex，卡片要寫 hosts 標明只給 Claude。
+    if mcp_guard_tool_parts(tool) is not None:
+        return [host for host in HOST_TOOL_NAMES if host != "Claude"]
     missing = []
     for host, tools in HOST_TOOL_NAMES.items():
         if tool in tools:
@@ -1953,7 +1989,7 @@ CARD_PATTERN_BROKEN_REASON = (
 )
 CARD_GUARD_TOOL_UNKNOWN_REASON = (
     "guard_tool「{tool}」不在認得的工具名單裡；打錯字的話這道守衛永遠不會攔到東西。"
-    "認得的有：{known}"
+    "認得的有：{known}，以及外掛工具 mcp__<server>__<tool>（整個 server 寫 mcp__<server>__*）"
 )
 
 
@@ -3693,7 +3729,7 @@ _EN = {
     "CARD_REQUIRE_PAIR_REASON": "{present} is set but {missing} is not: the two only mean something as a pair — a condition with nothing required checks nothing",
     "CARD_DISARMED_REASON": "{field} is nested one level under {parent}, and the gates read only top-level fields, so this card blocks nothing; move it to the top level of the frontmatter",
     "ACTION_GUARD_DEFECT": "⚠ {field} on guard card {card} is unusable ({reason}), so this one did not apply",
-    "CARD_GUARD_TOOL_UNKNOWN_REASON": 'guard_tool "{tool}" is not a tool name we recognise; if it is a typo this guard will never catch anything. Known: {known}',
+    "CARD_GUARD_TOOL_UNKNOWN_REASON": 'guard_tool "{tool}" is not a tool name we recognise; if it is a typo this guard will never catch anything. Known: {known}, plus MCP tools as mcp__<server>__<tool> (a whole server as mcp__<server>__*)',
     "CARD_GUARD_TOOL_HOST_GAP_REASON": 'guard_tool "{tool}" has no counterpart on {hosts}, so this guard never fires there (Codex reads via shell and writes via apply_patch; it has no Read/Write/Edit/PowerShell). If the rule is meant for one host only, declare it with hosts; to guard both, use a tool both have or add a card written from that host\'s official docs.',
     "HOST_SOURCE_MISSING_REASON": "this card sets host-native fields but {field} has no official source URL (https://…). Host settings must follow the host's official docs or official source code; if you cannot find one, do not write it into host settings",
     "DREAM_NOTICE_LINE": "🌙 dream finished ({date}): type FAIL {card_fail} / missing aliases {missing_aliases} / drafts {drafts} → {pack}",
