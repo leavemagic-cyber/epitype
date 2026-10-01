@@ -646,12 +646,8 @@ def _read_guard(path):
     bad items instead would leave fewer required fragments and therefore a guard that
     matches *more* than its author wrote."""
     front = declared_frontmatter(
-        path, (memspec.ACTION_GUARD_TOOL_FIELD, "advise_tool", "require_tool_before"), memspec.STOP_GATE_FRONTMATTER_MAX_BYTES
+        path, (memspec.ACTION_GUARD_TOOL_FIELD, "advise_tool", "require_tool_before", memspec.WRITE_CHECK_FIELD), memspec.STOP_GATE_FRONTMATTER_MAX_BYTES
     )
-    if front is None:
-        front = declared_frontmatter(
-            path, memspec.WRITE_CHECK_FIELD, memspec.STOP_GATE_FRONTMATTER_MAX_BYTES
-        )
     if front is None:
         return None
     fields, _problem = memspec.frontmatter_text("---\n" + "\n".join(front) + "\n---\n")

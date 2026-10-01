@@ -66,6 +66,15 @@ class ActionGuardRegression(unittest.TestCase):
         if cache.exists():
             cache.unlink()
 
+    def test_guard_discovery_reads_each_card_header_once(self):
+        self.write_card('plain.md', name='plain', description='ordinary text')
+        self.write_card('checker.md', name='checker', write_check='owner-ruling')
+        reader=pretool.declared_frontmatter
+        for filename in ('plain.md','checker.md'):
+            with patch.object(pretool,'declared_frontmatter',wraps=reader) as observed:
+                pretool._read_guard(self.vault/filename)
+            self.assertEqual(observed.call_count,1)
+
     def heredoc_card(self):
         self.write_card(
             "scar-heredoc.md",

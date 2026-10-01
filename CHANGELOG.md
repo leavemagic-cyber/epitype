@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Read each action-card header once while discovering guards, advice, sequences and write checks; preserve every declaration and the existing refresh coverage.
+
 - Identify standalone gitfile checkouts separately from linked worktrees, including their primary HEAD for ref updates; keep nonstandard shared-directory ownership unknown.
 
 - Reject stale Git prerequisites after an unresolved main update or when a new nested linked checkout is absent from the recorded inventory.
