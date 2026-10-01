@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Allow read-only JSON serialization in native-setting audits while continuing to block stream dumps and file writes of managed keys.
+
 - Support official Codex root TOML keys while preserving unrelated tables and comments during insertion, update, and removal.
 
 - Keep private session identifiers in local evidence and use sample aliases in public batch-two documents.

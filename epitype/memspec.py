@@ -3322,7 +3322,7 @@ HOST_NATIVE_GUARD_REASON = (
 # 目標就是那個檔時才算寫。複製不算：`cp settings.json 備份` 是讀，分不出方向就不擋。
 HOST_NATIVE_GUARD_WRITE_REGEX = (
     r"set-content|add-content|out-file|\bsed\s+(?:-[a-z]*i|--in-place)|\btee\b|write_text|"
-    r"write_bytes|\.write\(|writealltext|json\.dumps?\(|move-item|remove-item|"
+    r"write_bytes|\.write\(|writealltext|json\.dump\(|move-item|remove-item|"
     r"rename-item|new-item|\bmv\b|\brm\b|\bdel\b|\bmove\b|\bren\b"
 )
 # 導向的目標要解析成完整路徑、等於受管的那個檔才算寫：只比檔名的話，

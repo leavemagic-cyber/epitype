@@ -712,6 +712,14 @@ class NativeGuard(_NativeFixture):
         posix = "/" + self.settings.drive[0].lower() + self.settings.as_posix()[2:]
         self.assertIsNotNone(self._denial("Bash", {"command": f"echo {{}} > {posix}"}), posix)
 
+    def test_serializing_a_read_is_not_a_settings_write(self):
+        read = f"data=json.loads(Path({str(self.settings)!r}).read_text()); value=data['env']['CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS']"
+        self.assertIsNone(self._denial('Bash', {'command': read + '; print(json.dumps(value))'}))
+        self.assertIsNotNone(self._denial('Bash', {'command': read
+            + f'; Path({str(self.settings)!r}).write_text(json.dumps(value))'}))
+        self.assertIsNotNone(self._denial('Bash', {'command': read
+            + f'; json.dump(value, open({str(self.settings)!r}, "w"))'}))
+
     def _patch(self, path, body):
         return {"command": ["apply_patch", "*** Begin Patch\n*** Update File: " + os.fspath(path)
                             + "\n" + body + "*** End Patch\n"]}
