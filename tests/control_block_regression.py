@@ -448,4 +448,4 @@ class ControlBlockRegression(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    unittest.main(argv=[arg for arg in sys.argv if arg != "--selftest"])
