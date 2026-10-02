@@ -10,9 +10,13 @@ import tempfile
 try:
     from . import memspec as _memspec
     from . import memsearch as _memsearch
+    from . import rule_pipeline as _rule_pipeline
+    from . import rule_provenance as _rule_provenance
 except ImportError:  # Direct script execution remains supported.
     import memspec as _memspec
     import memsearch as _memsearch
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from epitype import rule_pipeline as _rule_pipeline, rule_provenance as _rule_provenance
 
 ACTIVE_DECISION_STATUS = _memspec.ACTIVE_DECISION_STATUS
 AI_AUTONOMOUS_DECIDER = _memspec.AI_AUTONOMOUS_DECIDER
@@ -38,6 +42,7 @@ TOP_LEVEL_FIELD = _memspec.TOP_LEVEL_FIELD
 class Card:
     path: Path
     fields: dict[str, str]
+    card_text: str | None = None
 
 
 @dataclass(frozen=True)
@@ -163,6 +168,14 @@ def lint_vault(vault, audit=False):
 
     for path in _memsearch.card_files(vault):
         fields, yaml_problem = _parse_frontmatter(path)
+        card_text = None
+        if _rule_provenance.FIELD in fields:
+            try:
+                card_text = path.read_text(encoding='utf-8-sig')
+                fields, yaml_problem = _memspec.frontmatter_text(card_text)
+            except (OSError, ValueError) as error:
+                report.failures.append(Finding('FAIL', str(path), 'source', str(error)))
+                continue
         if yaml_problem:
             report.warnings.append(
                 Finding("WARN", str(path), "YAML", f"壞 YAML：{yaml_problem}")
@@ -171,10 +184,21 @@ def lint_vault(vault, audit=False):
         if DECISION_KEY_FIELD not in fields:
             continue
         # 保留 vault 內的字面路徑；resolve 可能讓 symlink 逃出 vault，破壞相對索引。
-        report.cards.append(Card(path=path.absolute(), fields=fields))
+        report.cards.append(Card(path=path.absolute(), fields=fields, card_text=card_text))
 
     groups = {}
+    unavailable = set()
     for card in report.cards:
+        if _rule_pipeline.is_rule(card.fields, card.fields.get('type', ''), card.card_text):
+            try:
+                projected = _rule_pipeline.projection(card.fields, card.path, card_text=card.card_text)
+                if projected['expired']:
+                    unavailable.add(card.path)
+                    report.warnings.append(Finding('WARN', str(card.path), 'source',
+                                                   '來源範圍已到期；不作現行裁定'))
+            except (ValueError, OSError) as error:
+                unavailable.add(card.path)
+                report.failures.append(Finding('FAIL', str(card.path), 'source', str(error)))
         decision_key = card.fields.get(DECISION_KEY_FIELD, "").strip()
         if not decision_key:
             report.failures.append(
@@ -220,6 +244,7 @@ def lint_vault(vault, audit=False):
             for card in cards
             if card.fields.get(DECISION_STATUS_FIELD, "").strip()
             == ACTIVE_DECISION_STATUS
+            and card.path not in unavailable
         ]
         shown_key = decision_key or "<空白 decision_key>"
         if not active_cards:

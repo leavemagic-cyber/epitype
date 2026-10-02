@@ -1,7 +1,7 @@
-"""Handoff rule blocks are exact owner quotations from active decision cards."""
+"""Handoff rules share card provenance and preserve interpretation authorship."""
 import argparse
 from pathlib import Path
-from . import memsearch, memspec
+from . import memsearch, memspec, rule_pipeline, rule_provenance
 
 BEGIN = '<!-- EPITYPE OWNER RULINGS BEGIN -->'
 END = '<!-- EPITYPE OWNER RULINGS END -->'
@@ -16,7 +16,7 @@ def region(text):
 
 
 def render(vaults):
-    lines = [BEGIN, 'owner 裁定（從卡片產生；修改正本後重新產生）：']
+    lines = [BEGIN, '裁定與執行整理（同一份卡片來源；原話、作者及範圍分列）：']
     for vault in vaults:
         for path in memsearch.card_files(vault):
             fields, _problem = memspec.frontmatter_fields(path)
@@ -26,7 +26,15 @@ def render(vaults):
                     or fields.get(memspec.DECISION_STATUS_FIELD) != memspec.ACTIVE_DECISION_STATUS
                     or not fields.get('owner_quote')):
                 raise ValueError(f'交接裁定必須有有效 owner 原話：{path.name}')
-            lines.extend((f"[{path.name}]", fields['owner_quote']))
+            if rule_provenance.FIELD in fields:
+                projected = rule_pipeline.projection(fields, path)
+                if projected['expired']:
+                    continue
+                lines.extend((f"[{path.name}]", rule_pipeline.render_projection(projected)))
+            else:
+                projected = rule_pipeline.projection(fields, path, legacy_text=fields['owner_quote'])
+                lines.extend((f"[{path.name}] 既有紀錄（原始來源尚未驗證，不當作 Owner 逐字引句）",
+                              projected['text']))
     lines.append(END)
     return '\n'.join(lines)
 

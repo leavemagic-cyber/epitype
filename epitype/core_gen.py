@@ -31,6 +31,7 @@ import tempfile
 try:
     from . import card_lint, memsearch, memspec
 except ImportError:  # Direct script execution keeps the CLI contract.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     import card_lint
     import memsearch
     import memspec
@@ -88,16 +89,30 @@ def collect_rules(vaults):
             if card_type != memspec.CARD_TYPE_RULE:
                 continue
             status = fields.get(memspec.DECISION_STATUS_FIELD, "").strip()
-            if status == memspec.SUPERSEDED_DECISION_STATUS:
-                continue
             front_lines, _closing = memspec.split_frontmatter(text)
+            from epitype import rule_pipeline
+            try:
+                projected = rule_pipeline.projection(
+                    fields, path, legacy_text=fields.get(memspec.RULE_TEXT_FIELD, ""), card_text=text)
+            except ValueError as exc:
+                errors.append(f"{vault}｜{relative}: {exc}")
+                continue
+            if status == memspec.SUPERSEDED_DECISION_STATUS or projected["expired"]:
+                continue
             rules.append({
                 "vault": str(vault),
                 "path": relative,
                 "layer": fields.get(memspec.RULE_LAYER_FIELD, "").strip(),
                 "section": fields.get(memspec.RULE_SECTION_FIELD, "").strip(),
                 "order": _order_of(fields),
-                "text": fields.get(memspec.RULE_TEXT_FIELD, ""),
+                "text": projected["text"],
+                "projection": projected,
+                "scope": projected["provenance"].get("scope"),
+                "provenance": projected["provenance"],
+                "source_sha256": projected["source_sha256"],
+                "authorship": projected["authorship"],
+                "kind": projected["kind"],
+                "supersedes": projected["supersedes"],
                 "approved_by": fields.get(memspec.RULE_APPROVED_BY_FIELD, "").strip(),
                 "approved_at": fields.get(memspec.RULE_APPROVED_AT_FIELD, "").strip(),
                 "hosts": tuple(
@@ -147,10 +162,18 @@ def _section_lines(members):
     for section, section_members in _resident_sections(members):
         lines.append(memspec.CORE_GEN_SECTION_HEADING.format(section=section))
         lines.extend(
-            memspec.CORE_GEN_RESIDENT_LINE.format(text=rule["text"]) for rule in section_members
+            memspec.CORE_GEN_RESIDENT_LINE.format(text=_display_rule(rule)) for rule in section_members
         )
         lines.append("")
     return lines
+
+
+def _display_rule(rule):
+    if rule.get("provenance", {}).get("status") != "VERIFIED":
+        return rule["text"]
+    from epitype import rule_pipeline
+    return rule_pipeline.render_projection(
+        rule["projection"], card_path=Path(rule["vault"]) / rule["path"])
 
 
 def assemble(rules):
@@ -172,10 +195,16 @@ def assemble(rules):
     if host_only:
         note += memspec.CORE_GEN_OUTPUT_NOTE_HOSTS_SUFFIX.format(host_only=len(host_only))
     lines = [memspec.CORE_GEN_OUTPUT_TITLE, note, ""]
+    legacy = [rule for rule in rules if rule["layer"] in memspec.RULE_GENERATED_LAYERS
+              and rule.get("provenance", {}).get("status") != "VERIFIED"]
+    if legacy:
+        manifests = "、".join(str(pack_path(vault)) for vault in sorted({rule["vault"] for rule in legacy}))
+        lines.extend((f"來源未核的舊卡：本生成包共 {len(legacy)} 條；原正文保留，尚未完成原句、作者與範圍遷移。"
+                      "未帶已核來源欄位的條目均屬此類；逐卡狀態見 " + manifests + "。", ""))
     if floor:
         lines.append(memspec.CORE_GEN_FLOOR_HEADING)
         lines.extend(
-            memspec.CORE_GEN_FLOOR_LINE.format(number=number, text=rule["text"])
+            memspec.CORE_GEN_FLOOR_LINE.format(number=number, text=_display_rule(rule))
             for number, rule in enumerate(floor, start=1)
         )
         lines.append("")
@@ -362,6 +391,11 @@ def _pack(rules, out_path, payload, cap, text):
                 "approved_at": rule["approved_at"],
                 "hosts": list(rule["hosts"]),
                 "text_sha256": _sha256(rule["text"].encode("utf-8")),
+                "provenance": rule.get("provenance", {"status": "UNVERIFIED"}),
+                "source_sha256": rule.get("source_sha256"),
+                "authorship": rule.get("authorship", "UNVERIFIED"),
+                "kind": rule.get("kind", "legacy-unverified"),
+                "supersedes": rule.get("supersedes", []),
             }
             for rule in rules
             if rule["layer"] in memspec.RULE_GENERATED_LAYERS
@@ -418,6 +452,10 @@ def generate(vaults, out, cap_bytes=None, dry_run=False, config=None):
         "text": text,
     }
 
+    if errors:
+        result["status"] = STATUS_UNREADABLE
+        return result
+
     missing = unapproved(rules)
     if missing:
         result["status"] = STATUS_UNAPPROVED
@@ -466,6 +504,10 @@ def check(vaults, out):
         "errors": errors,
         "reason": None,
     }
+    if errors:
+        result["status"] = STATUS_UNREADABLE
+        result["reason"] = "規則來源或卡片讀取未通過；保留既有生成內容。"
+        return result
     try:
         current = out_path.read_bytes()
     except OSError as exc:
@@ -486,8 +528,8 @@ def drifted(vaults, out):
     「無從判斷」包含兩種：讀不到那個檔，以及庫裡一張規則卡都沒有——沒有規則卡就沒有
     生成塊可比，把「空的組裝 vs 有內容的檔」報成漂移只是每晚固定的一則噪音。
     """
-    rules, _errors = collect_rules(vaults)
-    if not rules:
+    rules, errors = collect_rules(vaults)
+    if not rules or errors:
         return None
     result = check(vaults, out)
     if result["status"] == STATUS_UNREADABLE:

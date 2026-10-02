@@ -66,14 +66,23 @@ class ActionGuardRegression(unittest.TestCase):
         if cache.exists():
             cache.unlink()
 
-    def test_guard_discovery_reads_each_card_header_once(self):
+    def test_guard_discovery_reads_each_complete_card_once(self):
         self.write_card('plain.md', name='plain', description='ordinary text')
         self.write_card('checker.md', name='checker', write_check='owner-ruling')
-        reader=pretool.declared_frontmatter
+        reader = Path.read_text
         for filename in ('plain.md','checker.md'):
-            with patch.object(pretool,'declared_frontmatter',wraps=reader) as observed:
+            card_path = self.vault / filename
+            reads = []
+            def read(path, *args, **kwargs):
+                value = reader(path, *args, **kwargs)
+                if path == card_path:
+                    reads.append(value)
+                return value
+            # Source/body binding requires the body, not a header-only shortcut.
+            with patch.object(Path, 'read_text', autospec=True, side_effect=read):
                 pretool._read_guard(self.vault/filename)
-            self.assertEqual(observed.call_count,1)
+            self.assertEqual(len(reads), 1)
+            self.assertIn('\nbody\n', reads[0])
 
     def heredoc_card(self):
         self.write_card(

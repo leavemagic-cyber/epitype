@@ -873,7 +873,7 @@ def _apply_git_dates(vault, raw_cards, budget):
         ]
 
 
-def _check_card(path, relative, today, known_cards=None):
+def _check_card(path, relative, today, known_cards=None, source_path=None):
     """(型別, findings, 推得的日期, 執行層)。findings 是 (level, rule, reason) 的清單；
     執行層是 `_enforce_layer` 的結果，None＝不在分層統計範圍。
 
@@ -903,6 +903,22 @@ def _check_card(path, relative, today, known_cards=None):
 
     nested, counts = _nested_and_lists(front_lines, path)
     card_type = _card_type(relative, fields, nested)
+    try:
+        from . import rule_pipeline, rule_provenance
+    except ImportError:
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        from epitype import rule_pipeline, rule_provenance
+    if rule_provenance.FIELD in fields:
+        source = rule_provenance.validate(fields, source_path or path)
+        if not source.verified:
+            findings.append((FAIL,
+                             "rule-source", "規則來源 " + source.status + "："
+                             + "; ".join(source.issues)))
+        else:
+            issues = rule_pipeline.payload_issues(source.document, text)
+            issues += rule_pipeline.supersession_issues(fields, source_path or path, card_text=text)
+            if issues:
+                findings.append((FAIL, "rule-source", "規則來源 INVALID：" + "; ".join(issues)))
     derived = None
     if problem:
         level = FAIL if memspec.CARD_LINT_DUPLICATE_FIELD_REASON in problem else WARN
@@ -1058,7 +1074,7 @@ def _check_card(path, relative, today, known_cards=None):
     return card_type, findings, derived, layer
 
 
-def check_card(path, relative, today=None):
+def check_card(path, relative, today=None, *, before_text=None, source_path=None):
     """單張卡的內容檢查，回 (型別, findings)——與 scan_vault 逐卡走的是同一條路徑。
 
     寫檔內容閘要在落盤前對「寫入後的內容」跑同一套規則；沒有這個入口的話，閘門就得
@@ -1068,8 +1084,13 @@ def check_card(path, relative, today=None):
     git 首提日不在這條路徑上：閘門看的是還沒落盤的內容，磁碟上沒有那個檔可查。
     """
     card_type, findings, _derived, _layer = _check_card(
-        path, relative, today or datetime.now(timezone.utc).date()
+        path, relative, today or datetime.now(timezone.utc).date(), source_path=source_path
     )
+    if before_text is not None:
+        from epitype import rule_pipeline
+        text = Path(path).read_text(encoding="utf-8-sig")
+        findings.extend((FAIL, "rule-source-write", reason) for reason in
+                        rule_pipeline.admission(before_text, text, card_type, source_path or path))
     return card_type, findings
 
 

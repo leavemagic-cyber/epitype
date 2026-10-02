@@ -23,7 +23,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from epitype import memspec
+from epitype import memspec, rule_context, rule_pipeline, rule_provenance
 from _hook_common import (
     isolated_temp_root,
     append_gate_log,
@@ -85,10 +85,12 @@ def _turn(texts=(), prompt="", dispatch="", calls_after_dispatch=0):
 _Decision = namedtuple(
     "_Decision",
     "key decided_at quote forbidden aliases path decided_by require_when require_text advice"
-    " applies_to turn_check turn_check_limit on_hit fence_shell fence_langs turn_check_target require_tool_before pair_tools audience require_on_hit",
+    " applies_to turn_check turn_check_limit on_hit fence_shell fence_langs turn_check_target require_tool_before pair_tools audience require_on_hit"
+    " source_status source_scope source_author source_kind source_original_quote",
     # 只有最後幾欄有預設值：沒標處置的卡就是「照擋」，沒宣告殼層的卡不查圍籬區塊，
     # 沒寫目標語言的 owner_language 卡用預設語言；既有的建構處不必跟著改。
-    defaults=("", "", (), "", (), (), "", ""),
+    defaults=("", "", (), "", (), (), "", "", "UNVERIFIED", None,
+              "UNVERIFIED", "legacy-unverified", ""),
 )
 
 
@@ -145,6 +147,23 @@ def _read_decision(path):
     if front_lines is None:
         return None
     fields, _problem = memspec.frontmatter_text("---\n" + "\n".join(front_lines) + "\n---\n")
+    projected = None
+    if rule_pipeline.is_rule(fields, fields.get('type', ''), ''):
+        try:
+            # Interpret executable fields and their binding from one complete
+            # card snapshot; a second header version cannot supply its guards.
+            card_text = Path(path).read_text(encoding='utf-8-sig')
+            fields, problem = memspec.frontmatter_text(card_text)
+            front_lines, closing = memspec.split_frontmatter(card_text)
+            if problem or front_lines is None or closing is None:
+                return None
+            checked_projection = rule_pipeline.projection(fields, path, card_text=card_text)
+            if checked_projection['provenance']['status'] == rule_provenance.VERIFIED:
+                projected = checked_projection
+        except (ValueError, OSError):
+            return None
+        if projected is not None and projected['expired']:
+            return None
     key = _one_line(fields.get(memspec.DECISION_KEY_FIELD))
     status = _one_line(fields.get(memspec.DECISION_STATUS_FIELD))
     if key:
@@ -164,7 +183,7 @@ def _read_decision(path):
     quote = _one_line(fields.get(memspec.OWNER_QUOTE_FIELD))
     if not quote and decided_by != memspec.OWNER_EXPLICIT_DECIDER:
         quote = _one_line(fields.get(memspec.DESCRIPTION_FIELD))
-    return {
+    ruling = {
         _KEY: key,
         memspec.DECIDED_BY_FIELD: decided_by,
         _DECIDED_AT: _one_line(fields.get(memspec.CURRENT_DECISION_AT_FIELD)),
@@ -193,12 +212,43 @@ def _read_decision(path):
             _one_line(item).casefold() for item in sequences[memspec.FENCE_LANGS_FIELD]
         ],
     }
+    if projected is not None:
+        document = projected['document']
+        ruling.update(source_status=projected['provenance']['status'],
+                      source_scope=document['scope'], source_author=document['author'],
+                      source_kind=document['kind'], source_original_quote=document['quote'])
+        # A description and an AI interpretation may be approved by the Owner,
+        # but their author does not become the Owner as a result.
+        ruling[_ADVICE] = rule_pipeline.render_projection(projected)
+    else:
+        ruling.update(source_status='UNVERIFIED', source_scope=None,
+                      source_author='UNVERIFIED', source_kind='legacy-unverified',
+                      source_original_quote='')
+    return ruling
 
 
-def _decision_from_ruling(vault, card_path, ruling):
+def _decision_from_ruling(vault, card_path, ruling, *, fresh=False, event=None, defects=None):
     """一份裁定資料變成閘門用的結構；不該生效的回 None。"""
     if not isinstance(ruling, dict) or not ruling.get(_KEY):
         return None
+    path = Path(vault) / card_path
+    if not fresh:
+        # An old cache can omit or mislabel provenance. When its file is present,
+        # use the current card regardless of the cached authorship declaration.
+        if ruling.get('source_status') == 'VERIFIED' or path.is_file():
+            ruling = _checked_read(path, defects)
+            if ruling is None:
+                return None
+    if ruling.get('source_status') == 'VERIFIED':
+        scope = ruling.get('source_scope')
+        if not isinstance(scope, dict) or rule_pipeline.expired({'scope': scope}):
+            return None
+        state, reason = rule_context.applicability(scope, event)
+        if state != 'APPLICABLE':
+            if state == 'ADVISORY' and defects is not None:
+                defects.append(f"[{ruling[_KEY]}] 限定參考：{reason}；適用範圍："
+                               + rule_provenance.serialize(scope))
+            return None
     if memspec.card_expired(ruling.get(_EXPIRES)):
         # 過期的卡不再擋人。時限型的規則（試行一週、某日之前不要做某事）本來就該
         # 自己停下來，靠人記得去拔掉的話，它會一直擋到有人被擋為止。
@@ -227,7 +277,27 @@ def _decision_from_ruling(vault, card_path, ruling):
         pair_tools=tuple(_strings(ruling.get("pair_tools"))),
         audience=_one_line(ruling.get("audience")).casefold(),
         require_on_hit=_one_line(ruling.get("require_on_hit")).casefold(),
+        source_status=ruling.get('source_status', 'UNVERIFIED'),
+        source_scope=ruling.get('source_scope'),
+        source_author=ruling.get('source_author', 'UNVERIFIED'),
+        source_kind=ruling.get('source_kind', 'legacy-unverified'),
+        source_original_quote=ruling.get('source_original_quote', ''),
     )
+
+
+def _checked_read(path, defects=None):
+    ruling = _read_decision(path)
+    if ruling is None and defects is not None:
+        # The reader already validated the original; this bounded header read
+        # identifies an omitted source-bound card without rereading its source.
+        front = _decision_frontmatter(path)
+        if front is not None:
+            fields, _problem = memspec.frontmatter_text('---\n' + '\n'.join(front) + '\n---\n')
+            if (rule_pipeline.is_rule(fields, fields.get('type', ''), '')
+                    and fields.get(memspec.DECISION_STATUS_FIELD, '') not in memspec.STOP_GATE_SILENT_STATUSES):
+                defects.append(f"[{Path(path).name}] 來源裁定未採用：原始來源／正文未通過驗證或範圍已到期；"
+                               '可用 python -m epitype.rule_pipeline 核對此卡')
+    return ruling
 
 
 def _read_cache(cache_path):
@@ -275,7 +345,7 @@ def _write_cache(cache_path, manifest, rulings, cursor=""):
         pass
 
 
-def _decisions(vault, started_at, defects=None):
+def _decisions(vault, started_at, defects=None, *, event=None):
     """Cache discovery only; every returned authority comes from this turn's bytes.
 
     Refresh at most one cap of discovery cards and one cap of known decisions.
@@ -332,7 +402,7 @@ def _decisions(vault, started_at, defects=None):
                 skipped=len(scanning) - position, vault=vault.name))
             break
         try:
-            rulings[card_path] = _read_decision(paths[card_path])
+            rulings[card_path] = _checked_read(paths[card_path], defects)
         except Exception:
             rulings[card_path] = None
         refreshed.add(card_path)
@@ -360,7 +430,7 @@ def _decisions(vault, started_at, defects=None):
         # 能從這裡省——2026-09-19 試過信清單，那份測試當場擋下來。
         if card_path not in refreshed:
             try:
-                rulings[card_path] = _read_decision(paths[card_path])
+                rulings[card_path] = _checked_read(paths[card_path], defects)
             except Exception:
                 rulings[card_path] = None
             verified[card_path] = manifest[card_path]
@@ -372,7 +442,8 @@ def _decisions(vault, started_at, defects=None):
             defects.append(memspec.STOP_GATE_INCOMPLETE_DEFECT.format(
                 checked=index, total=len(candidates), vault=vault.name))
             break
-        decision = _decision_from_ruling(vault, card_path, ruling)
+        decision = _decision_from_ruling(vault, card_path, ruling,
+                                         fresh=True, event=event, defects=defects)
         if decision is not None:
             found.append(decision)
     if verified != old_manifest or rulings != cached or cursor != old_cursor:
@@ -1155,7 +1226,7 @@ def _verdict(event, message, config, started_at, defects, turn=None):
             defects.append(memspec.STOP_GATE_INCOMPLETE_DEFECT.format(
                 checked=index, total=len(vaults), vault=memspec.VAULT_WORD))
             break
-        decisions.extend(_decisions(vault, started_at, defects))
+        decisions.extend(_decisions(vault, started_at, defects, event=event))
     if not decisions:
         return None
 
@@ -1196,7 +1267,9 @@ def _verdict(event, message, config, started_at, defects, turn=None):
                    _message_digest(message), kind=memspec.STOP_NOTE_LOG_KIND, card_path=noted[0].path)
             # 擋人用的那句話寫著「請改寫」；提醒要講的正好相反，所以字面規則另給一句短的。
             _best_effort_audit(leave_note, config, session_id, (
-                memspec.STOP_NOTE_FORBIDDEN.format(fragment=noted[3], decision=noted[0].key)
+                memspec.STOP_NOTE_POLICY.format(
+                    advice=noted[0].advice or noted[0].quote, decision=noted[0].key)
+                + "\n" + memspec.STOP_NOTE_MATCHED_TEXT.format(fragment=noted[3])
                 # 其他類的理由取第一句就夠：提醒是要我下次照做，不是要我讀完整段說明。
                 if noted[3]
                 else noted[2].split(memspec.SENTENCE_END)[0] + memspec.SENTENCE_END))

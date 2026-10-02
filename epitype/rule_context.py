@@ -2,7 +2,42 @@
 import hashlib
 import json
 from pathlib import Path
-from . import memspec
+from . import memspec, rule_pipeline, rule_provenance
+
+
+def applicability(scope, event=None):
+    """Match explicit source scope; missing machine context is advisory, not global."""
+    event = event if isinstance(event, dict) else {}
+    context = event.get('rule_context')
+    context = context if isinstance(context, dict) else {}
+    project = scope.get('project', '')
+    if project:
+        explicit = context.get('project') or event.get('project')
+        cwd = event.get('cwd')
+        if explicit:
+            if str(explicit).casefold() != str(project).casefold():
+                return 'OUTSIDE', 'project does not match'
+        elif cwd and Path(project).is_absolute():
+            try:
+                if not Path(cwd).resolve().is_relative_to(Path(project).resolve()):
+                    return 'OUTSIDE', 'cwd is outside source project'
+            except (OSError, ValueError):
+                return 'ADVISORY', 'project context is unavailable'
+        else:
+            return 'ADVISORY', 'project context is unavailable'
+    case = scope.get('case', '')
+    if case:
+        actual = context.get('case') or event.get('case_id')
+        if not actual:
+            return 'ADVISORY', 'case context is unavailable'
+        if actual != case:
+            return 'OUTSIDE', 'case does not match'
+    # These clauses are human language, not predicates that a Stop event can
+    # certify. Preserve them in the reference without inventing an evaluator.
+    if (scope.get('actions') != ['*']
+            or any(scope.get(name) for name in ('conditions', 'exceptions'))):
+        return 'ADVISORY', 'action/condition/exception clauses require contextual interpretation'
+    return 'APPLICABLE', ''
 
 
 def state_path(vault, session):
@@ -52,7 +87,7 @@ def snapshot(vaults, session, destination):
     return records
 
 
-def restore(destination, allowed_vaults, budget=1800):
+def restore(destination, allowed_vaults, budget=1800, *, event=None, diagnostics=None):
     try:
         records = json.loads(Path(destination).with_suffix('.rules.json').read_text(encoding='utf-8'))
     except (OSError, ValueError):
@@ -73,9 +108,43 @@ def restore(destination, allowed_vaults, budget=1800):
                 or fields.get(memspec.DECISION_STATUS_FIELD) in memspec.STOP_GATE_SILENT_STATUSES):
             continue
         description = ' '.join(str(fields.get('description', '')).split())[:240]
-        if not description:
-            continue
-        line = f"本場規則 [{item['card']}]：{description}"
+        if rule_provenance.FIELD in fields:
+            try:
+                card_text = target.read_text(encoding='utf-8-sig')
+                fields, problem = memspec.frontmatter_text(card_text)
+                if problem:
+                    raise ValueError('source-bound card has malformed frontmatter: ' + problem)
+                projected = rule_pipeline.projection(fields, target, card_text=card_text)
+                if projected['expired']:
+                    continue
+                state, reason = applicability(projected['document']['scope'], event)
+                if state == 'OUTSIDE':
+                    continue
+                line = rule_pipeline.render_projection(projected)
+                if state == 'ADVISORY':
+                    line = '限定參考（執行範圍未由本場 context 確認）：' + line
+                    if diagnostics is not None:
+                        diagnostics.append(f"{item['card']}: {reason}")
+            except (ValueError, OSError) as error:
+                if diagnostics is not None:
+                    diagnostics.append(f"{item['card']}: {error}")
+                continue
+        else:
+            try:
+                integrity = rule_pipeline.legacy_integrity(fields, target)
+                if integrity is not None and not integrity.allowed:
+                    if diagnostics is not None:
+                        diagnostics.append(f"{item['card']}: " + '; '.join(integrity.issues))
+                    continue
+            except (ValueError, OSError) as error:
+                if diagnostics is not None:
+                    diagnostics.append(f"{item['card']}: {error}")
+                continue
+            if not description:
+                continue
+            line = f"本場規則路由 [UNVERIFIED；{item['card']}]：{description}"
         if len('\n'.join([*lines, line]).encode('utf-8')) <= budget:
             lines.append(line)
+        elif diagnostics is not None:
+            diagnostics.append(f"{item['card']}: context budget omitted the complete labelled entry")
     return '\n'.join(lines)

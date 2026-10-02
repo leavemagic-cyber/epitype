@@ -1683,6 +1683,10 @@ STOP_NOTE_STATE_DIRECTORY = "notes"
 STOP_NOTE_MAX_PENDING = 3
 STOP_NOTE_MAX_CHARS = 140
 STOP_NOTE_FORBIDDEN = "別說「{fragment}」（{decision}）"
+STOP_NOTE_POLICY = "{advice} ({decision})"
+STOP_NOTE_MATCHED_TEXT = "對照文字：{fragment}"
+RULE_SOURCE_LEGACY_REFERENCE = "既有記錄（來源未驗證；僅供查找）："
+RULE_SOURCE_AUTHOR_LABEL = "作者："
 STOP_NOTE_DELIVERY = "上一則回覆的提醒（已經送出的不用重寫、不用道歉，接下來照做）：{notes}"
 TURN_DISPATCH_TOOLS = frozenset({"task", "agent"})
 # 背景子代理跑完時，宿主把結果當成一則新的提問送進來；那一則裡有這個標記。
@@ -3742,6 +3746,9 @@ _EN = {
     "BLOCKED_ECHO_REASON": "the message after the block was {overlap:.0%} the same as the first one, so the owner read the same text twice. Next time you are blocked, add only the part that was missing.",
     "STOP_GATE_REWRITE_HINT": "Add only the missing content; do not repeat the previous text.",
     "STOP_NOTE_FORBIDDEN": 'do not say "{fragment}" ({decision})',
+    "STOP_NOTE_MATCHED_TEXT": "Matched text: {fragment}",
+    "RULE_SOURCE_LEGACY_REFERENCE": "Source UNVERIFIED (legacy reference): ",
+    "RULE_SOURCE_AUTHOR_LABEL": "Author: ",
     "STOP_NOTE_DELIVERY": "Reminders from the previous reply (what was sent is sent — do not rewrite it, do not apologise, just follow them from here): {notes}",
     "TURN_UNVERIFIED_DELEGATION_REASON": '📌 this turn took a delegated result ({source}) and said "{claim}" without checking one thing first. Per "{decision}": verify one item yourself, or say plainly that this is an unverified relay — delegating the work does not delegate the responsibility.{advice}',
     "HOST_BUDGET_NOTICE": "⚠ {path} would be {size} bytes after the sync, over the {budget} limit for {host} — the overflow is dropped silently, and what is dropped may be the rules block. Shrink the file first.",

@@ -140,7 +140,7 @@ def _frontmatter_fields(path):
     return fields
 
 
-def _active_decision(path):
+def _active_decision(path, source_projection=None):
     """(decision_key, current_decision_at, owner_quote) for an active decision card.
 
     The index carries `status` but neither the decision's key nor the owner's own
@@ -159,6 +159,14 @@ def _active_decision(path):
         return False
     if not key:
         return None
+    if source_projection is None:
+        from epitype import rule_pipeline
+        try:
+            source_projection = rule_pipeline.projection(fields, Path(path))
+        except (OSError, ValueError):
+            return False
+    if source_projection is not None and source_projection['expired']:
+        return False
     return (
         key,
         _one_line(fields.get(memspec.CURRENT_DECISION_AT_FIELD)),
@@ -223,6 +231,16 @@ def _bounded_recall(pieces, budget, required_count, header_count):
                 break
             selected.pop()
     return "\n".join(selected) if selected else None
+
+
+def _source_omission(budget):
+    """Report an omitted source entry without passing a partial ruling as authority."""
+    notice = "Epitype：預算不足，規則正文／Owner 原句／範圍未載入；來源卡仍可查找，本次未交付裁定。"
+    if payload_fits("UserPromptSubmit", notice, budget):
+        return payload("UserPromptSubmit", notice)
+    print("Epitype source recall omitted: budget cannot hold a complete source pointer or omission notice.",
+          file=sys.stderr)
+    return None
 
 
 def _card_identity(line, aliases):
@@ -432,6 +450,8 @@ def _recall(event, started_at, config, delivery_markers=None, deliveries=None):
     legend = []
     shown_names = set()  # 同檔名跨庫（專案的指路卡與通用庫正本）一則只端一張，先到的庫優先
     origins = {}  # 端出的那一行 -> (庫, 卡在庫裡的相對路徑, 送達方式)，送達帳用
+    source_routes = {}
+    pointer_lines = set()
     replacement_paths = set()
     for vault in scoped_vaults(config, event):
         if expired(started_at):
@@ -461,10 +481,28 @@ def _recall(event, started_at, config, delivery_markers=None, deliveries=None):
             if path in visited_paths:
                 continue
             visited_paths.add(path)
+            source_projection = None
+            try:
+                current_fields = _frontmatter_fields(Path(path))
+                from epitype import rule_pipeline
+                if 'rule_provenance' not in current_fields:
+                    # General shell writes have no declared prospective text.
+                    # They still cannot promote a new/changed legacy rule here.
+                    integrity = rule_pipeline.legacy_integrity(current_fields, Path(path))
+                    if integrity is not None and not integrity.allowed:
+                        raise ValueError('; '.join(integrity.issues))
+                if "rule_provenance" in current_fields:
+                    from epitype import rule_pipeline
+                    source_projection = rule_pipeline.projection(current_fields, Path(path))
+                    if source_projection['expired']:
+                        continue
+            except (OSError, ValueError) as error:
+                print(f"Epitype source recall omitted [{Path(path).name}]: {error}", file=sys.stderr)
+                continue
             # Decided before the caps: the owner's standing ruling is never a weak hit.
             decision = None
             if _one_line(hit.get(memspec.DECISION_STATUS_FIELD)) == memspec.ACTIVE_DECISION_STATUS:
-                decision = _active_decision(path)
+                decision = _active_decision(path, source_projection)
                 if decision is False:
                     continue  # A retired/unreadable ruling is not an ordinary hit.
             if decision is None and _event_card(hit, path):
@@ -496,6 +534,8 @@ def _recall(event, started_at, config, delivery_markers=None, deliveries=None):
             card_identity = located[len(alias) + 1:] if located.startswith(alias + "/") else path
             name = _one_line(hit.get("name"))
             description = _one_line(hit.get("description"))[: memspec.RECALL_DESCRIPTION_MAX_CHARS]
+            if source_projection is not None:
+                description = _one_line(rule_pipeline.render_projection(source_projection))
             if decision is not None:
                 key, decided_at, quote = decision
                 # The card layer carries what was decided in understood words; the
@@ -503,7 +543,7 @@ def _recall(event, started_at, config, delivery_markers=None, deliveries=None):
                 # opening the card (owner 2026-09-17). A quote fragment without its
                 # context reads as nothing. The description goes in uncut: a ruling
                 # cut to 120 characters is what let 08-13 come back as an option.
-                full = _one_line(hit.get("description"))
+                full = description if source_projection is not None else _one_line(hit.get("description"))
                 suffix = (memspec.RECALL_DECIDED_AT_SUFFIX.format(decided_at=decided_at)
                           if decided_at else "")
                 parts = (key + suffix, full or quote, located)
@@ -515,6 +555,9 @@ def _recall(event, started_at, config, delivery_markers=None, deliveries=None):
                     parts = (mark + parts[0], *parts[1:])
             prefix = memspec.DECISION_PREFIX if decision is not None else ""
             line = "- " + prefix + " | ".join(part for part in parts if part)
+            if source_projection is not None:
+                source_routes[line] = (
+                    "- 已核來源指路（正文／原句／範圍未載入，請讀卡片） | " + located)
             origins[line] = (vault, card_identity, memspec.RECALL_DELIVERY_MODE_DECISION
                              if decision is not None else memspec.RECALL_DELIVERY_MODE_CARD)
             if decision is not None:
@@ -540,7 +583,13 @@ def _recall(event, started_at, config, delivery_markers=None, deliveries=None):
     source_reads = 0
     for position, (line, path, vault, terms, name) in enumerate(pinned_entries):
         origin = origins.get(line)
-        if source_reads == 0 and not expired(started_at):
+        route = source_routes.get(line)
+        if route and not payload_fits("UserPromptSubmit", "\n".join([head, *pinned, line]),
+                                      config[memspec.CONFIG_BUDGET_BYTES_FIELD]):
+            line = route
+            pointer_lines.add(line)
+            origin = (origin[0], origin[1], memspec.RECALL_DELIVERY_MODE_CARD)
+        if line not in pointer_lines and source_reads == 0 and not expired(started_at):
             passage = _source_passage(path, vault, terms, name,
                                       fallback_first=path in replacement_paths)
             if passage:
@@ -557,7 +606,14 @@ def _recall(event, started_at, config, delivery_markers=None, deliveries=None):
     others = []
     for index, (line, path, vault, terms, name) in enumerate(other_entries):
         origin = origins.get(line)
-        if index < memspec.RECALL_SOURCE_MAX_CARDS - source_reads and not expired(started_at):
+        route = source_routes.get(line)
+        if route and not payload_fits("UserPromptSubmit", "\n".join([head, *pinned, line]),
+                                      config[memspec.CONFIG_BUDGET_BYTES_FIELD]):
+            line = route
+            pointer_lines.add(line)
+            origin = (origin[0], origin[1], memspec.RECALL_DELIVERY_MODE_CARD)
+        if (line not in pointer_lines and index < memspec.RECALL_SOURCE_MAX_CARDS - source_reads
+                and not expired(started_at)):
             passage = _source_passage(path, vault, terms, name,
                                       fallback_first=path in replacement_paths)
             if passage:
@@ -583,7 +639,8 @@ def _recall(event, started_at, config, delivery_markers=None, deliveries=None):
     aliases = dict(entry.split("=", 1) for entry in legend)
     pending = []
     for line in [*pinned, *others]:
-        digest = "card-" + hashlib.sha256(_card_identity(line, aliases).encode("utf-8")).hexdigest()
+        kind = "pointer-" if line in pointer_lines else "card-"
+        digest = kind + hashlib.sha256(_card_identity(line, aliases).encode("utf-8")).hexdigest()
         if not session_id or not (recall_marker_directory(session_id) / digest).is_file():
             pending.append((line, digest))
     if not pending:
@@ -602,12 +659,14 @@ def _recall(event, started_at, config, delivery_markers=None, deliveries=None):
         required_count=header_count + sum(line in pinned_set for line in lines),
         header_count=header_count,
     )
-    if not context or expired(started_at):
+    if expired(started_at):
         return None
+    if not context:
+        return _source_omission(config[memspec.CONFIG_BUDGET_BYTES_FIELD]) if pointer_lines else None
     sent_lines = set(context.splitlines())
     markers = [(session_id, digest) for line, digest in pending if line in sent_lines]
     if not markers:
-        return None
+        return _source_omission(config[memspec.CONFIG_BUDGET_BYTES_FIELD]) if pointer_lines else None
     if not head_seen:
         markers.append((session_id, head_digest))
     if delivery_markers is not None:

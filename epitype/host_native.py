@@ -24,13 +24,14 @@ import os
 from pathlib import Path
 import re
 import shutil
+import time
 import tomllib
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from epitype import memsearch, memspec
+from epitype import cardscan, memspec
 
 KIND_CLAUDE = "claude_settings"
 KIND_CODEX_CONFIG = "codex_config"
@@ -61,13 +62,62 @@ def state_path(home=None):
     return (Path(home) if home else Path.home()) / ".epitype" / memspec.HOST_NATIVE_STATE_FILENAME
 
 
-def load_state(home=None):
+def load_state(home=None, *, strict=False):
     try:
         with io.open(state_path(home), encoding="utf-8") as stream:
             loaded = json.loads(stream.read())
+    except FileNotFoundError:
+        return {}
     except (OSError, ValueError):
+        if strict:
+            raise
         return {}
     targets = loaded.get("targets") if isinstance(loaded, dict) else None
+    if strict and not isinstance(targets, dict):
+        raise ValueError('native ownership state has no valid targets object')
+    if strict:
+        for path, record in targets.items():
+            if not isinstance(path, str) or not path or not isinstance(record, dict):
+                raise ValueError('native ownership target record must be an object with a path')
+            kind = record.get('kind')
+            if kind not in (KIND_CLAUDE, KIND_CODEX_CONFIG, KIND_CODEX_RULES):
+                raise ValueError('native ownership target kind is missing or invalid')
+            if 'created' in record and (not isinstance(record['created'], list)
+                    or any(not isinstance(key, str) or not key for key in record['created'])):
+                raise ValueError('native ownership created containers must be a string list')
+            if 'created_file' in record and type(record['created_file']) is not bool:
+                raise ValueError('native ownership created_file must be a boolean')
+            allowed = {SECTION_ENV, SECTION_DENY} if kind == KIND_CLAUDE else (
+                {SECTION_CONFIG} if kind == KIND_CODEX_CONFIG else {SECTION_RULES})
+            for section in (SECTION_ENV, SECTION_DENY, SECTION_CONFIG, SECTION_RULES):
+                if section not in record:
+                    continue
+                entries = record[section]
+                if not isinstance(entries, dict) or (section not in allowed and entries):
+                    raise ValueError('native ownership section is invalid for its target kind')
+                for key, previous in entries.items():
+                    if not isinstance(key, str) or not key:
+                        raise ValueError('native ownership key must be a nonempty string')
+                    if section == SECTION_RULES:
+                        if not isinstance(previous, str) or not previous:
+                            raise ValueError('native ownership rule source must be a string')
+                        continue
+                    if (not isinstance(previous, dict)
+                            or type(previous.get('owned')) is not bool
+                            or not isinstance(previous.get('card'), str) or not previous['card']):
+                        raise ValueError('native ownership entry needs a source and boolean owned')
+                    if section in (SECTION_ENV, SECTION_CONFIG) and 'value' not in previous:
+                        raise ValueError('native ownership entry has no verified historical value')
+                    if section == SECTION_ENV and (not isinstance(previous['value'], str)
+                            or not previous['value']):
+                        raise ValueError('native ownership environment value must be a nonempty string')
+                    if section == SECTION_CONFIG and not (
+                            isinstance(previous['value'], str) and bool(previous['value'].strip())
+                            or type(previous['value']) is int and previous['value'] > 0):
+                        raise ValueError('native ownership config value must match its native scalar producer')
+            if kind == KIND_CODEX_RULES and (not isinstance(record.get('fingerprint'), str)
+                    or re.fullmatch(r'[0-9a-f]{16}', record['fingerprint']) is None):
+                raise ValueError('native ownership rule fingerprint is missing or invalid')
     return targets if isinstance(targets, dict) else {}
 
 
@@ -85,38 +135,118 @@ def _key(path):
 # --------------------------------------------------------------------------- 卡片
 
 
-def collect(vaults):
+def _native_card_paths(vault, deadline):
+    """Use the shared privacy boundaries, but propagate incomplete scans.
+
+    Search can tolerate an inaccessible subtree; rendering owned settings cannot
+    interpret that subtree as proof that its cards were removed.
+    """
+    found, pending = [], [Path(vault)]
+    while pending:
+        if time.monotonic() >= deadline:
+            raise TimeoutError('native source verification budget exhausted')
+        with os.scandir(pending.pop()) as entries:
+            for entry in entries:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError('native source verification budget exhausted')
+                if entry.name.startswith(('_', '.')):
+                    continue
+                info = entry.stat(follow_symlinks=False)
+                if cardscan._is_link(entry, info):
+                    continue
+                if entry.is_dir(follow_symlinks=False):
+                    pending.append(Path(entry.path))
+                elif (entry.is_file(follow_symlinks=False)
+                        and entry.name.lower().endswith('.md')
+                        and entry.name != memspec.MEMORY_INDEX_FILENAME):
+                    found.append(Path(entry.path))
+    return sorted(found, key=lambda path: path.relative_to(vault).as_posix().casefold())
+
+
+def collect(vaults, *, event=None, diagnostics=None, seconds=5.0):
     """({section: ...}, [問題])——這些庫裡還在生效的卡要求宿主做什麼。
 
     一張卡的欄位寫壞、兩張卡對同一個鍵要不同的值，這個庫的宿主原生設定就整批不寫：
     寫一半會讓那張壞卡原本生效的規則在設定裡被悄悄拿掉，而那正是它要擋的東西。"""
     desired = {SECTION_ENV: {}, SECTION_DENY: {}, SECTION_CONFIG: {}, SECTION_RULES: []}
     problems = []
+    diagnostics = diagnostics if diagnostics is not None else []
+    deadline = time.monotonic() + seconds
+
+    def timed_out():
+        if time.monotonic() < deadline:
+            return False
+        problems.append('UNVERIFIED native source: verification budget exhausted; next check: retry this exact vault group')
+        return True
+
     for vault in vaults:
+        if timed_out():
+            break
         vault = Path(vault)
         try:
-            paths = memsearch.card_files(vault)
+            paths = _native_card_paths(vault, deadline)
         except OSError as exc:
             problems.append(memspec.HOST_NATIVE_CARD_UNREADABLE_REASON.format(
                 card=vault, error=type(exc).__name__))
             continue
         for path in paths:
+            if timed_out():
+                return desired, problems
             relative = path.relative_to(vault).as_posix() if path.is_relative_to(vault) else path.name
             try:
                 text = path.read_text(encoding="utf-8-sig")
             except (OSError, UnicodeError) as exc:
-                if "host_" in path.name:
-                    problems.append(memspec.HOST_NATIVE_CARD_UNREADABLE_REASON.format(
-                        card=relative, error=type(exc).__name__))
-                continue
-            if "host_" not in text:
+                # An unreadable ordinary-named card may own existing native keys.
+                problems.append(memspec.HOST_NATIVE_CARD_UNREADABLE_REASON.format(
+                    card=relative, error=type(exc).__name__))
                 continue
             front, closing = memspec.split_frontmatter(text)
-            if front is None or closing is None or not memspec.host_native_declared(front):
+            from epitype import rule_pipeline, rule_context
+            if front is None or not memspec.host_native_declared(front):
+                # An enrolled card remains the same identity after a shell
+                # removes the fields that used to classify it as a native rule.
+                fields, _problem = memspec.frontmatter_text(text)
+                try:
+                    if 'rule_provenance' in fields:
+                        rule_pipeline.projection(fields, path, card_text=text)
+                    else:
+                        integrity = rule_pipeline.legacy_integrity(fields, path, card_text=text)
+                        if integrity is not None and not integrity.allowed:
+                            problems.append(memspec.HOST_NATIVE_CARD_INVALID_REASON.format(
+                                card=relative, problem='; '.join(integrity.issues)))
+                except (ValueError, OSError, UnicodeError) as exc:
+                    problems.append(memspec.HOST_NATIVE_CARD_INVALID_REASON.format(
+                        card=relative, problem=str(exc)))
                 continue
-            fields, _problem = memspec.frontmatter_text(text)
+            fields, problem = memspec.frontmatter_text(text)
+            if closing is None or problem:
+                problems.append(memspec.HOST_NATIVE_CARD_INVALID_REASON.format(
+                    card=relative, problem=problem or 'unclosed native card frontmatter'))
+                continue
+            try:
+                projected = rule_pipeline.projection(fields, path, card_text=text)
+            except (ValueError, OSError, UnicodeError) as exc:
+                problems.append(memspec.HOST_NATIVE_CARD_INVALID_REASON.format(
+                    card=relative, problem=str(exc)))
+                continue
+            if timed_out():
+                return desired, problems
             if fields.get(memspec.DECISION_STATUS_FIELD, "").strip() in memspec.STOP_GATE_SILENT_STATUSES:
                 continue
+            if (projected['expired'] or memspec.card_expired(fields.get(memspec.VALID_UNTIL_FIELD))
+                    or memspec.card_expired(fields.get(memspec.GRANT_EXPIRES_FIELD))):
+                continue
+            scope = projected['document'].get('scope')
+            if scope is not None:
+                applicable, reason = rule_context.applicability(scope, event or {})
+                if applicable == 'OUTSIDE':
+                    continue
+                if applicable == 'ADVISORY':
+                    problems.append(memspec.HOST_NATIVE_CARD_INVALID_REASON.format(
+                        card=relative, problem='UNVERIFIED rule scope: ' + reason))
+                    continue
+            if projected['provenance']['status'] != 'VERIFIED':
+                diagnostics.append(f'{relative}: UNVERIFIED legacy source; compatibility is not Owner authorship or scope proof')
             values, invalid = memspec.host_native_values(front)
             if invalid:
                 problems.extend(memspec.HOST_NATIVE_CARD_INVALID_REASON.format(
@@ -137,6 +267,7 @@ def collect(vaults):
             for pattern in values.get(memspec.HOST_CODEX_RULES_FIELD, ()):
                 if all(pattern != known for known, _card in desired[SECTION_RULES]):
                     desired[SECTION_RULES].append((pattern, relative))
+    timed_out()
     return desired, problems
 
 
@@ -193,7 +324,7 @@ def _read(path):
     """(原始位元組或 None, 去掉 BOM 的文字, 有沒有 BOM)。"""
     try:
         raw = path.read_bytes()
-    except OSError:
+    except FileNotFoundError:
         return None, "", False
     bom = raw.startswith(b"\xef\xbb\xbf")
     return raw, raw[3:].decode("utf-8") if bom else raw.decode("utf-8"), bom
@@ -222,7 +353,10 @@ def _status(want, have, record, present):
 def _stale(record, have, present):
     if not record.get("owned") or not present:
         return RELEASE
-    return STALE if have == record.get("value", have) else DISOWN
+    # Never guess the previous value from the value the user has now.
+    if 'value' not in record:
+        raise ValueError('native ownership entry has no verified historical value')
+    return STALE if have == record['value'] else DISOWN
 
 
 def _lookup(parsed, dotted):
@@ -242,7 +376,11 @@ def _lookup(parsed, dotted):
 
 def plan(target, desired, record):
     """這個設定檔要改什麼。record 是狀態表裡這個檔上次的紀錄（沒有就是 {}）。"""
-    raw, text, _bom = _read(target.path)
+    try:
+        raw, text, _bom = _read(target.path)
+    except (OSError, UnicodeError) as exc:
+        return Plan(target, [], [memspec.HOST_NATIVE_UNREADABLE_REASON.format(
+            error=f"{type(exc).__name__}: {exc}")], True, [], None)
     if target.kind == KIND_CODEX_RULES:
         return _plan_rules(target, desired, record, raw, text)
     try:
@@ -367,18 +505,31 @@ def _drift_line(target, entry):
 
 def _plans(vaults, hosts=None, home=None):
     """([Plan], {vault 組: 問題})——只收「卡片有要求」或「上次寫過東西」的那些檔。"""
-    state = load_state(home)
+    try:
+        state = load_state(home, strict=True)
+    except (OSError, ValueError, UnicodeError) as exc:
+        target = Target('', '', state_path(home), 'native:ownership-state', [], None)
+        return [Plan(target, [], [f'UNVERIFIED ownership state: {type(exc).__name__}: {exc}; '
+            'retry reading this exact state before rendering'], True, [], None)], {}
     collected = {}
     plans = []
     for target in targets(vaults, hosts, home):
-        group = tuple(os.fspath(Path(vault)) for vault in target.vaults)
+        group = (tuple(os.fspath(Path(vault)) for vault in target.vaults),
+                 _key(target.root) if target.root is not None else None)
         first = group not in collected
         if first:
-            collected[group] = collect(target.vaults)
-        desired, problems = collected[group]
+            diagnostics = []
+            desired, problems = collect(target.vaults, event={
+                'cwd': str(target.root) if target.root is not None else None,
+                'tool_name': 'host_sync'}, diagnostics=diagnostics)
+            collected[group] = desired, problems, diagnostics
+        desired, problems, diagnostics = collected[group]
         if problems and not first:
             continue  # 同一個庫的卡片問題只講一次；它的每一個目標都整批不寫
         record = state.get(_key(target.path)) or {}
+        if record and record['kind'] != target.kind:
+            plans.append(Plan(target, [], ['UNVERIFIED ownership state: target kind does not match its actual interface'], False, [], None))
+            continue
         if target.kind == KIND_CLAUDE:
             wanted = desired[SECTION_ENV] or desired[SECTION_DENY]
         elif target.kind == KIND_CODEX_CONFIG:
@@ -386,12 +537,12 @@ def _plans(vaults, hosts=None, home=None):
         else:
             wanted = desired[SECTION_RULES]
         if problems:
-            if wanted or record or any(desired.values()):
-                plans.append(Plan(target, [], list(problems), False, [], None))
+            plans.append(Plan(target, [], list(problems), False, list(diagnostics), None))
             continue
         if not wanted and not record:
             continue
-        plans.append(plan(target, desired, record))
+        planned = plan(target, desired, record)
+        plans.append(planned._replace(notes=[*planned.notes, *(diagnostics if first else [])]))
     return plans, state
 
 
@@ -442,6 +593,9 @@ def drift_lines(vaults, home=None):
     report = io.StringIO()
     drift, refused = check(vaults, home=home, output=report)
     lines = [line for line in report.getvalue().splitlines() if line.strip()]
+    if not drift and not refused and lines:
+        # Diagnostics must not hide the independent rendering result in doctor.
+        lines.insert(0, 'PASS host-native settings match the cards; legacy source/authorship remains UNVERIFIED')
     return lines, bool(drift or refused)
 
 
@@ -647,6 +801,8 @@ def _render(item, record):
     """(新內容, 新的狀態紀錄, 要刪檔嗎)。內容驗證不過就丟 ValueError。"""
     target = item.target
     raw, text, bom = _read(target.path)
+    if raw != item.raw:
+        raise ValueError('native target changed after planning; retry the current complete file')
     created = list(record.get("created") or [])
     created_file = bool(record.get("created_file")) or raw is None
     if target.kind == KIND_CODEX_RULES:
@@ -838,12 +994,14 @@ def apply(vaults, hosts=None, home=None, output=sys.stdout):
         changing = [entry for entry in item.entries if entry.status in (MISSING, DRIFT, STALE)]
         try:
             updated, new_record, delete = _render(item, record)
-        except (ValueError, KeyError, TypeError, tomllib.TOMLDecodeError) as exc:
+            raw, current_text, bom = _read(item.target.path)
+            if raw != item.raw:
+                raise ValueError('native target changed during rendering; retry the current complete file')
+        except (OSError, UnicodeError, ValueError, KeyError, TypeError, tomllib.TOMLDecodeError) as exc:
             print(f"REFUSE {label}: " + memspec.HOST_NATIVE_VERIFY_REASON.format(
                 detail=f"{type(exc).__name__}: {exc}"), file=output)
             refused += 1
             continue
-        raw, current_text, bom = _read(item.target.path)
         reverts = _reverts(item, record, current_text)
         try:
             if delete:
@@ -891,7 +1049,11 @@ def remove_all(home=None, output=sys.stdout):
     """解除安裝：把 Epitype 寫過的鍵全部拿回來，使用者原有的一個都不動。回傳改了幾個檔。"""
     from epitype.host_sync import atomic_write
 
-    state = load_state(home)
+    try:
+        state = load_state(home, strict=True)
+    except (OSError, ValueError) as exc:
+        print('REFUSE UNVERIFIED ownership state: ' + str(exc), file=output)
+        return 0
     removed = 0
     empty = {SECTION_ENV: {}, SECTION_DENY: {}, SECTION_CONFIG: {}, SECTION_RULES: []}
     for path_key, record in sorted(state.items()):

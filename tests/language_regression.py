@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""顯示語言：英文裝機看得懂，繁中裝機一個位元組都沒變。
+"""顯示語言：英文裝機看得懂，繁中維持明確輸出快照。
 
 Epitype 的說明是英文出貨的，擋下來的那一句以前寫死繁中——陌生人裝完第一次被擋，讀到的
 是一句他看不懂的話。這裡驗三件事：
@@ -53,6 +53,8 @@ SPEECH_CARD = "starter-no-hedged-completion.md"
 ZH_GUARD_REASON = (
     "🛑 傷疤卡（Stage explicit paths, not the whole tree）：這次 Bash 同時含有 "
     "「git add -A」——Run git status first, then name each path you actually changed"
+    "\n既有記錄（來源未驗證；僅供查找）：Run git status first, then name each path you actually changed"
+    "\n作者：UNVERIFIED"
 )
 ZH_STOP_REASON = (
     "⚖ 不要說「that should fix it」，請改寫。"

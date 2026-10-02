@@ -47,7 +47,7 @@ def _soft_remaining(started_at):
     return memspec.SESSIONSTART_BUDGET_SECONDS - (time.monotonic() - started_at)
 
 
-def _repeat_guard_notices(vaults, started_at, now=None, deadline=None):
+def _repeat_guard_notices(vaults, started_at, now=None, deadline=None, *, event=None):
     """最近一天一直擋人的守衛，一張一行（最多兩行）。
 
     這不是規則注入，是狀態：它報的是「這道守衛剛剛擋了你幾次」。規則本身在卡上，
@@ -115,7 +115,7 @@ def _repeat_guard_notices(vaults, started_at, now=None, deadline=None):
             if out_of_time():
                 break  # 建議詞查不完就少幾句建議，次數照報
             for guard in pretooluse_gate._guards(
-                Path(vault), started_at, [], deadline=deadline
+                Path(vault), started_at, [], deadline=deadline, event=event or {}
             ):
                 advice.setdefault(guard.card, guard.advice)
     except Exception:
@@ -343,7 +343,7 @@ def _record_deliveries(deliveries):
             pass
 
 
-def _startup_segments(pieces, vaults, resolved, governance, started_at):
+def _startup_segments(pieces, vaults, resolved, governance, started_at, *, event=None):
     """開場（非壓縮續場）才跑的三段：卡片檢查、守衛快取暖機、重複擋人提醒。
 
     每段各拿自己的時間預算，撥不到就整段省略。card_lint 用到才載入：光載入就要 0.3 s，
@@ -391,7 +391,7 @@ def _startup_segments(pieces, vaults, resolved, governance, started_at):
     if notice_seconds is not None:
         try:
             pieces.extend(_repeat_guard_notices(
-                resolved, started_at, deadline=time.monotonic() + notice_seconds
+                resolved, started_at, deadline=time.monotonic() + notice_seconds, event=event
             ))
         except Exception:
             pass
@@ -449,7 +449,11 @@ def _handle(event, started_at, deliveries=None, trace=None):
             destination = compact_map.handoff_destination(
                 governance, event.get("session_id", event.get("sessionId", "")),
                 Path(transcript_value).expanduser().resolve())
-            restored = rule_context.restore(destination, resolved)
+            rule_diagnostics = []
+            restored = rule_context.restore(
+                destination, resolved, event=event, diagnostics=rule_diagnostics)
+            if rule_diagnostics:
+                trace["rule_context_diagnostics"] = rule_diagnostics
             if restored:
                 pieces.append(restored)
     if _soft_remaining(started_at) > 0:
@@ -463,7 +467,7 @@ def _handle(event, started_at, deliveries=None, trace=None):
     # 2026-09-25 實測壓縮續場 3.2 s 裡三段占 2 s 以上，機器一忙就整段被砍，地圖那行跟著
     # 消失。少的是壞卡那一行與重複擋人提醒；它們下一場開場照常出現。
     if source != "compact":
-        _startup_segments(pieces, vaults, resolved, governance, started_at)
+        _startup_segments(pieces, vaults, resolved, governance, started_at, event=event)
 
     # 夢的一行跟其他一行摘要放在一起：它是狀態，不是規則。
     if _soft_remaining(started_at) > 0:
