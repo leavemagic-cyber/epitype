@@ -2135,3 +2135,48 @@ through each reader. It covers the Stop gate blocking on a `forbidden` list unde
 `write_check` denying, a nested `status` retiring a ruling, the top level winning, a
 stale negative cache entry, a view written by the old reading, the lint, the index, the
 stale mark, the origin mapping, and each layout that must be left as written.
+
+## 47. Replacement guidance revives an intermediate rule or disappears at the host
+
+### Symptom and cause
+
+A retired card points to another retired card, which points to its current
+replacement. The default search excludes the first card, but the replacement
+guidance previously followed only one edge and labelled the intermediate card
+current. A missing, historical or non-card target could also be labelled current.
+
+The shared prompt adapter consumed only lexical `results`, discarding `guidance`.
+When the replacement no longer contains the old search term, the prompt receives
+no replacement at all. A correct supersession marker alone therefore cannot fix
+delivery. These two failures were reproduced with isolated synthetic vaults.
+
+### Countermeasure and verification
+
+Search now follows the live replacement chain to a valid card inside the vault.
+It checks each card's current metadata rather than trusting a stale index, rejects
+cycles, missing or malformed cards, private paths and historical-only endpoints,
+and emits each endpoint once. Indexed paths are checked for containment after
+resolution as well as unindexed paths.
+
+`recall_index` also returns structured `replacement_results`. The shared Claude
+and Codex prompt adapter consumes these before ordinary lexical matches, through
+the existing event exclusion, authority, deduplication and context limits. The
+endpoint gets a bounded literal body passage even when its words no longer match
+the old query; in that case the first eligible passage is used. A small context
+budget retains the pointer fallback. The manual query's lexical result counts and
+history opt-in remain unchanged.
+
+```powershell
+python tests/recall_successor_regression.py SuccessorSearch SuccessorHost
+python tests/recall_selection_regression.py
+python epitype/memsearch.py --selftest
+python adapters/claude/recall_hook.py --selftest
+```
+
+The successor regression checks both `session_id` and `sessionId` payloads,
+changed wording, live metadata over a stale index, duplicate redirects and
+invalid endpoints. On Windows the outside-link boundary is tested by substituting
+its resolved destination, without requiring permission to create a symlink.
+This proves delivery behavior, not faithful interpretation of an owner's words,
+nor adoption by a live model. Exact quote provenance and semantic scope review
+remain separate requirements; a nonempty `owner_quote` is not evidence of either.

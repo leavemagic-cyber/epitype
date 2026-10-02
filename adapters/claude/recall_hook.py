@@ -236,7 +236,7 @@ def _card_identity(line, aliases):
     return f"{text}{separator}{aliases.get(alias, alias)}{slash}{rest}"
 
 
-def _source_passage(path, vault, terms, expected_name=None):
+def _source_passage(path, vault, terms, expected_name=None, fallback_first=False):
     """Read the current card, then return a bounded, literal passage relevant to this prompt.
 
     The index selects candidates; it is not the source of the words delivered here.
@@ -265,7 +265,7 @@ def _source_passage(path, vault, terms, expected_name=None):
             or front.get(memspec.DECISION_STATUS_FIELD) == memspec.SUPERSEDED_DECISION_STATUS):
         return ""
     strong = memsearch._strong_terms(terms)
-    if not strong:
+    if not strong and not fallback_first:
         return ""
     ranked = []
     fenced = False
@@ -278,7 +278,7 @@ def _source_passage(path, vault, terms, expected_name=None):
             continue
         folded = line.casefold()
         matched = sum(term in folded for term in strong)
-        if matched:
+        if matched or fallback_first:
             ranked.append((-matched, index))
     if not ranked:
         return ""
@@ -413,6 +413,7 @@ def _recall(event, started_at, config, delivery_markers=None, deliveries=None):
     legend = []
     shown_names = set()  # 同檔名跨庫（專案的指路卡與通用庫正本）一則只端一張，先到的庫優先
     origins = {}  # 端出的那一行 -> (庫, 卡在庫裡的相對路徑, 送達方式)，送達帳用
+    replacement_paths = set()
     for vault in scoped_vaults(config, event):
         if expired(started_at):
             return None
@@ -430,8 +431,17 @@ def _recall(event, started_at, config, delivery_markers=None, deliveries=None):
         body_only = 0
         ordinary = 0
         ordinary_lines = []
-        for hit in result.get("results", ()):
+        # The old wording may be absent from its replacement. Search supplies
+        # live endpoints separately; they use the same caps and authority checks.
+        hits = [*result.get("replacement_results", ()), *result.get("results", ())]
+        replacement_paths.update(_one_line(hit.get("path"))
+                                 for hit in result.get("replacement_results", ()))
+        visited_paths = set()
+        for hit in hits:
             path = _one_line(hit.get("path"))
+            if path in visited_paths:
+                continue
+            visited_paths.add(path)
             # Decided before the caps: the owner's standing ruling is never a weak hit.
             decision = None
             if _one_line(hit.get(memspec.DECISION_STATUS_FIELD)) == memspec.ACTIVE_DECISION_STATUS:
@@ -512,7 +522,8 @@ def _recall(event, started_at, config, delivery_markers=None, deliveries=None):
     for position, (line, path, vault, terms, name) in enumerate(pinned_entries):
         origin = origins.get(line)
         if source_reads == 0 and not expired(started_at):
-            passage = _source_passage(path, vault, terms, name)
+            passage = _source_passage(path, vault, terms, name,
+                                      fallback_first=path in replacement_paths)
             if passage:
                 front, separator, located = line.rpartition(" | ")
                 expanded = f"{front} | {passage} | {located}" if separator else line
@@ -528,7 +539,8 @@ def _recall(event, started_at, config, delivery_markers=None, deliveries=None):
     for index, (line, path, vault, terms, name) in enumerate(other_entries):
         origin = origins.get(line)
         if index < memspec.RECALL_SOURCE_MAX_CARDS - source_reads and not expired(started_at):
-            passage = _source_passage(path, vault, terms, name)
+            passage = _source_passage(path, vault, terms, name,
+                                      fallback_first=path in replacement_paths)
             if passage:
                 front, separator, located = line.rpartition(" | ")
                 expanded = f"{front} | {passage} | {located}" if separator else line

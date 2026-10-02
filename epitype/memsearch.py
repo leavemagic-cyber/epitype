@@ -290,6 +290,7 @@ def _read_card(path):
             ]
     fields = _parse_frontmatter(frontmatter.decode("utf-8", errors="replace"), closed=closed)
     fields["body"] = body.decode("utf-8", errors="replace")
+    fields["frontmatter_closed"] = closed
     fields["is_card"] = has_frontmatter and bool(
         fields["name"].strip() or fields["description"].strip()
     )
@@ -902,12 +903,12 @@ def _successor_path(vault, source_card_path, raw_target, indexed_paths):
     indexed = {item.casefold(): item for item in indexed_paths}
     for candidate in relative_candidates:
         matched = indexed.get(candidate.casefold())
-        if matched is not None:
-            return str((vault / matched).resolve())
-        path = (vault / candidate).resolve()
+        path = (vault / (matched or candidate)).resolve()
         try:
-            path.relative_to(vault)
+            relative = path.relative_to(vault)
         except ValueError:
+            continue
+        if any(part.startswith(("_", ".")) for part in relative.parts):
             continue
         if path.is_file():
             return str(path)
@@ -926,23 +927,51 @@ def _successor_path(vault, source_card_path, raw_target, indexed_paths):
             ):
                 loose.append(card_path)
         if len(set(loose)) == 1:
-            return str((vault / loose[0]).resolve())
+            return _successor_path(vault, "", loose[0], ())
     return None
 
 
-def _guidance_lines(vault, excluded_links, results, indexed_paths):
-    result_paths = {item["path"] for item in results}
-    lines = []
-    seen = set()
+def _current_successors(vault, excluded_links, indexed_paths):
+    """Follow live replacements; a retired intermediate is never current authority."""
+    successors = []
+    emitted = set()
     for source_card_path, target in excluded_links:
-        successor = _successor_path(vault, source_card_path, target, indexed_paths)
-        if successor is None or successor in result_paths:
-            continue
-        line = _CURRENT_DECISION_GUIDANCE + successor
-        if line not in seen:
-            seen.add(line)
-            lines.append(line)
-    return lines
+        visited = {source_card_path.casefold()}
+        while target:
+            successor = _successor_path(vault, source_card_path, target, indexed_paths)
+            if successor is None:
+                break
+            relative = Path(successor).relative_to(vault).as_posix()
+            if relative.casefold() in visited:
+                break
+            visited.add(relative.casefold())
+            try:
+                fields = _read_card(Path(successor))
+            except (OSError, ValueError):
+                break
+            if not fields["is_card"] or not fields["frontmatter_closed"] or historical_only(
+                fields["description"], fields[memspec.SCOPE_FIELD],
+                fields[memspec.DECISION_STATUS_FIELD],
+            ):
+                break
+            if _is_superseded(fields):
+                source_card_path = relative
+                target = fields[memspec.SUPERSEDED_BY_FIELD]
+                continue
+            if relative.casefold() not in emitted:
+                fields["card_path"] = relative
+                successors.append(_result(vault, fields, [memspec.SUPERSEDED_BY_FIELD]))
+                emitted.add(relative.casefold())
+            break
+    return successors
+
+
+def _guidance_lines(vault, excluded_links, results, indexed_paths, replacements=None):
+    result_paths = {item["path"] for item in results}
+    if replacements is None:
+        replacements = _current_successors(vault, excluded_links, indexed_paths)
+    return [_CURRENT_DECISION_GUIDANCE + item["path"] for item in replacements
+            if item["path"] not in result_paths]
 
 
 def _result(vault, row, hits):
@@ -1098,12 +1127,14 @@ def recall_index(vault, prompt, include_superseded=False, include_noncard=False,
     candidates.sort(key=lambda item: item[0])
     window = memspec.FTS_TOP_K if limit is None else max(int(limit), memspec.FTS_TOP_K)
     results = [item[1] for item in candidates[:window]]
+    replacements = _current_successors(vault, excluded_links, indexed_paths)
     payload = {
         "query": prompt,
         "terms": terms,
         "count": len(results),
         "results": results,
-        "guidance": _guidance_lines(vault, excluded_links, results, indexed_paths),
+        "replacement_results": replacements,
+        "guidance": _guidance_lines(vault, excluded_links, results, indexed_paths, replacements),
     }
     if index_updated:
         payload["index_updated"] = True
