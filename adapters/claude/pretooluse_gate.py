@@ -1923,8 +1923,9 @@ def _control_review(event, tool_name, started_at):
     """(擋下的值, 提醒行)——本場自建的瀏覽器分頁還開著，就先擋非瀏覽器工具。
 
     owner 2026-10-03：提醒擋不住「等一下還要用」而留著的分頁，改成攔截。Colab 跑中 VM
-    的保留宣告也在這裡核對：它是一行 shell，不核對就放行等於誰都能隨口豁免。壞了照舊放行
-    並講一句——這道閘不能因為自己的錯卡住工作。"""
+    的保留宣告也在這裡核對並登記；那行 shell 一律不放行執行，免得夾帶別的指令，也免得
+    登記了一個分頁就順便放過其他還開著的。壞了照舊放行並講一句——這道閘不能因為自己的錯
+    卡住工作。"""
     if expired(started_at):
         return None, None
     try:
@@ -1932,7 +1933,10 @@ def _control_review(event, tool_name, started_at):
         request = control_lifecycle.keep_request(event)
         if request is not None:
             accepted, message = control_lifecycle.declare_keep(event, path, *request)
-            return (None, message) if accepted else (_deny_value(message), None)
+            rows = control_lifecycle.blockers(event, path, record=True) if accepted else []
+            if rows:
+                message += control_lifecycle.block_reason(rows, tool_name)
+            return _deny_value(message), None
         rows = control_lifecycle.blockers(event, path, record=True)
         if rows:
             return _deny_value(control_lifecycle.block_reason(rows, tool_name)), None

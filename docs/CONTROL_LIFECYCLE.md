@@ -43,9 +43,12 @@ A resource is `closed` only on confirmation:
 - Built-in browser: `tabs_close` says `Closed tab X` for the requested tab, or
   says the Browser pane is now closed (which closes every recorded pane tab).
   `tabs_context` lists every pane tab, so a recorded tab missing from it, or
-  `browserOpen: false`, closes the record. A pane tab is recorded only from
-  `tabs_create` / `preview_start` results with `reused: false`, or from a
-  `navigate` that ran while the pane was known to be closed.
+  `browserOpen: false`, closes the record, and so does a `No preview is open`
+  error from any of these tools. A pane tab is recorded only from a
+  `tabs_create` / `preview_start` / `navigate` result that starts with JSON
+  carrying `reused: false` (what `navigate` returns when it opens the pane), or
+  from a `navigate` naming one `Executed on tabId` while the pane was known to
+  be closed.
 - CUA: a complete, unfiltered inventory no longer contains the ID. `listTabs`
   (scoped by a literal `iab`/`chrome`/`edge`) or `getState()` counts only when
   it is the code's final statement by itself, and the output holds exactly one
@@ -117,6 +120,13 @@ tabs and the close tool, and says to reopen a tab when it is needed again.
   `No tab group exists` or `Claude in Chrome is not connected`, is out of the
   agent's reach and stops blocking. It is not closed: it stays pending and
   reminded, and blocks again if a later listing shows it.
+- A session that cannot close its tabs (for example one resumed where the
+  browser tools are not loaded) has one way out that the agent cannot take
+  itself: the owner's own message containing `放行分頁`. `UserPromptSubmit`
+  then marks every tab still blocking in that session as released (a `release`
+  event). Released tabs stay pending and reminded; a tab opened afterwards
+  blocks again. A relayed agent message (`<agent-message`,
+  `<task-notification`, `<teammate-message`, `<channel`) does not count.
 - A failure inside this check fails open with the usual degraded notice.
 - Each denial is counted per tab in `alerts` (stage `block`); closing the tab
   keeps the count until retention removes it.
@@ -131,25 +141,32 @@ command (Bash or PowerShell, nothing chained to it):
 python -m epitype lifecycle keep TAB_ID --authuser N --notebook NOTEBOOK_ID
 ```
 
-`PreToolUse` checks the declaration before the command runs and denies it
-unless:
+`PreToolUse` checks and records the declaration, then denies the call either
+way: the line is a message to the hook and never runs, so nothing can ride
+along with it. The answer says whether it was recorded and, if other tabs of
+the agent are still open, also carries their block reason. It is recorded only
+when:
 
 - the tab is the calling agent's own open `chrome-tab` / `pane-tab`;
-- a tab listing seen in the last five minutes showed that tab on
+- within the last five minutes Epitype saw that tab on
   `https://colab.research.google.com/drive/NOTEBOOK_ID` with the same
-  `authuser` (absent means `0`); in Chrome call `tabs_context_mcp` first, in
-  the built-in browser the `navigate` result carries the URL;
+  `authuser` (absent means `0`). In Chrome that is a tab listing (call
+  `tabs_context_mcp` first). The built-in browser lists only origins, so there
+  it is a `navigate` to the notebook URL whose result confirms the navigation
+  (`navOk: true`, or `navigated to` the same origin on one `Executed on tabId`);
 - no other kept tab of this session already holds the same account and
   notebook (one tab per VM).
 
-An accepted declaration is recorded as a `keep` event. The command itself then
-reads the record back and exits 1 when the hook did not record it, so a
-missing or untrusted hook is visible. The exemption ends after 24 hours, when a
-later listing shows the tab on another URL, or when the tab closes; a reopened
-ID starts without it. Kept tabs are left out of tool-stage reminders and named
-as kept in prompt-stage reminders. Whether the VM is actually running is not
-observable from tool results; the check proves the tab is the declared notebook
-on the declared account, not that a job is running.
+An accepted declaration is recorded as a `keep` event; run outside the hook,
+`epitype lifecycle keep` only reads the record back and exits 1 when there is
+none. The exemption ends after 24 hours, when a later listing shows the tab on
+another URL (built-in browser: another origin), or when the tab closes; a
+reopened ID starts without it. Kept tabs are left out of tool-stage reminders
+and named as kept in prompt-stage reminders. Whether the VM is actually running
+is not observable from tool results; the check proves the tab is the declared
+notebook on the declared account, not that a job is running. Page changes made
+by clicks, `computer` or `browser_batch` are not observed, so they do not void
+an exemption before its 24 hours.
 
 ## Retention
 

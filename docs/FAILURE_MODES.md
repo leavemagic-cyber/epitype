@@ -2208,13 +2208,25 @@ python tests/control_block_regression.py
 python tests/control_lifecycle_regression.py
 ```
 
-Twelve block regressions cover open → Bash denied, unconfirmed close still
+Fifteen block regressions cover open → Bash denied, unconfirmed close still
 denied, confirmed close allowed, browser/meta tools allowed, owner and
-unattributable tabs, out-of-reach tabs, subagent scope, the built-in browser,
-declaration acceptance through the real hook with CLI read-back, and rejected
+unattributable tabs, out-of-reach tabs, subagent scope, the built-in browser
+on its real result formats (opening JSON from `navigate`, origin-only lists,
+`No preview is open`), declaration acceptance through the real hook with CLI
+read-back, a built-in browser Colab tab proved by its `navigate`, rejected
 declarations (non-notebook, wrong account or notebook, foreign tab, stale URL,
-second tab for one VM, chained command, expiry, reopened ID). Replacing the
-denial with the old reminder turns them red.
+second tab for one VM, chained or script-block command, expiry, reopened ID),
+a declaration that must not let another open tab through, and the owner's
+`放行分頁` release through the real prompt hook. Replacing the denial with the
+old reminder turns them red.
+
+An independent audit of the first version found that the built-in browser
+fixtures were invented rather than taken from transcripts (a `navigate` that
+opened the pane was never recorded, and its Colab exemption could never pass),
+that an accepted declaration let a PowerShell script block run and let other
+open tabs through, and that a session without browser tools had no way out.
+All four were reproduced and fixed before release; fixtures now come from real
+results.
 
 ### Limits
 
@@ -2222,6 +2234,10 @@ Only tabs created through a parsed result block: `browser_batch` steps, pages
 opened by clicks or popups, a pane opened by `navigate` while its state was
 unknown, and Codex CUA tabs stay reminder-only. Whether a declared VM is
 actually running is not observable; the check binds the declaration to the
-listed notebook and account, and the exemption lapses after 24 hours or when
-the tab's URL changes. A transient Chrome disconnect lifts the block until the
-next listing shows the tab again.
+seen notebook and account, and the exemption lapses after 24 hours or when a
+later listing shows another URL (built-in browser: another origin). Page
+changes by clicks, `computer` or `browser_batch` are not observed. A transient
+Chrome disconnect lifts the block until the next listing shows the tab again.
+The release phrase is honoured from any prompt that is not a relayed agent
+message; a peer session that sent it as plain text would be indistinguishable
+from the owner.

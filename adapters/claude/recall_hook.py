@@ -313,11 +313,12 @@ def _handle(event, started_at, delivery_markers=None, meter_pending=None, delive
     config = load_config(started_at)
     if config is None:
         return None
+    released = _owner_release(event)
     value = _recall(event, started_at, config, delivery_markers, deliveries)
     if expired(started_at):
         return None
     value = _with_notes(value, config, event)
-    value = _with_lifecycle(value, config, event)
+    value = _with_lifecycle(value, config, event, released)
     return _with_context_meter(value, config, event, started_at, meter_pending)
 
 
@@ -366,11 +367,29 @@ def _with_notes(value, config, event):
     return payload("UserPromptSubmit", (context + "\n" + line) if context else line)
 
 
-def _with_lifecycle(value, config, event):
+def _owner_release(event):
+    """使用者訊息裡的放行字樣要在喚回之前登記：喚回超時就整則不送，放行不能跟著丟。"""
+    try:
+        return control_lifecycle.owner_release(
+            event, control_lifecycle.database_path(config_path()))
+    except Exception as exc:
+        if config_path().exists():
+            print(memspec.GATE_DEGRADED_NOTICE.format(
+                gate="control lifecycle", reason=type(exc).__name__), file=sys.stderr)
+    return []
+
+
+def _with_lifecycle(value, config, event, released=()):
     """Carry outstanding browser cleanup to the model without a visible Stop prompt.
 
     Peek first and claim only when the whole context fits: a reminder dropped for
     budget stays available, and a claimed one counts toward the per-resource cap."""
+    if released:
+        line = control_lifecycle.release_notice(released)
+        context = value.get("hookSpecificOutput", {}).get("additionalContext", "") if value else ""
+        combined = (context + "\n" + line) if context else line
+        if payload_fits("UserPromptSubmit", combined, config[memspec.CONFIG_BUDGET_BYTES_FIELD]):
+            value = payload("UserPromptSubmit", combined)
     try:
         lifecycle_path = control_lifecycle.database_path(config_path())
         note = control_lifecycle.reminder(event, lifecycle_path, "prompt", claim=False)

@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Block the next non-browser tool call while a confirmed agent-created Claude-in-Chrome or built-in browser tab is still open; a Colab tab running a VM is exempt only after a standalone `epitype lifecycle keep` declaration whose account and notebook ID match a URL seen in the last five minutes. Tabs out of the agent's reach, unattributable candidates, tab groups and Codex CUA tabs keep the reminder only.
+- Block the next non-browser tool call while a confirmed agent-created Claude-in-Chrome or built-in browser tab is still open; a Colab tab running a VM is exempt only after a standalone `epitype lifecycle keep` declaration whose account and notebook ID match a URL seen in the last five minutes (built-in browser: a confirmed `navigate` to it); the declaration line is recorded by the hook and never runs. The owner's own message `放行分頁` releases a session that cannot close its tabs. Tabs out of the agent's reach, unattributable candidates, tab groups and Codex CUA tabs keep the reminder only.
 
 - Record actual Claude/Codex advice delivery, native compaction restoration, complete entrypoint timings and target-aware replay coverage; supersede the earlier partial acceptance statements without discarding their history.
 

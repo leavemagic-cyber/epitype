@@ -54,12 +54,20 @@ _PANE_GONE = "the Browser pane is now closed"
 _EXECUTED_ON = re.compile(r"Executed on tabId:\s*([A-Za-z0-9_-]+)")
 # 「  • tabId 123: "標題" ("網址")」；網址取行尾最後一組括號，標題裡的括號不算。
 _LISTED_TAB = re.compile(r"^[ \t]*\S*[ \t]*tabId[ \t]+([A-Za-z0-9_-]+)\b([^\n]*)$", re.M)
-_LISTED_URL = re.compile(r'\("([^"\s]*)"\)\s*$')
+# Chrome 列完整網址並加引號；內建瀏覽器只列來源網域、不加引號。
+_LISTED_URL = re.compile(r'\("([^"\s]*)"\)\s*$|\(([^"\s()]+)\)\s*$')
+_NAVIGATED_TO = re.compile(r"^navigated to (\S+)", re.I | re.M)
+_NO_PANE = "No preview is open"
+COLAB_ORIGIN = "https://colab.research.google.com"
 _COLAB_NOTEBOOK = re.compile(r"/drive/([A-Za-z0-9_-]{8,128})/?")
 
 # 只有這兩種分頁的建立能從工具結果確認是本場建的；擋下非瀏覽器工具的只有它們。
 # 分頁群組、無法確認的紀錄、Codex CUA 分頁仍只提醒。
 BLOCKING_KINDS = ("chrome-tab", "pane-tab")
+# 使用者自己在訊息裡打這幾個字，本場還開著的分頁就不再擋（仍會提醒）；給這個 session
+# 沒有能關分頁的瀏覽器工具時用。轉送進來的代理訊息不算。
+RELEASE_PHRASE = "放行分頁"
+_RELAYED = ("<agent-message", "<task-notification", "<teammate-message", "<channel")
 # 擋住時仍要放行的工具：收尾本身要載入關分頁的工具、讀操作說明、問使用者、記待辦、停背景工作。
 UNBLOCKED_TOOLS = frozenset((
     "ToolSearch", "Skill", "AskUserQuestion", "TodoWrite", "TaskCreate", "TaskUpdate",
@@ -72,7 +80,7 @@ KEEP_EVIDENCE_SECONDS = 300
 KEEP_TTL_SECONDS = 24 * 3600
 _PYTHON_NAME = r"(?:python(?:\d+(?:\.\d+)?)?w?|py)(?:\.exe)?"
 _KEEP_COMMAND = re.compile(
-    r"(?:&\s*)?(?:(?:\"(?:[^\"]*[\\/])?" + _PYTHON_NAME + r"\"|(?:[^\s\"']*[\\/])?" + _PYTHON_NAME +
+    r"(?:&\s*)?(?:(?:\"(?:[\w.:~ ()\\/-]*[\\/])?" + _PYTHON_NAME + r"\"|(?:[\w.:~\\/-]*[\\/])?" + _PYTHON_NAME +
     r")(?:\s+-3)?\s+-m\s+epitype|epitype(?:\.exe)?)\s+lifecycle\s+keep"
     r"\s+(?P<tab>[A-Za-z0-9_-]{1,64})\s+--authuser\s+(?P<authuser>\d{1,3})"
     r"\s+--notebook\s+(?P<notebook>[A-Za-z0-9_-]{8,128})",
@@ -407,7 +415,7 @@ def _listing(text, objects):
     found = {}
     for match in _LISTED_TAB.finditer(text[marker:]):
         url = _LISTED_URL.search(match.group(2))
-        found[match.group(1)] = url.group(1) if url else None
+        found[match.group(1)] = (url.group(1) or url.group(2)) if url else None
     return found
 
 
@@ -441,7 +449,9 @@ def _note_urls(db, session, kind, listing, state, now):
     """Remember which of our open tabs show a Colab notebook.
 
     A kept tab whose latest listed URL is no longer the declared notebook loses
-    its exemption; a listing line without a URL proves nothing either way.
+    its exemption; a listing line without a URL proves nothing either way. The
+    built-in browser lists only each tab's origin: a Colab origin keeps what its
+    navigate showed, any other origin voids it.
     """
     if not listing:
         return
@@ -451,7 +461,12 @@ def _note_urls(db, session, kind, listing, state, now):
         if tab_id not in owned or url is None:
             continue
         key = _key(kind, tab_id)
-        found = _colab(url)
+        if kind == "pane-tab" and _origin_only(url):
+            if url.rstrip("/").lower() == COLAB_ORIGIN:
+                continue
+            found = None
+        else:
+            found = _colab(url)
         if found:
             colab[key] = {"authuser": found[0], "notebook": found[1], "seen": now}
         else:
@@ -463,6 +478,22 @@ def _note_urls(db, session, kind, listing, state, now):
     state["colab"], state["kept"] = colab, kept
 
 
+def _origin_only(url):
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return False
+    return bool(parts.scheme and parts.netloc) and parts.path in ("", "/") and not parts.query
+
+
+def _same_origin(left, right):
+    try:
+        a, b = urlsplit(left), urlsplit(right)
+    except ValueError:
+        return False
+    return bool(a.scheme and a.netloc) and (a.scheme, a.netloc.lower()) == (b.scheme, b.netloc.lower())
+
+
 def _prune_marks(db, session, state):
     """Drop URL notes and exemptions whose tab is closed or was reopened since."""
     opened = {
@@ -471,7 +502,7 @@ def _prune_marks(db, session, state):
             (session,),
         )
     }
-    for name, stamp in (("colab", "seen"), ("kept", "opened")):
+    for name, stamp in (("colab", "seen"), ("kept", "opened"), ("released", "opened")):
         marks = _marks(state, name)
         for key in list(marks):
             mark = marks[key]
@@ -653,17 +684,28 @@ def _observe_pane(db, session, call_id, short, tool_input, result_text, failed, 
     """Built-in browser tabs live in the app's own pane, never in the owner's Chrome.
 
     tabs_context lists every pane tab, so a recorded tab missing from it is closed.
+    Tab lists show only origins; the full URL a tab was sent to is the navigate
+    input, counted only when the result confirms that navigation.
     """
     if failed:
+        if result_text.lstrip().startswith(_NO_PANE):
+            for owned in _open_ids(db, session, "pane-tab"):
+                _resource(db, session, call_id, "close", "pane-tab", owned, now)
+            state["pane_open"] = False
+        return
+    url = tool_input.get("url")
+    value = _leading_json(result_text)
+    tab_id = value.get("tabId") if value else None
+    if short in ("tabs_create", "preview_start", "navigate") and isinstance(tab_id, (str, int)):
+        # 內建瀏覽器關著時，這三個工具都回一段 JSON：reused=false 就是這次開出的分頁。
+        if value.get("reused") is False:
+            _resource(db, session, call_id, "open", "pane-tab", tab_id, now)
+        state["pane_open"] = True
+        if value.get("navOk") is True and isinstance(url, str):
+            _note_urls(db, session, "pane-tab", {str(tab_id): url}, state, now)
         return
     if short in ("tabs_create", "preview_start"):
-        value = _leading_json(result_text) or {}
-        tab_id = value.get("tabId")
-        if isinstance(tab_id, (str, int)) and value.get("reused") is False:
-            _resource(db, session, call_id, "open", "pane-tab", tab_id, now)
-            state["pane_open"] = True
-        elif not (isinstance(tab_id, (str, int)) and value.get("reused") is True):
-            _resource(db, session, call_id, "open", "unverified-control", call_id, now)
+        _resource(db, session, call_id, "open", "unverified-control", call_id, now)
         return
     if short == "navigate":
         executed = set(_EXECUTED_ON.findall(result_text))
@@ -672,6 +714,10 @@ def _observe_pane(db, session, call_id, short, tool_input, result_text, failed, 
             _resource(db, session, call_id, "open", "pane-tab", next(iter(executed)), now)
         if executed:
             state["pane_open"] = True
+        landed = _NAVIGATED_TO.search(result_text)
+        if (len(executed) == 1 and landed and isinstance(url, str)
+                and _same_origin(landed.group(1), url)):
+            _note_urls(db, session, "pane-tab", {next(iter(executed)): url}, state, now)
         _note_urls(db, session, "pane-tab", _listing(result_text, ()), state, now)
         return
     if short == "tabs_close":
@@ -695,6 +741,11 @@ def _observe_pane(db, session, call_id, short, tool_input, result_text, failed, 
         for owned in _open_ids(db, session, "pane-tab") - listed:
             _resource(db, session, call_id, "close", "pane-tab", owned, now)
         state["pane_open"] = bool(listed)
+        _note_urls(db, session, "pane-tab", {
+            str(tab["tabId"]): tab["origin"] for tab in value["tabs"]
+            if isinstance(tab, dict) and str(tab.get("tabId")) in listed
+            and isinstance(tab.get("origin"), str)
+        }, state, now)
 
 
 def observe(event: dict, path: Path) -> str | None:
@@ -868,7 +919,8 @@ def blockers(event: dict, path: Path, *, record=False):
     missing from the latest group listing is out of the agent's reach (closed by
     someone else, dragged out, group dissolved, Chrome disconnected) and no longer
     blocks; a declared running-VM Colab tab is exempt until its TTL or its URL
-    changes. record=True counts each denial per resource in the ledger.
+    changes; tabs the owner released by message stop blocking. record=True counts
+    each denial per resource in the ledger.
     """
     name = event.get("tool_name")
     session = event.get("session_id", event.get("sessionId"))
@@ -884,11 +936,13 @@ def blockers(event: dict, path: Path, *, record=False):
             return []
         state = _state(db, session)
         visible = state.get("chrome_visible")
+        released = _marks(state, "released")
         found = [
             (kind, resource_id, opened) for kind, resource_id, opened, _ in rows
             if not (kind == "chrome-tab" and isinstance(visible, list)
                     and resource_id not in visible)
             and not _kept(state, kind, resource_id, opened, now)
+            and (released.get(_key(kind, resource_id)) or {}).get("opened") != opened
         ]
         if record:
             for kind, resource_id, opened in found:
@@ -917,10 +971,11 @@ def block_reason(rows, tool_name):
         f"Epitype 擋下 {tool_name}：本場自建的" + "、".join(parts) + "還開著。"
         "先關掉自己建立的分頁、看到關閉結果再做別的事；之後要用再開新分頁。"
         "分頁其實已被關掉或不在群組裡時，呼叫 tabs_context_mcp／tabs_context 讓 Epitype 重新核對。"
-        "若分頁正連著執行中的 Colab VM（關了 VM 會被收回），不要關：先呼叫 tabs_context_mcp"
-        "（內建瀏覽器用 navigate）讓 Epitype 看到該分頁網址，再單獨執行 "
-        "python -m epitype lifecycle keep <分頁ID> --authuser <N> --notebook <筆記本ID> 宣告保留。"
-        "使用者已要求停止時不要再操作，直接回報。"
+        "若分頁正連著執行中的 Colab VM（關了 VM 會被收回），不要關：先讓 Epitype 看到它開著那本筆記本"
+        "（Chrome 呼叫 tabs_context_mcp；內建瀏覽器用 navigate 打開該筆記本網址），再單獨送出 "
+        "python -m epitype lifecycle keep <分頁ID> --authuser <N> --notebook <筆記本ID>"
+        "（只向 Epitype 登記，不會實際執行）。這個 session 沒有能關分頁的瀏覽器工具時，"
+        f"請使用者回覆「{RELEASE_PHRASE}」。使用者已要求停止時不要再操作，直接回報。"
     )
 
 
@@ -967,8 +1022,8 @@ def declare_keep(event: dict, path: Path, tab: str, authuser: str, notebook: str
         seen = _marks(state, "colab").get(key)
         if not isinstance(seen, dict) or now - seen.get("seen", 0) > KEEP_EVIDENCE_SECONDS:
             return False, (f"Epitype 拒絕保留分頁 {tab}：最近 {KEEP_EVIDENCE_SECONDS // 60} 分鐘內"
-                           "沒看到它開著 Colab 筆記本（/drive/…）的網址。先呼叫 tabs_context_mcp"
-                           "（內建瀏覽器用 navigate）再宣告。")
+                           "沒看到它開著 Colab 筆記本（/drive/…）的網址。Chrome 先呼叫 tabs_context_mcp、"
+                           "內建瀏覽器先用 navigate 打開該筆記本網址，再宣告。")
         if [seen.get("authuser"), seen.get("notebook")] != [authuser, notebook]:
             return False, (f"Epitype 拒絕保留分頁 {tab}：宣告的 authuser／筆記本 ID 與分頁網址不符；"
                            "讀分頁網址核對後再宣告。")
@@ -987,7 +1042,44 @@ def declare_keep(event: dict, path: Path, tab: str, authuser: str, notebook: str
             (session, call_id if isinstance(call_id, str) else "keep", "keep", kind, tab, now),
         )
     return True, (f"Epitype 已登記保留分頁 {tab}（Colab authuser={authuser}、筆記本 {notebook}）"
-                  "為執行中 VM 分頁：24 小時內、網址沒換就不擋。VM 跑完、結果下載核對後就關掉它。")
+                  "為執行中 VM 分頁：24 小時內、網址沒換就不擋。這行指令只用來登記，Epitype 已處理，"
+                  "不會實際執行。VM 跑完、結果下載核對後就關掉它。")
+
+
+def owner_release(event: dict, path: Path) -> list:
+    """Stop blocking this session's open tabs when the owner's own message says so.
+
+    For a session with no browser tool left to close them. The tabs stay pending
+    and keep their reminders; a tab opened afterwards blocks again.
+    """
+    prompt = event.get("prompt")
+    session = event.get("session_id", event.get("sessionId"))
+    if (not isinstance(prompt, str) or RELEASE_PHRASE not in prompt
+            or any(tag in prompt for tag in _RELAYED)
+            or not isinstance(session, str) or not session or not path.is_file()):
+        return []
+    now = _now()
+    with _database(path) as db:
+        db.execute("BEGIN IMMEDIATE")
+        rows = [row for row in _pending(db, session, now) if row[0] in BLOCKING_KINDS]
+        if not rows:
+            return []
+        state = _state(db, session)
+        released = _marks(state, "released")
+        for kind, resource_id, opened, _ in rows:
+            released[_key(kind, resource_id)] = {"opened": opened}
+            db.execute(
+                "INSERT INTO events(session,call_id,action,kind,resource_id,seen) "
+                "VALUES(?,?,?,?,?,?)", (session, "owner-release", "release", kind, resource_id, now),
+            )
+        state["released"] = released
+        _save_state(db, session, state, now)
+    return [(kind, resource_id) for kind, resource_id, _, _ in rows]
+
+
+def release_notice(rows):
+    return ("Epitype 依使用者指示，不再擋本場還開著的分頁 " + ", ".join(value for _, value in rows[:3])
+            + (" 等" if len(rows) > 3 else "") + "；它們仍待收尾，之後能關時照樣要關。")
 
 
 def kept_record(path: Path, tab: str, authuser: str, notebook: str, session=None):
