@@ -12,6 +12,7 @@ import os
 import tempfile
 from datetime import date
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -178,10 +179,14 @@ def main():
         original_home = Path.home
         try:
             Path.home = staticmethod(lambda: home)
-            read_only = dream.build_report([vault], today=TODAY)
-            after_read = host_path.read_bytes()
-            dream.build_report([vault], today=TODAY, write_hosts=True)
-            after_write = host_path.read_bytes()
+            # Direct build_report needs the same fixture config as _night uses.
+            with patch.dict(os.environ, {
+                memspec.EPITYPE_CONFIG_ENV: str(home / '.epitype/config.json'),
+            }):
+                read_only = dream.build_report([vault], today=TODAY)
+                after_read = host_path.read_bytes()
+                dream.build_report([vault], today=TODAY, write_hosts=True)
+                after_write = host_path.read_bytes()
         finally:
             Path.home = original_home
         section = {s["id"]: s for s in read_only["sections"]}[14]

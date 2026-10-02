@@ -16,6 +16,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -73,6 +74,10 @@ class ProjectSync(unittest.TestCase):
         config = self.home / ".epitype/config.json"
         config.parent.mkdir()
         config.write_text(json.dumps({"vaults": [str(self.governance)]}), encoding="utf-8")
+        # Explicit home does not override the runner's config; use this fixture's vaults.
+        environment = patch.dict(os.environ, {memspec.EPITYPE_CONFIG_ENV: str(config)})
+        environment.start()
+        self.addCleanup(environment.stop)
 
     def _cleanup(self):
         import shutil

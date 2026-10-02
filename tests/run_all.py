@@ -58,6 +58,8 @@ SELFTESTS = (
     Path("tests") / "rule_guard_sources_regression.py",
     Path("tests") / "rule_native_sources_regression.py",
     Path("tests") / "rule_native_membership_regression.py",
+    Path("tests") / "rule_writer_sources_regression.py",
+    Path("tests") / "selftest_environment_regression.py",
     Path("tests") / "shared_index_scope_regression.py",
     Path("tests") / "recall_regression.py",
     Path("tests") / "governance_regression.py",
@@ -166,6 +168,15 @@ def _run_selftest(repo_root, relative_path, environment):
             child = dict(environment)
             child["TMPDIR"] = child["TEMP"] = child["TMP"] = scratch
             child["PYTHONIOENCODING"] = "utf-8"
+            # Synthetic cards must never consume a user's live pinned baseline
+            # or route themselves into native vaults discovered in the real home.
+            fixture_home = Path(scratch) / "home"
+            fixture_config = fixture_home / ".epitype" / "config.json"
+            fixture_config.parent.mkdir(parents=True)
+            fixture_config.write_text("{}\n", encoding="utf-8")
+            child["HOME"] = child["USERPROFILE"] = str(fixture_home)
+            child["CODEX_HOME"] = str(fixture_home / ".codex")
+            child["EPITYPE_CONFIG"] = str(fixture_config)
             return subprocess.run(
                 [sys.executable, str(tool), "--selftest"],
                 cwd=repo_root,

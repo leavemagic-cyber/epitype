@@ -2,8 +2,10 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import json
+import os
 import tempfile
 import unittest
+from unittest.mock import patch
 from epitype import host_native, native_migration
 
 
@@ -19,7 +21,12 @@ class Migration(unittest.TestCase):
         (root / '.claude').mkdir()
         (root / '.codex/rules').mkdir(parents=True)
         (root / '.epitype').mkdir()
-        (root / '.epitype/config.json').write_text(json.dumps({'vaults': [str(vault)]}), encoding='utf-8')
+        config = root / '.epitype/config.json'
+        config.write_text(json.dumps({'vaults': [str(vault)]}), encoding='utf-8')
+        # The runner config has precedence over home; route to this fixture's vaults.
+        environment = patch.dict(os.environ, {'EPITYPE_CONFIG': str(config)})
+        environment.start()
+        self.addCleanup(environment.stop)
         (root / '.claude/settings.json').write_text(json.dumps({'permissions': {'deny': ['Bash(git clean*)', 'Read(other)']}, 'unrelated': True}), encoding='utf-8')
         (root / '.codex/config.toml').write_text('', encoding='utf-8')
         (vault / 'guard.md').write_text('---\nname: guard\nhost_source: https://developers.openai.com/codex/rules\nhost_claude_deny:\n  - Bash(git clean*)\nhost_codex_rules:\n  - git clean\n---\n', encoding='utf-8')
