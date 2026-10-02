@@ -57,6 +57,7 @@ SELFTESTS = (
     Path("tests") / "source_framework_closure_regression.py",
     Path("tests") / "rule_guard_sources_regression.py",
     Path("tests") / "rule_native_sources_regression.py",
+    Path("tests") / "rule_native_membership_regression.py",
     Path("tests") / "shared_index_scope_regression.py",
     Path("tests") / "recall_regression.py",
     Path("tests") / "governance_regression.py",

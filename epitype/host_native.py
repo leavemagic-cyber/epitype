@@ -21,7 +21,7 @@ import hashlib
 import io
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 import re
 import shutil
 import time
@@ -60,6 +60,18 @@ def _graft():
 def state_path(home=None):
     """跟規則塊同步的狀態檔放在同一個目錄（見 host_sync._state_path）。"""
     return (Path(home) if home else Path.home()) / ".epitype" / memspec.HOST_NATIVE_STATE_FILENAME
+
+
+def _card_reference(value):
+    if not isinstance(value, str) or not value or any(ord(c) < 32 for c in value):
+        raise ValueError('native ownership source must be a relative .md card path')
+    parts = value.replace('\\', '/').split('/')
+    if (PureWindowsPath(value).drive or PureWindowsPath(value).is_absolute()
+            or PurePosixPath(value).is_absolute() or any(not p or p.startswith(('.', '_')) for p in parts)
+            or not parts[-1].endswith('.md') or parts[-1] == 'MEMORY.md'):
+        raise ValueError('native ownership source must be a visible relative .md card path')
+    relative = '/'.join(parts)
+    return relative.casefold() if os.name == 'nt' else relative
 
 
 def load_state(home=None, *, strict=False):
@@ -101,11 +113,13 @@ def load_state(home=None, *, strict=False):
                     if section == SECTION_RULES:
                         if not isinstance(previous, str) or not previous:
                             raise ValueError('native ownership rule source must be a string')
+                        _card_reference(previous)
                         continue
                     if (not isinstance(previous, dict)
                             or type(previous.get('owned')) is not bool
                             or not isinstance(previous.get('card'), str) or not previous['card']):
                         raise ValueError('native ownership entry needs a source and boolean owned')
+                    _card_reference(previous['card'])
                     if section in (SECTION_ENV, SECTION_CONFIG) and 'value' not in previous:
                         raise ValueError('native ownership entry has no verified historical value')
                     if section == SECTION_ENV and (not isinstance(previous['value'], str)
@@ -163,7 +177,21 @@ def _native_card_paths(vault, deadline):
     return sorted(found, key=lambda path: path.relative_to(vault).as_posix().casefold())
 
 
-def collect(vaults, *, event=None, diagnostics=None, seconds=5.0):
+def _provenance_declares_native(fields):
+    from epitype import rule_provenance
+    try:
+        document = rule_provenance.parse(fields) or {}
+    except (ValueError, TypeError, RecursionError):
+        return False  # Known native identities are checked independently of this hint.
+    scope = document.get('scope')
+    actions = scope.get('actions', []) if isinstance(scope, dict) else []
+    if isinstance(actions, str):
+        actions = [actions]
+    return isinstance(actions, list) and any(action in (
+        'host_sync', 'host_native', 'host_settings', 'native_settings') for action in actions)
+
+
+def collect(vaults, *, event=None, diagnostics=None, seconds=5.0, owned_cards=()):
     """({section: ...}, [問題])——這些庫裡還在生效的卡要求宿主做什麼。
 
     一張卡的欄位寫壞、兩張卡對同一個鍵要不同的值，這個庫的宿主原生設定就整批不寫：
@@ -172,6 +200,12 @@ def collect(vaults, *, event=None, diagnostics=None, seconds=5.0):
     problems = []
     diagnostics = diagnostics if diagnostics is not None else []
     deadline = time.monotonic() + seconds
+    from epitype import rule_legacy, rule_pipeline, rule_context
+    membership = rule_legacy.native_membership()
+    if not membership.allowed:
+        return desired, ['INVALID native baseline: ' + '; '.join(membership.issues)]
+    native_paths = membership.native_paths
+    owned_matches = {reference: [] for reference in owned_cards}
 
     def timed_out():
         if time.monotonic() < deadline:
@@ -193,6 +227,9 @@ def collect(vaults, *, event=None, diagnostics=None, seconds=5.0):
             if timed_out():
                 return desired, problems
             relative = path.relative_to(vault).as_posix() if path.is_relative_to(vault) else path.name
+            reference_key = _card_reference(relative)
+            if reference_key in owned_matches:
+                owned_matches[reference_key].append(path)
             try:
                 text = path.read_text(encoding="utf-8-sig")
             except (OSError, UnicodeError) as exc:
@@ -201,16 +238,26 @@ def collect(vaults, *, event=None, diagnostics=None, seconds=5.0):
                     card=relative, error=type(exc).__name__))
                 continue
             front, closing = memspec.split_frontmatter(text)
-            from epitype import rule_pipeline, rule_context
+            identity = (reference_key in owned_matches or native_paths is not None
+                        and rule_legacy.normalize_path(path.resolve()) in native_paths)
             if front is None or not memspec.host_native_declared(front):
                 # An enrolled card remains the same identity after a shell
                 # removes the fields that used to classify it as a native rule.
                 fields, _problem = memspec.frontmatter_text(text)
+                if native_paths is not None and not identity and not _provenance_declares_native(fields):
+                    continue
                 try:
                     if 'rule_provenance' in fields:
-                        rule_pipeline.projection(fields, path, card_text=text)
+                        projected = rule_pipeline.projection(fields, path, card_text=text)
+                        if identity and native_paths is not None and not (
+                                projected['expired'] or fields.get('status', '').strip() in memspec.STOP_GATE_SILENT_STATUSES
+                                or memspec.card_expired(fields.get(memspec.VALID_UNTIL_FIELD))
+                                or memspec.card_expired(fields.get(memspec.GRANT_EXPIRES_FIELD))):
+                            raise ValueError('native source identity lost execution fields without verified retirement')
                     else:
                         integrity = rule_pipeline.legacy_integrity(fields, path, card_text=text)
+                        if identity and native_paths is not None and integrity is None:
+                            raise ValueError('owned native source has no frozen identity or verified retirement')
                         if integrity is not None and not integrity.allowed:
                             problems.append(memspec.HOST_NATIVE_CARD_INVALID_REASON.format(
                                 card=relative, problem='; '.join(integrity.issues)))
@@ -267,6 +314,11 @@ def collect(vaults, *, event=None, diagnostics=None, seconds=5.0):
             for pattern in values.get(memspec.HOST_CODEX_RULES_FIELD, ()):
                 if all(pattern != known for known, _card in desired[SECTION_RULES]):
                     desired[SECTION_RULES].append((pattern, relative))
+    for reference, matches in owned_matches.items():
+        if len(matches) > 1 or native_paths is not None and not matches:
+            problems.append('UNVERIFIED native ownership source: ' + reference
+                            + (' is absent or excluded from its target vault group' if not matches
+                               else ' is ambiguous across its target vault group'))
     timed_out()
     return desired, problems
 
@@ -513,15 +565,25 @@ def _plans(vaults, hosts=None, home=None):
             'retry reading this exact state before rendering'], True, [], None)], {}
     collected = {}
     plans = []
-    for target in targets(vaults, hosts, home):
-        group = (tuple(os.fspath(Path(vault)) for vault in target.vaults),
-                 _key(target.root) if target.root is not None else None)
+    actual_targets = targets(vaults, hosts, home)
+    def target_group(target):
+        return (tuple(os.fspath(Path(vault)) for vault in target.vaults),
+                _key(target.root) if target.root is not None else None)
+    group_cards = {}
+    for target in actual_targets:
+        references = group_cards.setdefault(target_group(target), set())
+        record = state.get(_key(target.path)) or {}
+        for section in (SECTION_ENV, SECTION_DENY, SECTION_CONFIG, SECTION_RULES):
+            for previous in record.get(section, {}).values():
+                references.add(_card_reference(previous if section == SECTION_RULES else previous['card']))
+    for target in actual_targets:
+        group = target_group(target)
         first = group not in collected
         if first:
             diagnostics = []
             desired, problems = collect(target.vaults, event={
                 'cwd': str(target.root) if target.root is not None else None,
-                'tool_name': 'host_sync'}, diagnostics=diagnostics)
+                'tool_name': 'host_sync'}, diagnostics=diagnostics, owned_cards=group_cards[group])
             collected[group] = desired, problems, diagnostics
         desired, problems, diagnostics = collected[group]
         if problems and not first:
