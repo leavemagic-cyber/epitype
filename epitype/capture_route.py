@@ -456,6 +456,8 @@ def _selftest():
 
     # 自測才用：每一支 hook 都經 _hook_common 載入這個模組，不該替 tempfile 付載入時間。
     import tempfile
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
+    from rule_capture_source_fixtures import STAMP, reviewed_capture_event
 
     checks = []
     try:
@@ -482,11 +484,15 @@ def _selftest():
             outsider.mkdir()
 
             grant = "你可以直接改那個測試檔"
-            replay = capture.Replay(reindex=False)
+            replay = capture.Replay(stamp=STAMP, reindex=False)
+            project_event = {"cwd": os.fspath(project / "sub"), "session_id": "sess-project"}
+            project_event = reviewed_capture_event(
+                capture.classify(grant), registered, project_event,
+                source_root=root / "originals", replay=replay)
             grant_target = capture.capture_owner_sentence(
                 grant,
                 capture_vault(os.fspath(project / "sub"), governance, home),
-                {"cwd": os.fspath(project / "sub"), "session_id": "sess-project"},
+                project_event,
                 None,
                 "grant",
                 replay=replay,
@@ -503,10 +509,12 @@ def _selftest():
             outside_target = capture.capture_owner_sentence(
                 grant,
                 capture_vault(os.fspath(outsider), governance, home),
-                {"cwd": os.fspath(outsider), "session_id": "sess-outside"},
+                reviewed_capture_event(capture.classify(grant), governance,
+                    {"cwd": os.fspath(outsider), "session_id": "sess-outside"},
+                    source_root=root / "originals", replay=replay),
                 None,
                 "grant",
-                replay=capture.Replay(reindex=False),
+                replay=capture.Replay(stamp=STAMP, reindex=False),
             )
             checks.append((
                 "a cwd under no registered vault falls back to the governance vault",
@@ -518,10 +526,12 @@ def _selftest():
             shell_target = capture.capture_owner_sentence(
                 "你可以直接刪掉那個暫存檔",
                 capture_vault(os.fspath(shell_project), governance, home),
-                {"cwd": os.fspath(shell_project), "session_id": "sess-shell"},
+                reviewed_capture_event(capture.classify("你可以直接刪掉那個暫存檔"), governance,
+                    {"cwd": os.fspath(shell_project), "session_id": "sess-shell"},
+                    source_root=root / "originals", replay=replay),
                 None,
                 "grant",
-                replay=capture.Replay(reindex=False),
+                replay=capture.Replay(stamp=STAMP, reindex=False),
             )
             checks.append((
                 "an unregistered project shell keeps the card in governance and records its cwd",

@@ -702,12 +702,34 @@ def _selftest():
     import shutil
     import subprocess
     import uuid
+    sys.path.insert(0, str(_REPO_ROOT / "tests"))
+    from epitype import capture
+    from rule_capture_source_fixtures import STAMP, calendar_wrapper, reviewed_capture_event
 
     checks = []
     marker_directory = None
     try:
         with tempfile.TemporaryDirectory(prefix="epitype-recall-") as temp_dir:
             root = Path(temp_dir).resolve()
+            capture_script = calendar_wrapper(Path(__file__), root / "capture-calendar.py")
+
+            def run_reviewed_capture(script, event, config_path, *args, **kwargs):
+                # A publication positive supplies its own original, full payload,
+                # and case scope; all negative/ordinary calls retain the real clock.
+                config_value = json.loads(Path(config_path).read_text(encoding="utf-8"))
+                environment = kwargs.get("environment", {})
+                synthetic_home = Path(environment.get("HOME") or Path(config_path).parent / "_synthetic_home")
+                config_value[memspec.CONFIG_VAULTS_FIELD] = [
+                    Path(item) for item in config_value[memspec.CONFIG_VAULTS_FIELD]]
+                target = _capture_vault(config_value, event, synthetic_home)
+                question = capture.last_assistant_text(event.get("transcript_path"))
+                found = capture.classify(event["prompt"], question)
+                if found is None:
+                    raise ValueError("reviewed capture positive has no classified payload")
+                reviewed_event = reviewed_capture_event(found, target, event,
+                    source_root=root / "originals")
+                return run_synthetic(capture_script, reviewed_event, config_path, *args, **kwargs)
+
             vault = root / "vault"
             vault.mkdir()
             short_card = vault / "b-short.md"
@@ -793,6 +815,12 @@ def _selftest():
 
             busy_card = vault / "busy-capture.md"
             busy_db = memsearch._db_path(vault)
+            busy_replay = capture.Replay(stamp=STAMP, reindex=True)
+            busy_event = reviewed_capture_event(
+                ("correction", "busylockneedle sentence", None, "busylockneedle"),
+                vault, {"cwd": str(root), "session_id": session_id},
+                source_root=root / "originals", replay=busy_replay,
+                digest_override="busylockdigest0", owner_quote="不要再 busylockneedle")
             with memspec.file_lock(busy_db, 0.0) as held:
                 busy_target = _write_capture(
                     vault,
@@ -801,10 +829,11 @@ def _selftest():
                     "busylockdigest0",
                     "owner correction auto-captured",
                     "busylockneedle sentence",
-                    {"cwd": str(root), "session_id": session_id},
+                    busy_event,
                     time.monotonic(),
                     # 只有白名單過關的卡才進索引，這條檢查驗的正是「進索引時搶不到鎖」。
                     source_text="不要再 busylockneedle",
+                    replay=busy_replay,
                 )
             checks.append((
                 "a capture that cannot take the index lock ages the index so the next prompt rebuilds",
@@ -967,7 +996,7 @@ def _selftest():
             )
             write_config(grant_config, [project_vault, grant_vault])
             routed_grant = "governance capture 我同意,以後不用再問"
-            routed_result = run_synthetic(
+            routed_result = run_reviewed_capture(
                 Path(__file__),
                 {"prompt": routed_grant, "session_id": uuid.uuid4().hex},
                 grant_config,
@@ -1000,7 +1029,7 @@ def _selftest():
                 encoding="utf-8",
             )
             project_grant = "專案落點 我同意,以後不用再問"
-            project_routed = run_synthetic(
+            project_routed = run_reviewed_capture(
                 Path(__file__),
                 {"prompt": project_grant, "session_id": uuid.uuid4().hex,
                  "cwd": os.fspath(native_project)},
@@ -1069,7 +1098,7 @@ def _selftest():
             )
 
             direct_grant = "chrome 操作我同意,以後不用再問"
-            direct_result = run_synthetic(
+            direct_result = run_reviewed_capture(
                 Path(__file__),
                 {"prompt": direct_grant, "session_id": uuid.uuid4().hex},
                 grant_config,
@@ -1108,7 +1137,7 @@ def _selftest():
 
             embedded_grant = "repo 操作我授權,不必再問"
             embedded_prompt = f"這是前句。{embedded_grant}。這是後句"
-            embedded_result = run_synthetic(
+            embedded_result = run_reviewed_capture(
                 Path(__file__),
                 {"prompt": embedded_prompt, "session_id": uuid.uuid4().hex},
                 grant_config,
@@ -1138,7 +1167,7 @@ def _selftest():
             # 換一場說同一句話則各留一張，那條在 tests/capture_integration_regression）。
             grant_session = uuid.uuid4().hex
             for _ in range(2):
-                run_synthetic(
+                run_reviewed_capture(
                     Path(__file__),
                     {"prompt": grant_prompt, "session_id": grant_session},
                     grant_config,
@@ -1206,7 +1235,7 @@ def _selftest():
             correction_sentence = "不要亂處理 SWSetup，我不是說過你只能處理AI產生資料"
             correction_session = uuid.uuid4().hex
             for _ in range(2):
-                run_synthetic(
+                run_reviewed_capture(
                     Path(__file__),
                     {"prompt": f"待刪_雜項 SWSetup 卡到現在。{correction_sentence}", "session_id": correction_session},
                     grant_config,
@@ -1278,7 +1307,7 @@ def _selftest():
             widened_ok = True
             pending_root = grant_vault.joinpath(*memspec.CAPTURE_PENDING_SUBPATH)
             for sentence in widened:
-                run_synthetic(
+                run_reviewed_capture(
                     Path(__file__),
                     {"prompt": sentence, "session_id": uuid.uuid4().hex},
                     grant_config,
@@ -1333,7 +1362,7 @@ def _selftest():
             answer = "不是！只有6s是標準合約，其他還是微型，小單期是指1口(微型或標準)"
             ruling_session = uuid.uuid4().hex
             for _ in range(2):
-                run_synthetic(
+                run_reviewed_capture(
                     Path(__file__),
                     {"prompt": answer, "session_id": ruling_session, "transcript_path": os.fspath(transcript)},
                     grant_config,

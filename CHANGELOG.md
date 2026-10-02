@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Require original-source, author, scope and complete-payload evidence before capture, promotion or starter templates publish a rule. Preserve unproved captures and historical context in unpublished drafts; an Owner verification stamp alone cannot supply the missing source. Source-bound recall now displays the original quotation beside its AI author and scope, superseding the earlier quote-hiding test requirement.
+
+- Isolate each selftest's home, Codex home and Epitype configuration from live pinned baselines. Give positive capture fixtures real scoped synthetic originals, retain missing-source rejection and all other publication boundaries, and route native migration fixtures to their own explicit configuration.
+
 - Block the next non-browser tool call while a confirmed agent-created Claude-in-Chrome or built-in browser tab is still open; a Colab tab running a VM is exempt only after a standalone `epitype lifecycle keep` declaration whose account and notebook ID match a URL seen in the last five minutes (built-in browser: a confirmed `navigate` to it); the declaration line is recorded by the hook and never runs. An owner message that is exactly `放行分頁` releases a session that cannot close its tabs. Tabs out of the agent's reach, unattributable candidates, tab groups and Codex CUA tabs keep the reminder only.
 
 - Record actual Claude/Codex advice delivery, native compaction restoration, complete entrypoint timings and target-aware replay coverage; supersede the earlier partial acceptance statements without discarding their history.

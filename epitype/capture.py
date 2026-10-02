@@ -17,6 +17,7 @@ try:
 except ImportError:  # Direct script execution keeps the CLI contract.
     import memsearch
     import memspec
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 # 寫入結果分類：回放要能分辨「新寫」與「早就有了」，線上不看這個值。
@@ -390,6 +391,38 @@ def capture_owner_sentence(prompt, vault, event, started_at, kind, replay=None, 
     return _capture_classified(found, vault, event, started_at, replay)
 
 
+def capture_card_text(name, label, body, summary, stamp, event, event_id, origin, replay=None):
+    """Render captured context; session/position metadata never invents a source.
+
+    A producer may supply an already reviewed envelope. The event body can
+    contain assistant context, so it is never labelled a whole Owner quotation.
+    """
+    from epitype import rule_provenance
+    provenance = "".join(
+        f"{key}: {one_line(value)}\n" for key, value in (replay.fields if replay is not None else ())
+    )
+    document = event.get(rule_provenance.FIELD)
+    if document is not None:
+        provenance += f"{rule_provenance.FIELD}: {json.dumps(document, ensure_ascii=False)}\n"
+    return (
+        "---\n"
+        f"name: {name}\n"
+        f"description: {label} {stamp[:10]}: {one_line(summary if summary is not None else body)}\n"
+        f"{memspec.SCOPE_FIELD}: captured-context\n"
+        "capture_author: epitype-capture (AI)\n"
+        f"captured_at: {stamp}\n"
+        f"{memspec.CWD_FIELD}: {one_line(event.get('cwd'))}\n"
+        f"session_id: {one_line(event.get('session_id', event.get('sessionId')))}\n"
+        f"{memspec.EVENT_ID_FIELD}: {event_id}\n"
+        f"{memspec.ORIGIN_FIELD}: {origin}\n"
+        f"{memspec.PROVENANCE_FIELD}: {memspec.PROVENANCE_AUTO_CAPTURED}\n"
+        f"{memspec.VERIFIED_FIELD}: {memspec.VERIFIED_FALSE}\n"
+        f"{provenance}"
+        "---\n"
+        f"{body}\n"
+    )
+
+
 def write_capture(vault, directory_name, kind, digest, label, body, event, started_at,
                   summary=None, replay=None, source_text=None):
     """Write one captured sentence, into the vault or into the proposal area.
@@ -399,6 +432,7 @@ def write_capture(vault, directory_name, kind, digest, label, body, event, start
     `source_text` overrides that only for callers that hand in a body which is not
     the owner's sentence.
     """
+    from epitype import rule_pipeline
     # A captured card is persistent, indexed, and re-injected later: credential-shaped
     # text never earns that (adversarial review 2026-09-03 #5). The sentence still
     # exists in the transcript; Epitype simply does not copy it into the vault.
@@ -421,40 +455,24 @@ def write_capture(vault, directory_name, kind, digest, label, body, event, start
             return None
         # 回放時用原話當時的時間，否則整批歷史卡會全部標成今天，日期就不再是證據。
         stamp = (replay.stamp if replay is not None else None) or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        directory = vault / directory_name if admitted else pending_directory(vault, stamp)
-        directory.mkdir(parents=True, exist_ok=True)
         # 檔名尾巴帶 event_id：同一句話在兩場對話裡各講一次，同一天就會撞到同一個
         # `{kind}-{日期}-{digest}` 檔名，而撞名在下面是「已經有了」——第二件事故會
         # 靜靜消失。事件識別進了檔名，兩張卡才各自存在。
         name = f"{kind}-{stamp[:10].replace('-', '')}-{digest}-{event_id}"
+        target = vault / directory_name / f"{name}.md"
+        card = capture_card_text(name, label, body, summary, stamp, event, event_id, origin, replay)
+        # Even a grant with no executable fields claims an Owner decision.
+        # Shape matching permits capture; only the shared source contract permits
+        # publication. No event position is substituted for a raw record hash.
+        _fields, problem = memspec.frontmatter_text(card)
+        issues = ([problem] if problem else
+                  rule_pipeline.admission("", card, "decision", target)) if admitted else []
+        if issues:
+            admitted = False
+            card = card.replace("---\n", "---\npublication_status: UNVERIFIED\n", 1)
+        directory = vault / directory_name if admitted else pending_directory(vault, stamp)
+        directory.mkdir(parents=True, exist_ok=True)
         target = directory / f"{name}.md"
-        # The description is what recall injects; it must carry the owner's words,
-        # not just a label, or the model has to open the file to learn anything.
-        summary = one_line(summary if summary is not None else body)
-        provenance = "".join(
-            f"{key}: {one_line(value)}\n" for key, value in (replay.fields if replay is not None else ())
-        )
-        card = (
-            "---\n"
-            f"name: {name}\n"
-            f"description: {label} {stamp[:10]}: {summary}\n"
-            f"{memspec.SCOPE_FIELD}: governance-core\n"
-            f"captured_at: {stamp}\n"
-            # cwd 是落點的證據，也是事後歸戶（capture_route）唯一能依據的來源專案。
-            f"{memspec.CWD_FIELD}: {one_line(event.get('cwd'))}\n"
-            f"session_id: {one_line(event.get('session_id', event.get('sessionId')))}\n"
-            # 事件身分（U-P）：卡數不等於事故數，所以每張卡都要說得出自己是哪一則
-            # 事件、來自哪個宿主的哪一場對話的哪個位置。夢的檢討包按這兩欄去重計數。
-            f"{memspec.EVENT_ID_FIELD}: {event_id}\n"
-            f"{memspec.ORIGIN_FIELD}: {origin}\n"
-            # 機器抓的、還沒人核過：轉正的人把 verified 改 true 並補 verified_by／
-            # verified_at，這兩欄就是「這張卡能不能當依據」的卡面憑證。
-            f"{memspec.PROVENANCE_FIELD}: {memspec.PROVENANCE_AUTO_CAPTURED}\n"
-            f"{memspec.VERIFIED_FIELD}: {memspec.VERIFIED_FALSE}\n"
-            f"{provenance}"
-            "---\n"
-            f"{body}\n"
-        )
         with memspec.file_lock(target, memspec.GRANT_LOCK_SECONDS) as locked:
             if not locked or target.exists():
                 _report(replay, STATUS_DUPLICATE if target.exists() else STATUS_ERROR)

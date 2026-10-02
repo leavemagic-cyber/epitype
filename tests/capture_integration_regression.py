@@ -15,6 +15,7 @@ from epitype import capture, harvest, memspec
 import _hook_common as common
 import recall_hook as recall
 from capture_precision import SYNTHETIC
+from rule_writer_sources_regression import fixture_capture_event
 
 
 class CaptureIntegrationRegression(unittest.TestCase):
@@ -30,13 +31,29 @@ class CaptureIntegrationRegression(unittest.TestCase):
         })
         environment.start()
         self.addCleanup(environment.stop)
+        self.source_root = self.root / 'synthetic-originals'
+        self.stamp = '2026-01-02T03:04:05Z'
+        # Only the fixture clock is fixed; real classification/writers/admission run.
+        clock = patch.object(capture.time, 'gmtime', return_value=time.strptime(self.stamp, '%Y-%m-%dT%H:%M:%SZ'))
+        clock.start()
+        self.addCleanup(clock.stop)
+        self.hosts = {}
 
     def event(self, name, prompt, question, codex=False):
         transcript = self.root / f"{name}.jsonl"
         message = {"role": "assistant", "content": [{"type": "text", "text": question or ""}]}
         item = {"type": "response_item", "payload": message} if codex else {"type": "assistant", "message": message}
         transcript.write_text(json.dumps(item, ensure_ascii=False) + "\n", encoding="utf-8")
+        self.hosts[name] = 'codex' if codex else 'claude'
         return {"prompt": prompt, "session_id": name, "cwd": str(self.root), "transcript_path": str(transcript)}
+
+    def reviewed_event(self, event, vault, *, prompt=None, question=None, replay=None):
+        found = capture.classify(prompt if prompt is not None else event['prompt'], question)
+        if found is None:
+            return event
+        return fixture_capture_event(found, vault, event,
+            replay or capture.Replay(stamp=self.stamp), source_root=self.source_root,
+            host=self.hosts.get(event.get('session_id'), 'claude'))
 
     def test_actual_hook_matches_replay_for_all_precision_fixtures(self):
         for name, prompt, question, expected in SYNTHETIC:
@@ -45,6 +62,7 @@ class CaptureIntegrationRegression(unittest.TestCase):
                 vault.mkdir()
                 common.write_config(self.config, [vault])
                 event = self.event(name, prompt, question)
+                event = self.reviewed_event(event, vault, question=question)
                 replay = harvest.candidates(prompt, question)
                 with patch.object(capture, "classify", wraps=capture.classify) as classifier:
                     recall._handle(event, time.monotonic(), [])
@@ -85,6 +103,7 @@ class CaptureIntegrationRegression(unittest.TestCase):
             for kind in capture.CAPTURE_KINDS:
                 self.assertIsNone(capture.capture_owner_sentence(prompt, vault, event, None, kind))
             replay = capture.Replay(stamp="2026-01-02T03:04:05Z", fields=(("source", "synthetic"),))
+            event = self.reviewed_event(event, vault, question='請你確認要用哪個方案？', replay=replay)
             path = capture.capture_ruling(prompt, vault, event, None, replay=replay)
             self.assertEqual(replay.status, capture.STATUS_WRITTEN)
             text = path.read_text(encoding="utf-8")
@@ -113,11 +132,13 @@ class CaptureIntegrationRegression(unittest.TestCase):
         vault = self.root / "two-sessions"
         vault.mkdir()
         first = capture.capture_event(
-            prompt, vault, self.event("sess-a", prompt, None), None,
+            prompt, vault, self.reviewed_event(self.event("sess-a", prompt, None), vault,
+                replay=capture.Replay(stamp="2026-01-02T03:04:05Z")), None,
             replay=capture.Replay(stamp="2026-01-02T03:04:05Z"),
         )
         second = capture.capture_event(
-            prompt, vault, self.event("sess-b", prompt, None), None,
+            prompt, vault, self.reviewed_event(self.event("sess-b", prompt, None), vault,
+                replay=capture.Replay(stamp="2026-01-02T05:06:07Z")), None,
             replay=capture.Replay(stamp="2026-01-02T05:06:07Z"),
         )
         self.assertIsNotNone(first)
@@ -184,6 +205,7 @@ class CaptureIntegrationRegression(unittest.TestCase):
             event = self.event(f"scalar-{index}", "不要再問這件事，以後一律用第二案。", "請你確認要用哪個方案？")
             transcript = Path(event["transcript_path"])
             transcript.write_text(json.dumps(scalar) + "\n" + transcript.read_text(encoding="utf-8"), encoding="utf-8")
+            event = self.reviewed_event(event, vault, question='請你確認要用哪個方案？')
             recall._handle(event, time.monotonic(), [])
             cards = list(vault.rglob("*.md"))
             self.assertEqual(len(cards), 1)
@@ -192,8 +214,11 @@ class CaptureIntegrationRegression(unittest.TestCase):
     def test_no_request_or_unrelated_request_preserves_correction_priority(self):
         prompt = "不要再問這件事，以後一律用第二案。"
         for index, question in enumerate((None, "今天天氣如何？", "報告引用「請你確認要用哪個方案？」")):
-            path = capture.capture_event(prompt, self.root / f"v{index}", {}, None,
-                                         question=question, replay=capture.Replay())
+            vault = self.root / f"v{index}"
+            replay = capture.Replay(stamp=self.stamp)
+            event = self.reviewed_event({}, vault, prompt=prompt, question=question, replay=replay)
+            path = capture.capture_event(prompt, vault, event, None,
+                                         question=question, replay=replay)
             self.assertEqual(path.parent.name, memspec.CORRECTION_DIRECTORY)
             self.assertNotIn("問（助理）", path.read_text(encoding="utf-8"))
 
@@ -213,6 +238,19 @@ class CaptureIntegrationRegression(unittest.TestCase):
         self.assertIsNone(value)
         self.assertEqual(replay.status, capture.STATUS_REJECTED)
         self.assertEqual(list(self.root.rglob("*.md")), [])
+
+    def test_actual_hook_without_reviewed_source_remains_pending(self):
+        vault = self.root / 'source-missing'
+        vault.mkdir()
+        common.write_config(self.config, [vault])
+        prompt = '不要再亂改介面'
+        self.assertTrue(capture.auto_admitted(prompt)[0])
+        event = self.event('source-missing', prompt, None)
+        recall._handle(event, time.monotonic(), [])
+        cards = list(vault.rglob('*.md'))
+        self.assertEqual(len(cards), 1)
+        self.assertIn('captured_pending', cards[0].parts)
+        self.assertFalse(list((vault / memspec.CORRECTION_DIRECTORY).glob('*.md')))
 
 
 if __name__ == "__main__":

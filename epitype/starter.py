@@ -5,8 +5,8 @@
 沒有一次攔截可以看，而這套東西唯一說得清楚的賣點就是「規則真的擋得住」。空庫等於把證明
 的責任丟回給剛裝好的人。
 
-這裡出貨的卡沒有任何「示範用」的特例：欄位、閘門、體檢走的都是真機那一套，兩向例句由
-card_lint 當場跑過。所以第一次被擋下來的那一次，就是這套規則平常的樣子。
+出貨卡是 AI 範本。只有附有完整原源、範圍及正文驗證的規則才發布到庫；其餘保存到
+不注入的候選區供查看。範本例句可檢查產品行為，不能證明使用者已裁定這些規則。
 
 兩條不能退讓的界線：
 - 已經在庫裡的同名檔一律不覆寫。那個檔是使用者的，即使內容碰巧一樣。
@@ -20,9 +20,11 @@ from pathlib import Path
 import sys
 
 try:
-    from . import memspec
+    from . import memspec, card_lint, card_io, rule_pipeline
 except ImportError:  # 直接當腳本跑
     import memspec
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from epitype import card_lint, card_io, rule_pipeline
 
 _ADAPTER_DIR = Path(__file__).resolve().parents[1] / "adapters" / "claude"
 # 輪子裡 `epitype/` 與 `adapters/` 是同一層的姊妹目錄，checkout 裡也是——所以這一行
@@ -37,6 +39,7 @@ DRY_REMOVE = "DRY-RUN remove {name}"
 KEPT_EDITED = "KEEP {name}: edited since it was installed, so it is yours now"
 KEPT_FOREIGN = "KEEP {name}: no {field} marker, not ours to remove"
 MISSING = "ABSENT {name}: not in this vault"
+CANDIDATE_SUBPATH = ("_drafts", "starter_templates")
 DRY_DONE = "DRY-RUN complete; no files changed."
 # 裝完之後第一件該做的事，是看它擋一次。這一句擋的是 PreToolUse，指令連跑都不會跑到。
 TRY_LINE = (
@@ -93,12 +96,37 @@ def _install(vault, cards, dry_run, output):
             skipped.append(source.name)
             print(SKIPPED.format(name=source.name), file=output)
             continue
-        written.append(source.name)
-        print((DRY_WRITE if dry_run else WROTE).format(name=source.name), file=output)
-        if not dry_run:
+        payload = source.read_bytes()
+        text = payload.decode("utf-8-sig")
+        card_type, _fields = card_lint.card_type_of(source.name, text, target)
+        _fields, problem = memspec.frontmatter_text(text)
+        issues = [problem] if problem else rule_pipeline.admission("", text, card_type, target)
+        if issues:
+            candidate = vault.joinpath(*CANDIDATE_SUBPATH, source.name)
+            print(f"CANDIDATE {source.name}: AI template; source UNVERIFIED; unpublished; "
+                  + "; ".join(issues), file=output)
+            if not dry_run:
+                candidate.parent.mkdir(parents=True, exist_ok=True)
+                if not candidate.exists():
+                    try:
+                        card_io.publish(candidate, payload)
+                    except FileExistsError:
+                        pass  # A racing owner's candidate stays intact.
+            continue
+        if dry_run:
+            written.append(source.name)
+            print(DRY_WRITE.format(name=source.name), file=output)
+        else:
             # 位元組照抄：`--remove` 之後要比對「跟出貨版一模一樣嗎」，任何換行轉換都會
             # 讓那個比對永遠不成立，於是每一張卡都變成「使用者改過的」而刪不掉。
-            target.write_bytes(source.read_bytes())
+            try:
+                card_io.publish(target, payload)
+            except FileExistsError:
+                skipped.append(source.name)
+                print(SKIPPED.format(name=source.name), file=output)
+            else:
+                written.append(source.name)
+                print(WROTE.format(name=source.name), file=output)
     return written, skipped
 
 

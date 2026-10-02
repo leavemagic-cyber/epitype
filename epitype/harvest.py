@@ -15,13 +15,15 @@ import re
 import time
 
 try:
-    from . import capture, capture_route, card_io, memsearch, memspec
+    from . import capture, capture_route, card_io, memsearch, memspec, rule_pipeline, rule_provenance
 except ImportError:  # Direct script execution keeps the CLI contract.
     import capture
     import capture_route
     import card_io
     import memsearch
     import memspec
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from epitype import rule_pipeline, rule_provenance
 
 
 CLAUDE_TRANSCRIPT_GLOB = ("projects", "*", "*.jsonl")
@@ -464,11 +466,20 @@ def harvest(home, vaults, docs=(), since=None, limit=None, dry_run=False,
                     continue
                 if dry_run:
                     stamp = _record_stamp(item, fallback)
-                    event_id, _origin, _session = capture.event_identity(event, digest)
+                    event_id, origin, _session = capture.event_identity(event, digest)
                     landing = "" if target == vault else f" -> {os.fspath(target)}"
                     admitted, _template = capture.auto_admitted(capture.owner_side(body, summary))
                     if drafts_only:
                         admitted = False
+                    if admitted:
+                        name = f"{kind}-{stamp[:10].replace('-', '')}-{digest}-{event_id}"
+                        replay = capture.Replay(stamp=stamp,
+                            fields=(("source", source), ("harvested_at", now)))
+                        card = capture.capture_card_text(name, label, body, summary, stamp,
+                                                         event, event_id, origin, replay)
+                        _fields, problem = memspec.frontmatter_text(card)
+                        admitted = not (problem or rule_pipeline.admission("", card, "decision",
+                                        target / directory / f"{name}.md"))
                     where = directory if admitted else "/".join(
                         (*memspec.CAPTURE_PENDING_SUBPATH, stamp[:10].replace("-", ""))
                     )
@@ -617,12 +628,18 @@ def reevaluate(directory, vault, apply=False, quarantine_drops=None):
             moved = ""
             if quarantine_drops is None and apply and _held_pending(path):
                 # 提案區的卡本來就「今天的規則也會捕捉」——那正是它被扣住的原因，不是
-                # 搬正的理由。轉正是人看過、把 verified 改 true 的動作（owner 2026-09-09 Q5「C」）。
+                # 搬正的理由。verified 標記也不能代替 _move_card 的原源及正文驗證。
                 counts["held"] += 1
                 lines.append(f"HOLD  {was:<10} {path} ({memspec.CAPTURE_PENDING_HOLD_REASON})")
                 continue
             if quarantine_drops is None and apply:
                 outcome, target = _move_card(path, vault, kind, capture.grant_digest(digest_source), counts)
+                if outcome == "held":
+                    lines.append(f"HOLD  {was:<10} {path} (source contract: unpublished)")
+                    continue
+                if outcome == "historical":
+                    lines.append(f"HISTORY {path} -> {target} (unpublished context)")
+                    continue
                 if outcome == "duplicate":
                     lines.append(f"DUPLICATE {path} == {target}")
                 elif outcome == "renamed":
@@ -634,6 +651,12 @@ def reevaluate(directory, vault, apply=False, quarantine_drops=None):
                 outcome, target = _move_card(
                     path, vault, kind, capture.grant_digest(digest_source), counts, counter="reclassified",
                 )
+                if outcome == "held":
+                    lines.append(f"HOLD  {was:<10} {path} (source contract: unpublished)")
+                    continue
+                if outcome == "historical":
+                    lines.append(f"HISTORY {path} -> {target} (unpublished context)")
+                    continue
                 if outcome == "duplicate":
                     lines.append(f"DUPLICATE {path} == {target}")
                 elif outcome in ("moved", "renamed"):
@@ -722,6 +745,46 @@ def _move_card(path, vault, kind, digest, counts, counter="moved"):
     # 兩卡」則被當成沒撞名，直接再放一張進去。
     if _is_card_for(path, kind, digest) and path.parent.resolve() == directory.resolve():
         return "unchanged", path
+    try:
+        original = path.read_bytes()
+        text = original.decode("utf-8-sig")
+    except (OSError, UnicodeError) as exc:
+        counts["failed"] = counts.get("failed", 0) + 1
+        print(f"MOVE FAILED {path}: {exc}", file=sys.stderr)
+        return None, None
+    fields, problem = memspec.frontmatter_text(text)
+    source_bound = rule_provenance.FIELD in fields
+    # Moving a reviewed card must preserve its exact bound name/description.
+    # Rebinding machine relabelling would pretend a fresh interpretation review.
+    if source_bound:
+        name = path.stem
+        target = directory / path.name
+        if path.resolve() == target.resolve():
+            return "unchanged", path
+    else:
+        text = CARD_NAME_REGEX.sub(f"name: {name}", text, count=1)
+        text = CARD_LABEL_REGEX.sub(rf"\g<1>{CARD_LABELS[kind]}", text, count=1)
+    historical = (str(fields.get("auto", "")).casefold() == "true"
+                  and not rule_pipeline.is_rule(fields, kind, text))
+    if historical and not problem:
+        # Older readers may interpret verified:true in an event directory as
+        # an Owner ruling. Historical context never enters those directories.
+        history = Path(vault) / "_drafts" / "captured_history" / kind / path.name
+        try:
+            card_io.move(path, history, expected=original)
+        except OSError as exc:
+            counts["failed"] = counts.get("failed", 0) + 1
+            print(f"MOVE FAILED {path}: {exc}", file=sys.stderr)
+            return None, None
+        counts["history"] = counts.get("history", 0) + 1
+        return "historical", history
+    # All actual Owner publication uses the decision contract, even a grant
+    # with no executable fields. A verified flag cannot replace its sources.
+    issues = [problem] if problem else rule_pipeline.admission("", text, "decision", target)
+    if issues:
+        counts["held"] = counts.get("held", 0) + 1
+        print(f"HOLD {path}: " + "; ".join(issues), file=sys.stderr)
+        return "held", path
     occupied = next(
         (item for item in sorted(directory.glob(f"{kind}-*-{digest}*.md"))
          if item.resolve() != path.resolve()),
@@ -745,14 +808,20 @@ def _move_card(path, vault, kind, digest, counts, counter="moved"):
             # it physically landed — the filesystem move is a bookkeeping detail,
             # the equivalence with `existing` is what the caller's message needs.
             return "duplicate", existing
-        name = f"{name}-2"
-        target = target.with_name(f"{name}.md")
+        if source_bound:
+            reviewed_target = directory / path.name
+            if reviewed_target == occupied or reviewed_target.exists():
+                counts["held"] = counts.get("held", 0) + 1
+                print(f"HOLD {path}: occupied reviewed identity {reviewed_target}", file=sys.stderr)
+                return "held", path
+            target = reviewed_target
+        else:
+            name = f"{name}-2"
+            target = target.with_name(f"{name}.md")
         outcome = "renamed"
     try:
-        original = path.read_bytes()
-        text = original.decode("utf-8-sig")
-        text = CARD_NAME_REGEX.sub(f"name: {name}", text, count=1)
-        text = CARD_LABEL_REGEX.sub(rf"\g<1>{CARD_LABELS[kind]}", text, count=1)
+        if not source_bound:
+            text = CARD_NAME_REGEX.sub(f"name: {name}", text, count=1)
         payload = (b"\xef\xbb\xbf" if original.startswith(b"\xef\xbb\xbf") else b"") + text.encode("utf-8")
         card_io.move(path, target, payload, expected=original)
     except (OSError, UnicodeError) as exc:
@@ -800,11 +869,29 @@ def _selftest():
     import contextlib
     import io
     import tempfile
+    tests_dir = Path(__file__).resolve().parents[1] / "tests"
+    sys.path.insert(0, str(tests_dir))
+    from rule_writer_sources_regression import fixture_card
 
     checks = []
     try:
-        with tempfile.TemporaryDirectory(prefix="epitype-harvest-") as temp_dir:
+        with tempfile.TemporaryDirectory(prefix="epitype-harvest-") as temp_dir, contextlib.ExitStack() as fixtures:
             root = Path(temp_dir).resolve()
+            real_capture_renderer = capture.capture_card_text
+
+            def reviewed_capture(name, label, body, summary, stamp, event, event_id, origin, replay=None):
+                # Positive publication fixtures supply actual synthetic records;
+                # the real writer and admission engine still execute unchanged.
+                text = real_capture_renderer(name, label, body, summary, stamp, event,
+                                             event_id, origin, replay)
+                admitted, _ = capture.auto_admitted(capture.owner_side(body, summary))
+                if admitted and not memspec.CAPTURE_REJECT_REGEX.search(body):
+                    return fixture_card(text, root / "reviewed-cards" / f"{name}.md",
+                                        source_root=root / "reviewed-originals", case_id=name)
+                return text
+
+            fixtures.callback(setattr, capture, "capture_card_text", real_capture_renderer)
+            capture.capture_card_text = reviewed_capture
             home = root / "home"
             vault = home / "vault"
             (vault / "notes").mkdir(parents=True)
@@ -1175,10 +1262,13 @@ def _selftest():
                 encoding="utf-8",
             )
             stale_correction = "以後都用第二案，不要另外開一支"
-            (quarantine / "ruling-20260801-deadbeef0002.md").write_text(
-                "---\nname: ruling-20260801-deadbeef0002\n"
+            reviewed_name = f"ruling-20260801-{capture.grant_digest(stale_correction)}"
+            reviewed_path = quarantine / f"{reviewed_name}.md"
+            reviewed_path.write_text(fixture_card(
+                f"---\nname: {reviewed_name}\n"
                 f"description: owner ruling auto-captured 2026-08-01: {stale_correction}\n---\n"
                 f"{stale_correction}\n",
+                reviewed_path, source_root=root / "reviewed-originals", case_id="decisive-move"),
                 encoding="utf-8",
             )
             reeval_counts, reeval_lines = reevaluate(quarantine, vault, apply=True)
@@ -1255,10 +1345,10 @@ def _selftest():
             dup_pile = root / "dup_pile"
             dup_pile.mkdir()
             dup_source = dup_pile / "grant-20260801-placeholder002.md"
-            dup_source.write_text(
+            dup_source.write_text(fixture_card(
                 f"---\nname: grant-20260801-placeholder002\n"
                 f"description: owner grant auto-captured 2026-08-01: {correction}\n---\n{correction}\n",
-                encoding="utf-8",
+                dup_source, source_root=root / "reviewed-originals", case_id="duplicate"), encoding="utf-8",
             )
             existing_correction_card = next(
                 # 檔名尾巴是 U-P 的事件識別，所以照 `-{digest}*` 找（同 existing_capture）。
@@ -1285,12 +1375,14 @@ def _selftest():
             rename_pile.mkdir()
             rename_source_sentence = "你不要再改那個顏色設定了"
             rename_digest = capture.grant_digest(rename_source_sentence)
-            rename_source = rename_pile / "grant-20260801-placeholder003.md"
-            rename_source.write_text(
-                f"---\nname: grant-20260801-placeholder003\n"
-                f"description: owner grant auto-captured 2026-08-01: {rename_source_sentence}\n---\n"
+            # The collision identity is explicitly reviewed before publication;
+            # the writer cannot silently invent and rebind a new '-2' identity.
+            rename_source = rename_pile / f"correction-20260801-{rename_digest}-2.md"
+            rename_source.write_text(fixture_card(
+                f"---\nname: {rename_source.stem}\n"
+                f"description: owner correction auto-captured 2026-08-01: {rename_source_sentence}\n---\n"
                 f"{rename_source_sentence}\n",
-                encoding="utf-8",
+                rename_source, source_root=root / "reviewed-originals", case_id="collision"), encoding="utf-8",
             )
             collision_target = vault / memspec.CORRECTION_DIRECTORY / f"correction-20260801-{rename_digest}.md"
             collision_target.write_text(
@@ -1319,10 +1411,11 @@ def _selftest():
             # 之前只印訊息不搬；dry-run 仍不搬，--apply 才真的搬到新 kind 目錄。
             reclass_sentence = "你不要再放大那個字級了"
             reclass_digest = capture.grant_digest(reclass_sentence)
-            misfiled_grant = vault / memspec.GRANT_DIRECTORY / f"grant-20260801-{reclass_digest}.md"
-            misfiled_grant.write_text(
-                f"---\nname: grant-20260801-{reclass_digest}\n"
-                f"description: owner grant auto-captured 2026-08-01: {reclass_sentence}\n---\n{reclass_sentence}\n",
+            misfiled_grant = vault / memspec.GRANT_DIRECTORY / f"correction-20260801-{reclass_digest}.md"
+            misfiled_grant.write_text(fixture_card(
+                f"---\nname: {misfiled_grant.stem}\n"
+                f"description: owner correction auto-captured 2026-08-01: {reclass_sentence}\n---\n{reclass_sentence}\n",
+                misfiled_grant, source_root=root / "reviewed-originals", case_id="reclassification"),
                 encoding="utf-8",
             )
             reclassed_target = vault / memspec.CORRECTION_DIRECTORY / f"correction-20260801-{reclass_digest}.md"

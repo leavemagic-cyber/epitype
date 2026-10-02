@@ -10,8 +10,9 @@ import unittest
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path[:0] = [str(ROOT), str(ROOT / "adapters" / "claude")]
-from epitype import capture, memsearch, memspec
+sys.path[:0] = [str(ROOT), str(ROOT / "adapters" / "claude"), str(ROOT / 'tests')]
+from epitype import capture, memsearch, memspec, rule_pipeline, rule_provenance
+from rule_writer_sources_regression import fixture_capture_event, fixture_card
 import _hook_common as common
 import recall_hook as recall
 
@@ -36,11 +37,14 @@ class CaptureRecallRegression(unittest.TestCase):
         self.addCleanup(environment.stop)
 
     def card(self, quote=QUOTE, kind="ruling", legacy=False):
+        event = {"cwd": "synthetic-project", "session_id": "synthetic-source-session"}
+        replay = capture.Replay(stamp="2026-01-02T03:04:05Z")
+        event = fixture_capture_event((kind, quote, None, quote), self.vault, event, replay,
+            source_root=self.root / 'synthetic-originals')
         path = capture.write_capture(
             self.vault, kind + "s", kind, capture.grant_digest(quote),
             f"owner {kind} auto-captured", quote,
-            {"cwd": "synthetic-project", "session_id": "synthetic-source-session"}, None,
-            replay=capture.Replay(stamp="2026-01-02T03:04:05Z"),
+            event, None, replay=replay,
             # 這一組驗的是「入庫的卡怎麼端出來」，所以固定走白名單那條路；白名單本身
             # 由 tests/capture_admission_regression.py 驗（owner 2026-09-09 Q5「C」）。
             source_text="不要再這樣做",
@@ -50,7 +54,11 @@ class CaptureRecallRegression(unittest.TestCase):
             lines = text.splitlines()
             lines = [line[:line.index(": ", 13) + 2] + capture.one_line(quote)[:80]
                      if line.startswith("description: ") else line for line in lines]
-            path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            plain = '\n'.join(line for line in lines if not line.startswith(rule_provenance.FIELD + ':')) + '\n'
+            path.write_text(fixture_card(plain, path, source_root=self.root / 'synthetic-originals',
+                case_id='legacy-description'), encoding='utf-8')
+        self.assertEqual(replay.status, capture.STATUS_WRITTEN)
+        self.assertEqual(rule_pipeline.admission('', path.read_text(encoding='utf-8'), 'decision', path), [])
         memsearch.build_index(self.vault)
         return path
 
@@ -115,20 +123,27 @@ class CaptureRecallRegression(unittest.TestCase):
         path = self.card()
         text = path.read_text(encoding="utf-8")
         head, _, rest = text.partition("\n---\n")
-        path.write_text(
+        head = '\n'.join(line for line in head.splitlines() if not line.startswith(rule_provenance.FIELD + ':'))
+        final_text = (
             head
             + f"\n{memspec.DECISION_KEY_FIELD}: fixturehistory-key"
             + f"\n{memspec.DECISION_STATUS_FIELD}: {memspec.ACTIVE_DECISION_STATUS}"
             + f"\n{memspec.CURRENT_DECISION_AT_FIELD}: 2026-01-02"
             + f"\n{memspec.OWNER_QUOTE_FIELD}: fixturehistory 一律照這條走\n---\n"
-            + rest,
-            encoding="utf-8",
+            + rest
         )
+        path.write_text(fixture_card(final_text, path, source_root=self.root / 'synthetic-originals',
+            case_id='promoted-decision-final'), encoding='utf-8')
+        self.assertEqual(rule_pipeline.admission('', path.read_text(encoding='utf-8'), 'decision', path), [])
         memsearch.build_index(self.vault)
         context = self.context()
         self.assertIn(memspec.DECISION_PREFIX + "fixturehistory-key（2026-01-02）", context)
-        # The card layer shows the card's description; the verbatim quote stays one level down.
-        self.assertNotIn("fixturehistory 一律照這條走", context)
+        # The current source contract requires the original, AI author and full
+        # scope together; the former quote-hiding expectation is superseded.
+        self.assertIn('原始 Owner 引句：fixturehistory 一律照這條走', context)
+        self.assertIn('作者分類：AI 整理：synthetic-test-ai', context)
+        document = json.loads(memspec.frontmatter_fields(path)[0][rule_provenance.FIELD])
+        self.assertIn('適用範圍：' + rule_provenance.serialize(document['scope']), context)
 
     def test_budget_preserves_pointer_then_drops_whole_card_without_marker(self):
         path = self.plain_card()
@@ -144,6 +159,17 @@ class CaptureRecallRegression(unittest.TestCase):
         self.assertNotIn(path.name, context)
         self.assertFalse(any(digest.startswith("card-") for _session, digest in markers))
         self.assertIn(path.stem, self.context())
+
+    def test_unreviewed_capture_is_pending_and_not_searchable(self):
+        replay = capture.Replay(stamp='2026-01-02T03:04:05Z')
+        path = capture.write_capture(self.vault, memspec.RULING_DIRECTORY, 'ruling',
+            capture.grant_digest(QUOTE), 'owner ruling auto-captured', QUOTE,
+            {'cwd': 'synthetic-project'}, None, replay=replay, source_text='不要再這樣做')
+        self.assertEqual(replay.status, capture.STATUS_PENDING)
+        self.assertIn('captured_pending', path.parts)
+        memsearch.build_index(self.vault)
+        self.assertEqual(self.searched(), [])
+        self.assertEqual(self.invoke()[0], None)
 
 
 if __name__ == "__main__":

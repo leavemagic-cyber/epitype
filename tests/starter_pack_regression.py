@@ -28,6 +28,7 @@ import unittest
 from unittest.mock import patch
 
 from epitype import card_lint, memspec, starter
+from rule_writer_sources_regression import fixture_starter_directory
 
 import _hook_common as common
 import pretooluse_gate as pretool
@@ -49,6 +50,12 @@ class StarterCardsAreRealRules(unittest.TestCase):
     """卡片本身：體檢零 FAIL、例句兩向都對、記號齊全。"""
 
     def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="epitype-reviewed-starter-")
+        self.addCleanup(temporary.cleanup)
+        directory = fixture_starter_directory(Path(temporary.name))
+        distribution = patch.object(starter, "CARD_DIRECTORY", directory)
+        distribution.start()
+        self.addCleanup(distribution.stop)
         self.cards = starter.shipped_cards()
         self.assertTrue(self.cards, "出貨目錄裡一張卡都沒有，陌生人拿到的還是空庫")
 
@@ -102,6 +109,12 @@ class _VaultCase(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory(prefix="epitype-starter-")
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name).resolve()
+        # The publication contract changed: these positive gate/install fixtures
+        # are exact AI templates with real synthetic Owner records and binding.
+        directory = fixture_starter_directory(self.root)
+        distribution = patch.object(starter, "CARD_DIRECTORY", directory)
+        distribution.start()
+        self.addCleanup(distribution.stop)
         self.vault = self.root / "vault"
         self.vault.mkdir()
         self.config = self.root / "config.json"

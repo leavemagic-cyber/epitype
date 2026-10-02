@@ -1,7 +1,7 @@
 import sys; sys.dont_write_bytecode = True
 """自動捕捉的入庫政策（owner 2026-09-09 裁定 Q5「C」）的回歸。
 
-三件事釘在這裡：形狀明確的句子才自動入庫、其餘只落 `_drafts/captured_pending/`、
+三件事釘在這裡：形狀明確且有真來源的句子才入庫、其餘只落 `_drafts/captured_pending/`、
 以及「機器抓的、還沒人核過」的卡不得成為任何閘門的依據。第三件是最容易在改別的
 東西時悄悄失守的一件——決策閘、寫檔閘、PreToolUse 授權判定與開場裁定清單各自讀
 卡，任何一處改成「事件卡也算」都會讓未核的句子變成授權。
@@ -18,6 +18,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "adapters" / "claude")]
 from epitype import capture, card_lint, harvest, memsearch, memspec  # noqa: E402
+from rule_writer_sources_regression import fixture_card, fixture_capture_event
 import _hook_common as common  # noqa: E402
 import pretooluse_gate  # noqa: E402
 import recall_hook as recall  # noqa: E402
@@ -55,10 +56,14 @@ class CaptureAdmissionRegression(unittest.TestCase):
         self.addCleanup(environment.stop)
 
     def capture(self, prompt, question=None, vault=None):
+        replay = capture.Replay(stamp="2026-09-09T01:02:03Z")
+        event = {"cwd": str(self.root), "session_id": "admission-session"}
+        if capture.auto_admitted(prompt)[0]:
+            event = fixture_capture_event(capture.classify(prompt, question), vault or self.vault,
+                event, replay, source_root=self.root / "originals")
         return capture.capture_event(
             prompt, vault or self.vault,
-            {"cwd": str(self.root), "session_id": "admission-session"}, None,
-            question=question, replay=capture.Replay(stamp="2026-09-09T01:02:03Z"),
+            event, None, question=question, replay=replay,
         )
 
     @property
@@ -156,10 +161,14 @@ class CaptureAdmissionRegression(unittest.TestCase):
             found = harvest.candidates(prompt, question)
             self.assertEqual(len(found), 1, prompt)
             kind, directory, digest, label, body, summary = found[0]
+            replay = capture.Replay(stamp="2026-09-09T01:02:03Z")
+            event = {"cwd": str(self.root), "session_id": "replay"}
+            if capture.auto_admitted(prompt)[0]:
+                event = fixture_capture_event(capture.classify(prompt, question), replayed,
+                    event, replay, source_root=self.root / "originals")
             capture.write_capture(
                 replayed, directory, kind, digest, label, body,
-                {"cwd": str(self.root), "session_id": "replay"}, None,
-                summary=summary, replay=capture.Replay(stamp="2026-09-09T01:02:03Z"),
+                event, None, summary=summary, replay=replay,
             )
             live = self.capture(prompt, question)
             # 兩邊的檔名尾巴是各自的事件識別（回放是另一場 session），所以比對用文句
@@ -176,7 +185,7 @@ class CaptureAdmissionRegression(unittest.TestCase):
         self.assertTrue(proposal.is_file())
         self.assertTrue(any(text.startswith("HOLD") for text in lines))
         self.assertEqual(list((self.vault / memspec.RULING_DIRECTORY).glob("*.md")), [])
-        # 人核過（verified: true）之後同一條命令才把它搬進庫。
+        # 人核標記加完整合成原源及正文 binding 才能發布；單一 true 反例在 writer suite。
         proposal.write_text(
             proposal.read_text(encoding="utf-8").replace(
                 f"{memspec.VERIFIED_FIELD}: {memspec.VERIFIED_FALSE}",
@@ -186,6 +195,8 @@ class CaptureAdmissionRegression(unittest.TestCase):
             ),
             encoding="utf-8",
         )
+        proposal.write_text(fixture_card(proposal.read_text(encoding="utf-8"), proposal,
+                            source_root=self.root / "originals", case_id="promotion"), encoding="utf-8")
         counts, _lines = harvest.reevaluate(self.pending_root, self.vault, apply=True)
         self.assertEqual(counts["held"], 0)
         self.assertEqual(counts["moved"], 1)
