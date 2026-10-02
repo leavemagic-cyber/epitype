@@ -976,8 +976,10 @@ def _section_caps(vaults, today, since_date, config):
     entries = []
     errors = []
     index_cap = _positive_int(config.get(memspec.CONFIG_INDEX_CAP_BYTES_FIELD))
+    shared_index_cap = _positive_int(config.get(memspec.CONFIG_SHARED_INDEX_CAP_BYTES_FIELD))
     if index_cap is None:
-        notes.append(CAP_UNSET_NOTE.format(field=memspec.CONFIG_INDEX_CAP_BYTES_FIELD))
+        if shared_index_cap is None:
+            notes.append(CAP_UNSET_NOTE.format(field=memspec.CONFIG_INDEX_CAP_BYTES_FIELD))
     else:
         for vault in vaults:
             path = Path(vault) / memspec.MEMORY_INDEX_FILENAME
@@ -989,6 +991,26 @@ def _section_caps(vaults, today, since_date, config):
                 entries.append({
                     "path": str(path), "bytes": size, "cap": index_cap, "over": size - index_cap,
                 })
+    if shared_index_cap is not None:
+        try:
+            try:
+                from . import host_sync
+            except ImportError:
+                import host_sync
+            contract = host_sync.contract_vaults(vaults)
+            for vault in contract:
+                path = Path(vault) / memspec.MEMORY_INDEX_FILENAME
+                index = host_sync._index_of(vault)
+                if index is None:
+                    errors.append(f"{path}: shared index unavailable")
+                    continue
+                size = len(index.encode("utf-8"))
+                if size > shared_index_cap:
+                    entries.append({"path": str(path), "bytes": size,
+                                    "cap": shared_index_cap, "over": size - shared_index_cap,
+                                    "kind": "shared-index-payload"})
+        except (OSError, ValueError) as exc:
+            errors.append("shared-index: " + type(exc).__name__)
     core_files = config.get(memspec.CONFIG_CORE_FILES_FIELD)
     core_cap = _positive_int(config.get(memspec.CONFIG_CORE_CAP_BYTES_FIELD))
     named = [

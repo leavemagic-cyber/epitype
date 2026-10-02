@@ -126,6 +126,7 @@ CONFIG_BUDGET_BYTES_FIELD = "budget_bytes"
 # 鍵都選填——缺鍵時夢寫一行「未設定」跳過，絕不拿內建數字當成 owner 的門檻，因為
 # 「超上限」會被讀成 owner 的判斷。core_files 是絕對路徑清單（契約正本那一類檔案）。
 CONFIG_INDEX_CAP_BYTES_FIELD = "index_cap_bytes"
+CONFIG_SHARED_INDEX_CAP_BYTES_FIELD = "shared_index_cap_bytes"
 CONFIG_CORE_FILES_FIELD = "core_files"
 CONFIG_CORE_CAP_BYTES_FIELD = "core_cap_bytes"
 # 口袋庫＝未登記卻裝著卡的目錄，擺在 `<家目錄>/.claude/projects/<專案>/memory`。

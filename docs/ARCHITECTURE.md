@@ -166,6 +166,13 @@ Two refusals, both of which write nothing at all:
   the same `core_cap_bytes`, measured on that host's own view; the agent reads those
   files, not the generated one, so a cap only core-gen honoured would bound nothing.
 
+`shared_index_cap_bytes` optionally limits the normalised governance `MEMORY.md`
+payload written into either global host's index region. Nightly cap checks measure
+that same payload, excluding its first heading. Project indexes retain their own
+scope; this setting does not impose the governance limit on every managed vault.
+Omitting the setting introduces no additional limit. `index_cap_bytes` retains its
+existing raw-file monitoring meaning for all selected vaults.
+
 A successful run also writes an approval pack to `<vault>/.epitype/core_gen_latest.json`:
 per card the vault, path, layer, section, order, approver, and the SHA-256 of its
 `text`; for the output the SHA-256, the byte count, the cap in force, and the time.

@@ -297,7 +297,11 @@ def _plan(host, label, key, path, wanted_of, home=None):
 
     # 設了 core_cap_bytes 就是規則塊的上限：core-gen 超過會拒寫，而代理真正讀到的是這裡
     # 寫進去的字，這裡不守的話那個上限等於沒設。
-    rules_cap = core_gen._cap_of(None, memspec.config_options())
+    configured = memspec.config_options()
+    rules_cap = core_gen._cap_of(None, configured)
+    shared_index_cap = configured.get(memspec.CONFIG_SHARED_INDEX_CAP_BYTES_FIELD)
+    if isinstance(shared_index_cap, bool) or not isinstance(shared_index_cap, int) or shared_index_cap <= 0:
+        shared_index_cap = None
     for name, text in wanted.items():
         size = len(text.encode("utf-8"))
         if size > memspec.HOST_SYNC_REGION_CAP_BYTES:
@@ -310,6 +314,14 @@ def _plan(host, label, key, path, wanted_of, home=None):
             problems.append(
                 f"{name} 有 {size} 位元組，超過設定的 {memspec.CONFIG_CORE_CAP_BYTES_FIELD} "
                 f"{rules_cap}；先讓規則瘦身或調整上限再同步"
+            )
+            continue
+        if (key is None and name == memspec.HOST_SYNC_INDEX_REGION
+                and shared_index_cap is not None and size > shared_index_cap):
+            problems.append(
+                f"{name} 有 {size} 位元組，超過設定的 "
+                f"{memspec.CONFIG_SHARED_INDEX_CAP_BYTES_FIELD} {shared_index_cap}；"
+                "請縮短共用索引或調整其上限"
             )
             continue
         # 要寫進去的內容自己含標記，寫下去就會讓這個檔永遠有兩組標記，之後每次都拒絕、
