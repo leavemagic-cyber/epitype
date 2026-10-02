@@ -2208,7 +2208,7 @@ python tests/control_block_regression.py
 python tests/control_lifecycle_regression.py
 ```
 
-Fifteen block regressions cover open → Bash denied, unconfirmed close still
+Sixteen block regressions cover open → Bash denied, unconfirmed close still
 denied, confirmed close allowed, browser/meta tools allowed, owner and
 unattributable tabs, out-of-reach tabs, subagent scope, the built-in browser
 on its real result formats (opening JSON from `navigate`, origin-only lists,
@@ -2226,7 +2226,9 @@ opened the pane was never recorded, and its Colab exemption could never pass),
 that an accepted declaration let a PowerShell script block run and let other
 open tabs through, and that a session without browser tools had no way out.
 All four were reproduced and fixed before release; fixtures now come from real
-results.
+results. The re-audit then found that the release matched any message
+containing `放行分頁`, including `不要放行分頁`; it now requires the whole
+message to be the phrase.
 
 ### Limits
 
@@ -2238,6 +2240,7 @@ seen notebook and account, and the exemption lapses after 24 hours or when a
 later listing shows another URL (built-in browser: another origin). Page
 changes by clicks, `computer` or `browser_batch` are not observed. A transient
 Chrome disconnect lifts the block until the next listing shows the tab again.
-The release phrase is honoured from any prompt that is not a relayed agent
-message; a peer session that sent it as plain text would be indistinguishable
-from the owner.
+A peer session that sent exactly `放行分頁` as plain text would be
+indistinguishable from the owner, and a session nobody can answer (`claude -p`,
+a scheduled run) that loses its browser tools has no way out but a Chrome
+disconnect or a built-in browser listing.

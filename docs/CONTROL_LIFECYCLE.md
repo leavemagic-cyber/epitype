@@ -44,7 +44,8 @@ A resource is `closed` only on confirmation:
   says the Browser pane is now closed (which closes every recorded pane tab).
   `tabs_context` lists every pane tab, so a recorded tab missing from it, or
   `browserOpen: false`, closes the record, and so does a `No preview is open`
-  error from any of these tools. A pane tab is recorded only from a
+  error from any of these tools called without a `serverId` or `tabId` (a call
+  aimed at a wrong target proves nothing about the pane). A pane tab is recorded only from a
   `tabs_create` / `preview_start` / `navigate` result that starts with JSON
   carrying `reused: false` (what `navigate` returns when it opens the pane), or
   from a `navigate` naming one `Executed on tabId` while the pane was known to
@@ -122,11 +123,12 @@ tabs and the close tool, and says to reopen a tab when it is needed again.
   reminded, and blocks again if a later listing shows it.
 - A session that cannot close its tabs (for example one resumed where the
   browser tools are not loaded) has one way out that the agent cannot take
-  itself: the owner's own message containing `放行分頁`. `UserPromptSubmit`
-  then marks every tab still blocking in that session as released (a `release`
-  event). Released tabs stay pending and reminded; a tab opened afterwards
-  blocks again. A relayed agent message (`<agent-message`,
-  `<task-notification`, `<teammate-message`, `<channel`) does not count.
+  itself: an owner message that is exactly `放行分頁` (spaces and punctuation
+  ignored). `UserPromptSubmit` then marks every tab still blocking in that
+  session as released (a `release` event). Released tabs stay pending and
+  reminded; a tab opened afterwards blocks again. A message that only contains
+  the phrase, such as `不要放行分頁`, a pasted paragraph or a relayed agent
+  message, does not count.
 - A failure inside this check fails open with the usual degraded notice.
 - Each denial is counted per tab in `alerts` (stage `block`); closing the tab
   keeps the count until retention removes it.
@@ -152,8 +154,11 @@ when:
   `https://colab.research.google.com/drive/NOTEBOOK_ID` with the same
   `authuser` (absent means `0`). In Chrome that is a tab listing (call
   `tabs_context_mcp` first). The built-in browser lists only origins, so there
-  it is a `navigate` to the notebook URL whose result confirms the navigation
-  (`navOk: true`, or `navigated to` the same origin on one `Executed on tabId`);
+  it is a `navigate` to the notebook URL whose result confirms where it landed
+  (`navigated to` the same origin on one `Executed on tabId`). A `navigate`
+  that opened the pane returns only `navOk: true`, which a redirect to a
+  sign-in page may also give, so that URL counts only after a later
+  `tabs_context` lists the tab on the Colab origin;
 - no other kept tab of this session already holds the same account and
   notebook (one tab per VM).
 
@@ -165,8 +170,9 @@ reopened ID starts without it. Kept tabs are left out of tool-stage reminders
 and named as kept in prompt-stage reminders. Whether the VM is actually running
 is not observable from tool results; the check proves the tab is the declared
 notebook on the declared account, not that a job is running. Page changes made
-by clicks, `computer` or `browser_batch` are not observed, so they do not void
-an exemption before its 24 hours.
+by clicks, `computer` or `browser_batch` are not observed, and a built-in
+browser tab moved to another notebook on the same Colab origin looks
+unchanged, so neither voids an exemption before its 24 hours.
 
 ## Retention
 

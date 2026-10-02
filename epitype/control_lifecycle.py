@@ -64,10 +64,10 @@ _COLAB_NOTEBOOK = re.compile(r"/drive/([A-Za-z0-9_-]{8,128})/?")
 # 只有這兩種分頁的建立能從工具結果確認是本場建的；擋下非瀏覽器工具的只有它們。
 # 分頁群組、無法確認的紀錄、Codex CUA 分頁仍只提醒。
 BLOCKING_KINDS = ("chrome-tab", "pane-tab")
-# 使用者自己在訊息裡打這幾個字，本場還開著的分頁就不再擋（仍會提醒）；給這個 session
-# 沒有能關分頁的瀏覽器工具時用。轉送進來的代理訊息不算。
+# 使用者整則訊息就是這四個字（不計空白標點），本場還開著的分頁就不再擋（仍會提醒）；給這個
+# session 沒有能關分頁的瀏覽器工具時用。只比對整則：「不要放行分頁」或轉貼的長段落都不算。
 RELEASE_PHRASE = "放行分頁"
-_RELAYED = ("<agent-message", "<task-notification", "<teammate-message", "<channel")
+_NOT_LETTERS = re.compile(r"[\W_]+")
 # 擋住時仍要放行的工具：收尾本身要載入關分頁的工具、讀操作說明、問使用者、記待辦、停背景工作。
 UNBLOCKED_TOOLS = frozenset((
     "ToolSearch", "Skill", "AskUserQuestion", "TodoWrite", "TaskCreate", "TaskUpdate",
@@ -400,8 +400,12 @@ def _unverified_chrome(db, session, call_id, candidates, now):
         _resource(db, session, call_id, "open", "unverified-chrome", tab_id, now)
 
 
-def _listing(text, objects):
-    """{tab ID: URL or None} from the result's tab list, or None when it shows none."""
+def _listing(text, objects, origins=False):
+    """{tab ID: URL or None} from the result's tab list, or None when it shows none.
+
+    origins=True also reads the built-in browser's unquoted `(https://host)`; a
+    Chrome title ending in `(v2)` must not read as a URL.
+    """
     for value in objects:
         if isinstance(value, dict) and isinstance(value.get("availableTabs"), list):
             return {
@@ -415,7 +419,8 @@ def _listing(text, objects):
     found = {}
     for match in _LISTED_TAB.finditer(text[marker:]):
         url = _LISTED_URL.search(match.group(2))
-        found[match.group(1)] = (url.group(1) or url.group(2)) if url else None
+        found[match.group(1)] = None if url is None else (
+            url.group(1) if url.group(1) is not None else url.group(2) if origins else None)
     return found
 
 
@@ -463,6 +468,8 @@ def _note_urls(db, session, kind, listing, state, now):
         key = _key(kind, tab_id)
         if kind == "pane-tab" and _origin_only(url):
             if url.rstrip("/").lower() == COLAB_ORIGIN:
+                if isinstance(colab.get(key), dict):
+                    colab[key].pop("unconfirmed", None)
                 continue
             found = None
         else:
@@ -688,7 +695,9 @@ def _observe_pane(db, session, call_id, short, tool_input, result_text, failed, 
     input, counted only when the result confirms that navigation.
     """
     if failed:
-        if result_text.lstrip().startswith(_NO_PANE):
+        # 指定了 serverId／tabId 的呼叫可能只是指錯對象，不能拿來證明整個窗格關了。
+        if (result_text.lstrip().startswith(_NO_PANE)
+                and "serverId" not in tool_input and "tabId" not in tool_input):
             for owned in _open_ids(db, session, "pane-tab"):
                 _resource(db, session, call_id, "close", "pane-tab", owned, now)
             state["pane_open"] = False
@@ -703,6 +712,10 @@ def _observe_pane(db, session, call_id, short, tool_input, result_text, failed, 
         state["pane_open"] = True
         if value.get("navOk") is True and isinstance(url, str):
             _note_urls(db, session, "pane-tab", {str(tab_id): url}, state, now)
+            # 這段 JSON 不說最後落在哪個網域（可能被導去登入頁）：等清單顯示它停在 Colab 才算數。
+            noted = _marks(state, "colab").get(_key("pane-tab", tab_id))
+            if isinstance(noted, dict):
+                noted["unconfirmed"] = True
         return
     if short in ("tabs_create", "preview_start"):
         _resource(db, session, call_id, "open", "unverified-control", call_id, now)
@@ -718,7 +731,7 @@ def _observe_pane(db, session, call_id, short, tool_input, result_text, failed, 
         if (len(executed) == 1 and landed and isinstance(url, str)
                 and _same_origin(landed.group(1), url)):
             _note_urls(db, session, "pane-tab", {next(iter(executed)): url}, state, now)
-        _note_urls(db, session, "pane-tab", _listing(result_text, ()), state, now)
+        _note_urls(db, session, "pane-tab", _listing(result_text, (), origins=True), state, now)
         return
     if short == "tabs_close":
         tab_id = tool_input.get("tabId")
@@ -972,10 +985,11 @@ def block_reason(rows, tool_name):
         "先關掉自己建立的分頁、看到關閉結果再做別的事；之後要用再開新分頁。"
         "分頁其實已被關掉或不在群組裡時，呼叫 tabs_context_mcp／tabs_context 讓 Epitype 重新核對。"
         "若分頁正連著執行中的 Colab VM（關了 VM 會被收回），不要關：先讓 Epitype 看到它開著那本筆記本"
-        "（Chrome 呼叫 tabs_context_mcp；內建瀏覽器用 navigate 打開該筆記本網址），再單獨送出 "
+        "（Chrome 呼叫 tabs_context_mcp；內建瀏覽器用 navigate 打開該筆記本網址，"
+        "若這次 navigate 才把窗格打開，再呼叫 tabs_context 確認它停在 Colab），再單獨送出 "
         "python -m epitype lifecycle keep <分頁ID> --authuser <N> --notebook <筆記本ID>"
         "（只向 Epitype 登記，不會實際執行）。這個 session 沒有能關分頁的瀏覽器工具時，"
-        f"請使用者回覆「{RELEASE_PHRASE}」。使用者已要求停止時不要再操作，直接回報。"
+        f"請使用者只回覆「{RELEASE_PHRASE}」四個字。使用者已要求停止時不要再操作，直接回報。"
     )
 
 
@@ -1024,6 +1038,9 @@ def declare_keep(event: dict, path: Path, tab: str, authuser: str, notebook: str
             return False, (f"Epitype 拒絕保留分頁 {tab}：最近 {KEEP_EVIDENCE_SECONDS // 60} 分鐘內"
                            "沒看到它開著 Colab 筆記本（/drive/…）的網址。Chrome 先呼叫 tabs_context_mcp、"
                            "內建瀏覽器先用 navigate 打開該筆記本網址，再宣告。")
+        if seen.get("unconfirmed"):
+            return False, (f"Epitype 拒絕保留分頁 {tab}：這次 navigate 才打開內建瀏覽器，看不出最後停在"
+                           "哪個網域（可能被導去登入頁）。先呼叫 tabs_context 確認它停在 Colab，再宣告。")
         if [seen.get("authuser"), seen.get("notebook")] != [authuser, notebook]:
             return False, (f"Epitype 拒絕保留分頁 {tab}：宣告的 authuser／筆記本 ID 與分頁網址不符；"
                            "讀分頁網址核對後再宣告。")
@@ -1054,8 +1071,7 @@ def owner_release(event: dict, path: Path) -> list:
     """
     prompt = event.get("prompt")
     session = event.get("session_id", event.get("sessionId"))
-    if (not isinstance(prompt, str) or RELEASE_PHRASE not in prompt
-            or any(tag in prompt for tag in _RELAYED)
+    if (not isinstance(prompt, str) or _NOT_LETTERS.sub("", prompt) != RELEASE_PHRASE
             or not isinstance(session, str) or not session or not path.is_file()):
         return []
     now = _now()
