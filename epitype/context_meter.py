@@ -734,7 +734,11 @@ ROTATION_MARKER = ".epitype-context-rotation"
 
 
 def rotation_notice(reading, limit, vault, session_id, transcript, directory, options):
-    """Opt-in Epitype policy; host compaction configuration is not changed."""
+    """Opt-in same-task checkpoint; host compaction configuration is not changed.
+
+    This notice is injected for the model.  It must never turn context pressure into
+    an owner chore or claim that a real lead transfer has happened.
+    """
     setting = (_section(options) or {}).get("handoff_tokens")
     if not _positive_int(setting) or not _positive_int(limit):
         return None
@@ -742,10 +746,9 @@ def rotation_notice(reading, limit, vault, session_id, transcript, directory, op
     _rearm_if_stale(directory, ROTATION_MARKER, reading.tokens, limit)
     if reading.tokens < threshold_tokens or (Path(directory) / ROTATION_MARKER).exists():
         return None
-    route = ("由 owner 點新場任務卡" if reading.host != memspec.CONTEXT_METER_HOST_CODEX
-             else "由 owner 開接手場；自動建場路徑尚未驗證")
-    line = (f"目前約 {_k(reading.tokens)} token；到有界檢查點時保存交接 {_handoff(vault, session_id, transcript)}，"
-            f"{route}，確認新主控讀檔接手後舊場才停止。")
+    line = (f"目前約 {_k(reading.tokens)}k token；到有界檢查點時保存交接 {_handoff(vault, session_id, transcript)}，"
+            "只供同一 task 壓縮後續跑。寫完由原 task 繼續；不要要求 owner 開新 task、不要貼接手 prompt、"
+            "不要宣稱已交接或因 context 壓力停止。")
     return line, ROTATION_MARKER, reading.tokens
 
 
