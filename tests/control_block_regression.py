@@ -502,6 +502,11 @@ class ControlBlockRegression(unittest.TestCase):
         declared = self.hook(pre(session, "Bash", keep_command("seed"), call_id="keep-p"))
         self.assertIn("已登記保留分頁 seed", self.reason(declared))
         self.assertNotEqual(self.decision(self.hook(pre(session, "Bash", {"command": "ls"}))), "deny")
+        # 擋下理由叫代理呼叫 tabs_context：宣告之後再看到 Colab 網域，豁免不能因此作廢。
+        self.hook(post(session, "p2b", "mcp__Claude_Browser__tabs_context", {}, pane_json(
+            {"browserOpen": True, "tabs": [{"tabId": "seed", "origin": COLAB_ORIGIN, "isActive": True}]},
+            "")))
+        self.assertNotEqual(self.decision(self.hook(pre(session, "Bash", {"command": "ls"}))), "deny")
         # 開窗格後被導去登入頁：清單的網域不是 Colab，證據作廢。
         login = "pane-login-" + uuid.uuid4().hex
         lifecycle.observe(pane_navigate_opening(login, "l1", COLAB), self.path)
