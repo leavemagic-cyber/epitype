@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Block the next non-browser tool call while a confirmed agent-created Claude-in-Chrome or built-in browser tab is still open; a Colab tab running a VM is exempt only after a standalone `epitype lifecycle keep` declaration whose account and notebook ID match a URL seen in the last five minutes. Tabs out of the agent's reach, unattributable candidates, tab groups and Codex CUA tabs keep the reminder only.
+
 - Record actual Claude/Codex advice delivery, native compaction restoration, complete entrypoint timings and target-aware replay coverage; supersede the earlier partial acceptance statements without discarding their history.
 
 - Read each action-card header once while discovering guards, advice, sequences and write checks; preserve every declaration and the existing refresh coverage.

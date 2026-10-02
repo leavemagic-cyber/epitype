@@ -1070,7 +1070,8 @@ behavioural guidance text of its own. The owner changed Q2's scope on
 2026-09-27: Epitype should record browser open/close results and remind the
 agent when one of its own resources remains open. The result observer and
 reminder are documented in `CONTROL_LIFECYCLE.md`; Q1, Q3 and Q6 were not
-reversed. The 2026-09-09 removal table below remains a historical record.
+reversed. On 2026-10-03 the reminder became a block for confirmed agent-created
+browser tabs (§48). The 2026-09-09 removal table below remains a historical record.
 
 ### Removed
 
@@ -2180,3 +2181,47 @@ its resolved destination, without requiring permission to create a symlink.
 This proves delivery behavior, not faithful interpretation of an owner's words,
 nor adoption by a live model. Exact quote provenance and semantic scope review
 remain separate requirements; a nonempty `owner_quote` is not evidence of either.
+
+## 48. A cleanup reminder did not stop a tab kept "for later" (2026-10-03)
+
+### Symptom and cause
+
+The owner card already said to close agent-created Chrome tabs as soon as they
+are used, and the lifecycle ledger appended "Epitype 查到本次仍未確認收尾：分頁 …"
+at the next tool call and user message. A Claude lead still kept an idle Colab
+tab open twice while waiting for a regression run, reasoning that it would be
+needed again. The owner repeated: 「用完chrome或操控電腦要記得關閉，如果還需要使用再建立連結，懂？」
+A reminder is model-visible text with no decision attached; a model that has
+already decided to keep the tab reads it and continues.
+
+### Countermeasure and verification
+
+`PreToolUse` now denies every non-browser call while the calling agent has an
+open tab whose creation a tool result attributed to it (`CONTROL_LIFECYCLE.md`,
+Blocking). The built-in browser is parsed instead of being recorded as
+unverified. The one exemption the owner's Colab card requires, a tab connected
+to a running VM, needs a standalone declaration checked against a recently
+listed Colab notebook URL for that tab; the agent's word alone does not pass.
+
+```powershell
+python tests/control_block_regression.py
+python tests/control_lifecycle_regression.py
+```
+
+Twelve block regressions cover open → Bash denied, unconfirmed close still
+denied, confirmed close allowed, browser/meta tools allowed, owner and
+unattributable tabs, out-of-reach tabs, subagent scope, the built-in browser,
+declaration acceptance through the real hook with CLI read-back, and rejected
+declarations (non-notebook, wrong account or notebook, foreign tab, stale URL,
+second tab for one VM, chained command, expiry, reopened ID). Replacing the
+denial with the old reminder turns them red.
+
+### Limits
+
+Only tabs created through a parsed result block: `browser_batch` steps, pages
+opened by clicks or popups, a pane opened by `navigate` while its state was
+unknown, and Codex CUA tabs stay reminder-only. Whether a declared VM is
+actually running is not observable; the check binds the declaration to the
+listed notebook and account, and the exemption lapses after 24 hours or when
+the tab's URL changes. A transient Chrome disconnect lifts the block until the
+next listing shows the tab again.

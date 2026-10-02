@@ -1911,7 +1911,36 @@ def _handle(event, started_at, defects=None, meter_claims=None, advice_claims=No
         return waste_value
     if waste_notice:
         notices = tuple(notices) + (waste_notice,)
+    control_value, control_notice = _control_review(event, tool_name, started_at)
+    if control_value is not None:
+        return control_value
+    if control_notice:
+        notices = tuple(notices) + (control_notice,)
     return _allow_context(event, notices, config, started_at, meter_claims, advisories, advice_claims)
+
+
+def _control_review(event, tool_name, started_at):
+    """(擋下的值, 提醒行)——本場自建的瀏覽器分頁還開著，就先擋非瀏覽器工具。
+
+    owner 2026-10-03：提醒擋不住「等一下還要用」而留著的分頁，改成攔截。Colab 跑中 VM
+    的保留宣告也在這裡核對：它是一行 shell，不核對就放行等於誰都能隨口豁免。壞了照舊放行
+    並講一句——這道閘不能因為自己的錯卡住工作。"""
+    if expired(started_at):
+        return None, None
+    try:
+        path = control_lifecycle.database_path(config_path())
+        request = control_lifecycle.keep_request(event)
+        if request is not None:
+            accepted, message = control_lifecycle.declare_keep(event, path, *request)
+            return (None, message) if accepted else (_deny_value(message), None)
+        rows = control_lifecycle.blockers(event, path, record=True)
+        if rows:
+            return _deny_value(control_lifecycle.block_reason(rows, tool_name)), None
+    except Exception as exc:
+        if config_path().exists():
+            print(memspec.GATE_DEGRADED_NOTICE.format(
+                gate="control lifecycle", reason=type(exc).__name__), file=sys.stderr)
+    return None, None
 
 
 def _selftest():

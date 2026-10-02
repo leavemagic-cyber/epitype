@@ -76,8 +76,11 @@ class ControlLifecycleRegression(unittest.TestCase):
                           {"action": "screenshot"}, mcp("ok"))
         self.assertIsNone(lifecycle.observe(screenshot, self.path))
         self.assertFalse(self.path.exists())
-        self.assertFalse(lifecycle.is_tracked_tool("mcp__claude-in-chrome__navigate"))
+        self.assertFalse(lifecycle.is_tracked_tool("mcp__claude-in-chrome__find"))
+        self.assertFalse(lifecycle.is_tracked_tool("mcp__Claude_Browser__read_page"))
         self.assertFalse(lifecycle.is_tracked_tool("mcp__computer-use__screenshot"))
+        # navigate 的結果帶分頁網址（Colab 保留宣告的核對依據），2026-10-03 起改為追蹤。
+        self.assertTrue(lifecycle.is_tracked_tool("mcp__claude-in-chrome__navigate"))
         self.assertTrue(lifecycle.is_tracked_tool("mcp__claude-in-chrome__tabs_close_mcp"))
         self.assertTrue(lifecycle.is_tracked_tool("mcp__cua_repl__js"))
         # 設定檔壞掉時，只有真的會讀設定的呼叫才會報解析失敗：未追蹤的工具連讀都不讀。

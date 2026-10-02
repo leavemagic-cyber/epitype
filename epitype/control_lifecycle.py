@@ -1,9 +1,14 @@
 """Record browser resources created by this agent from completed tool results.
 
-The ledger deliberately does not read browser history or save page titles/URLs.
-It only claims a resource is closed when a tool result confirms closure or a
-complete, successful inventory no longer contains its ID. A record that cannot
-be confirmed either way expires instead of waiting forever.
+The ledger deliberately does not read browser history or save page titles/URLs;
+the one exception is the authuser and notebook ID of an open Colab notebook tab
+the agent created, which the running-VM exemption is checked against. It only
+claims a resource is closed when a tool result confirms closure or a complete,
+successful inventory no longer contains its ID. A record that cannot be
+confirmed either way expires instead of waiting forever.
+
+A confirmed, agent-created Chrome or built-in browser tab that is still open
+blocks the agent's next non-browser tool call (owner 2026-10-03).
 """
 
 from __future__ import annotations
@@ -14,7 +19,9 @@ import os
 from pathlib import Path
 import re
 import sqlite3
+import sys
 import time
+from urllib.parse import parse_qs, urlsplit
 
 
 DB_FILENAME = "control_lifecycle.sqlite3"
@@ -30,15 +37,48 @@ CALL_RETENTION_SECONDS = 24 * 3600
 RETENTION_SECONDS = 7 * 24 * 3600
 CLEANUP_INTERVAL_SECONDS = 3600
 CHROME = "mcp__claude-in-chrome__"
+PANE = "mcp__Claude_Browser__"
 CUA_JS = frozenset(("mcp__cua_repl__js", "mcp__cua_repl.js"))
 CUA_RESET = frozenset(("mcp__cua_repl__js_reset", "mcp__cua_repl.js_reset"))
-OTHER_CONTROL = ("mcp__Claude_Browser__", "mcp__computer-use__")
-_CHROME_TRACKED = frozenset(("tabs_context_mcp", "tabs_create_mcp", "tabs_close_mcp"))
+OTHER_CONTROL = (PANE, "mcp__computer-use__")
+# navigate 的結果帶分頁清單與網址：Colab 保留宣告要拿它核對，內建瀏覽器沒開時它也會開出分頁。
+_CHROME_TRACKED = frozenset(("tabs_context_mcp", "tabs_create_mcp", "tabs_close_mcp", "navigate"))
+_PANE_TRACKED = frozenset(("tabs_create", "preview_start", "tabs_close", "tabs_context", "navigate"))
 # 只有「開」類名稱會留下無法確認的紀錄；close/stop/reset 類不開任何紀錄。
 _CONTROL_OPEN = re.compile(r"(?:create|open|start|launch)", re.I)
 _TAB_CREATED = re.compile(r"Browser tab:\s*([A-Za-z0-9_-]+)\b")
 _CHROME_CLOSED = re.compile(r"\bClosed tab\s+([A-Za-z0-9_-]+)\b", re.I)
 _CHROME_CREATED = re.compile(r"^Created new tab\. Tab ID:\s*(\d+)\s*$", re.M)
+_CHROME_DISCONNECTED = "Claude in Chrome is not connected"
+_PANE_GONE = "the Browser pane is now closed"
+_EXECUTED_ON = re.compile(r"Executed on tabId:\s*([A-Za-z0-9_-]+)")
+# 「  • tabId 123: "標題" ("網址")」；網址取行尾最後一組括號，標題裡的括號不算。
+_LISTED_TAB = re.compile(r"^[ \t]*\S*[ \t]*tabId[ \t]+([A-Za-z0-9_-]+)\b([^\n]*)$", re.M)
+_LISTED_URL = re.compile(r'\("([^"\s]*)"\)\s*$')
+_COLAB_NOTEBOOK = re.compile(r"/drive/([A-Za-z0-9_-]{8,128})/?")
+
+# 只有這兩種分頁的建立能從工具結果確認是本場建的；擋下非瀏覽器工具的只有它們。
+# 分頁群組、無法確認的紀錄、Codex CUA 分頁仍只提醒。
+BLOCKING_KINDS = ("chrome-tab", "pane-tab")
+# 擋住時仍要放行的工具：收尾本身要載入關分頁的工具、讀操作說明、問使用者、記待辦、停背景工作。
+UNBLOCKED_TOOLS = frozenset((
+    "ToolSearch", "Skill", "AskUserQuestion", "TodoWrite", "TaskCreate", "TaskUpdate",
+    "TaskList", "TaskGet", "TaskStop", "EnterPlanMode", "ExitPlanMode",
+))
+SHELL_TOOLS = frozenset(("Bash", "PowerShell"))
+# 保留宣告要拿最近幾分鐘內看到的網址核對；navigate 以外的點擊也可能換頁，舊網址不算數。
+KEEP_EVIDENCE_SECONDS = 300
+# Colab 單次執行階段最長約 24 小時；過了要重新宣告（重新核對網址）。
+KEEP_TTL_SECONDS = 24 * 3600
+_PYTHON_NAME = r"(?:python(?:\d+(?:\.\d+)?)?w?|py)(?:\.exe)?"
+_KEEP_COMMAND = re.compile(
+    r"(?:&\s*)?(?:(?:\"(?:[^\"]*[\\/])?" + _PYTHON_NAME + r"\"|(?:[^\s\"']*[\\/])?" + _PYTHON_NAME +
+    r")(?:\s+-3)?\s+-m\s+epitype|epitype(?:\.exe)?)\s+lifecycle\s+keep"
+    r"\s+(?P<tab>[A-Za-z0-9_-]{1,64})\s+--authuser\s+(?P<authuser>\d{1,3})"
+    r"\s+--notebook\s+(?P<notebook>[A-Za-z0-9_-]{8,128})",
+    re.I,
+)
+_SHELL_META = re.compile(r"[;&|<>`\r\n]|\$\(")
 _CREATE_CUA = re.compile(r"\bcua\.createBrowserTab\s*\(")
 _CREATE_BROWSER = re.compile(r"\bcua\.createBrowserTab\s*\(\s*['\"](iab|chrome|edge)['\"]", re.I)
 # 清單只有在「程式最後一個敘述就是這個呼叫本身」時才算完整：REPL 輸出的是最後一個值，
@@ -73,6 +113,8 @@ def is_tracked_tool(name) -> bool:
         return False
     if name.startswith(CHROME):
         return name[len(CHROME):] in _CHROME_TRACKED
+    if name.startswith(PANE) and name[len(PANE):] in _PANE_TRACKED:
+        return True
     if name in CUA_JS or name in CUA_RESET:
         return True
     for prefix in OTHER_CONTROL:
@@ -297,7 +339,8 @@ def _resource(db, session, call_id, action, kind, resource_id, now):
             "WHERE session=? AND kind=? AND resource_id=?",
             ("closed" if action == "close" else "expired", now, session, kind, resource_id),
         )
-        db.execute("DELETE FROM alerts WHERE session=? AND fingerprint=?",
+        # 擋下次數留著備查（到保留期限才刪）；提醒次數隨這一段結束清掉。
+        db.execute("DELETE FROM alerts WHERE session=? AND fingerprint=? AND stage<>'block'",
                    (session, _fingerprint(kind, resource_id, old[1])))
     else:
         return
@@ -349,11 +392,115 @@ def _unverified_chrome(db, session, call_id, candidates, now):
         _resource(db, session, call_id, "open", "unverified-chrome", tab_id, now)
 
 
+def _listing(text, objects):
+    """{tab ID: URL or None} from the result's tab list, or None when it shows none."""
+    for value in objects:
+        if isinstance(value, dict) and isinstance(value.get("availableTabs"), list):
+            return {
+                str(tab["tabId"]): tab["url"] if isinstance(tab.get("url"), str) else None
+                for tab in value["availableTabs"]
+                if isinstance(tab, dict) and isinstance(tab.get("tabId"), (str, int))
+            }
+    marker = text.rfind("Available tabs:")
+    if marker < 0:
+        return None
+    found = {}
+    for match in _LISTED_TAB.finditer(text[marker:]):
+        url = _LISTED_URL.search(match.group(2))
+        found[match.group(1)] = url.group(1) if url else None
+    return found
+
+
+def _colab(url):
+    """(authuser, notebook ID) of a Colab Drive notebook URL, else None."""
+    if not isinstance(url, str):
+        return None
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname
+    except ValueError:
+        return None
+    match = _COLAB_NOTEBOOK.fullmatch(parts.path)
+    if parts.scheme != "https" or host != "colab.research.google.com" or match is None:
+        return None
+    # 網址沒帶 authuser 時 Google 用第 0 個帳號。
+    user = (parse_qs(parts.query).get("authuser") or ["0"])[0]
+    return (user, match.group(1)) if user.isdigit() else None
+
+
+def _key(kind, resource_id):
+    return f"{kind}:{resource_id}"
+
+
+def _marks(state, name):
+    value = state.get(name)
+    return value if isinstance(value, dict) else {}
+
+
+def _note_urls(db, session, kind, listing, state, now):
+    """Remember which of our open tabs show a Colab notebook.
+
+    A kept tab whose latest listed URL is no longer the declared notebook loses
+    its exemption; a listing line without a URL proves nothing either way.
+    """
+    if not listing:
+        return
+    colab, kept = _marks(state, "colab"), _marks(state, "kept")
+    owned = _open_ids(db, session, kind)
+    for tab_id, url in listing.items():
+        if tab_id not in owned or url is None:
+            continue
+        key = _key(kind, tab_id)
+        found = _colab(url)
+        if found:
+            colab[key] = {"authuser": found[0], "notebook": found[1], "seen": now}
+        else:
+            colab.pop(key, None)
+        held = kept.get(key)
+        if isinstance(held, dict) and (
+                not found or [held.get("authuser"), held.get("notebook")] != list(found)):
+            del kept[key]
+    state["colab"], state["kept"] = colab, kept
+
+
+def _prune_marks(db, session, state):
+    """Drop URL notes and exemptions whose tab is closed or was reopened since."""
+    opened = {
+        _key(kind, resource_id): when for kind, resource_id, when in db.execute(
+            "SELECT kind,resource_id,opened FROM resources WHERE session=? AND status='open'",
+            (session,),
+        )
+    }
+    for name, stamp in (("colab", "seen"), ("kept", "opened")):
+        marks = _marks(state, name)
+        for key in list(marks):
+            mark = marks[key]
+            if key not in opened or not isinstance(mark, dict) or not isinstance(
+                    mark.get(stamp), (int, float)) or (
+                    mark[stamp] < opened[key] if name == "colab" else mark[stamp] != opened[key]):
+                del marks[key]
+        if marks or name in state:
+            state[name] = marks
+
+
 def _observe_chrome(db, session, call_id, name, tool_input, result_text, objects, failed, state, now):
-    context = _chrome_context(objects)
-    no_group = "No tab group exists for this session" in result_text
     if failed:
         return
+    _chrome_ledger(db, session, call_id, name, tool_input, result_text, objects, state, now)
+    # 擋人只算目前還在 Claude 群組裡、工具碰得到的分頁：被使用者關掉、拖出群組、群組解散或
+    # Chrome 斷線時，代理已經沒辦法關它，再擋只會卡死；紀錄照舊待確認、照舊提醒。
+    if _CHROME_DISCONNECTED in result_text or "No tab group exists for this session" in result_text:
+        state["chrome_visible"] = []
+        return
+    listing = _listing(result_text, objects)
+    if listing is not None:
+        state["chrome_visible"] = sorted(listing)
+        _note_urls(db, session, "chrome-tab", listing, state, now)
+
+
+def _chrome_ledger(db, session, call_id, name, tool_input, result_text, objects, state, now):
+    context = _chrome_context(objects)
+    no_group = "No tab group exists for this session" in result_text
     # Chrome 的 availableTabs 只列本工作階段群組裡的分頁，不是整個瀏覽器的清單：分頁被拖出
     # 群組、群組被解散，都會讓它「不在清單」卻仍開著。所以分頁只認「Closed tab X」；
     # 群組不見只證明群組本身沒了。
@@ -490,6 +637,66 @@ def _observe_cua(db, session, call_id, name, tool_input, result_text, objects, f
                 _resource(db, session, call_id, "close", kind, unknown, now)
 
 
+def _leading_json(text):
+    """The JSON object a result starts with; built-in browser results append prose to it."""
+    stripped = text.lstrip()
+    if not stripped.startswith("{"):
+        return None
+    try:
+        value, _ = json.JSONDecoder().raw_decode(stripped)
+    except ValueError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _observe_pane(db, session, call_id, short, tool_input, result_text, failed, state, now):
+    """Built-in browser tabs live in the app's own pane, never in the owner's Chrome.
+
+    tabs_context lists every pane tab, so a recorded tab missing from it is closed.
+    """
+    if failed:
+        return
+    if short in ("tabs_create", "preview_start"):
+        value = _leading_json(result_text) or {}
+        tab_id = value.get("tabId")
+        if isinstance(tab_id, (str, int)) and value.get("reused") is False:
+            _resource(db, session, call_id, "open", "pane-tab", tab_id, now)
+            state["pane_open"] = True
+        elif not (isinstance(tab_id, (str, int)) and value.get("reused") is True):
+            _resource(db, session, call_id, "open", "unverified-control", call_id, now)
+        return
+    if short == "navigate":
+        executed = set(_EXECUTED_ON.findall(result_text))
+        # 確知內建瀏覽器關著時，navigate 會開出分頁；狀態不明時分不出是開新的還是沿用。
+        if len(executed) == 1 and state.get("pane_open") is False:
+            _resource(db, session, call_id, "open", "pane-tab", next(iter(executed)), now)
+        if executed:
+            state["pane_open"] = True
+        _note_urls(db, session, "pane-tab", _listing(result_text, ()), state, now)
+        return
+    if short == "tabs_close":
+        tab_id = tool_input.get("tabId")
+        tab_id = str(tab_id) if isinstance(tab_id, (str, int)) else ""
+        if tab_id and tab_id in set(_CHROME_CLOSED.findall(result_text)):
+            _resource(db, session, call_id, "close", "pane-tab", tab_id, now)
+        if _PANE_GONE in result_text:
+            for owned in _open_ids(db, session, "pane-tab"):
+                _resource(db, session, call_id, "close", "pane-tab", owned, now)
+            state["pane_open"] = False
+        return
+    if short == "tabs_context":
+        value = _leading_json(result_text)
+        if value is None or not isinstance(value.get("tabs"), list):
+            return
+        listed = set() if value.get("browserOpen") is False else {
+            str(tab["tabId"]) for tab in value["tabs"]
+            if isinstance(tab, dict) and isinstance(tab.get("tabId"), (str, int))
+        }
+        for owned in _open_ids(db, session, "pane-tab") - listed:
+            _resource(db, session, call_id, "close", "pane-tab", owned, now)
+        state["pane_open"] = bool(listed)
+
+
 def observe(event: dict, path: Path) -> str | None:
     """Consume one PostToolUse result; return one uncertainty notice if needed."""
     name = event.get("tool_name")
@@ -521,6 +728,9 @@ def observe(event: dict, path: Path) -> str | None:
         elif name in CUA_JS or name in CUA_RESET:
             _observe_cua(db, session, call_id, name, tool_input, text, objects,
                          failed, now)
+        elif name.startswith(PANE) and name[len(PANE):] in _PANE_TRACKED:
+            _observe_pane(db, session, call_id, name[len(PANE):], tool_input, text,
+                          failed, state, now)
         elif name.startswith(OTHER_CONTROL):
             _resource(db, session, call_id, "open", "unverified-control", call_id, now)
         agent = _agent(event)
@@ -533,6 +743,7 @@ def observe(event: dict, path: Path) -> str | None:
                 "WHERE session=? AND call_id=? AND action='open')",
                 (agent, session, session, call_id),
             )
+        _prune_marks(db, session, state)
         _save_state(db, session, state, now)
         if db.execute(
             "SELECT 1 FROM events WHERE session=? AND call_id=? AND action='open' "
@@ -555,9 +766,11 @@ def _pending(db, session, now, agent=None, creator="agent"):
     ) if agent is None or row[3] == agent]
 
 
-def _summary(pending):
+def _summary(pending, kept=()):
     pending = [(row[0], row[1]) for row in pending]
-    tabs = [value for kind, value in pending if kind in ("chrome-tab",) or
+    held = [value for kind, value in pending if (kind, value) in kept]
+    pending = [row for row in pending if row not in kept]
+    tabs = [value for kind, value in pending if kind in BLOCKING_KINDS or
             kind.startswith("cua-tab:")]
     groups = [value for kind, value in pending if kind == "chrome-group"]
     controller = any(kind == "cua-controller" for kind, _ in pending)
@@ -571,6 +784,8 @@ def _summary(pending):
         parts.append("操控工作階段")
     if uncertain:
         parts.append("無法確認的瀏覽器操作")
+    if held:
+        parts.append("宣告保留的 Colab VM 分頁 " + ", ".join(held[:3]) + "（VM 跑完、結果核對後就關）")
     return "、".join(parts)
 
 
@@ -608,6 +823,12 @@ def reminder(event: dict, path: Path, stage: str, *, claim=True) -> str | None:
         if claim:
             _expire(db, session, now)
         pending = _pending(db, session, now, _agent(event))
+        state = _state(db, session)
+        kept = {(kind, resource_id) for kind, resource_id, opened, _ in pending
+                if _kept(state, kind, resource_id, opened, now)}
+        if stage == "tool":
+            # 宣告保留的 VM 分頁是刻意留著的；工具階段不提醒，訊息階段才提醒用完要關。
+            pending = [row for row in pending if (row[0], row[1]) not in kept]
         if not pending:
             return None
         marks = [_fingerprint(kind, resource_id, opened)
@@ -627,10 +848,173 @@ def reminder(event: dict, path: Path, stage: str, *, claim=True) -> str | None:
                     (session, stage, mark, now),
                 )
         return (
-            "Epitype 查到本次仍未確認收尾：" + _summary(pending) +
+            "Epitype 查到本次仍未確認收尾：" + _summary(pending, kept) +
             "。用完請只關自己建立的資源並核對工具結果；若使用者已要求停止，"
             "不要為收尾再操作，改為如實回報。"
         )
+
+
+def _kept(state, kind, resource_id, opened, now):
+    held = _marks(state, "kept").get(_key(kind, resource_id))
+    return (isinstance(held, dict) and held.get("opened") == opened
+            and isinstance(held.get("since"), (int, float))
+            and now - held["since"] < KEEP_TTL_SECONDS)
+
+
+def blockers(event: dict, path: Path, *, record=False):
+    """Our confirmed tabs that must be closed before this non-browser call.
+
+    Only the calling agent's own chrome-tab / pane-tab rows count. A Chrome tab
+    missing from the latest group listing is out of the agent's reach (closed by
+    someone else, dragged out, group dissolved, Chrome disconnected) and no longer
+    blocks; a declared running-VM Colab tab is exempt until its TTL or its URL
+    changes. record=True counts each denial per resource in the ledger.
+    """
+    name = event.get("tool_name")
+    session = event.get("session_id", event.get("sessionId"))
+    if (not isinstance(name, str) or not name or is_control_tool(name)
+            or name in UNBLOCKED_TOOLS or not isinstance(session, str) or not session
+            or not path.is_file()):
+        return []
+    now = _now()
+    with _database(path) as db:
+        rows = [row for row in _pending(db, session, now, _agent(event))
+                if row[0] in BLOCKING_KINDS]
+        if not rows:
+            return []
+        state = _state(db, session)
+        visible = state.get("chrome_visible")
+        found = [
+            (kind, resource_id, opened) for kind, resource_id, opened, _ in rows
+            if not (kind == "chrome-tab" and isinstance(visible, list)
+                    and resource_id not in visible)
+            and not _kept(state, kind, resource_id, opened, now)
+        ]
+        if record:
+            for kind, resource_id, opened in found:
+                db.execute(
+                    "INSERT INTO alerts(session,stage,fingerprint,seen,count) "
+                    "VALUES(?,'block',?,?,1) ON CONFLICT(session,stage,fingerprint) "
+                    "DO UPDATE SET seen=excluded.seen,count=count+1",
+                    (session, _fingerprint(kind, resource_id, opened), now),
+                )
+    return [(kind, resource_id) for kind, resource_id, _ in found]
+
+
+def block_reason(rows, tool_name):
+    chrome = [value for kind, value in rows if kind == "chrome-tab"]
+    pane = [value for kind, value in rows if kind == "pane-tab"]
+
+    def named(values):
+        return ", ".join(values[:3]) + (" 等" if len(values) > 3 else "")
+
+    parts = []
+    if chrome:
+        parts.append(f"Chrome 分頁 {named(chrome)}（用 tabs_close_mcp 關）")
+    if pane:
+        parts.append(f"內建瀏覽器分頁 {named(pane)}（用 tabs_close 關）")
+    return (
+        f"Epitype 擋下 {tool_name}：本場自建的" + "、".join(parts) + "還開著。"
+        "先關掉自己建立的分頁、看到關閉結果再做別的事；之後要用再開新分頁。"
+        "分頁其實已被關掉或不在群組裡時，呼叫 tabs_context_mcp／tabs_context 讓 Epitype 重新核對。"
+        "若分頁正連著執行中的 Colab VM（關了 VM 會被收回），不要關：先呼叫 tabs_context_mcp"
+        "（內建瀏覽器用 navigate）讓 Epitype 看到該分頁網址，再單獨執行 "
+        "python -m epitype lifecycle keep <分頁ID> --authuser <N> --notebook <筆記本ID> 宣告保留。"
+        "使用者已要求停止時不要再操作，直接回報。"
+    )
+
+
+def keep_request(event: dict):
+    """(tab, authuser, notebook) when this shell call is nothing but a keep declaration."""
+    if event.get("tool_name") not in SHELL_TOOLS:
+        return None
+    tool_input = event.get("tool_input")
+    command = tool_input.get("command") if isinstance(tool_input, dict) else None
+    if not isinstance(command, str):
+        return None
+    text = command.strip()
+    body = text[1:] if text.startswith("&") else text
+    if _SHELL_META.search(body):
+        return None
+    match = _KEEP_COMMAND.fullmatch(text)
+    if match is None:
+        return None
+    return match.group("tab"), str(int(match.group("authuser"))), match.group("notebook")
+
+
+def declare_keep(event: dict, path: Path, tab: str, authuser: str, notebook: str):
+    """(accepted, message) for a running-VM keep declaration, checked against the ledger.
+
+    The tab must be this agent's own open tab, and a listing seen within
+    KEEP_EVIDENCE_SECONDS must show it on exactly this Colab notebook and account.
+    One tab per notebook and account.
+    """
+    session = event.get("session_id", event.get("sessionId"))
+    if not isinstance(session, str) or not session or not path.is_file():
+        return False, f"Epitype 無法登記保留分頁 {tab}：本場沒有瀏覽器紀錄。"
+    now = _now()
+    with _database(path) as db:
+        # 讀改寫同一份場次狀態：先拿寫鎖，並行的 PostToolUse 不會蓋掉這筆宣告。
+        db.execute("BEGIN IMMEDIATE")
+        rows = [row for row in _pending(db, session, now, _agent(event))
+                if row[0] in BLOCKING_KINDS and row[1] == tab]
+        if not rows:
+            return False, (f"Epitype 拒絕保留分頁 {tab}：它不是本場自建且仍開著的分頁，"
+                           "不能用保留宣告豁免。")
+        kind, _, opened, _ = rows[0]
+        key = _key(kind, tab)
+        state = _state(db, session)
+        seen = _marks(state, "colab").get(key)
+        if not isinstance(seen, dict) or now - seen.get("seen", 0) > KEEP_EVIDENCE_SECONDS:
+            return False, (f"Epitype 拒絕保留分頁 {tab}：最近 {KEEP_EVIDENCE_SECONDS // 60} 分鐘內"
+                           "沒看到它開著 Colab 筆記本（/drive/…）的網址。先呼叫 tabs_context_mcp"
+                           "（內建瀏覽器用 navigate）再宣告。")
+        if [seen.get("authuser"), seen.get("notebook")] != [authuser, notebook]:
+            return False, (f"Epitype 拒絕保留分頁 {tab}：宣告的 authuser／筆記本 ID 與分頁網址不符；"
+                           "讀分頁網址核對後再宣告。")
+        kept = _marks(state, "kept")
+        live = {_key(k, r) for k, r, o, _ in _pending(db, session, now) if _kept(state, k, r, o, now)}
+        for other in sorted(live - {key}):
+            if [kept[other].get("authuser"), kept[other].get("notebook")] == [authuser, notebook]:
+                return False, (f"Epitype 拒絕保留分頁 {tab}：同一台 VM 已保留分頁 "
+                               f"{other.split(':', 1)[1]}，每台 VM 只留一個分頁。")
+        kept[key] = {"opened": opened, "authuser": authuser, "notebook": notebook, "since": now}
+        state["kept"] = kept
+        _save_state(db, session, state, now)
+        call_id = event.get("tool_use_id")
+        db.execute(
+            "INSERT INTO events(session,call_id,action,kind,resource_id,seen) VALUES(?,?,?,?,?,?)",
+            (session, call_id if isinstance(call_id, str) else "keep", "keep", kind, tab, now),
+        )
+    return True, (f"Epitype 已登記保留分頁 {tab}（Colab authuser={authuser}、筆記本 {notebook}）"
+                  "為執行中 VM 分頁：24 小時內、網址沒換就不擋。VM 跑完、結果下載核對後就關掉它。")
+
+
+def kept_record(path: Path, tab: str, authuser: str, notebook: str, session=None):
+    """The session that holds a live keep declaration matching these values, else None."""
+    if not path.is_file():
+        return None
+    uri = Path(path).resolve().as_uri() + "?mode=ro"
+    now = _now()
+    with closing(sqlite3.connect(uri, uri=True, timeout=5.0)) as db:
+        if not _columns(db, "session_state"):
+            return None
+        query = "SELECT session,data FROM session_state"
+        rows = db.execute(query + " WHERE session=?", (session,)) if session else db.execute(query)
+        for owner, data in rows:
+            try:
+                state = json.loads(data)
+            except ValueError:
+                continue
+            if not isinstance(state, dict):
+                continue
+            for key, held in _marks(state, "kept").items():
+                if (key.split(":", 1)[-1] == tab and isinstance(held, dict)
+                        and [held.get("authuser"), held.get("notebook")] == [authuser, notebook]
+                        and isinstance(held.get("since"), (int, float))
+                        and now - held["since"] < KEEP_TTL_SECONDS):
+                    return owner
+    return None
 
 
 def status(path: Path, session: str):
@@ -644,9 +1028,12 @@ def status(path: Path, session: str):
         if not columns or not _columns(db, "events"):
             return empty
         creator = "agent" if "agent" in columns else "''"
+        now = _now()
+        state = _state(db, session) if _columns(db, "session_state") else {}
         pending = [
-            {"kind": kind, "id": resource_id, **({"agent": agent} if agent else {})}
-            for kind, resource_id, _, agent in _pending(db, session, _now(), creator=creator)
+            {"kind": kind, "id": resource_id, **({"agent": agent} if agent else {}),
+             **({"kept": True} if _kept(state, kind, resource_id, opened, now) else {})}
+            for kind, resource_id, opened, agent in _pending(db, session, now, creator=creator)
         ]
         events = [{"action": action, "kind": kind, "id": resource_id}
                   for action, kind, resource_id in db.execute(
@@ -656,21 +1043,51 @@ def status(path: Path, session: str):
     return {"session": session, "pending": pending, "events": events}
 
 
+def _keep_main(argv, path):
+    """Read back a keep declaration; the PreToolUse hook is what checks and records it."""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="epitype lifecycle keep",
+        description="Confirm that a running-VM Colab tab exemption was recorded",
+    )
+    parser.add_argument("tab")
+    parser.add_argument("--authuser", required=True)
+    parser.add_argument("--notebook", required=True)
+    parser.add_argument("--session", help="host session ID (default: any session)")
+    args = parser.parse_args(argv)
+    authuser = str(int(args.authuser)) if args.authuser.isdigit() else args.authuser
+    owner = kept_record(path, args.tab, authuser, args.notebook, args.session)
+    if owner is None:
+        print("Epitype 沒有這筆保留登記。保留宣告由 PreToolUse hook 核對網址後才登記；"
+              "hook 沒啟用或核對沒過時，分頁仍會擋。", file=sys.stderr)
+        return 1
+    print(f"Epitype 已登記保留分頁 {args.tab}（Colab authuser={authuser}、筆記本 {args.notebook}；"
+          f"場次 {owner}）。VM 跑完、結果下載核對後就關掉它。")
+    return 0
+
+
 def main(argv=None):
     import argparse
 
+    argv = list(sys.argv[1:] if argv is None else argv)
+    for stream in (sys.stdout, sys.stderr):
+        getattr(stream, "reconfigure", lambda **_: None)(errors="replace")
+    config = Path(os.environ.get("EPITYPE_CONFIG", Path.home() / ".epitype" / "config.json"))
+    if argv[:1] == ["keep"]:
+        return _keep_main(argv[1:], database_path(config))
     parser = argparse.ArgumentParser(
         description="Inspect browser resources recorded for one agent session"
     )
     parser.add_argument("--session", required=True, help="host session ID")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
-    config = Path(os.environ.get("EPITYPE_CONFIG", Path.home() / ".epitype" / "config.json"))
     result = status(database_path(config), args.session)
     if args.json:
         print(json.dumps(result, ensure_ascii=False))
     else:
-        print(_summary([(item["kind"], item["id"]) for item in result["pending"]])
+        print(_summary([(item["kind"], item["id"]) for item in result["pending"]],
+                       {(item["kind"], item["id"]) for item in result["pending"] if item.get("kept")})
               or "本次沒有待確認的瀏覽器資源")
     return 0
 
