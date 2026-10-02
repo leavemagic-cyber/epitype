@@ -11,12 +11,14 @@ tamper protection. Nothing here enrolls cards or updates a baseline or its pin.
 """
 import argparse
 from dataclasses import dataclass, field
+from functools import lru_cache
 import hashlib
 import json
 import ntpath
 import os
 from pathlib import Path, PureWindowsPath
 import re
+from types import MappingProxyType
 
 from . import memspec
 
@@ -123,7 +125,10 @@ def build_baseline(entries):
     return {"version": VERSION, "entries": _entries(entries)}
 
 
+@lru_cache(maxsize=1)
 def _parse_baseline(raw):
+    # Reuse pure normalization only for byte-identical input. Callers still
+    # reread bytes and verify the fixed pin on every use; verdicts are not cached.
     value = json.loads(raw.decode("utf-8-sig"), object_pairs_hook=_unique_pairs)
     if not isinstance(value, dict):
         raise ValueError("baseline must be a JSON object")
@@ -131,7 +136,7 @@ def _parse_baseline(raw):
         raise ValueError("unsupported rule baseline version; expected integer 1")
     if set(value) != {"version", "entries"}:
         raise ValueError("baseline schema requires only version and entries")
-    return _entries(value["entries"])
+    return MappingProxyType(_entries(value["entries"]))
 
 
 def check(path, meaning_sha256, *, options=None):

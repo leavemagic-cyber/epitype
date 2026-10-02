@@ -49,6 +49,47 @@ class LegacyBaselineTests(unittest.TestCase):
         self.assertEqual(result.to_dict()["source_verification"], "UNVERIFIED")
         self.assertFalse(result.to_dict()["action_authorization"])
 
+    def test_identical_bytes_reuse_only_immutable_parsing_with_fresh_reads(self):
+        rule_legacy._parse_baseline.cache_clear()
+        original = Path.read_bytes
+        reads = []
+        def read(path):
+            reads.append(path)
+            return original(path)
+        with patch.object(Path, 'read_bytes', read):
+            self.assertTrue(self.check().matched)
+            self.assertTrue(self.check().matched)
+        self.assertEqual(reads, [self.baseline, self.baseline])
+        stats = rule_legacy._parse_baseline.cache_info()
+        self.assertEqual(stats.misses, 1)
+        self.assertEqual(stats.hits, 1)
+        parsed = rule_legacy._parse_baseline(original(self.baseline))
+        with self.assertRaises(TypeError):
+            parsed[rule_legacy.normalize_path(self.card)] = '0' * 64
+
+    def test_cached_parser_never_caches_current_meaning_or_membership_verdict(self):
+        self.assertTrue(self.check().matched)
+        self.assertFalse(self.check(digest='0' * 64).allowed)
+        self.assertFalse(self.check(path=self.root / 'new-rule.md').allowed)
+        self.assertTrue(self.check().matched)
+
+    def test_cached_parser_cannot_accept_same_size_and_mtime_baseline_tamper(self):
+        self.assertTrue(self.check().matched)
+        before = self.baseline.read_bytes()
+        stat = self.baseline.stat()
+        after = before.replace(self.digest.encode(), b'0' * 64)
+        self.assertEqual(len(before), len(after))
+        self.baseline.write_bytes(after)
+        os.utime(self.baseline, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+        self.assertFalse(self.check().allowed)
+
+    def test_changed_explicit_pin_parses_new_bytes_without_reusing_old_mapping(self):
+        self.assertTrue(self.check().matched)
+        new = '0' * 64
+        self.write_baseline(rule_legacy.build_baseline({str(self.card): new}))
+        self.assertFalse(self.check().allowed)
+        self.assertTrue(self.check(digest=new).matched)
+
     def test_path_and_pin_must_be_configured_together(self):
         for options in ({rule_legacy.PATH_OPTION: str(self.baseline)},
                         {rule_legacy.PIN_OPTION: self.options[rule_legacy.PIN_OPTION]}):
