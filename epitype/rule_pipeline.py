@@ -64,11 +64,26 @@ def _meaning(text, *, include_source=True):
     # reader hoists metadata before grouping, matching the actual consumers.
     blocks = {}
     key = None
+    metadata_child_indent = None
     for line in lines or ():
         match = memspec.TOP_LEVEL_FIELD.match(line)
         if match:
             key = match.group(1)
+            metadata_child_indent = None
             blocks.setdefault(key, [])
+        elif key == memspec.METADATA_FIELD and line.strip() and not line.lstrip().startswith("#"):
+            # This direct metadata date is maintenance, separate from rule meaning.
+            # Keep every other metadata value, including deeper `modified` keys.
+            indent = len(line) - len(line.lstrip(" "))
+            if metadata_child_indent is None:
+                metadata_child_indent = indent
+            child = memspec.TOP_LEVEL_FIELD.match(line.lstrip(" "))
+            if child and indent == metadata_child_indent and child.group(1) == "modified":
+                value = memspec.strip_inline_comment(child.group(2)).strip()
+                if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                    value = value[1:-1]
+                if rule_provenance._iso(value):
+                    continue
         if key and key not in excluded:
             blocks[key].append(line.rstrip())
     data = {key: value for key, value in blocks.items() if key not in excluded}
