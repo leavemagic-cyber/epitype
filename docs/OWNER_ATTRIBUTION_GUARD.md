@@ -77,6 +77,12 @@ a completed historical sentence does not exempt the next instruction, including
 another sentence on the same line. Quoted specimens being examined and explicit
 denials of owner attribution are references; adopting the quoted instruction or
 adding another authority assertion keeps that new assertion active.
+Logical sentences reconnect line breaks, list indentation and blockquote markers
+before classification. Blank lines followed by explicit therefore/so connectors
+(因此/所以/故/於是) or present adoption retain their antecedent. A complete request
+asking the owner whether to adopt a quoted proposal is a request, not an adopted
+rule. Report/request exemptions cover only their own portion; subsequent present
+adoption rechecks the cited proposal, even after a sentence break.
 Attached AI claim payloads receive the same sentence-by-sentence duration/ratio
 checks. One valid threshold cannot license another contradictory one. Valid
 multi-sentence AI claims match their exact checked sentence fragments; owner
@@ -127,6 +133,14 @@ earliest authorship through their original source locators.
   grammar of explicit roles, not a general natural-language entailment proof;
   implicit paraphrases, other grammatical forms and the truth of self-reported
   observations still require review.
+  The reviewed boundary is explicit owner labels/headings and quotations,
+  attached prohibitions, work/preflight duration or ratio cancellation, and
+  explicit adoption after reports/history/requests, including the layout changes
+  above. Arbitrary synonyms, irony, missing subjects without explicit continuation,
+  remote inference across unrelated headings/paragraphs, comprehensive multilingual
+  semantics, images/attachments and opaque/dynamic writes are known limitations.
+  Ordinary API limits and task scope without these authority/cancellation links
+  are outside this gate. DESIGN.md defines the fix4 review boundary.
 * Python `-c` and here-documents with imported literal Path targets, `write_text`,
   aliases, bounded string addition, UTF-8 reads and replacement use the same gate.
   The submitted Python code is parsed, never executed by the guard. Queries and
@@ -154,6 +168,13 @@ This preserves every earlier message and assertion while an active logger may
 append. The temporary payload is removed with the test fixture. A separate test
 asserts that stable-prefix appends pass while prefix rewrites remain blocked.
 Repeat the incident command with `--admission-seconds 2` for the daily deadline.
+The formal load regression measures >65 MiB sources with the unchanged two-second
+admission budget both alone and with four simultaneous Stop calls across the two
+hosts. LOAD_MEASUREMENT records distinguish VERIFIED from UNVERIFIED timeouts;
+passing the bounded-return/diagnostic test does not make a timeout source-verified.
+SessionStart selftests retain the 240-byte cap, test naturally long TEMP paths as
+omitted notices, and allocate an owned representable fixture for positive delivery
+assertions. Every fixture is removed by its owning context manager.
 
 Installation belongs to the lead after reviewing the commit and test artifacts:
 

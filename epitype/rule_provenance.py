@@ -307,6 +307,7 @@ _CANCEL = re.compile(r'取消|停止|終止|\b(?:cancel|stop|terminate)\b', re.I
 _OPERATIVE_SUBJECT = re.compile(
     r'前置檢查|建置|工作(?:程序|流程)?|任務|批次|跑批|訓練|回放|重掃|驗收|'
     r'\b(?:preflight|build|job|task|batch|training|replay|worker|workflow)\b', re.IGNORECASE)
+_CONTINUATION = re.compile(r'^(?:因此|所以|故(?:而)?|於是|因而|則|就|那麼|現在|以後|今後|依此)')
 
 
 def _verify_stable_prefix(path, origin, budget):
@@ -559,7 +560,7 @@ def _validate_claim(claim, base, budget):
 def _owner_labels(line):
     # Asking the human to decide is not a claim that they already decided.
     return [match for match in _OWNER_CLAIM.finditer(line)
-            if not re.search(r'(?:請|等|待|需要|交由|由|不是|並非|不屬於)\s*$', line[:match.start()])]
+            if not re.search(r'(?:請|等|待|需要|交由|由|不是|並非|不屬於|不當作)\s*$', line[:match.start()])]
 
 
 def _labelled_quotations(line, inherited=False):
@@ -707,7 +708,37 @@ def _sentences(line):
         yield line[start:]
 
 
+def _outside_quotes(text):
+    outside = memspec.GRANT_QUOTED_TEXT_REGEX.sub('', text)
+    return re.sub(r'(`+).*?\1', '', outside)
+
+
+def _adopts_rule(text):
+    outside = _outside_quotes(text)
+    return bool(re.search(r'照做|遵守|依此|執行(?:這|此|該)|按(?:這|此|該)|現行裁定|'
+                          r'(?:現在|以後|今後|但|已經|已).{0,8}採用', outside)
+                or re.search(r'(?:因此|所以|故(?:而)?|於是|因而)', outside)
+                and _RESTRICTION.search(outside))
+
+
+def _request_unit(text):
+    outside = _outside_quotes(text)
+    return bool(re.match(r'^\s*(?:[^。；;]{0,30}[，,]\s*)?請\s*(?:owner|使用者|你)\s*'
+                         r'(?:決定|判斷|確認|裁定)', outside, re.IGNORECASE)
+                and not _owner_labels(outside) and not _adopts_rule(text))
+
+
+def _history_unit(text):
+    return bool(not _owner_labels(text) and not _operative_cancel(text)
+                and _OPERATIVE_SUBJECT.search(text) and _CANCEL.search(text)
+                and re.search(r'(?:已經?|曾經?)(?:被|直接|立即|一律)*\s*(?:取消|停止|終止)|'
+                              r'(?:取消|停止|終止)(?:了|完畢|完成)', text))
+
+
 def _reported_unit(text):
+    # Exemption covers the report, never a following present adoption.
+    if _adopts_rule(text):
+        return False
     labels = _owner_labels(text)
     prefix = text[:labels[0].start()] if labels else text
     mistake = r'(?:誤稱|錯稱|錯誤(?:地)?宣稱|不實主張)'
@@ -730,9 +761,9 @@ def _reported_unit(text):
         outside = memspec.GRANT_QUOTED_TEXT_REGEX.sub('', text)
         denied_owner = _OWNER_CLAIM.search(outside) and not _owner_labels(outside)
         if ((re.search(r'測例|反例|範例|引用|應(?:被)?拒絕|應擋|錯誤句', outside)
-                or denied_owner and re.search(r'不是|並非|不屬於', outside))
+                or denied_owner and re.search(r'不是|並非|不屬於|不當作', outside))
                 and not _owner_labels(outside) and not _NEW_RULE.search(outside)
-                and not re.search(r'照做|遵守|採用|依此|執行(?:這|此|該)|按(?:這|此|該)', outside)
+                and not re.search(r'採用', outside)
                 and not _operative_cancel(outside)):
             return True
     return False
@@ -754,32 +785,81 @@ class _ClaimUnit:
     def restriction(self):
         return bool(_RESTRICTION.search(self.text)) and (
             self.owner or self.paragraph or _NEW_RULE.search(self.text)
-            or _operative_cancel(self.text))
+            or _operative_cancel(self.text) or _adopts_rule(self.text))
 
     @property
     def identity(self):
         return self.text, self.role, self.section, self.paragraph
 
 
+def _logical_lines(text, budget, card_metadata):
+    """Reconnect presentation lines before interpreting semantic roles."""
+    pending, first, pending_role = [], 0, 'prose'
+    separated = False
+    originals = text.splitlines()
+    for number, (line, role) in enumerate(_role_lines(text, budget, card_metadata)):
+        budget.check()
+        line = CLAIM_MARKER.sub('', line)
+        line = re.sub(r'^\s*(?:>\s*)*(?:[-+*]\s+|\d+[.)]\s+)?', '', line)
+        boundary = role in ('data', 'metadata', 'uncertain') or line.startswith(('#', '|'))
+        if boundary:
+            if pending:
+                yield first, ' '.join(pending), pending_role
+                pending = []
+            yield number, originals[number] if role in ('data', 'metadata') else line, role
+            separated = False
+            continue
+        if not line.strip():
+            separated = True
+            continue
+        continuation = _CONTINUATION.match(line)
+        if pending and (pending_role != role or separated and not continuation):
+            yield first, ' '.join(pending), pending_role
+            yield number, '', 'break'
+            pending = []
+        if pending and not continuation and re.search(r'[」』”’"`]\s*[。.]?$', pending[-1]):
+            # A finished quotation keeps its edit identity when ordinary progress
+            # is appended. The next unit still inherits paragraph authority.
+            yield first, ' '.join(pending), pending_role
+            pending = []
+        if pending and (_OWNER_CLAIM.match(line) or _NEW_RULE.match(line)
+                        and _RESTRICTION.search(line) or _operative_cancel(line)):
+            previous = ' '.join(pending)
+            # A complete new assertion is independent even without punctuation;
+            # an unfinished report label still belongs to its following specimen.
+            if not re.search(r'(?:誤稱|錯稱|錯誤(?:地)?宣稱|不實主張)\s*$', previous):
+                yield first, previous, pending_role
+                pending = []
+        if not pending:
+            first, pending_role = number, role
+        pending.append(line.strip())
+        separated = False
+    if pending:
+        yield first, ' '.join(pending), pending_role
+
+
 def _role_units(text, budget, card_metadata=False):
     section = paragraph = False
     result = []
-    originals = text.splitlines()
+    antecedent = None
     headings = []
-    for number, (line, role) in enumerate(_role_lines(text, budget, card_metadata)):
+    for number, line, role in _logical_lines(text, budget, card_metadata):
         budget.check()
         if role in ('data', 'metadata'):
             # Raw data identity must differ when identical words become prose.
-            result.append(_ClaimUnit(number, originals[number], role, False, False))
+            result.append(_ClaimUnit(number, line, role, False, False))
             paragraph = False
+            antecedent = None
             continue
         line = CLAIM_MARKER.sub('', line)
         if not line.strip():
             paragraph = False
+            antecedent = None
             continue
         if role == 'uncertain':
             result.append(_ClaimUnit(number, line, role, False, False))
             paragraph = False
+            antecedent = None
             continue
         heading = re.match(r'^\s*(#{1,6})\s+', line)
         if heading:
@@ -789,15 +869,22 @@ def _role_units(text, budget, card_metadata=False):
             section = bool(_owner_labels(line)) or bool(headings and headings[-1][1])
             headings.append((depth, section))
             paragraph = False
+            antecedent = None
         for sentence in _sentences(line):
             budget.check()
-            current_role = 'reported' if _reported_unit(sentence) else role
+            if (antecedent is not None and antecedent.role in ('reported', 'request', 'history')
+                    and _adopts_rule(sentence)):
+                sentence = antecedent.text+' '+sentence
+            current_role = ('request' if _request_unit(sentence) else
+                            'reported' if _reported_unit(sentence) else
+                            'history' if _history_unit(sentence) and not _adopts_rule(sentence) else role)
             inline = re.fullmatch(r'\s*(`+)(.*?)\1\s*[。.]?\s*', sentence)
             if inline and _statement_data(inline[2], budget):
                 current_role = 'data'
             unit = _ClaimUnit(number, sentence, current_role, section, paragraph)
             result.append(unit)
-            if current_role not in ('reported', 'data') and unit.owner:
+            antecedent = unit
+            if current_role not in ('reported', 'request', 'history', 'data') and unit.owner:
                 paragraph = True
     return result
 
@@ -822,8 +909,8 @@ def _has_claim_surface(text):
     # Ordinary technical limits and task scope carry no asserted authority.
     return bool(_OWNER_CLAIM.search(text) or _CLAIM_OPEN.search(text)
                 or _NEW_RULE.search(text) and _RESTRICTION.search(text)
-                or any(_operative_cancel(unit) for line in text.splitlines()
-                       for unit in _sentences(line)))
+                or _operative_cancel(text.replace('\r', ' ').replace('\n', ' '))
+                or _RESTRICTION.search(text) and _adopts_rule(text))
 
 
 def _claim_worker_command():
@@ -942,7 +1029,7 @@ def claim_violation(text, transcript_path=None, *, previous=None, require_citati
         quotes = []
         for unit in _active_units(text, budget, previous, card_metadata):
             budget.check()
-            if unit.role in ('data', 'metadata', 'reported'):
+            if unit.role in ('data', 'metadata', 'reported', 'request', 'history'):
                 continue
             if unit.role == 'uncertain':
                 if _has_claim_surface(unit.text):

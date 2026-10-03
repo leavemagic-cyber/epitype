@@ -502,8 +502,9 @@ def _selftest():
 
     try:
         import tempfile
+        from contextlib import ExitStack
 
-        with tempfile.TemporaryDirectory(prefix="epitype-sessionstart-") as temp_dir:
+        with ExitStack() as fixtures, tempfile.TemporaryDirectory(prefix="epitype-sessionstart-") as temp_dir:
             root = Path(temp_dir).resolve()
             vault = root / "vault"
             vault.mkdir()
@@ -1098,8 +1099,25 @@ def _selftest():
                 encoding="utf-8",
             )
             map_config = root / "map-config.json"
-            write_config(map_config, [map_vault])
             map_session = "compact-session"
+            natural_map = compact_map.map_destination(map_vault, map_session, map_transcript)
+            if compact_map.map_notice(natural_map) is None:
+                # The positive delivery tests need a representable path. Allocate
+                # an owned fixture on a writable ancestor, never change the cap.
+                for parent in reversed(root.parents):
+                    try:
+                        candidate = Path(fixtures.enter_context(tempfile.TemporaryDirectory(
+                            prefix="ep-map-", dir=parent))).resolve()
+                    except OSError:
+                        continue
+                    if compact_map.map_notice(compact_map.map_destination(
+                            candidate, map_session, map_transcript)) is not None:
+                        map_vault = candidate
+                        (map_vault / memspec.WORK_LEDGER_FILENAME).write_text("map ledger\n", encoding="utf-8")
+                        break
+                else:
+                    raise AssertionError("no writable fixture path fits the unchanged 240-byte notice cap")
+            write_config(map_config, [map_vault])
             precompact = Path(__file__).with_name("precompact_hook.py")
             precompact_event = {
                 "session_id": map_session,
@@ -1393,6 +1411,15 @@ def _selftest():
                 and "壓縮前原文地圖" not in long_context
                 and os.fspath(long_map) not in long_context,
             ))
+            # A naturally long TEMP takes this same None branch, without encode().
+            if compact_map.map_notice(natural_map) is None:
+                natural_config = root / "natural-long-config.json"
+                write_config(natural_config, [natural_map.parent.parent])
+                natural_written = run_synthetic(precompact, precompact_event, natural_config)
+                natural_run, natural_context = map_run(claude_shape, natural_config)
+                assert natural_written.returncode == 0 and natural_map.is_file()
+                assert natural_run.returncode == 0 and "壓縮前原文地圖" not in natural_context
+                assert os.fspath(natural_map) not in natural_context
 
             # 2026-09-06 事故：Codex 把 SessionStart 記成 Failed。宿主砍 hook 的兩個
             # 理由只有「逾時」與「stdout 不是它認得的 JSON」，所以這兩件事各釘一次，
