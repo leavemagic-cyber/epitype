@@ -121,7 +121,12 @@ class SourceConsumers(unittest.TestCase):
                 self.assertEqual(decision_lint.lint_vault(self.vault).exit_code, 0)
                 event = {'session_id': host + '-source-read', 'hook_event_name': 'Stop',
                          'cwd': str(self.root), 'last_assistant_message': 'badold'}
-                self.assertEqual(stop._handle(event, time.monotonic(), [])['decision'], 'block')
+                notices = []
+                with patch.object(stop, 'leave_note', side_effect=lambda _config, _session, text:
+                                  notices.append(text)):
+                    self.assertIsNone(stop._handle(event, time.monotonic(), notices))
+                self.assertTrue(any(found[0].key in notice for notice in notices), notices)
+                self.assertTrue(any('來源' in notice for notice in notices), notices)
 
     def test_original_changes_invalidate_cached_ruling_with_unchanged_card(self):
         self.card()

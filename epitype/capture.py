@@ -7,6 +7,7 @@ import sys; sys.dont_write_bytecode = True; [getattr(stream, "reconfigure", lamb
 
 import hashlib
 import json
+import re
 import os
 from pathlib import Path
 import sqlite3
@@ -101,19 +102,68 @@ CAPTURE_KINDS = {
 }
 
 
-def owner_reply_parts(text):
-    """Return cited text and the human reply without promoting the citation."""
-    matches = list(memspec.CAPTURE_REPLY_MARKER_REGEX.finditer(text or ""))
+def _reply_markers(content):
+    """Unpaired annotation markers; paired placeholders/titles remain content."""
+    pattern = re.compile(memspec.CAPTURE_REPLY_MARKER_REGEX.pattern + "|〈")
+    pairs = {"<": ">", "《": "》", "〈": "〉"}
+    return [match for match in pattern.finditer(content)
+            if not (match.group() in pairs
+                    and re.match(re.escape(match.group()) + r"[^<>《》〈〉\r\n]{1,80}"
+                                 + re.escape(pairs[match.group()]), content[match.start():]))]
+
+
+def _reply_sections(text):
+    """Split annotated quote/reply blocks while retaining every contiguous reply."""
+    content = text or ""
+    matches = _reply_markers(content)
     if not matches:
-        return "", (text or "").strip()
-    marker = matches[-1]
-    return text[:marker.start()].strip(), text[marker.end():].strip()
+        return [], [content.strip()] if content.strip() else []
+    cited = []
+    replies = []
+    quote_start = 0
+    for index, marker in enumerate(matches):
+        prefix = content[quote_start:marker.start()].strip()
+        if prefix:
+            cited.append(prefix)
+        reply_end = len(content)
+        if index + 1 < len(matches):
+            next_start = matches[index + 1].start()
+            between = content[marker.end():next_start]
+            paragraphs = list(re.finditer(r"\r?\n[ \t]*\r?\n", between))
+            if paragraphs:
+                reply_end = marker.end() + paragraphs[-1].start()
+                quote_start = marker.end() + paragraphs[-1].end()
+            else:
+                newline = between.rfind("\n")
+                if newline >= 0:
+                    reply_end = marker.end() + newline
+                    quote_start = reply_end + 1
+                else:
+                    # Without a block boundary, the intervening prose cannot be
+                    # separated safely from the next citation. Keep it as cited.
+                    reply_end = marker.end()
+                    quote_start = marker.end()
+        reply = content[marker.end():reply_end].strip()
+        if reply:
+            replies.append(reply)
+    return cited, replies
+
+
+def owner_replies(text):
+    """Return the separate original human annotations, never stitched evidence."""
+    return _reply_sections(text)[1]
+
+
+def owner_reply_parts(text):
+    """Return cited text and all human replies without promoting any citation."""
+    cited, replies = _reply_sections(text)
+    return "\n\n".join(cited), "\n\n".join(replies)
 
 
 def owner_reply(text):
     """owner 自己說的那半。
 
-    owner 常貼一段助理原文再用 `<-`／`<=`／`《` 接自己的話；標記前那半是助理的字，
+    owner 常貼一段助理原文再用 `<-`／`<=`／`《`／`〈` 接自己的話；各段標記前是助理的字，
     拿它當觸發詞或長度證據等於讓助理替 owner 作證（實測 7 例助理長段分析被存成
     owner 事件卡）。標記後沒有字時整句都是引文，回空字串。
     """
@@ -338,7 +388,7 @@ def auto_admitted(text):
     # 箭頭模板要求現場真的有回覆標記：沒有標記時 owner_reply 回整句，任何以「好」
     # 開頭的句子都會被當成短答。
     if (
-        memspec.CAPTURE_REPLY_MARKER_REGEX.search(text or "")
+        _reply_markers(text or "")
         and memspec.CAPTURE_ADMIT_ARROW_REGEX.match(reply)
     ):
         return True, memspec.CAPTURE_ADMIT_ARROW

@@ -14,7 +14,7 @@ import time
 import zipfile
 
 from . import memspec
-from .capture import owner_reply
+from .capture import owner_replies
 from .source_lookup import MAX_BYTES
 from .transcript import source_record
 
@@ -232,7 +232,7 @@ def _original(source, base, cache, budget, *, stable_prefix=None):
     return result
 
 
-def _owner_text(text):
+def _owner_text_parts(text):
     # Ambient host data may precede a real human request. Remove only these
     # supported prefixes before rejecting synthetic directives; the generic
     # owner extractor must not erase a hard hook/delegation envelope first.
@@ -256,27 +256,31 @@ def _owner_text(text):
                 end = opening.end() + token.end()
                 break
         if end is None:
-            return ""
+            return []
         text = text[end:].lstrip()
     if _SYNTHETIC.search(text):
-        return ""
-    text = owner_reply(memspec.owner_typed_text(text))
+        return []
+    parts = owner_replies(memspec.owner_typed_text(text))
     # Inline quoted/coded material is evidence data, not a new directive.
-    text = re.sub(r"```[\s\S]*?```", "", text)
-    return "\n".join(line for line in text.splitlines() if not line.lstrip().startswith(">"))
+    return ["\n".join(line for line in re.sub(r"```[\s\S]*?```", "", part).splitlines()
+                      if not line.lstrip().startswith(">")) for part in parts]
+
+
+def _owner_text(text):
+    return "\n\n".join(_owner_text_parts(text))
 
 
 def _human_quote(text, quote):
-    text = _owner_text(text)
-    if not quote or quote not in text:
+    if not quote:
         return False
-    # A quoted assistant sentence inside a user's reply remains a quotation.
-    quoted_spans = [match.span() for match in memspec.GRANT_QUOTED_TEXT_REGEX.finditer(text)]
-    start = text.find(quote)
-    while start >= 0:
-        if not any(left <= start and start + len(quote) <= right for left, right in quoted_spans):
-            return True
-        start = text.find(quote, start + 1)
+    for part in _owner_text_parts(text):
+        # A quoted assistant sentence inside a user's reply remains a quotation.
+        quoted_spans = [match.span() for match in memspec.GRANT_QUOTED_TEXT_REGEX.finditer(part)]
+        start = part.find(quote)
+        while start >= 0:
+            if not any(left <= start and start + len(quote) <= right for left, right in quoted_spans):
+                return True
+            start = part.find(quote, start + 1)
     return False
 
 
