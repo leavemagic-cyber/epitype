@@ -141,5 +141,9 @@ def source_record(item):
             kind = message.get("role")
         if kind not in ("user", "assistant"):
             return None
+        content = message.get("content") if isinstance(message, dict) else None
+        if kind == "user" and isinstance(content, list) and any(
+                isinstance(block, dict) and block.get("type") == "tool_result" for block in content):
+            return None
         role, text = ("U" if kind == "user" else "A"), message_text(message)
     return (role, text) if isinstance(text, str) and text.strip() else None

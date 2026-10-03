@@ -5,6 +5,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / 'adapters' / 'claude')]
 import copy
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import os
@@ -52,13 +53,16 @@ class GuardSources(unittest.TestCase):
         if scope['expiry'] != 'unspecified':
             extent += '，有效至 ' + scope['expiry']
         quote = extent + '：採用此測試規則，禁止 guard-hit-marker。'
+        stamp = (datetime.now(timezone.utc)-timedelta(seconds=1)).isoformat()
+        expiry = (datetime.fromisoformat(stamp)+timedelta(hours=1)).isoformat()
+        observed = 'guard-hit-marker 在隔離測試中依來源禁止。'
         sid, mid = 'synthetic-guard-session', 'synthetic-guard-owner'
         if host == 'claude':
             row = {'type': 'user', 'sessionId': sid, 'uuid': mid,
-                   'message': {'role': 'user', 'content': [{'type': 'text', 'text': quote}]}}
+                   'message': {'role': 'user', 'content': [{'type': 'text', 'text': quote+'\n'+observed+' '+stamp+' '+expiry}]}}
         else:
             row = {'type': 'response_item', 'payload': {'type': 'message', 'role': 'user',
-                'id': mid, 'content': [{'type': 'input_text', 'text': quote}]}}
+                'id': mid, 'content': [{'type': 'input_text', 'text': quote+'\n'+observed+' '+stamp+' '+expiry}]}}
         meta = (json.dumps({'type': 'session_meta', 'payload': {'id': sid}}) + '\n').encode()
         raw = (json.dumps(row, ensure_ascii=False) + '\n').encode()
         self.source.write_bytes(meta + raw)
@@ -71,6 +75,13 @@ class GuardSources(unittest.TestCase):
                 'source': 0, 'quote': quote, 'reviewed_by': 'synthetic-guard-reviewer',
                 'reviewed_at': '2026-10-03', 'rationale': 'The synthetic human source expressly declares scope.'},
             'supersedes': []}
+        if kind == 'ai-derived':
+            document['restriction_evidence'] = {
+                'kind': kind, 'author': document['author'], 'challengeable': True,
+                'text': document['text'], 'subject': 'guard-hit-marker',
+                'basis': [{'quote': observed, 'observed_at': stamp, 'valid_until': expiry,
+                           'source': document['sources'][0]}],
+                'rationale': 'The original synthetic human source explicitly prohibits this marker.'}
         actual = {'name': document['key'], 'type': 'rule', 'status': 'active',
             'description': '隔離測試守衛。', 'guard_tool': 'Bash',
             'guard_all_of': ['guard-hit-marker'], 'guard_advice': '隔離測試建議。'}

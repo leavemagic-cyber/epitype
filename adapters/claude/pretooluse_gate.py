@@ -28,6 +28,7 @@ from epitype import context_meter
 from epitype import control_lifecycle
 from epitype import memspec
 from epitype import patch_envelope
+from epitype import rule_provenance
 from _hook_common import (
     isolated_temp_root,
     GATE_LOG_MAX_BYTES,
@@ -1642,17 +1643,37 @@ def _review_one_target(event, config, target, additions, prospective, started_at
             after = prospective
             if after is None and patch is not None:
                 after = patch_envelope.apply_update(patch, before)
-            if after is not None:
-                reason = owner_rules.violation(before, after, resolve_vaults(config, event))
+            if after is not None or additions:
+                reason = rule_provenance.claim_violation(
+                    after if after is not None else "\n".join(additions),
+                    event.get("transcript_path"), previous=before if after is not None else None,
+                    require_citations=True, base=target.parent,
+                    card_metadata=_vault_card_path(target, resolve_vaults(config, event)) is not None)
+                if reason:
+                    return _deny_value(reason), notices
+                if event.get("stop_hook_active"):
+                    return None, notices
+                reason = (owner_rules.violation(before, after, resolve_vaults(config, event))
+                          if after is not None else None)
                 if reason:
                     _best_effort_audit(append_gate_log, governance_vault(config),
                         with_session({"kind": "write_block", "rule": "owner_rulings",
                                       "target": str(target)}, session_id), started_at)
                     return _deny_value(reason), notices
         except (OSError, UnicodeError, ValueError) as exc:
+            # Failure to reconstruct the old file does not exempt new claims.
+            # Ordinary undecidable text retains the existing write-gate contract.
+            candidate = prospective if isinstance(prospective, str) else "\n".join(additions)
+            reason = rule_provenance.claim_violation(
+                candidate, event.get("transcript_path"), require_citations=True,
+                base=target.parent)
+            if reason:
+                return _deny_value(reason), notices
             if (owner_rules.BEGIN in str(prospective or "")
                     or owner_rules.BEGIN in locals().get("before", "")):
                 return _deny_value(f"交接裁定段無法驗證：{type(exc).__name__}"), notices
+    if event.get("stop_hook_active"):
+        return None, notices
     if patch is not None and patch.op == "delete":
         # Owner ruling removal was checked above; deletion creates no card content.
         return None, notices
@@ -1788,15 +1809,135 @@ def _envelope_review(event, tool_input, config, started_at):
     return None, notices
 
 
+def _literal_python_writes(command, cwd):
+    """Recognize bounded literal Markdown writes, never execute the submitted code.
+
+    Path literals, aliases, UTF-8 read_text, string addition and replace preserve
+    an exact prospective document. Dynamic control flow stays outside this shape.
+    A read/query containing authority words is not a file write.
+    """
+    import ast
+    import shlex
+
+    if len(command.encode('utf-8')) > memspec.WRITE_GATE_MAX_CONTENT_BYTES:
+        return []
+    sources = [match[3] for match in re.finditer(
+        r'(?m)^\s*python(?:3(?:\.\d+)?)?(?:\.exe)?\s+-\s+<<\s*([\x27"]?)(\w+)\1\s*\n'
+        r'([\s\S]*?)^\2\s*$', command)]
+    try:
+        words = shlex.split(command)
+        for i, word in enumerate(words[:-2]):
+            if re.fullmatch(r'python(?:3(?:\.\d+)?)?(?:\.exe)?', Path(word).name, re.IGNORECASE) and words[i+1] == '-c':
+                sources.append(words[i+2])
+    except ValueError:
+        pass
+    writes = []
+    for source in sources:
+        if len(source.encode('utf-8')) > memspec.WRITE_GATE_MAX_CONTENT_BYTES:
+            continue
+        try:
+            tree = ast.parse(source)
+        except (SyntaxError, ValueError, RecursionError):
+            continue
+        values = {}
+        constructors, modules = set(), set()
+
+        def value(node):
+            if isinstance(node, ast.Constant) and isinstance(node.value, (str, int)):
+                return node.value
+            if isinstance(node, ast.Name):
+                return values.get(node.id)
+            if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+                operand = value(node.operand)
+                return -operand if isinstance(operand, int) else None
+            if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+                left, right = value(node.left), value(node.right)
+                if isinstance(left, str) and isinstance(right, str):
+                    joined = left+right
+                    return joined if len(joined.encode('utf-8')) <= memspec.WRITE_GATE_MAX_CONTENT_BYTES else None
+            if not isinstance(node, ast.Call):
+                return None
+            name = node.func.id if isinstance(node.func, ast.Name) else None
+            path_constructor = (name in constructors or isinstance(node.func, ast.Attribute)
+                and node.func.attr == 'Path' and isinstance(node.func.value, ast.Name)
+                and node.func.value.id in modules)
+            if path_constructor and len(node.args) == 1:
+                path = value(node.args[0])
+                return _resolve_target(path, cwd) if isinstance(path, str) else None
+            if isinstance(node.func, ast.Attribute):
+                owner = value(node.func.value)
+                if isinstance(owner, Path) and owner.suffix.casefold() == '.md' and node.func.attr == 'read_text':
+                    try:
+                        if owner.stat().st_size <= memspec.WRITE_GATE_MAX_CONTENT_BYTES:
+                            return owner.read_text(encoding='utf-8-sig')
+                    except (OSError, UnicodeError):
+                        pass
+                if isinstance(owner, str) and node.func.attr == 'replace' and len(node.args) in (2, 3):
+                    args = [value(arg) for arg in node.args]
+                    if all(isinstance(arg, str) for arg in args[:2]) and (len(args) == 2 or isinstance(args[2], int)):
+                        # Bounding the result avoids a literal expansion consuming the hook.
+                        count = owner.count(args[0]) if len(args) == 2 or args[2] < 0 else min(owner.count(args[0]), args[2])
+                        growth = max(0, len(args[1].encode('utf-8'))-len(args[0].encode('utf-8')))
+                        if len(owner.encode('utf-8'))+count*growth <= memspec.WRITE_GATE_MAX_CONTENT_BYTES:
+                            return owner.replace(*args)
+            return None
+
+        for statement in tree.body:
+            if isinstance(statement, (ast.If, ast.For, ast.AsyncFor, ast.While, ast.Try,
+                                      ast.With, ast.AsyncWith, ast.Match)):
+                # A conditional can rebind either the target or imported constructors.
+                # Never carry assumed literal identities across unknown control flow.
+                break
+            if isinstance(statement, ast.ImportFrom) and statement.module == 'pathlib':
+                constructors.update(alias.asname or alias.name for alias in statement.names if alias.name == 'Path')
+            if isinstance(statement, ast.Import):
+                modules.update(alias.asname or alias.name for alias in statement.names if alias.name == 'pathlib')
+            if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                constructors.discard(statement.name)
+                modules.discard(statement.name)
+            if isinstance(statement, ast.Assign):
+                computed = value(statement.value)
+                for target in statement.targets:
+                    if isinstance(target, ast.Name):
+                        values[target.id] = computed
+                        constructors.discard(target.id)
+                        modules.discard(target.id)
+            if not isinstance(statement, (ast.Expr, ast.Assign)) or not isinstance(statement.value, ast.Call):
+                continue
+            call = statement.value
+            if not isinstance(call.func, ast.Attribute) or call.func.attr != 'write_text' or not call.args:
+                continue
+            target = value(call.func.value)
+            if not isinstance(target, Path) or target.suffix.casefold() != '.md':
+                continue
+            content = value(call.args[0])
+            additions = ([content] if isinstance(content, str) else [node.value for node in ast.walk(call.args[0])
+                if isinstance(node, ast.Constant) and isinstance(node.value, str)])
+            writes.append((target, additions, content if isinstance(content, str) else None))
+    return writes
+
+
+def _python_write_review(event, tool_input, config, started_at):
+    notices = []
+    for target, additions, prospective in _literal_python_writes(_envelope_text(tool_input), event.get('cwd')):
+        deny, advice = _review_one_target(event, config, target, additions, prospective,
+                                         started_at, event.get('session_id'))
+        notices.extend(advice)
+        if deny is not None:
+            return deny, []
+    return None, notices
+
+
 def _write_review(event, tool_name, tool_input, config, started_at):
     """(deny value, advice lines) for a call about to write file content.
 
-    Two shapes reach this gate. A named write tool declares its target and its new
-    text in structured fields. Anything else is scanned for a patch envelope, which
-    is the shape Codex writes files in here. A non-file tool with no envelope, a
-    re-entrant hook run, and a path outside every vault all proceed untouched; bash
+    A named write tool declares its target and its new text in structured fields.
+    Other calls are scanned for patch envelopes and literal Python Markdown writes.
+    A non-file tool without either recognized write shape
+    proceeds untouched. Source admission also runs during Stop rewrites; existing
+    ordinary card checks retain their re-entry exemption. Opaque bash
     redirections never reach this gate at all (docs/FAILURE_MODES.md §11)."""
-    if not isinstance(tool_input, dict) or event.get("stop_hook_active"):
+    if not isinstance(tool_input, dict):
         return None, []
     if tool_name.casefold() in memspec.WRITE_GATE_TOOL_NAMES:
         target = _write_target(tool_input, event.get("cwd"))
@@ -1809,7 +1950,11 @@ def _write_review(event, tool_name, tool_input, config, started_at):
         )
     if expired(started_at):
         return None, []
-    return _envelope_review(event, tool_input, config, started_at)
+    deny, advice = _envelope_review(event, tool_input, config, started_at)
+    if deny is not None:
+        return deny, advice
+    python_deny, python_advice = _python_write_review(event, tool_input, config, started_at)
+    return python_deny, advice+python_advice
 
 
 def _context_meter_line(event, config, started_at):
@@ -1994,13 +2139,19 @@ def _waste_review(event, tool_name, tool_input, config, started_at):
 
 
 def _handle(event, started_at, defects=None, meter_claims=None, advice_claims=None):
-    """The gate's whole decision, in two parts.
-
-    A call about to write file content is judged against the owner's settled rulings
-    and the card contract. Any call at all is judged against the scar cards' literal
-    action guards (owner 2026-09-16, docs/FAILURE_MODES.md §34). Nothing here reads
-    intent: what is not a content rule and not a declared literal guard is the host's
-    native rules to judge, never this hook's."""
+    """Review source-bound dispatches, writes, then existing action guards."""
+    # Dispatch prose is another authority-writing surface. Do not inspect read
+    # queries or arbitrary shell strings as if they were new instructions.
+    dispatch_name = str(event.get("tool_name", "")).casefold()
+    if any(name in dispatch_name for name in ("task", "agent", "send_message")):
+        dispatch = event.get("tool_input", {})
+        if isinstance(dispatch, dict):
+            for key in ("prompt", "message", "instructions"):
+                reason = rule_provenance.claim_violation(
+                    dispatch.get(key), event.get("transcript_path"), require_citations=True,
+                    base=event.get("cwd"))
+                if reason:
+                    return _deny_value(reason)
     defects = [] if defects is None else defects
     tool_name = event.get("tool_name")
     if not isinstance(tool_name, str) or not tool_name:
@@ -2876,8 +3027,18 @@ def _selftest():
             ))
 
             ordinary = []
+            ordinary_owner_words = "驗證程式片段太大問題，免得以後再犯。"
+            ordinary_source = write_root / "ordinary-owner.jsonl"
+            ordinary_source.write_text(json.dumps({
+                "type": "user", "sessionId": "ordinary-owner", "uuid": "original-owner",
+                "timestamp": "2026-06-18T00:00:00Z",
+                "message": {"content": ordinary_owner_words}}, ensure_ascii=False) + "\n", encoding="utf-8")
+            ordinary_proof = "<!-- EPITYPE CLAIM " + json.dumps({
+                "kind": "owner-directive", "text": ordinary_owner_words, "quote": ordinary_owner_words,
+                "source": {"path": str(ordinary_source), "line": 1, "message_id": "original-owner"}},
+                ensure_ascii=False) + " -->"
             for index, text in enumerate((
-                "owner 2026-06-18：「驗證程式片段太大問題，免得以後再犯。」",
+                "owner 2026-06-18：「驗證程式片段太大問題，免得以後再犯。」\n" + ordinary_proof,
                 "## 我最大的錯（永遠別再犯）",
                 "這是行為層的防再犯規則，2026-09-20 起適用。",
                 "- 不要再犯沒有對於各商品有不同判斷方式（2026-07-12）",

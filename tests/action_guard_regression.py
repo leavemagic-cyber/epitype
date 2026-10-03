@@ -867,7 +867,10 @@ class RequireWhenThen(unittest.TestCase):
             "這條定規寫成記憶卡，附你的原話「設定規則，session預設可以遠端遙控」。"
             "要改回去在「設定」關掉即可。本回合讀了：偏好設定兩次。"
         )
-        self.assertIsNone(self.block(long_report))
+        # Source admission now checks attribution as well as quote presence.
+        # Keep the original allowance assertion with an actual human source.
+        owner = {"type": "user", "message": {"content": "設定規則，session預設可以遠端遙控"}}
+        self.assertIsNone(self.block_turn([owner, self.said(long_report)], long_report))
         self.assertIsNotNone(self.block("這是你的原話，我照做了。"))
 
     def test_a_speech_only_ruling_still_blocks_what_i_say(self):

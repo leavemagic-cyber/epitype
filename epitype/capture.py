@@ -101,6 +101,15 @@ CAPTURE_KINDS = {
 }
 
 
+def owner_reply_parts(text):
+    """Return cited text and the human reply without promoting the citation."""
+    matches = list(memspec.CAPTURE_REPLY_MARKER_REGEX.finditer(text or ""))
+    if not matches:
+        return "", (text or "").strip()
+    marker = matches[-1]
+    return text[:marker.start()].strip(), text[marker.end():].strip()
+
+
 def owner_reply(text):
     """owner 自己說的那半。
 
@@ -108,10 +117,7 @@ def owner_reply(text):
     拿它當觸發詞或長度證據等於讓助理替 owner 作證（實測 7 例助理長段分析被存成
     owner 事件卡）。標記後沒有字時整句都是引文，回空字串。
     """
-    matches = list(memspec.CAPTURE_REPLY_MARKER_REGEX.finditer(text or ""))
-    if not matches:
-        return (text or "").strip()
-    return text[matches[-1].end():].strip()
+    return owner_reply_parts(text)[1]
 
 
 def _segments(text):

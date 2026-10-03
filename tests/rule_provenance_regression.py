@@ -104,6 +104,29 @@ class ProvenanceTests(unittest.TestCase):
         document["quote"] = document["text"] = self.assistant
         self.assertEqual(self.verdict(document).status, provenance.INVALID)
 
+    def test_plain_user_echo_cannot_reauthor_an_earlier_assistant_phrase(self):
+        self.rows[1]['payload']['content'] = [{'type': 'output_text', 'text': self.quote}]
+        self.raw = [(json.dumps(row, ensure_ascii=False) + '\n').encode() for row in self.rows]
+        self.path.write_bytes(b''.join(self.raw))
+        self.document['sources'] = [self.source(2)]
+        result = self.verdict()
+        self.assertEqual(result.status, provenance.INVALID)
+        self.assertTrue(any('first occurred' in issue for issue in result.issues))
+
+    def test_existing_card_validator_requires_data_for_new_ai_timeout(self):
+        document = copy.deepcopy(self.document)
+        document.update(kind='ai-derived', author='codex', text='前置檢查超過10分鐘就取消')
+        result = self.verdict(document)
+        self.assertEqual(result.status, provenance.INVALID)
+        self.assertTrue(any('restriction_evidence' in issue for issue in result.issues))
+
+    def test_non_numeric_ai_ban_cannot_bypass_via_card_metadata(self):
+        document = copy.deepcopy(self.document)
+        document.update(kind='ai-derived', author='codex', text='校準資料不交dot')
+        result = self.verdict(document)
+        self.assertEqual(result.status, provenance.INVALID)
+        self.assertTrue(any('restriction_evidence' in issue for issue in result.issues))
+
     def test_pasted_assistant_arrow_and_actual_owner_half(self):
         self.replace_owner("所有案都直接提送。《" + self.quote)
         self.assertEqual(self.verdict().status, provenance.VERIFIED)

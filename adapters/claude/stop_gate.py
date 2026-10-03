@@ -1180,6 +1180,11 @@ def _echo_overlap(config, session_id, message):
 
 def _handle(event, started_at, defects):
     message = event.get("last_assistant_message")
+    reason = rule_provenance.claim_violation(message, event.get("transcript_path"))
+    if reason:
+        # Source admission is not an advisory or a one-time card match. A
+        # re-entrant rewrite must not repeat the same false authority claim.
+        return {"decision": "block", "reason": reason}
     if event.get("stop_hook_active"):
         # 這是被擋之後的重寫。規則不在這一輪重判（會無限迴圈），但有一件事只有這一輪
         # 看得到：重寫出來的東西跟剛才被擋那一段是不是幾乎一樣。owner 已經看過那一段，
@@ -1210,6 +1215,9 @@ def _handle(event, started_at, defects):
     if message.strip() not in memspec.join_turn_text(texts):
         texts.append(message)
     message = memspec.join_turn_text(texts)
+    reason = rule_provenance.claim_violation(message, event.get("transcript_path"))
+    if reason:
+        return {"decision": "block", "reason": reason}
     config = load_config(started_at)
     if config is None:
         # load_config 只在期限已過時回 None（其他壞法都丟例外）。放行照舊，但要講出來。
@@ -1785,8 +1793,12 @@ def _selftest():
                 and not table_value,
             ))
 
+            mixed_source = root / "mixed-owner.jsonl"
+            mixed_source.write_text(json.dumps({"type": "user", "message": {
+                "content": "虛擬盤先用不同參數不行"}}, ensure_ascii=False)+"\n", encoding="utf-8")
             mixed_result, mixed_value, _ = run(
-                "owner 說過「虛擬盤先用不同參數」不行，但我還是想虛擬盤先用不同參數看看。"
+                "owner 說過「虛擬盤先用不同參數」不行，但我還是想虛擬盤先用不同參數看看。",
+                extra={"transcript_path": str(mixed_source)},
             )
             checks.append((
                 "同訊息一次加引號、一次沒加：沒加引號那次仍照擋",

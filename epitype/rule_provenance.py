@@ -43,6 +43,7 @@ class _ReadBudgetExhausted(OSError):
 class _ReadBudget:
     deadline: float
     remaining: int
+    origins: dict = field(default_factory=dict)
 
     def check(self):
         if time.monotonic() >= self.deadline:
@@ -277,6 +278,358 @@ def _human_quote(text, quote):
     return False
 
 
+# These are admission checks on claims, shared by the existing write and Stop
+# gates. They never authorize actions, and unavailable evidence is not a pass.
+CLAIM_MARKER = re.compile(r'<!--\s*EPITYPE CLAIM\s+(\{[^\r\n]*\})\s*-->')
+_CLAIM_OPEN = re.compile(r'<!--\s*EPITYPE CLAIM\b')
+_OWNER_CLAIM = re.compile(
+    r'(?:owner|使用者|你)\s*(?:的\s*)?(?:原話|原句|逐字|裁定|規定|定的界線|'
+    r'(?:已經?|曾經?|先前)?(?:要求|指示|決定|定規|授權|同意|說過))'
+    r'|owner\s+\d{1,4}[-/]\d{1,2}|你(?:說|定|訂)的'
+    r'|(?:owner|user)(?:[’\x27]s)?\s+(?:(?:has|had|already|previously|explicitly)\s+)*'
+    r'(?:words|rul(?:ing|ed|es?)|directives?|instructions?|said|decided|requested|requires?|approved|ordered)',
+    re.IGNORECASE)
+_RESTRICTION = re.compile(
+    r'不准|禁止|不得|只能|只准|只用|不放|不交|不能(?:用|做|跑)|'
+    r'(?:超過|逾).{0,40}(?:取消|停止|終止)|'
+    r'(?:至少|最多|最少|固定)\s*\d|\b(?:must not|may only|can only|only allowed)\b|'
+    r'\bnever\s+(?:use|run|submit|stop|cancel)\b|\b(?:at most|at least|maximum|minimum)\s*\d|'
+    r'\b(?:cancel|stop|terminate)\b.{0,40}\b(?:after|over|exceeds?)\b', re.IGNORECASE)
+_NEW_RULE = re.compile(r'記下規則|新增規則|以後|一律|今後|門檻|訂定|制定|我這邊的判斷|規則[：:]|\b(?:policy|new rule|from now on)\b', re.IGNORECASE)
+_HISTORY = re.compile(r'^\s*(?:[-*]\s*)?(?:歷史反例|錯誤紀錄|待更正|引用資料)[：:]')
+_DURATION_UNITS = r'分鐘|秒|小時|seconds?|minutes?|hours?'
+_THRESHOLD = re.compile(r'(?:超過|逾|\bafter|\bover|\bexceeds?)\s*(\d+(?:\.\d+)?)\s*('+_DURATION_UNITS+r')', re.IGNORECASE)
+_DURATIONS = re.compile(r'(\d+(?:\.\d+)?)(?:\s*(?:[–—~～至到-]|to)\s*(\d+(?:\.\d+)?))?\s*('+_DURATION_UNITS+r')', re.IGNORECASE)
+_UNITS = {'秒': 1, '分鐘': 60, '小時': 3600, 'second': 1, 'seconds': 1,
+          'minute': 60, 'minutes': 60, 'hour': 3600, 'hours': 3600}
+_CANCEL = re.compile(r'取消|停止|終止|\b(?:cancel|stop|terminate)\b', re.IGNORECASE)
+
+
+def first_authorship(path, quotes, *, seconds=2.0, max_bytes=MAX_BYTES, _budget=None, member=None):
+    """Find first literal occurrences in original messages, never summaries.
+
+    A bounded scan starts at byte zero. A missing prefix, truncated row or read
+    budget exhaustion leaves unresolved quotes UNVERIFIED, not owner-authored.
+    Message IDs and physical lines are returned, not unrelated source bodies.
+    """
+    pending = set(quotes)
+    found = {}
+    budget = _budget or _ReadBudget(time.monotonic() + seconds, max_bytes)
+    try:
+        path = Path(path)
+        if path.suffix.casefold() not in ('.jsonl', '.zip'):
+            raise ValueError('original JSONL required')
+        before = path.stat()
+        from contextlib import ExitStack
+        with ExitStack() as resources:
+            if path.suffix.casefold() == '.zip':
+                archive = resources.enter_context(zipfile.ZipFile(path))
+                if (not isinstance(member, str) or not member.endswith('.jsonl')
+                        or sum(info.filename == member for info in archive.infolist()) != 1):
+                    raise ValueError('exact unique JSONL archive member required')
+                stream = resources.enter_context(archive.open(member))
+            else:
+                stream = resources.enter_context(path.open('rb'))
+            number = 0
+            offset = 0
+            while pending:
+                raw = budget.read(stream, memspec.COMPACT_MAP_MAX_LINE_BYTES + 1, line=True)
+                if not raw:
+                    break
+                number += 1
+                if len(raw) > memspec.COMPACT_MAP_MAX_LINE_BYTES:
+                    raise ValueError('oversized source row; earliest occurrence unknown')
+                row = json.loads(raw.decode('utf-8-sig'))
+                record = source_record(row)
+                if record:
+                    role, body = record
+                    for quote in tuple(pending):
+                        if quote and quote in body:
+                            payload = row.get('payload', {})
+                            found[quote] = {
+                                'role': role, 'human_authored': role in ('U', 'Q') and _human_quote(body, quote),
+                                'line': number, 'byte_offset': offset,
+                                'message_id': row.get('uuid') or row.get('id') or payload.get('id'),
+                                'record_sha256': hashlib.sha256(raw).hexdigest(),
+                            }
+                            pending.remove(quote)
+                offset += len(raw)
+        after = path.stat()
+        if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+            raise OSError('source changed during attribution scan')
+    except (OSError, ValueError, TypeError, UnicodeError, zipfile.BadZipFile) as exc:
+        # No partial positive result survives an invalid or changing prefix.
+        reason = ('read-budget-exhausted' if isinstance(exc, _ReadBudgetExhausted)
+                  else 'source-changed' if str(exc) == 'source changed during attribution scan'
+                  else 'source-prefix-unreadable-or-invalid')
+        return {quote: {'status': UNVERIFIED, 'reason': reason} for quote in quotes}
+    return {quote: ({'status': VERIFIED, **found[quote]} if quote in found
+                    else {'status': UNVERIFIED}) for quote in quotes}
+
+
+def _claim_source(source, quote, base, budget, *, human=False):
+    """Resolve a line/ID citation through the same original-record verifier."""
+    if not isinstance(source, dict) or not (_integer(source.get('line'), 1)
+                                          or source.get('message_id')):
+        raise ValueError('claim source needs a physical line or message ID')
+    path = Path(source.get('path', '')).expanduser()
+    if not path.is_absolute():
+        path = base / path
+    path = path.resolve()
+    if path.suffix.casefold() != '.jsonl':
+        raise ValueError('prose claim requires original JSONL; archive cards use the existing card verifier')
+    cached = budget.origins.get((str(path), quote))
+    if cached is not None:
+        fingerprint, origin = cached
+        current = path.stat()
+        if (current.st_size, current.st_mtime_ns) != fingerprint:
+            raise ValueError('source changed during claim validation')
+    else:
+        origin = first_authorship(path, [quote], _budget=budget)[quote]
+    if origin['status'] != VERIFIED:
+        raise ValueError('earliest source UNVERIFIED ('+origin.get('reason', 'occurrence-not-found')+'); supply readable original JSONL')
+    # Citation must point to the first source, not a later user-shaped echo.
+    if ('line' in source and source['line'] != origin['line']
+            or 'message_id' in source and source['message_id'] != origin['message_id']):
+        raise ValueError('citation differs from earliest original occurrence')
+    if any(key in source and source[key] != origin[key] for key in ('record_sha256', 'role', 'byte_offset')):
+        raise ValueError('citation hash/role/offset differs from original occurrence')
+    locator = {**source, **{key: origin[key] for key in ('line', 'byte_offset', 'record_sha256', 'role')}}
+    if not locator.get('session_id'):
+        with path.open('rb') as stream:
+            stream.seek(origin['byte_offset'])
+            row = json.loads(budget.read(stream, memspec.COMPACT_MAP_MAX_LINE_BYTES+1, line=True))
+            locator['session_id'] = _session(b'', row)
+            if not locator['session_id']:
+                stream.seek(0)
+                locator['session_id'] = _session(budget.read(stream, 256*1024).decode('utf-8'), row)
+    role, text, _digest = _original(locator, base, None, budget)
+    if quote not in text or human and (role not in ('U', 'Q') or not _human_quote(text, quote)):
+        raise ValueError('cited text is assistant/quoted material, not owner words')
+    if human and not origin['human_authored']:
+        raise ValueError('earliest occurrence is assistant/quoted material')
+    return text
+
+
+def _prime_claim_sources(claims, base, budget):
+    """Batch each original prefix once per admission; rows are still hash-checked."""
+    groups = {}
+    for claim in claims:
+        if not isinstance(claim, dict):
+            raise ValueError('claim metadata must be an object')
+        observations = [claim] if claim.get('kind') == 'owner-directive' else claim.get('basis', [])
+        if not isinstance(observations, list):
+            raise ValueError('restriction observations must be a list')
+        for observation in observations:
+            if not isinstance(observation, dict):
+                raise ValueError('invalid claim observation')
+            source, quote = observation.get('source'), observation.get('quote')
+            if not isinstance(source, dict) or not isinstance(quote, str) or not quote:
+                continue
+            path = Path(source.get('path', '')).expanduser()
+            path = (base/path).resolve() if not path.is_absolute() else path.resolve()
+            groups.setdefault(path, set()).add(quote)
+    for path, quotes in groups.items():
+        before = path.stat()
+        origins = first_authorship(path, quotes, _budget=budget)
+        after = path.stat()
+        fingerprint = (before.st_size, before.st_mtime_ns)
+        if (after.st_size, after.st_mtime_ns) != fingerprint:
+            raise ValueError('source changed during claim validation')
+        for quote, origin in origins.items():
+            budget.origins[(str(path), quote)] = fingerprint, origin
+
+
+def _validate_claim(claim, base, budget):
+    text = claim.get('text')
+    if not isinstance(text, str) or not text.strip() or _SECRET.search(text):
+        raise ValueError('claim requires nonempty, credential-free text')
+    if claim.get('kind') == 'owner-directive':
+        if claim.get('quote') != text:
+            raise ValueError('owner directive must preserve exact words; interpretations are AI-derived')
+        _claim_source(claim.get('source'), text, base, budget, human=True)
+        return
+    author = claim.get('author')
+    if (claim.get('kind') != 'ai-derived' or not isinstance(author, str) or not author.strip()
+            or author.casefold() in ('owner', 'user', 'human', 'owner-explicit')
+            or claim.get('challengeable') is not True):
+        raise ValueError('custom restriction must identify its AI author and be challengeable')
+    subject = claim.get('subject')
+    if not isinstance(subject, str) or not subject.strip() or subject not in text:
+        raise ValueError('restriction needs an explicit subject shared by text and observations')
+    basis = claim.get('basis')
+    if not isinstance(basis, list) or not 1 <= len(basis) <= 4:
+        raise ValueError('restriction needs 1..4 source-bound current observations')
+    evidence = []
+    for observation in basis:
+        if not isinstance(observation, dict):
+            raise ValueError('invalid restriction observation')
+        quote = observation.get('quote')
+        if not isinstance(quote, str) or subject not in quote:
+            raise ValueError('observation must concern the same subject')
+        checked = observation.get('observed_at')
+        if not _iso(checked):
+            raise ValueError('observation date must be explicit ISO')
+        when = datetime.fromisoformat(checked.replace('Z', '+00:00'))
+        if when.tzinfo is None:
+            raise ValueError('observation date needs a timezone')
+        from datetime import timezone
+        if when > datetime.now(timezone.utc):
+            raise ValueError('observation is future-dated')
+        valid_until = observation.get('valid_until')
+        if not _iso(valid_until):
+            raise ValueError('observation needs source-bound validity expiry')
+        expiry = datetime.fromisoformat(valid_until.replace('Z', '+00:00'))
+        if expiry.tzinfo is None or expiry < datetime.now(timezone.utc) or expiry < when:
+            raise ValueError('observation is expired; recheck current data')
+        # The timestamp must occur in the cited original observation as well.
+        body = _claim_source(observation.get('source'), quote, base, budget)
+        if checked not in body or valid_until not in body:
+            raise ValueError('observation timestamp/expiry is not source-bound')
+        evidence.append(quote)
+    threshold = _THRESHOLD.search(text)
+    if threshold:
+        seconds = float(threshold[1])*_UNITS[threshold[2].casefold()]
+        durations = [float(m[2] or m[1])*_UNITS[m[3].casefold()] for quote in evidence
+                     for m in _DURATIONS.finditer(quote)]
+        if not durations or seconds < max(durations):
+            raise ValueError('new timeout contradicts observed duration or has no comparable data')
+        # Time is a diagnostic cue, not sufficient grounds to discard valid work.
+        if _CANCEL.search(text):
+            condition = claim.get('cancel_condition')
+            if (not isinstance(condition, str) or not condition.strip() or condition not in text
+                    or condition not in '\n'.join(evidence)):
+                raise ValueError('elapsed time alone cannot justify cancellation; source-bind a concrete fault condition')
+            for key in ('checkpoint', 'redo_cost', 'recovery'):
+                value = claim.get(key)
+                if not isinstance(value, str) or not value.strip() or value not in '\n'.join(evidence):
+                    raise ValueError('cancellation needs source-bound '+key+' before stopping work')
+    elif (_CANCEL.search(text) and re.search(r'超過|逾|\b(?:after|over|exceeds?)\b', text, re.IGNORECASE)):
+        raise ValueError('timeout formula needs directly comparable duration data; an unexplained ratio is UNVERIFIED')
+    elif not isinstance(claim.get('rationale'), str) or not claim['rationale'].strip():
+        raise ValueError('non-numeric restriction needs a challengeable rationale')
+
+
+def _owner_labels(line):
+    # Asking the human to decide is not a claim that they already decided.
+    return [match for match in _OWNER_CLAIM.finditer(line)
+            if not re.search(r'(?:請|等|待|需要|交由|由)\s*$', line[:match.start()])]
+
+
+def _labelled_quotations(line, inherited=False):
+    fragments = list(memspec.GRANT_QUOTED_TEXT_REGEX.finditer(line))
+    labels = _owner_labels(line)
+    selected = []
+    for label in labels:
+        following = next((m for m in fragments if m.start() >= label.end()), None)
+        preceding = [m for m in fragments if m.end() <= label.start()]
+        candidate = following or (preceding[-1] if preceding else None)
+        if candidate is not None:
+            selected.append(candidate)
+    if inherited and not labels:
+        selected = fragments
+    return [m[0][1:-1] for m in selected]
+
+
+def claim_violation(text, transcript_path=None, *, previous=None, require_citations=False,
+                    base=None, seconds=2.0, card_metadata=False):
+    """Return a blocking reason for new authority/restriction claims, else None.
+
+    Owner quotation in ordinary prose is checked automatically on Stop. Writes
+    additionally require an attached source locator. New operational limitations
+    need structured AI attribution plus dated observations. Historical examples
+    use explicit line labels. Fencing prose does not turn it into owner authority.
+    """
+    if not isinstance(text, str):
+        return None
+    budget = _ReadBudget(time.monotonic()+seconds, MAX_BYTES)
+    base = Path(base or Path.cwd()).resolve()
+    claims = []
+    try:
+        markers = list(CLAIM_MARKER.finditer(text))
+        if len(markers) != len(list(_CLAIM_OPEN.finditer(text))):
+            raise ValueError('malformed claim metadata')
+        claims = [json.loads(match[1]) for match in markers]
+        _prime_claim_sources(claims, base, budget)
+        for claim in claims:
+            _validate_claim(claim, base, budget)
+        added = set(text.splitlines())
+        if previous is not None:
+            import difflib
+            added = set()
+            for op, _a, _b, c, d in difflib.SequenceMatcher(
+                    a=previous.splitlines(), b=text.splitlines(), autojunk=False).get_opcodes():
+                if op in ('insert', 'replace'):
+                    added.update(text.splitlines()[c:d])
+        quotes = []
+        in_owner_section = False
+        new_owner_section = False
+        lines = text.splitlines()
+        # Card metadata is admitted by the existing card_lint/validate path.
+        # JSON proof payloads and descriptions are data, not free prose. Do not
+        # let their embedded examples masquerade as newly asserted limitations.
+        frontmatter_end = None
+        if card_metadata and lines and lines[0].lstrip('\ufeff') == '---':
+            frontmatter_end = next((i for i, line in enumerate(lines[1:], 1) if line == '---'), None)
+        for number, line in enumerate(lines):
+            if frontmatter_end is not None and number <= frontmatter_end:
+                continue
+            if line.lstrip().startswith(('```', '~~~')):
+                continue
+            if _HISTORY.match(line):
+                continue
+            original_line = line
+            # The annotation is data, but prose beside it still makes claims.
+            line = CLAIM_MARKER.sub('', line)
+            if line.lstrip().startswith('#'):
+                in_owner_section = bool(_owner_labels(line))
+                new_owner_section = in_owner_section and original_line in added
+                if not (_labelled_quotations(line) or _RESTRICTION.search(line)):
+                    continue
+            if (original_line not in added and not new_owner_section) or not line.strip():
+                continue
+            owner_claim = bool(_owner_labels(line)) or in_owner_section
+            restriction = bool(_RESTRICTION.search(line)) and (
+                owner_claim or require_citations or bool(_NEW_RULE.search(line)))
+            if not owner_claim and not restriction:
+                continue
+            matching = [claim for claim in claims if claim['text'] in line]
+            labelled = _labelled_quotations(line, in_owner_section) if owner_claim else []
+            if owner_claim:
+                matching = [claim for claim in matching if claim['kind'] == 'owner-directive']
+            residual = line
+            for claim in matching:
+                residual = residual.replace(claim['text'], '')
+            if (matching and not _RESTRICTION.search(residual)
+                    and all(quote in {claim['text'] for claim in matching} for quote in labelled)):
+                continue
+            if restriction and not owner_claim:
+                raise ValueError('new restriction lacks AI attribution, challengeable label and current evidence')
+            if require_citations:
+                raise ValueError('owner claim needs EPITYPE CLAIM metadata with original line/message ID')
+            quoted = labelled
+            if not quoted:
+                raise ValueError('owner claim has no exact quotation to verify')
+            # A genuine owner quotation cannot license an adjacent AI ban.
+            unquoted = line
+            for quote in quoted:
+                unquoted = unquoted.replace(quote, '')
+            if _RESTRICTION.search(unquoted):
+                raise ValueError('restriction outside owner quotation needs independent AI evidence')
+            quotes.extend(quoted)
+        if quotes:
+            origins = first_authorship(transcript_path, quotes, _budget=budget)
+            for quote in quotes:
+                origin = origins[quote]
+                if origin['status'] != VERIFIED:
+                    raise ValueError('owner attribution UNVERIFIED ('+origin.get('reason', 'occurrence-not-found')+'): original occurrence not found/readable')
+                if not origin['human_authored']:
+                    raise ValueError(f'owner attribution rejected: first occurrence role={origin["role"]}, L{origin["line"]}')
+    except (ValueError, TypeError, OSError, KeyError, UnicodeError) as exc:
+        return f'[owner-attribution] {exc}'
+    return None
+
+
 def _precedes(context, owner):
     if context.get("session_id") != owner.get("session_id"):
         return False
@@ -398,6 +751,29 @@ def validate(fields, card_path=None, cache=None, *, seconds=5.0, max_bytes=MAX_B
             owner_sources.append(index)
     if not owner_sources:
         result.issues.append("quotation does not occur in original human-authored directive text")
+    if owner:
+        for index in owner_sources:
+            source = sources[index]
+            origin_path = Path(source.get('path') or source.get('archive')).expanduser()
+            if not origin_path.is_absolute():
+                origin_path = base / origin_path
+            origin = first_authorship(origin_path,
+                [document['quote']], _budget=budget, member=source.get('member'))[document['quote']]
+            if origin['status'] != VERIFIED:
+                unavailable = True
+                result.issues.append('earliest authorship UNVERIFIED; next check: restore/read original prefix')
+            elif not origin['human_authored']:
+                result.issues.append('owner-directive quotation first occurred in assistant/quoted text')
+    elif _RESTRICTION.search(document['text']):
+        constraint = document.get('restriction_evidence')
+        try:
+            if not isinstance(constraint, dict) or constraint.get('text') != document['text']:
+                raise ValueError('AI restriction requires restriction_evidence for the exact interpretation')
+            if constraint.get('author') != document['author']:
+                raise ValueError('restriction evidence author differs from interpretation author')
+            _validate_claim(constraint, base, budget)
+        except (ValueError, OSError, TypeError, KeyError) as exc:
+            result.issues.append(str(exc))
     basis = document["scope_basis"]
     if not isinstance(basis, dict) or not all(name in basis for name in
                                               ("source", "quote", "reviewed_by", "reviewed_at", "rationale")):
@@ -427,7 +803,7 @@ def validate(fields, card_path=None, cache=None, *, seconds=5.0, max_bytes=MAX_B
         budget.check()
     except _ReadBudgetExhausted:
         return _budget_unverified(result)
-    result.status = INVALID if result.issues else VERIFIED
+    result.status = (UNVERIFIED if unavailable else INVALID) if result.issues else VERIFIED
     return result
 
 

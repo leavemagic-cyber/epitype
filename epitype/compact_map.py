@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 
 try:
+    from .capture import owner_reply_parts
     from .transcript import message_text as _text_content, source_record
     from .memspec import (
         COMPACT_MAP_ASSISTANT_MAX_CHARS,
@@ -20,6 +21,8 @@ try:
     )
     from . import memspec as _memspec
 except ImportError:  # Direct script execution keeps the U1 CLI contract.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from epitype.capture import owner_reply_parts
     from transcript import message_text as _text_content, source_record
     from memspec import (
         COMPACT_MAP_ASSISTANT_MAX_CHARS,
@@ -183,6 +186,12 @@ def _extract_candidates(numbered_lines):
         if source is None:
             continue
         role, text = source
+        if role != 'A':
+            cited, reply = owner_reply_parts(text)
+            if cited:
+                # Put the owner's reply first so byte clipping cannot leave only
+                # assistant text under a U/Q label.
+                text = f'owner_reply={reply} | cited_text={cited}'
         limit = COMPACT_MAP_ASSISTANT_MAX_CHARS if role == 'A' else COMPACT_MAP_USER_MAX_CHARS
         if len(text) > limit:
             text = text[:limit] + ' [truncated]'

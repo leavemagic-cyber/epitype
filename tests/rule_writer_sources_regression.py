@@ -30,8 +30,12 @@ def fixture_card(text, path, *, source_root, case_id='writer', host='codex'):
     block = message['content'][0]
     # The declared human half follows all preserved AI context. In an arrow
     # reply, text before the last marker cannot stand in for the owner's words.
-    block['text'] = ('待發布的合成測試 AI 資料（完整保留）：\n' + text
-                     + '\nOwner 原句：' + document['quote'] + '\n' + scope_quote)
+    prefix = '待發布的合成測試 AI 資料（完整保留）：\n' + text
+    constraint = document.get('restriction_evidence')
+    if constraint:
+        observation = constraint['basis'][0]
+        prefix += '\n合成測試已核的候選：'+observation['quote']+' '+observation['observed_at']+' '+observation['valid_until']
+    block['text'] = prefix+'\nOwner 原句：'+document['quote']+'\n'+scope_quote
     raw = (json.dumps(record, ensure_ascii=False) + '\n').encode('utf-8')
     reviewed_source = source.with_name('writer-' + source.name)
     expected = meta + raw
@@ -42,6 +46,8 @@ def fixture_card(text, path, *, source_root, case_id='writer', host='codex'):
         reviewed_source.write_bytes(expected)
     document['sources'][0]['path'] = str(reviewed_source)
     document['sources'][0]['record_sha256'] = hashlib.sha256(raw).hexdigest()
+    if constraint:
+        constraint['basis'][0]['source'] = dict(document['sources'][0])
     document['scope'] = {'level': 'global', 'project': None, 'case': None,
         'actions': ['*'], 'conditions': [], 'exceptions': [], 'expiry': 'unspecified'}
     document['scope_basis']['quote'] = scope_quote

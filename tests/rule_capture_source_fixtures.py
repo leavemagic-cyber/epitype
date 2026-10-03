@@ -33,8 +33,12 @@ def reviewed_capture_event(found, vault, event, *, source_root, replay=None, hos
     # No derived description or assistant question becomes the Owner quotation.
     quote = owner_quote or capture.owner_reply(capture.owner_side(body, summary))
     message = row['message'] if host == 'claude' else row['payload']
-    message['content'][0]['text'] = ('待發布的完整合成卡片資料：\n' + text
-        + '\nOwner 原句：' + quote + '\n' + scope_quote)
+    prefix = '待發布的完整合成卡片資料：\n' + text
+    constraint = document.get('restriction_evidence')
+    if constraint:
+        observation = constraint['basis'][0]
+        prefix += '\n合成測試已核的候選：'+observation['quote']+' '+observation['observed_at']+' '+observation['valid_until']
+    message['content'][0]['text'] = prefix+'\nOwner 原句：'+quote+'\n'+scope_quote
     raw = (json.dumps(row, ensure_ascii=False) + '\n').encode('utf-8')
     scoped_source = source.with_name('scoped-capture-' + source.name)
     expected = meta + raw
@@ -47,6 +51,9 @@ def reviewed_capture_event(found, vault, event, *, source_root, replay=None, hos
     document['sources'][0]['record_sha256'] = hashlib.sha256(raw).hexdigest()
     document['quote'] = quote
     document['author'] = 'epitype-capture (AI)'
+    if constraint:
+        constraint['author'] = document['author']
+        constraint['basis'][0]['source'] = dict(document['sources'][0])
     document['scope'] = {'level': 'case', 'project': project, 'case': name,
         'actions': ['此案例的卡片捕捉與喚回'], 'conditions': ['隔離合成測試'],
         'expiry': 'unspecified', 'exceptions': []}

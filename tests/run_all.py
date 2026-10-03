@@ -118,6 +118,7 @@ SELFTESTS = (
     Path("tests") / "tool_sequence_regression.py",
     Path("tests") / "lead_transfer_regression.py",
     Path("tests") / "owner_rules_regression.py",
+    Path("tests") / "owner_attribution_regression.py",
     Path("tests") / "harvest_owner_regression.py",
     Path("tests") / "context_rotation_regression.py",
     Path("tests") / "rewrite_cost_regression.py",

@@ -5,6 +5,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / 'adapters' / 'claude')]
 import copy
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import os
@@ -55,13 +56,16 @@ class SourceConsumers(unittest.TestCase):
         if scope['expiry'] != 'unspecified':
             extent += '，有效至 ' + scope['expiry']
         quote = extent + '：採用此測試規則，禁止 badold。'
+        stamp = (datetime.now(timezone.utc)-timedelta(seconds=1)).isoformat()
+        expiry = (datetime.fromisoformat(stamp)+timedelta(hours=1)).isoformat()
+        observed = 'badold 在隔離測試中依來源禁止。'
         sid, mid = 'synthetic-read-session', 'synthetic-read-owner'
         if host == 'claude':
             row = {'type': 'user', 'sessionId': sid, 'uuid': mid,
-                'message': {'role': 'user', 'content': [{'type': 'text', 'text': quote}]}}
+                'message': {'role': 'user', 'content': [{'type': 'text', 'text': quote+'\n'+observed+' '+stamp+' '+expiry}]}}
         else:
             row = {'type': 'response_item', 'payload': {'type': 'message', 'id': mid, 'role': 'user',
-                'content': [{'type': 'input_text', 'text': quote}]}}
+                'content': [{'type': 'input_text', 'text': quote+'\n'+observed+' '+stamp+' '+expiry}]}}
         meta = (json.dumps({'type': 'session_meta', 'payload': {'id': sid}}) + '\n').encode()
         raw = (json.dumps(row, ensure_ascii=False) + '\n').encode()
         self.source.write_bytes(meta + raw)
@@ -74,6 +78,13 @@ class SourceConsumers(unittest.TestCase):
             'scope_basis': {'source': 0, 'quote': quote, 'reviewed_by': 'synthetic-read-reviewer',
                 'reviewed_at': '2026-10-03', 'rationale': 'Synthetic original expressly declares this scope.'},
             'supersedes': []}
+        if kind == 'ai-derived':
+            document['restriction_evidence'] = {
+                'kind': kind, 'author': document['author'], 'challengeable': True,
+                'text': document['text'], 'subject': 'badold',
+                'basis': [{'quote': observed, 'observed_at': stamp, 'valid_until': expiry,
+                           'source': document['sources'][0]}],
+                'rationale': 'The original synthetic human source explicitly prohibits badold.'}
         fields = {'name': 'synthetic-read-rule', 'description': '採用本測試規則。',
             'decision_key': document['key'], 'status': 'active', 'current_decision_at': '2026-10-03',
             'decided_by': 'owner-explicit', 'owner_quote': quote, 'text': document['text'],

@@ -1,5 +1,5 @@
 """Per-card synthetic original records for source-bound publication regressions."""
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 from pathlib import Path
@@ -26,7 +26,13 @@ def source_bound_card(text, card_path, *, source_root, case_id, host='codex'):
     quote = fields.get('owner_quote') or (
         '此合成測試只適用於 ' + case_id + ' 案：採用下列測試規則，'
         '由 synthetic-test-ai 整理，保留這個案例的執行條件。')
+    source = source_root / (digest + '.jsonl')
+    stamp = (json.loads(source.read_bytes().splitlines()[1])['timestamp'] if source.exists()
+             else datetime.now(timezone.utc).isoformat())
+    expiry = (datetime.fromisoformat(stamp)+timedelta(hours=1)).isoformat()
+    interpretation = fields.get('text') or fields.get('description') or '合成測試執行整理。'
     message = quote + '\n待發布的合成測試規則資料：\n' + text
+    message += '\n合成測試已核的候選：'+interpretation+' '+stamp+' '+expiry
     if host == 'claude':
         row = {'type': 'user', 'sessionId': sid, 'uuid': mid,
                'message': {'role': 'user', 'content': [{'type': 'text', 'text': message}]}}
@@ -35,9 +41,9 @@ def source_bound_card(text, card_path, *, source_root, case_id, host='codex'):
                'role': 'user', 'content': [{'type': 'input_text', 'text': message}]}}
     else:
         raise ValueError('unsupported synthetic source host')
+    row['timestamp'] = stamp
     meta = (json.dumps({'type': 'session_meta', 'payload': {'id': sid}}, ensure_ascii=False) + '\n').encode()
     raw = (json.dumps(row, ensure_ascii=False) + '\n').encode()
-    source = source_root / (digest + '.jsonl')
     expected = meta + raw
     if source.exists():
         if source.read_bytes() != expected:
@@ -45,11 +51,10 @@ def source_bound_card(text, card_path, *, source_root, case_id, host='codex'):
     else:
         source.write_bytes(expected)
     # Identical retries reuse identical evidence bytes and review timestamps.
-    stamp = datetime.fromtimestamp(source.stat().st_mtime, timezone.utc).isoformat()
     document = {
         'version': 1, 'key': fields.get('decision_key') or ('synthetic-' + card_path.stem),
         'kind': 'ai-derived', 'author': 'synthetic-test-ai', 'quote': quote,
-        'text': fields.get('text') or fields.get('description') or '合成測試執行整理。',
+        'text': interpretation,
         'sources': [{'path': str(source), 'byte_offset': len(meta), 'line': 2,
             'record_sha256': hashlib.sha256(raw).hexdigest(), 'session_id': sid,
             'message_id': mid, 'role': 'U'}],
@@ -60,6 +65,13 @@ def source_bound_card(text, card_path, *, source_root, case_id, host='codex'):
             'reviewed_at': stamp, 'rationale': 'Synthetic source declares this single isolated test case.'},
         'supersedes': [],
     }
+    if rule_provenance._RESTRICTION.search(interpretation):
+        document['restriction_evidence'] = {
+            'kind': 'ai-derived', 'author': document['author'], 'challengeable': True,
+            'text': interpretation, 'subject': interpretation,
+            'basis': [{'quote': interpretation, 'observed_at': stamp, 'valid_until': expiry,
+                       'source': document['sources'][0]}],
+            'rationale': 'Isolated positive fixture has source-bound reviewed conditions.'}
     document = rule_pipeline.bind_payload(document, text, reviewer='synthetic-test-reviewer', reviewed_at=stamp)
     encoded = json.dumps(rule_provenance.serialize(document), ensure_ascii=False)
     return text.replace('---\n', '---\nrule_provenance: ' + encoded + '\n', 1)
