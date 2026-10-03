@@ -1,15 +1,9 @@
 import sys, time; sys.dont_write_bytecode = True; _STARTED_AT = time.monotonic(); [getattr(stream, "reconfigure", lambda **_: None)(encoding="utf-8", errors="replace") for stream in (sys.stdin, sys.stdout, sys.stderr)]  # cp950 consoles must not break hook entrypoints.
-"""Stop adapter shared by both hosts: a turn that re-opens a settled ruling is blocked.
+"""Stop observations are advisory after the reply has reached its recipient.
 
-2026-09-05 事故：owner 已裁「虛擬必須鏡像實盤」的事，被同一場 session 重新端成選項
-問 owner（owner：「為什麼還是會發生這種錯誤？」）。SessionStart 注入裁定、
-UserPromptSubmit 喚回裁定，兩者都只是「說給模型聽」；回合結束前沒有任何一道閘去比
-對模型剛說出口的話。這支 adapter 就是那道閘：命中決策卡的 `forbidden` 就擋；把已裁定
-的事再問一次 owner 也擋，並要求照裁定改寫。
-
-Fail-open by construction: any exception, an expired deadline, or a missing config
-lets the turn end. A hook that could hang or crash the turn would be worse than the
-error it guards against.
+No finding, incomplete check, timeout, or retry may require another copy of the
+reply. Action-time safety boundaries belong to the action adapter; Stop records
+a short notice and lets the turn end.
 """
 
 from collections import namedtuple
@@ -904,6 +898,12 @@ def _turn_check_gap(decision, message, turn, opened_names, defects, event=None,
     name = decision.turn_check
     if not name:
         return None
+    if _is_subagent_stop(event) and name in (
+            memspec.TURN_CHECK_LENGTH, memspec.TURN_CHECK_UNVERIFIED_DELEGATION,
+            memspec.TURN_CHECK_PROMPT_BLOCK, memspec.TURN_CHECK_OWNER_LANGUAGE,
+            memspec.TURN_CHECK_FINISHED_AGENTS):
+        # 子代理交付給主控，不能要求它完成主控的回覆格式或全場資源收尾。
+        return None
     if name not in memspec.TURN_CHECK_NAMES:
         defects.append(memspec.TURN_CHECK_UNKNOWN_DEFECT.format(
             decision=decision.key, name=name,
@@ -1181,32 +1181,8 @@ def _echo_overlap(config, session_id, message):
 def _handle(event, started_at, defects):
     message = event.get("last_assistant_message")
     if event.get("stop_hook_active"):
-        # A rewrite is checked before its exemption. Normal turns instead check
-        # the complete text once below, avoiding two identical source scans.
-        reason = rule_provenance.claim_violation(message, event.get("transcript_path"),
-            seconds=max(0.0, min(2.0-(time.monotonic()-started_at), remaining_seconds(started_at))),
-            hard_deadline=True, notices=defects)
-        if reason:
-            return {"decision": "block", "reason": reason}
-        # 這是被擋之後的重寫。規則不在這一輪重判（會無限迴圈），但有一件事只有這一輪
-        # 看得到：重寫出來的東西跟剛才被擋那一段是不是幾乎一樣。owner 已經看過那一段，
-        # 整段重貼等於同一段話給他看兩次。
-        if not isinstance(message, str) or not message.strip():
-            return None
-        config = load_config(started_at)
-        if config is None:
-            return None
-        session_id = event.get("session_id", event.get("sessionId"))
-        overlap = _echo_overlap(config, session_id, message)
-        if overlap < memspec.BLOCKED_ECHO_MAX_OVERLAP:
-            return None
-        if not _claim_marker(session_id, memspec.BLOCKED_ECHO_DECISION, message):
-            return None
-        # 不擋：重複的那一段已經在 owner 眼前，再擋一輪只會生出第三段。記帳＋下一則提醒。
-        _audit(config, memspec.BLOCKED_ECHO_DECISION, memspec.BLOCKED_ECHO_DECISION, started_at,
-               session_id, _message_digest(message), kind=memspec.STOP_NOTE_LOG_KIND)
-        _best_effort_audit(leave_note, config, session_id,
-                           memspec.BLOCKED_ECHO_REASON.format(overlap=overlap))
+        # 舊版本留下的重寫事件只核對來源並提醒；不再要求重送或壓抑完整交付。
+        _source_notice(event, message, started_at, defects)
         return None
     if not isinstance(message, str) or not message.strip():
         return None
@@ -1217,17 +1193,34 @@ def _handle(event, started_at, defects):
     if message.strip() not in memspec.join_turn_text(texts):
         texts.append(message)
     message = memspec.join_turn_text(texts)
-    reason = rule_provenance.claim_violation(message, event.get("transcript_path"),
-        seconds=max(0.0, min(2.0-(time.monotonic()-started_at), remaining_seconds(started_at))),
-        hard_deadline=True, notices=defects)
-    if reason:
-        return {"decision": "block", "reason": reason}
+    _source_notice(event, message, started_at, defects)
     config = load_config(started_at)
     if config is None:
         # load_config 只在期限已過時回 None（其他壞法都丟例外）。放行照舊，但要講出來。
         defects.append(memspec.STOP_GATE_EXPIRED_BEFORE_CHECK_DEFECT)
         return None
     return _verdict(event, message, config, started_at, defects, turn)
+
+
+def _is_subagent_stop(event):
+    return isinstance(event, dict) and (
+        event.get("hook_event_name") == memspec.SUBAGENT_STOP_EVENT
+        or bool(event.get("agent_id") or event.get("agentId")))
+
+
+def _source_notice(event, message, started_at, defects):
+    """A failed or incomplete attribution check is one observation, never a veto."""
+    notices = []
+    try:
+        reason = rule_provenance.claim_violation(message, event.get("transcript_path"),
+            seconds=max(0.0, min(2.0-(time.monotonic()-started_at), remaining_seconds(started_at))),
+            hard_deadline=True, notices=notices)
+    except Exception as exc:
+        reason = "UNVERIFIED: " + type(exc).__name__
+    if reason or notices:
+        detail = _one_line(reason or notices[0])[:240]
+        defects.append("Epitype 提醒（歸屬／來源核對）：" + detail
+                       + "；本回合放行，不需重送。")
 
 
 def _verdict(event, message, config, started_at, defects, turn=None):
@@ -1266,33 +1259,20 @@ def _verdict(event, message, config, started_at, defects, turn=None):
         if digest not in excepted.get(decision.key, frozenset())
     ]
     session_id = event.get("session_id", event.get("sessionId"))
-    blocking = [decision for decision in decisions if decision.on_hit != memspec.ON_HIT_NOTE]
-    verdict = _first_violation(blocking, event, message, config, started_at, defects, turn)
+    verdict = _first_violation(decisions, event, message, config, started_at, defects, turn,
+                               require_notes=True)
     if verdict is None:
-        # 只提醒的卡排在後面：真的要擋的時候，那一輪重寫本來就會把用詞一起帶過。
-        noting = [decision for decision in decisions if decision.on_hit == memspec.ON_HIT_NOTE
-                  or decision.require_on_hit == memspec.ON_HIT_NOTE]
-        noted = _first_violation(noting, event, message, config, started_at, defects, turn,
-                                require_notes=True)
-        if noted is not None and _claim_marker(session_id, noted[0].key, message):
-            _audit(config, noted[0].key, noted[1], started_at, session_id,
-                   _message_digest(message), kind=memspec.STOP_NOTE_LOG_KIND, card_path=noted[0].path)
-            # 擋人用的那句話寫著「請改寫」；提醒要講的正好相反，所以字面規則另給一句短的。
-            _best_effort_audit(leave_note, config, session_id, (
-                memspec.STOP_NOTE_POLICY.format(
-                    advice=noted[0].advice or noted[0].quote, decision=noted[0].key)
-                + "\n" + memspec.STOP_NOTE_MATCHED_TEXT.format(fragment=noted[3])
-                # 其他類的理由取第一句就夠：提醒是要我下次照做，不是要我讀完整段說明。
-                if noted[3]
-                else noted[2].split(memspec.SENTENCE_END)[0] + memspec.SENTENCE_END))
         return None
     decision, rule, reason, _fragment = verdict
     if not _claim_marker(session_id, decision.key, message):
         return None
-    _audit(config, decision.key, rule, started_at, session_id, _message_digest(message), card_path=decision.path)
-    # 留著這一段，下一輪才比得出「重寫的東西跟 owner 已經看過的那一段一不一樣」。
-    _best_effort_audit(_remember_blocked, config, session_id, message)
-    return {"decision": "block", "reason": reason + memspec.STOP_GATE_REWRITE_HINT}
+    _audit(config, decision.key, rule, started_at, session_id, _message_digest(message),
+           kind=memspec.STOP_NOTE_LOG_KIND, card_path=decision.path)
+    # 舊理由含「請改寫」等字眼；提醒只記檢查名稱，不把舊阻擋指令送回模型。
+    notice = (f"Epitype 提醒：回覆命中 {decision.key} 的 {rule} 檢查；"
+              "後續請核對當次指示與實際來源，這一則不用重送。")
+    _best_effort_audit(leave_note, config, session_id, notice)
+    return None
 
 
 # 開頭圍籬：行首（可縮排，清單裡的區塊會縮）三個以上反引號或波浪號，後面第一個詞是語言
@@ -1494,7 +1474,7 @@ def _first_violation(decisions, event, message, config, started_at, defects, tur
                      require_notes=False):
     """這批裁定裡第一個被違反的：(裁定, 哪一類, 要說的話, 命中的字)；都沒有回 None。"""
     verdicts = []
-    if turn is not None and turn.prompt:
+    if turn is not None and turn.prompt and not _is_subagent_stop(event):
         from epitype import tool_sequence, action_receipts, action_sequence
         semantic = any(any(item.strip().startswith('@') for item in d.require_tool_before) for d in decisions)
         if semantic: action_receipts.refresh(event,action_receipts.database_path(config_path()))
@@ -1577,14 +1557,14 @@ def _first_violation(decisions, event, message, config, started_at, defects, tur
         # 圍籬區塊在上面的字面比對裡是遮掉的（2026-09-19）；這一道不看字面，直接問 owner
         # 按執行時會跑它的那個殼層「這段合不合法」。沒有卡宣告殼層、或沒有相符的區塊時，
         # 一個行程都不起。
-        for decision in decisions:
+        for decision in (() if _is_subagent_stop(event) else decisions):
             reason = _fence_shell_gap(decision, message, event, started_at, defects)
             if reason is None:
                 continue
             verdicts.append((decision, memspec.FENCE_SHELL_RULE, reason, ""))
             break
     if not verdicts:
-        for decision in decisions:
+        for decision in (() if _is_subagent_stop(event) else decisions):
             if decision.require_on_hit == memspec.ON_HIT_NOTE and not require_notes:
                 continue
             trigger = _requirement_gap(decision, message, defects)
@@ -1600,7 +1580,7 @@ def _first_violation(decisions, event, message, config, started_at, defects, tur
             )
             break
     if not verdicts:
-        for decision in decisions:
+        for decision in (() if _is_subagent_stop(event) else decisions):
             if not _asks_again(decision, message):
                 continue
             template = (
@@ -2457,15 +2437,9 @@ def _selftest():
 
 
 def _emits(value, started_at):
-    """A block reaches the host even past the deadline.
-
-    `_verdict` claims the same-session dedupe marker and appends the audit row
-    before it returns, so a deadline crossed in between used to drop the block
-    while leaving the ruling on the ledger and unable to fire again this session
-    (2026-09-06 review). The action gate's `main` has the same shape."""
-    return value is not None and (
-        value.get("decision") == "block" or not expired(started_at)
-    )
+    """A Stop adapter must never emit a veto, including after its deadline."""
+    return (value is not None and value.get("decision") != "block"
+            and not expired(started_at))
 
 
 def main():
