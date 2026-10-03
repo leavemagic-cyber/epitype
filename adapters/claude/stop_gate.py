@@ -1184,7 +1184,8 @@ def _handle(event, started_at, defects):
         # A rewrite is checked before its exemption. Normal turns instead check
         # the complete text once below, avoiding two identical source scans.
         reason = rule_provenance.claim_violation(message, event.get("transcript_path"),
-            seconds=max(0.0, 2.0-(time.monotonic()-started_at)), hard_deadline=True)
+            seconds=max(0.0, min(2.0-(time.monotonic()-started_at), remaining_seconds(started_at))),
+            hard_deadline=True, notices=defects)
         if reason:
             return {"decision": "block", "reason": reason}
         # 這是被擋之後的重寫。規則不在這一輪重判（會無限迴圈），但有一件事只有這一輪
@@ -1217,7 +1218,8 @@ def _handle(event, started_at, defects):
         texts.append(message)
     message = memspec.join_turn_text(texts)
     reason = rule_provenance.claim_violation(message, event.get("transcript_path"),
-        seconds=max(0.0, 2.0-(time.monotonic()-started_at)), hard_deadline=True)
+        seconds=max(0.0, min(2.0-(time.monotonic()-started_at), remaining_seconds(started_at))),
+        hard_deadline=True, notices=defects)
     if reason:
         return {"decision": "block", "reason": reason}
     config = load_config(started_at)

@@ -285,8 +285,8 @@ def _human_quote(text, quote):
 CLAIM_MARKER = re.compile(r'<!--\s*EPITYPE CLAIM\s+(\{[^\r\n]*\})\s*-->')
 _CLAIM_OPEN = re.compile(r'<!--\s*EPITYPE CLAIM\b')
 _OWNER_CLAIM = re.compile(
-    r'(?:owner|使用者|你)\s*(?:的\s*)?(?:原話|原句|逐字|裁定|規定|定的界線|'
-    r'(?:已經?|曾經?|先前)?(?:要求|指示|決定|定規|授權|同意|說過))'
+    r'(?:owner|使用者|你)\s*(?:的\s*)?(?:已經?|曾經?|先前)?(?:原話|原句|逐字|裁定|規定|定的界線|'
+    r'要求|指示|決定|定規|授權|同意|說過)'
     r'|owner\s+\d{1,4}[-/]\d{1,2}|你(?:說|定|訂)的(?=\s*(?:界線|規則|限制|要求|指示|原話|原句|裁定|[「『“]))'
     r'|(?:owner|user)(?:[’\x27]s)?\s+(?:(?:has|had|already|previously|explicitly)\s+)*'
     r'(?:words|rul(?:ing|ed|es?)|directives?|instructions?|said|decided|requested|requires?|approved|ordered)',
@@ -298,7 +298,6 @@ _RESTRICTION = re.compile(
     r'\bnever\s+(?:use|run|submit|stop|cancel)\b|\b(?:at most|at least|maximum|minimum)\s*\d|'
     r'\b(?:cancel|stop|terminate)\b.{0,40}\b(?:after|over|exceeds?)\b', re.IGNORECASE)
 _NEW_RULE = re.compile(r'記下規則|新增規則|以後|一律|今後|門檻|訂定|制定|主控自訂|我這邊的判斷|規則[：:]|\b(?:policy|new rule|from now on)\b', re.IGNORECASE)
-_HISTORY = re.compile(r'^\s*(?:[-*]\s*)?(?:歷史反例|錯誤紀錄|待更正|引用資料)[：:]')
 _DURATION_UNITS = r'分鐘|秒|小時|seconds?|minutes?|hours?'
 _THRESHOLD = re.compile(r'(?:超過|逾|\bafter|\bover|\bexceeds?)\s*(\d+(?:\.\d+)?)\s*('+_DURATION_UNITS+r')', re.IGNORECASE)
 _DURATIONS = re.compile(r'(\d+(?:\.\d+)?)(?:\s*(?:[–—~～至到-]|to)\s*(\d+(?:\.\d+)?))?\s*('+_DURATION_UNITS+r')', re.IGNORECASE)
@@ -530,76 +529,127 @@ def _validate_claim(claim, base, budget):
         if checked not in body or valid_until not in body:
             raise ValueError('observation timestamp/expiry is not source-bound')
         evidence.append(quote)
-    threshold = _THRESHOLD.search(text)
-    if threshold:
-        seconds = float(threshold[1])*_UNITS[threshold[2].casefold()]
-        durations = [float(m[2] or m[1])*_UNITS[m[3].casefold()] for quote in evidence
-                     for m in _DURATIONS.finditer(quote)]
-        if not durations or seconds < max(durations):
-            raise ValueError('new timeout contradicts observed duration or has no comparable data')
-        # Time is a diagnostic cue, not sufficient grounds to discard valid work.
-        if _CANCEL.search(text):
-            condition = claim.get('cancel_condition')
-            if (not isinstance(condition, str) or not condition.strip() or condition not in text
-                    or condition not in '\n'.join(evidence)):
-                raise ValueError('elapsed time alone cannot justify cancellation; source-bind a concrete fault condition')
-            for key in ('checkpoint', 'redo_cost', 'recovery'):
-                value = claim.get(key)
-                if not isinstance(value, str) or not value.strip() or value not in '\n'.join(evidence):
-                    raise ValueError('cancellation needs source-bound '+key+' before stopping work')
-    elif (_CANCEL.search(text) and re.search(r'超過|逾|\b(?:after|over|exceeds?)\b', text, re.IGNORECASE)):
-        raise ValueError('timeout formula needs directly comparable duration data; an unexplained ratio is UNVERIFIED')
-    elif not isinstance(claim.get('rationale'), str) or not claim['rationale'].strip():
-        raise ValueError('non-numeric restriction needs a challengeable rationale')
+    # Attached evidence must not check the first threshold and license a second
+    # contradictory duration or unexplained ratio in the same payload.
+    for line in text.splitlines():
+        for sentence in _sentences(line):
+            budget.check()
+            threshold = _THRESHOLD.search(sentence)
+            if threshold:
+                seconds = float(threshold[1])*_UNITS[threshold[2].casefold()]
+                durations = [float(m[2] or m[1])*_UNITS[m[3].casefold()] for quote in evidence
+                             for m in _DURATIONS.finditer(quote)]
+                if not durations or seconds < max(durations):
+                    raise ValueError('new timeout contradicts observed duration or has no comparable data')
+                if _CANCEL.search(sentence):
+                    condition = claim.get('cancel_condition')
+                    if (not isinstance(condition, str) or not condition.strip() or condition not in sentence
+                            or condition not in '\n'.join(evidence)):
+                        raise ValueError('elapsed time alone cannot justify cancellation; source-bind a concrete fault condition')
+                    for key in ('checkpoint', 'redo_cost', 'recovery'):
+                        value = claim.get(key)
+                        if not isinstance(value, str) or not value.strip() or value not in '\n'.join(evidence):
+                            raise ValueError('cancellation needs source-bound '+key+' before stopping work')
+            elif (_CANCEL.search(sentence) and re.search(r'超過|逾|\b(?:after|over|exceeds?)\b', sentence, re.IGNORECASE)):
+                raise ValueError('timeout formula needs directly comparable duration data; an unexplained ratio is UNVERIFIED')
+            elif not isinstance(claim.get('rationale'), str) or not claim['rationale'].strip():
+                raise ValueError('non-numeric restriction needs a challengeable rationale')
 
 
 def _owner_labels(line):
     # Asking the human to decide is not a claim that they already decided.
     return [match for match in _OWNER_CLAIM.finditer(line)
-            if not re.search(r'(?:請|等|待|需要|交由|由)\s*$', line[:match.start()])]
+            if not re.search(r'(?:請|等|待|需要|交由|由|不是|並非|不屬於)\s*$', line[:match.start()])]
 
 
 def _labelled_quotations(line, inherited=False):
-    fragments = list(memspec.GRANT_QUOTED_TEXT_REGEX.finditer(line))
+    fragments = [(m.start(), m.end(), m[0][1:-1])
+                 for m in memspec.GRANT_QUOTED_TEXT_REGEX.finditer(line)]
+    # Backticks format quotations too. Keep their exact contents for lookup.
+    fragments.extend((m.start(), m.end(), m['body']) for m in re.finditer(
+        r'(?<!`)(?P<ticks>`+)(?!`)(?P<body>[^\r\n]*?)(?<!`)(?P=ticks)(?!`)', line))
+    fragments.sort()
     labels = _owner_labels(line)
     selected = []
     for label in labels:
-        following = next((m for m in fragments if m.start() >= label.end()), None)
-        preceding = [m for m in fragments if m.end() <= label.start()]
+        following = next((m for m in fragments if m[0] >= label.end()), None)
+        preceding = [m for m in fragments if m[1] <= label.start()]
         candidate = following or (preceding[-1] if preceding else None)
         if candidate is not None:
             selected.append(candidate)
     if inherited and not labels:
         selected = fragments
-    return [m[0][1:-1] for m in selected]
+    return [m[2] for m in selected]
 
 
-def _code_example(body, language):
-    """Recognize code data without letting fenced prose claim owner authority."""
+def _statement_data(body, budget=None):
+    """Recognize actual expressions/statements, never a language-name permit."""
     import ast
-    if language in ('python', 'py', ''):
-        try:
-            tree = ast.parse(body)
-            if tree.body:
-                return True
-        except (SyntaxError, ValueError):
-            pass
-    if language in ('json', ''):
-        try:
-            return isinstance(json.loads(body), (dict, list))
-        except (ValueError, TypeError):
-            pass
-    return language in ('javascript', 'js', 'typescript', 'ts', 'bash', 'sh',
-                        'powershell', 'ps1', 'sql', 'ruby', 'go', 'rust', 'java',
-                        'c', 'cpp', 'csharp', 'yaml', 'yml', 'toml')
+    if budget is not None and budget.remaining == 0 and len(body) > 16*1024:
+        raise _ReadBudgetExhausted('syntax exceeds bounded classification reserve')
+    try:
+        tree = ast.parse(body)
+        return bool(tree.body) and all(not (isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Name)) for node in tree.body)
+    except (SyntaxError, ValueError):
+        return False
 
 
-def _prose_lines(text, budget, *, timeout_classification=False):
-    """Mask actual code examples; leave generic fences containing prose active."""
+def _code_lines(lines, budget):
+    """Each code line retains its role; comments and mixed prose remain visible."""
+    import io
+    import tokenize
+    body = '\n'.join(lines)
+    budget.check()
+    if budget.remaining == 0 and len(body) > 16*1024:
+        raise _ReadBudgetExhausted('syntax exceeds bounded classification reserve')
+    try:
+        if isinstance(json.loads(body), (dict, list)):
+            return [('', 'data') for _ in lines]
+    except (ValueError, TypeError):
+        pass
+    comments, literals = {}, set()
+    try:
+        for token in tokenize.generate_tokens(io.StringIO(body).readline):
+            budget.check()
+            if token.type == tokenize.COMMENT:
+                comments[token.start[0]-1] = token.string[1:]
+            if token.type == tokenize.STRING:
+                literals.update(range(token.start[0]-1, token.end[0]))
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        pass
+    if _statement_data(body, budget):
+        return [(comments[i], 'fenced-prose') if i in comments else ('', 'data')
+                for i in range(len(lines))]
+    result = []
+    for i, line in enumerate(lines):
+        budget.check()
+        # A bounded subset of JS declarations has the same literal RHS syntax.
+        statement = re.sub(r'^\s*(?:const|let|var)\s+(?=[A-Za-z_$])', '', line).rstrip('; ')
+        if _statement_data(statement, budget):
+            result.append((comments[i], 'fenced-prose') if i in comments else ('', 'data'))
+        elif i in literals and not _owner_labels(re.sub(r'([\x22\x27]).*?\1', '', line)):
+            # Unsupported syntax with authority-looking string data is undecidable,
+            # rather than verified or a reason to block an ordinary code delivery.
+            result.append((line, 'uncertain'))
+        else:
+            result.append((line, 'fenced-prose'))
+    return result
+
+
+def _role_lines(text, budget, card_metadata=False):
     lines = text.splitlines()
+    result = [(line, 'prose') for line in lines]
+    if card_metadata and lines and lines[0].lstrip('\ufeff') == '---':
+        end = next((i for i, line in enumerate(lines[1:], 1) if line == '---'), None)
+        if end is not None:
+            result[:end+1] = [('', 'metadata')] * (end+1)
     index = 0
     while index < len(lines):
         budget.check()
+        if result[index][1] == 'metadata':
+            index += 1
+            continue
         opening = re.match(r'^\s*(`{3,}|~{3,})(\w*)\s*$', lines[index])
         if opening:
             end = index + 1
@@ -607,21 +657,149 @@ def _prose_lines(text, budget, *, timeout_classification=False):
             while end < len(lines) and not closing.match(lines[end]):
                 budget.check()
                 end += 1
+            result[index] = ('', 'data')
+            result[index+1:end] = _code_lines(lines[index+1:end], budget)
             if end < len(lines):
-                language = opening[2].casefold()
-                declared_code = language in ('python', 'py', 'json', 'javascript', 'js',
-                    'typescript', 'ts', 'bash', 'sh', 'powershell', 'ps1', 'sql', 'ruby',
-                    'go', 'rust', 'java', 'c', 'cpp', 'csharp', 'yaml', 'yml', 'toml')
-                if (declared_code if timeout_classification else
-                        _code_example('\n'.join(lines[index+1:end]), language)):
-                    lines[index:end+1] = [''] * (end-index+1)
-                else:
-                    lines[index] = lines[end] = ''
-                index = end
-        # Inline code literals, unlike plain quotations, are example data.
-        lines[index] = re.sub(r'`[^`\r\n]+`', '', lines[index])
+                result[end] = ('', 'data')
+            index = end
         index += 1
-    return lines
+    return result
+
+
+def _sentences(line):
+    """Outer sentence boundaries; punctuation inside quotations is preserved."""
+    stack, start, index = [], 0, 0
+    pairs = {'「': '」', '『': '』', '“': '”', '‘': '’'}
+    while index < len(line):
+        char = line[index]
+        if char == '`':
+            end = index+1
+            while end < len(line) and line[end] == '`':
+                end += 1
+            token = line[index:end]
+            if stack and stack[-1] == token:
+                stack.pop()
+            elif not stack:
+                stack.append(token)
+            index = end
+            continue
+        if stack and char == stack[-1]:
+            stack.pop()
+        elif char in pairs:
+            stack.append(pairs[char])
+        elif char in ('"', "'") and not stack and (
+                index == 0 or not line[index-1].isalnum()):
+            stack.append(char)
+        elif not stack and (char in '。！？；;!?'
+                or char == '.' and (index+1 == len(line) or line[index+1].isspace())):
+            yield line[start:index+1]
+            start = index+1
+        elif not stack and char in '，,':
+            following = re.sub(r'^\s*(?:(?:但是|然而|接著|所以|但|現在|今天)\s*)?', '', line[index+1:])
+            # Only an independent assertion starts another role. A subordinate
+            # "over ten minutes, then cancel" condition stays in one unit.
+            if (_OWNER_CLAIM.match(following) or _NEW_RULE.match(following) and _RESTRICTION.search(following)
+                    or _OPERATIVE_SUBJECT.match(following) and _operative_cancel(following)):
+                yield line[start:index+1]
+                start = index+1
+        index += 1
+    if line[start:].strip():
+        yield line[start:]
+
+
+def _reported_unit(text):
+    labels = _owner_labels(text)
+    prefix = text[:labels[0].start()] if labels else text
+    mistake = r'(?:誤稱|錯稱|錯誤(?:地)?宣稱|不實主張)'
+    # Denying that a claim was mistaken affirms it; it is not an error report.
+    if re.search(r'(?:沒有|並未|未曾|不是|並非|不曾|沒)\s*'+mistake, prefix):
+        return False
+    if re.search(mistake+r'\s*$', prefix):
+        return True
+    if re.fullmatch(r'\s*(?:錯誤紀錄|歷史反例|待更正)[：:][^「『“]*'+mistake+
+                    r'\s*(?:「.*」|『.*』|“.*”)\s*[。.]?\s*', text):
+        return True
+    cited = re.match(r'^\s*(?:引用資料|歷史反例)[：:]\s*(.+?)\s*[。.]?$', text)
+    if cited:
+        value = cited[1].rstrip('。.')
+        return bool(value and value[0] in '「『“' and value[-1] == {'「': '」', '『': '』', '“': '”'}[value[0]])
+    # A quoted specimen being examined is data. The surrounding sentence must
+    # describe that examination and contain no adoption or external authority.
+    fragments = list(memspec.GRANT_QUOTED_TEXT_REGEX.finditer(text))
+    if fragments:
+        outside = memspec.GRANT_QUOTED_TEXT_REGEX.sub('', text)
+        denied_owner = _OWNER_CLAIM.search(outside) and not _owner_labels(outside)
+        if ((re.search(r'測例|反例|範例|引用|應(?:被)?拒絕|應擋|錯誤句', outside)
+                or denied_owner and re.search(r'不是|並非|不屬於', outside))
+                and not _owner_labels(outside) and not _NEW_RULE.search(outside)
+                and not re.search(r'照做|遵守|採用|依此|執行(?:這|此|該)|按(?:這|此|該)', outside)
+                and not _operative_cancel(outside)):
+            return True
+    return False
+
+
+@dataclass
+class _ClaimUnit:
+    number: int
+    text: str
+    role: str
+    section: bool
+    paragraph: bool
+
+    @property
+    def owner(self):
+        return bool(_owner_labels(self.text)) or self.section
+
+    @property
+    def restriction(self):
+        return bool(_RESTRICTION.search(self.text)) and (
+            self.owner or self.paragraph or _NEW_RULE.search(self.text)
+            or _operative_cancel(self.text))
+
+    @property
+    def identity(self):
+        return self.text, self.role, self.section, self.paragraph
+
+
+def _role_units(text, budget, card_metadata=False):
+    section = paragraph = False
+    result = []
+    originals = text.splitlines()
+    headings = []
+    for number, (line, role) in enumerate(_role_lines(text, budget, card_metadata)):
+        budget.check()
+        if role in ('data', 'metadata'):
+            # Raw data identity must differ when identical words become prose.
+            result.append(_ClaimUnit(number, originals[number], role, False, False))
+            paragraph = False
+            continue
+        line = CLAIM_MARKER.sub('', line)
+        if not line.strip():
+            paragraph = False
+            continue
+        if role == 'uncertain':
+            result.append(_ClaimUnit(number, line, role, False, False))
+            paragraph = False
+            continue
+        heading = re.match(r'^\s*(#{1,6})\s+', line)
+        if heading:
+            depth = len(heading[1])
+            while headings and headings[-1][0] >= depth:
+                headings.pop()
+            section = bool(_owner_labels(line)) or bool(headings and headings[-1][1])
+            headings.append((depth, section))
+            paragraph = False
+        for sentence in _sentences(line):
+            budget.check()
+            current_role = 'reported' if _reported_unit(sentence) else role
+            inline = re.fullmatch(r'\s*(`+)(.*?)\1\s*[。.]?\s*', sentence)
+            if inline and _statement_data(inline[2], budget):
+                current_role = 'data'
+            unit = _ClaimUnit(number, sentence, current_role, section, paragraph)
+            result.append(unit)
+            if current_role not in ('reported', 'data') and unit.owner:
+                paragraph = True
+    return result
 
 
 def _operative_cancel(line):
@@ -629,19 +807,23 @@ def _operative_cancel(line):
     if (not _OPERATIVE_SUBJECT.search(line) or not _RESTRICTION.search(line)
             or not _CANCEL.search(line)):
         return False
-    if re.search(r'(?:已經?|曾經?|當時|昨日|昨天|實測|觀察到).{0,50}(?:取消|停止|終止)|'
-                 r'\b(?:cancelled|canceled|stopped|terminated)\b', line, re.IGNORECASE):
-        return False
-    return bool(re.search(r'(?:超過|逾).{0,40}(?:就|直接|一律|應|才|要|必須).{0,8}(?:取消|停止|終止)|'
-                          r'\b(?:cancel|stop|terminate)\b.{0,40}\b(?:after|over|exceeds?)\b',
-                          line, re.IGNORECASE))
+    directives = re.finditer(
+        r'(?:超過|逾).{0,40}(?:就|直接|一律|應|才|要|必須).{0,8}(?P<action>取消|停止|終止)(?!了|完畢|完成)|'
+        r'\b(?:cancel|stop|terminate)\b.{0,40}\b(?:after|over|exceeds?)\b', line, re.IGNORECASE)
+    for directive in directives:
+        if directive['action'] and re.search(
+                r'(?:已經?|曾經?)(?:被|直接|立即|一律)*\s*$', line[:directive.start('action')]):
+            continue
+        return True
+    return False
 
 
 def _has_claim_surface(text):
     # Ordinary technical limits and task scope carry no asserted authority.
     return bool(_OWNER_CLAIM.search(text) or _CLAIM_OPEN.search(text)
                 or _NEW_RULE.search(text) and _RESTRICTION.search(text)
-                or _operative_cancel(text))
+                or any(_operative_cancel(unit) for line in text.splitlines()
+                       for unit in _sentences(line)))
 
 
 def _claim_worker_command():
@@ -649,25 +831,58 @@ def _claim_worker_command():
     return [sys.executable, '-B', '-m', 'epitype.rule_provenance', '--claim-worker']
 
 
-def _deadline_result(text, *, reaped=False):
-    # Timing out a declared code example cannot invent an authority claim.
+def _unverified_notice(notices, detail):
+    notices.append('[owner-attribution] authority UNVERIFIED: '+detail+
+                   '; next check: inspect this exact text; continuing work is not verification')
+
+
+def _active_units(text, budget, previous=None, card_metadata=False):
+    from collections import Counter
+    units = _role_units(text, budget, card_metadata)
+    if previous is None:
+        return units
+    available = Counter(unit.identity for unit in _role_units(previous, budget, card_metadata))
+    added = []
+    for unit in units:
+        budget.check()
+        if available[unit.identity]:
+            available[unit.identity] -= 1
+        else:
+            added.append(unit)
+    return added
+
+
+def _deadline_result(text, *, previous=None, card_metadata=False, notices=None, reaped=False):
+    # Use the exact same role rules with a bounded reserve. An unresolved role
+    # gets a visible warning; a known claim never turns into verified data.
+    notices = [] if notices is None else notices
     fallback = _ReadBudget(time.monotonic()+0.1, 0)
     try:
-        prose = '\n'.join(_prose_lines(text, fallback, timeout_classification=True))
-        if not _has_claim_surface(prose):
-            return None
+        marker = any(_CLAIM_OPEN.search(line) for line, role in
+                     _role_lines(text, fallback, card_metadata)
+                     if role not in ('data', 'metadata'))
+        units = _active_units(text, fallback, previous, card_metadata)
+        known = any(unit.role in ('prose', 'fenced-prose') and (
+            unit.restriction or unit.owner and not (
+                unit.text.lstrip().startswith('#') and not _labelled_quotations(unit.text)
+                and not _RESTRICTION.search(unit.text))) for unit in units)
+        if marker or known:
+            return ('[owner-attribution] admission deadline exhausted; authority UNVERIFIED'
+                    + (' (worker reaped)' if reaped else ''))
+        if any(unit.role == 'uncertain' and _has_claim_surface(unit.text) for unit in units):
+            _unverified_notice(notices, 'text role could not be determined within admission budget')
     except _ReadBudgetExhausted:
-        pass
-    return ('[owner-attribution] admission deadline exhausted; authority UNVERIFIED'
-            + (' (worker reaped)' if reaped else ''))
+        _unverified_notice(notices, 'text role classification deadline exhausted')
+    return None
 
 
-def _bounded_claim(text, transcript_path, options, started):
+def _bounded_claim(text, transcript_path, options, started, notices):
     """The hook's CPU/IO deadline is enforced by an owned, reaped subprocess."""
     import subprocess
     remaining = options['seconds'] - (time.monotonic() - started)
     if remaining <= 0:
-        return _deadline_result(text)
+        return _deadline_result(text, previous=options['previous'],
+            card_metadata=options['card_metadata'], notices=notices)
     packet = {'text': text, 'transcript_path': str(transcript_path) if transcript_path else None,
               **options, 'base': str(options['base']) if options['base'] else None,
               'seconds': remaining}
@@ -678,17 +893,21 @@ def _bounded_claim(text, transcript_path, options, started):
                              cwd=Path(__file__).resolve().parents[1], timeout=remaining)
     except subprocess.TimeoutExpired:
         # subprocess.run kills and waits for this exact worker before raising.
-        return _deadline_result(text, reaped=True)
+        return _deadline_result(text, previous=options['previous'],
+            card_metadata=options['card_metadata'], notices=notices, reaped=True)
     if run.returncode:
         raise RuntimeError('owner-attribution worker failed: exit '+str(run.returncode))
     result = json.loads(run.stdout)
-    if result is not None and not isinstance(result, str):
+    if (not isinstance(result, dict) or 'reason' not in result or result.get('reason') is not None
+            and not isinstance(result['reason'], str) or not isinstance(result.get('notices'), list)
+            or any(not isinstance(notice, str) for notice in result['notices'])):
         raise RuntimeError('owner-attribution worker returned invalid result')
-    return result
+    notices.extend(result['notices'])
+    return result['reason']
 
 
 def claim_violation(text, transcript_path=None, *, previous=None, require_citations=False,
-                    base=None, seconds=2.0, card_metadata=False, hard_deadline=False):
+                    base=None, seconds=2.0, card_metadata=False, hard_deadline=False, notices=None):
     """Return a blocking reason for new authority/restriction claims, else None.
 
     Owner quotations are checked automatically on every surface. Source markers
@@ -699,19 +918,20 @@ def claim_violation(text, transcript_path=None, *, previous=None, require_citati
     """
     if not isinstance(text, str):
         return None
+    notices = [] if notices is None else notices
     started = time.monotonic()
     if not _has_claim_surface(text):
         return None
     if hard_deadline:
         return _bounded_claim(text, transcript_path, dict(previous=previous,
             require_citations=require_citations, base=base, seconds=seconds,
-            card_metadata=card_metadata), started)
+            card_metadata=card_metadata), started, notices)
     budget = _ReadBudget(started+seconds, float('inf'))
     base = Path(base or Path.cwd()).resolve()
     claims = []
     try:
-        lines = _prose_lines(text, budget)
-        prose = '\n'.join(lines)
+        lines = _role_lines(text, budget, card_metadata)
+        prose = '\n'.join(line for line, role in lines if role not in ('data', 'metadata'))
         markers = list(CLAIM_MARKER.finditer(prose))
         if len(markers) != len(list(_CLAIM_OPEN.finditer(prose))):
             raise ValueError('malformed claim metadata')
@@ -719,69 +939,41 @@ def claim_violation(text, transcript_path=None, *, previous=None, require_citati
         _prime_claim_sources(claims, base, budget)
         for claim in claims:
             _validate_claim(claim, base, budget)
-        originals = text.splitlines()
-        added = set(range(len(originals)))
-        if previous is not None:
-            # Count lines with their authority context. Moving an old heading
-            # onto old prose changes that context even when all words are old.
-            from collections import Counter
-            available = Counter()
-            previous_lines = previous.splitlines()
-            old_owner_section = False
-            for number, line in enumerate(_prose_lines(previous, budget)):
-                budget.check()
-                if line.lstrip().startswith('#'):
-                    old_owner_section = bool(_owner_labels(line))
-                available[(previous_lines[number], old_owner_section)] += 1
-            added = set()
-            current_owner_section = False
-            for number, line in enumerate(lines):
-                budget.check()
-                if line.lstrip().startswith('#'):
-                    current_owner_section = bool(_owner_labels(line))
-                key = originals[number], current_owner_section
-                if available[key]:
-                    available[key] -= 1
-                else:
-                    added.add(number)
         quotes = []
-        in_owner_section = False
-        new_owner_section = False
-        # Card metadata is admitted by the existing card_lint/validate path.
-        # JSON proof payloads and descriptions are data, not free prose. Do not
-        # let their embedded examples masquerade as newly asserted limitations.
-        frontmatter_end = None
-        if card_metadata and lines and lines[0].lstrip('\ufeff') == '---':
-            frontmatter_end = next((i for i, line in enumerate(lines[1:], 1) if line == '---'), None)
-        for number, line in enumerate(lines):
+        for unit in _active_units(text, budget, previous, card_metadata):
             budget.check()
-            if frontmatter_end is not None and number <= frontmatter_end:
+            if unit.role in ('data', 'metadata', 'reported'):
                 continue
-            if line.lstrip().startswith(('```', '~~~')):
+            if unit.role == 'uncertain':
+                if _has_claim_surface(unit.text):
+                    _unverified_notice(notices, 'text role could not be determined')
                 continue
-            if _HISTORY.match(line):
-                continue
-            # The annotation is data, but prose beside it still makes claims.
-            line = CLAIM_MARKER.sub('', line)
+            line = unit.text
             if line.lstrip().startswith('#'):
-                in_owner_section = bool(_owner_labels(line))
-                new_owner_section = in_owner_section and number in added
                 if not (_labelled_quotations(line) or _RESTRICTION.search(line)):
                     continue
-            if (number not in added and not new_owner_section) or not line.strip():
-                continue
-            owner_claim = bool(_owner_labels(line)) or in_owner_section
-            restriction = bool(_RESTRICTION.search(line)) and (
-                owner_claim or bool(_NEW_RULE.search(line)) or _operative_cancel(line))
+            owner_claim = unit.owner
+            restriction = unit.restriction
             if not owner_claim and not restriction:
                 continue
-            matching = [claim for claim in claims if claim['text'] in line]
-            labelled = _labelled_quotations(line, in_owner_section) if owner_claim else []
+            matching = []
+            covered = {}
+            for claim in claims:
+                if claim['text'] in line:
+                    covered[id(claim)] = claim['text']
+                elif claim['kind'] == 'ai-derived' and line.strip() in {
+                        sentence.strip() for part in claim['text'].splitlines()
+                        for sentence in _sentences(part)}:
+                    covered[id(claim)] = line
+                else:
+                    continue
+                matching.append(claim)
+            labelled = _labelled_quotations(line, unit.section) if owner_claim else []
             if owner_claim:
                 matching = [claim for claim in matching if claim['kind'] == 'owner-directive']
             residual = line
             for claim in matching:
-                residual = residual.replace(claim['text'], '')
+                residual = residual.replace(covered[id(claim)], '')
             if (matching and not _RESTRICTION.search(residual)
                     and all(quote in {claim['text'] for claim in matching} for quote in labelled)):
                 continue
@@ -807,6 +999,8 @@ def claim_violation(text, transcript_path=None, *, previous=None, require_citati
                 if not origin['human_authored']:
                     raise ValueError(f'owner attribution rejected: first occurrence role={origin["role"]}, L{origin["line"]}')
         budget.check()
+    except _ReadBudgetExhausted:
+        return _deadline_result(text, previous=previous, card_metadata=card_metadata, notices=notices)
     except (ValueError, TypeError, OSError, KeyError, UnicodeError) as exc:
         return f'[owner-attribution] {exc}'
     return None
@@ -1045,4 +1239,6 @@ if __name__ == '__main__':
         raise SystemExit('only --claim-worker is supported')
     sys.stdin.reconfigure(encoding='utf-8')
     sys.stdout.reconfigure(encoding='utf-8')
-    print(json.dumps(claim_violation(**json.load(sys.stdin)), ensure_ascii=False))
+    notices = []
+    reason = claim_violation(**json.load(sys.stdin), notices=notices)
+    print(json.dumps({'reason': reason, 'notices': notices}, ensure_ascii=False))

@@ -545,6 +545,201 @@ class OwnerAttributionRegression(unittest.TestCase):
         self.assertIsNotNone(provenance.claim_violation(old+f'owner 原話：「{ASSISTANT_WORDS}」',
             self.path, previous=old, hard_deadline=True))
 
+    def review_source(self, arguments):
+        truth, invented = '先改回用正常codex', '工作超過十分鐘必須取消'
+        if arguments:
+            self.rows = [{'type': 'session_meta', 'payload': {'id': 'incident'}}] + [
+                {'type': 'response_item', 'payload': {'type': 'message', 'role': role,
+                    'id': role, 'content': [{'type': 'output_text' if role == 'assistant'
+                        else 'input_text', 'text': text}]}}
+                for role, text in (('assistant', invented), ('user', truth))]
+        else:
+            self.rows = [{'type': role, 'sessionId': 'incident', 'uuid': role,
+                'message': {'content': text}}
+                for role, text in (('assistant', invented), ('user', truth))]
+        self.write_rows()
+        return truth, invented
+
+    def check_surface(self, text, tool, arguments, blocked, previous='一般進度。', clock=None):
+        target = self.root/'fix3.md'
+        target.write_text(previous, encoding='utf-8')
+        event = {**self.event, 'last_assistant_message': text} if tool == 'Stop' else {
+            **self.event, 'tool_name': tool, 'tool_input': (
+                {'prompt': text} if tool == 'Task' else
+                {'file_path': str(target), 'old_string': previous, 'new_string': text}
+                if tool == 'Edit' else {'file_path': str(target), 'content': text})}
+        result = common.run_synthetic(ROOT/'adapters/claude'/(
+            'stop_gate.py' if tool == 'Stop' else 'pretooluse_gate.py'),
+            event, self.config, arguments=arguments, clock=clock)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output = json.loads(result.stdout) if result.stdout.strip() else {}
+        denied = output.get('decision') == 'block' or output.get(
+            'hookSpecificOutput', {}).get('permissionDecision') == 'deny'
+        self.assertEqual(denied, blocked, (tool, arguments, text, output, result.stderr))
+        return output, result.stderr
+
+    def test_fix3_all_rereview_counterexamples_all_surfaces_both_hosts(self):
+        for arguments in ((), ('--codex',)):
+            truth, invented = self.review_source(arguments)
+            false = f'owner 原話：「{invented}」'
+            cases = [(f'owner 原話：`{truth}`', False),
+                     (f'owner 原話：``{truth}``', False),
+                     (f'owner 原話：`{invented}`', True),
+                     ('前置檢查已經超過 10 分鐘沒有前進，就直接取消。', True),
+                     ('前置檢查已經超過預估一半以上就直接取消。', True),
+                     ('昨天前置檢查已取消。\n前置檢查超過 10 分鐘沒有前進，就直接取消。', True),
+                     (f'owner 原話：「{truth}」。`禁止修改產品程式。`', True)]
+            cases += [(f'```{language}\n{false}\n```', True)
+                      for language in ('', 'python', 'javascript', 'yaml')]
+            for tool in ('Write', 'Edit', 'Task', 'Stop'):
+                for text, blocked in cases:
+                    with self.subTest(host=arguments, tool=tool, text=text):
+                        self.check_surface(text, tool, arguments, blocked)
+
+    def test_fix3_role_promotion_and_each_exemption_abuse(self):
+        for arguments in ((), ('--codex',)):
+            truth, invented = self.review_source(arguments)
+            false = f'owner 原話：「{invented}」'
+            sample = '```python\n"""\n'+false+'\n"""\n```'
+            history = '錯誤紀錄：主控當時誤稱 '+false
+            for before in (sample, '```javascript\n'+false+'\n```', history):
+                with self.subTest(host=arguments, promotion=before):
+                    self.check_surface(false, 'Edit', arguments, True, previous=before)
+            pairs = [
+                (sample, sample+'\n'+false),
+                (f'```javascript\nconst label = "owner 10-03";\n```',
+                 f'```javascript\nconst label = "owner 10-03";\n{false}\n```'),
+                (history, history+'。'+false),
+                (history, history+'，'+false),
+                ('昨天前置檢查超過10分鐘，已取消。',
+                 '昨天前置檢查已取消。前置檢查已經超過預估一半就直接取消。'),
+                ('下一步請 owner 決定要不要合併。',
+                 '下一步請 owner 決定。'+false),
+                ('API 每次最多 100 筆。', '規則：工作程序只能跑10分鐘。'),
+                ('只改文件，禁止修改產品程式。', 'owner 要求：「禁止修改產品程式。」'),
+                ('你訂的餐廳已列入行程。', false),
+                (f'引用資料：「{false}」。', f'引用資料：{false}'),
+                ('```python\nassert label == "owner 10-03"\n```',
+                 '```python\n# '+false+'\nassert label == "owner 10-03"\n```'),
+            ]
+            for ordinary, abuse in pairs:
+                for tool in ('Write', 'Edit', 'Task', 'Stop'):
+                    with self.subTest(host=arguments, tool=tool, exempt=ordinary):
+                        self.check_surface(ordinary, tool, arguments, False)
+                        self.check_surface(abuse, tool, arguments, True)
+            # Unchanged legacy prose stays exempt; changing its authority does not.
+            self.check_surface(false+'\n\n一般進度。', 'Edit', arguments, False, previous=false)
+            self.check_surface('# owner 原話\n「'+invented+'」', 'Edit', arguments, True,
+                               previous='# 討論\n「'+invented+'」')
+            # Registered frontmatter is checked by card lint; an ordinary wrapper isn't.
+            self.check_surface('---\n'+false+'\n---', 'Write', arguments, True)
+
+    def test_fix3_zero_budget_uses_content_not_fence_language(self):
+        truth, invented = self.review_source(())
+        for language in ('', 'python', 'javascript', 'yaml', 'unknown'):
+            for text in (f'owner 原話：「{invented}」',
+                         '前置檢查已經超過 10 分鐘，就直接取消。'):
+                reason = provenance.claim_violation(f'```{language}\n{text}\n```',
+                    self.path, seconds=0, hard_deadline=True)
+                self.assertIn('UNVERIFIED', reason, (language, text))
+        self.assertIsNone(provenance.claim_violation(
+            'API 每次最多 100 筆。', seconds=0, hard_deadline=True))
+
+    def test_fix3_uncertain_role_warns_and_never_becomes_verified(self):
+        text = '```custom\nemit!{"owner 10-03"}\n```'
+        for arguments in ((), ('--codex',)):
+            self.review_source(arguments)
+            for tool in ('Write', 'Edit', 'Task', 'Stop'):
+                with self.subTest(host=arguments, tool=tool):
+                    output, diagnostic = self.check_surface(text, tool, arguments, False)
+                    self.assertIn('UNVERIFIED', json.dumps(output)+diagnostic)
+        for seconds in (0, 2):
+            notices = []
+            self.assertIsNone(provenance.claim_violation(text, seconds=seconds,
+                hard_deadline=True, notices=notices))
+            self.assertTrue(notices)
+            self.assertIn('UNVERIFIED', notices[0])
+
+    def test_fix3_classifier_exhaustion_warns_without_deadlocking_ordinary_work(self):
+        notices = []
+        with patch.object(provenance, '_role_units', side_effect=provenance._ReadBudgetExhausted):
+            self.assertIsNone(provenance.claim_violation('owner 10-03', seconds=0,
+                hard_deadline=True, notices=notices))
+        self.assertIn('UNVERIFIED', notices[0])
+
+    def test_fix3_reporting_requires_an_actual_report_and_keeps_heading_scope(self):
+        false = f'owner 原話：「{ASSISTANT_WORDS}」'
+        cancel = '前置檢查已經超過10分鐘，就直接取消。'
+        for text, blocked in (
+                ('錯誤紀錄：主控沒有誤稱 '+false, True),
+                ('錯誤紀錄：主控當時誤稱「'+cancel+'」', False),
+                ('錯誤紀錄：主控當時誤稱「'+cancel+'」。'+cancel, True),
+                ('# owner 原話\n## 指示\n「'+ASSISTANT_WORDS+'」', True),
+                ('# owner 原話\n## 指示\n「'+OWNER_WORDS+'」', False),
+                ('當時前置檢查超過10分鐘就取消了。', False),
+                ('昨天前置檢查超過10分鐘，已直接取消。', False),
+                ('昨天前置檢查超過預估一半，已經立即取消。', False),
+                ('當時前置檢查超過10分鐘就取消了。'+cancel, True)):
+            with self.subTest(text=text):
+                self.assertEqual(provenance.claim_violation(text, self.path) is not None, blocked)
+
+    def test_fix3_registered_metadata_does_not_exempt_body_or_fake_wrappers(self):
+        front = '---\nname: sample\ndescription: owner 原話：「範例資料」\nmetadata:\n  type: knowledge\n---\n'
+        self.assertIsNone(provenance.claim_violation(front+'一般進度。', card_metadata=True))
+        self.assertIsNotNone(provenance.claim_violation(front+f'owner 原話：「{ASSISTANT_WORDS}」',
+            self.path, card_metadata=True))
+        self.assertIsNotNone(provenance.claim_violation(front+'一般進度。', self.path))
+
+    def test_fix3_expired_host_preserves_claim_decision_and_ordinary_work(self):
+        for arguments in ((), ('--codex',)):
+            truth, invented = self.review_source(arguments)
+            for tool in ('Write', 'Edit', 'Task', 'Stop'):
+                for text, blocked in ((f'```python\nowner 原話：「{invented}」\n```', True),
+                                      ('```python\nassert label == "owner 10-03"\n```', False),
+                                      ('API 每次最多 100 筆。', False)):
+                    with self.subTest(host=arguments, tool=tool, text=text):
+                        output, diagnostic = self.check_surface(text, tool, arguments, blocked,
+                            clock=common.memspec.HOOK_CLOCK_EXPIRED)
+                        if blocked:
+                            self.assertIn('UNVERIFIED', json.dumps(output)+diagnostic)
+
+    def test_fix3_examined_quotations_and_denials_are_local_roles(self):
+        cancel = '前置檢查超過10分鐘就取消。'
+        false = f'owner 原話：「{ASSISTANT_WORDS}」'
+        for text, blocked in (
+                ('拒絕測例：「'+cancel+'」', False),
+                ('拒絕測例：「'+cancel+'」，以後照做。', True),
+                ('不是 '+false, False),
+                ('不是 '+false+'；'+false, True),
+                ('不是 owner 原話：「'+cancel+'」', False),
+                ('不是 owner 原話：「'+cancel+'」，以後照做。', True),
+                ('下一步請 owner 決定。owner 已裁定：「'+ASSISTANT_WORDS+'」', True),
+                ('範例：'+false, True)):
+            with self.subTest(text=text):
+                self.assertEqual(provenance.claim_violation(text, self.path) is not None, blocked)
+        self.assertIsNone(provenance.claim_violation(
+            '錯誤紀錄：主控當時誤稱 '+false+'，owner 原話：「'+OWNER_WORDS+'」', self.path))
+
+    def test_fix3_claim_metadata_cannot_hide_a_second_cancel_rule(self):
+        original = self.limitation(30)
+        for second in ('前置檢查超過10分鐘且已確認工作程序卡死才取消',
+                       '前置檢查超過預估一半以上就直接取消'):
+            claim = copy.deepcopy(original)
+            claim['text'] += '。'+second
+            with self.subTest(second=second):
+                self.assertIsNotNone(provenance.claim_violation(self.marker(claim)))
+        claim = copy.deepcopy(original)
+        claim['text'] += '。前置檢查超過35分鐘且已確認工作程序卡死才取消'
+        self.assertIsNone(provenance.claim_violation(claim['text']+'\n'+self.marker(claim)))
+
+    def test_fix3_large_syntax_at_zero_budget_warns_without_running_heavy_parser(self):
+        text = '```python\n'+('label = "owner 10-03"\n'*2000)+'```'
+        notices = []
+        with patch.object(provenance, '_statement_data', side_effect=AssertionError('no reserve for parser')):
+            self.assertIsNone(provenance.claim_violation(text, seconds=0,
+                hard_deadline=True, notices=notices))
+        self.assertIn('UNVERIFIED', notices[0])
+
     @unittest.skipUnless(REAL_TRANSCRIPT, 'explicit original transcript required')
     def test_real_original_snapshot_record_replay(self):
         rows = {}

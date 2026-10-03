@@ -44,9 +44,13 @@ match. The locator must identify the first original occurrence, and the text
 must equal the quotation; interpretations need AI attribution. Paths are relative
 to the target file's directory, or absolute. An unrelated true quotation cannot
 authorize a second claim or an adjacent prohibition. Owner headings and prose
-beside annotations still undergo admission checks. Actual code examples and
-inline code literals are data; a generic fence around owner prose is not an
-exemption. Technical descriptions and ordinary task constraints with no owner
+beside annotations still undergo admission checks. Single and repeated inline
+backticks preserve exact owner quotations; their contents are never removed just
+because they are formatted as code. Actual AST/JSON data and recognized literal
+statements are examples; code comments and adjacent prose remain active. A fence's
+language name grants no exemption, including on timeout. Unsupported syntax with
+authority-looking string data yields an UNVERIFIED warning, not verified authority.
+Technical descriptions and ordinary task constraints with no owner
 attribution or newly asserted operating rule do not need claim metadata.
 
 ## AI-derived restrictions
@@ -66,8 +70,17 @@ freshness interval invented by this guard. A duration cancellation threshold is
 compared in seconds against the upper observed range for the same subject; a
 ten-minute timeout contradicting a normal fifteen-to-twenty-five-minute range is
 rejected. An unexplained cancellation ratio is unverified.
-Conditional cancellation directives are checked even without a leading phrase
-such as "new rule"; an ordinary report of an earlier cancellation is not one.
+Conditional cancellation directives are checked sentence by sentence even without
+a leading phrase such as "new rule". "Already exceeded ten minutes" does not mean
+cancellation has happened. Completion attaches to the cancellation action itself;
+a completed historical sentence does not exempt the next instruction, including
+another sentence on the same line. Quoted specimens being examined and explicit
+denials of owner attribution are references; adopting the quoted instruction or
+adding another authority assertion keeps that new assertion active.
+Attached AI claim payloads receive the same sentence-by-sentence duration/ratio
+checks. One valid threshold cannot license another contradictory one. Valid
+multi-sentence AI claims match their exact checked sentence fragments; owner
+directives still require the full exact quotation and earliest authorship check.
 Cancellation also requires `cancel_condition` in both the proposed text and
 source evidence, plus source-bound `checkpoint`, `redo_cost` and `recovery`.
 Elapsed time or silent logs alone cannot justify discarding valid work.
@@ -81,24 +94,39 @@ earliest authorship through their original source locators.
 * Hook admission shares one two-second budget across its calls. Claim evaluation
   runs in an owned subprocess with a hard CPU/IO timeout; timeout kills and reaps
   that worker. Ordinary prose without authority or operating rules returns
-  without source IO. Timeout does not invent an authority claim in code data;
-  unresolved authority remains UNVERIFIED. Direct helper calls additionally
-  check deadlines throughout scanning and classification.
+  without source IO. A bounded 0.1-second reserve uses the same content/role rules,
+  never the fence language. Known authority whose evidence cannot be checked stays
+  UNVERIFIED and blocks. If the role itself cannot be determined or classification
+  exhausts the reserve, work continues with a visible per-call UNVERIFIED warning.
+  This is not a positive source result and creates no positive cache. Both hosts'
+  Write/Edit/Task/Stop entrypoints carry these diagnostics, including after the
+  host budget expires for structured Markdown writes. Unexpected exceptions still
+  follow the existing degraded-mode contract below. Direct helpers accept a
+  `notices` sink and check deadlines throughout scanning and classification.
+  Reserve syntax parsing is limited to 16 KiB of code text so an expensive AST or
+  JSON parse cannot run without available verification resources. Larger syntax
+  is explicitly unclassified/UNVERIFIED with a warning, not accepted as evidence.
 * Transcript admission streams bounded rows through the initial snapshot without
   the former 64 MiB file-size ceiling. It checks the earliest physical occurrence
   and rereads the examined prefix. Multiple attached claims sharing one file scan
   its prefix once, then reread/hash-check cited rows. There is no persistent
   positive cache. An unreadable prefix, rewrite or exhausted deadline still blocks
   a claim. Existing explicit card-verification resource budgets remain supported.
-* File edits use linear counts of lines and their owner-heading context instead
-  of quadratic sequence matching. Unchanged prose is skipped; moving an owner
-  heading onto old prose changes its authority context and is checked. Registered memory-card
+* File edits use linear counts of sentence text, its data/report/prose role,
+  owner-heading ancestry and paragraph authority instead of quadratic sequence
+  matching. Unchanged text is skipped only when its role and context also match;
+  removing a code string/fence, promoting a reported error, moving an owner
+  heading or changing paragraph authority triggers a check. Owner subheadings
+  inherit the enclosing authority section. Registered memory-card
   frontmatter continues through the existing card lint/provenance path. A fake
   frontmatter wrapper in an ordinary plan does not exempt its prose.
-* Lines explicitly labelled as historical error reports or cited data are data,
-  not new authority claims. A reported error must not be reused as an operative
-  instruction. That distinction, implicit paraphrases, arbitrary semantic
-  entailment and the truth of self-reported observations still require review.
+* Historical labels alone confer no exemption. The individual sentence must
+  actually report a mistaken assertion or quote material as a reference.
+  Denying that the assertion was mistaken affirms it and remains a claim.
+  References cannot exempt adjacent operative instructions. This is a bounded
+  grammar of explicit roles, not a general natural-language entailment proof;
+  implicit paraphrases, other grammatical forms and the truth of self-reported
+  observations still require review.
 * Python `-c` and here-documents with imported literal Path targets, `write_text`,
   aliases, bounded string addition, UTF-8 reads and replacement use the same gate.
   The submitted Python code is parsed, never executed by the guard. Queries and
@@ -144,6 +172,10 @@ Installation belongs to the lead after reviewing the commit and test artifacts:
 4. Verify one false attribution is blocked and one genuine quotation passes in
    each host. Confirm write/dispatch denials and compact-map separation. Read back
    the configured root and loaded code. A passing isolated test is not deployment
-   evidence. Restore the backed-up config to roll back the root selection.
+   evidence. To return to the old root and its nightly target, use the same
+   existing `python -m epitype relocate --to <previous-root> --dry-run`, review,
+   then run without `--dry-run`. Read back config `repo_root`, run doctor and
+   query the existing nightly scheduler's command to confirm both old targets.
+   Keep the transaction backup; restoring config alone does not restore nightly.
 
 This change is source preparation until those installation checks are performed.

@@ -44,6 +44,7 @@ from _hook_common import (
     notice_marker_directory,
     payload_fits,
     read_event,
+    remaining_seconds,
     recall_marker_directory,
     release_meter,
     resolve_vaults,
@@ -1648,11 +1649,12 @@ def _review_one_target(event, config, target, additions, prospective, started_at
                     after if after is not None else "\n".join(additions),
                     event.get("transcript_path"), previous=before if after is not None else None,
                     require_citations=True, base=target.parent,
-                    seconds=max(0.0, 2.0-(time.monotonic()-started_at)), hard_deadline=True,
-                    card_metadata=_vault_card_path(target, resolve_vaults(config, event)) is not None)
+                    seconds=max(0.0, min(2.0-(time.monotonic()-started_at), remaining_seconds(started_at))), hard_deadline=True,
+                    card_metadata=bool(config) and _vault_card_path(target, resolve_vaults(config, event)) is not None,
+                    notices=notices)
                 if reason:
                     return _deny_value(reason), notices
-                if event.get("stop_hook_active"):
+                if event.get("stop_hook_active") or expired(started_at):
                     return None, notices
                 reason = (owner_rules.violation(before, after, resolve_vaults(config, event))
                           if after is not None else None)
@@ -1667,8 +1669,8 @@ def _review_one_target(event, config, target, additions, prospective, started_at
             candidate = prospective if isinstance(prospective, str) else "\n".join(additions)
             reason = rule_provenance.claim_violation(
                 candidate, event.get("transcript_path"), require_citations=True,
-                base=target.parent, seconds=max(0.0, 2.0-(time.monotonic()-started_at)),
-                hard_deadline=True)
+                base=target.parent, seconds=max(0.0, min(2.0-(time.monotonic()-started_at), remaining_seconds(started_at))),
+                hard_deadline=True, notices=notices)
             if reason:
                 return _deny_value(reason), notices
             if (owner_rules.BEGIN in str(prospective or "")
@@ -1943,7 +1945,7 @@ def _write_review(event, tool_name, tool_input, config, started_at):
         return None, []
     if tool_name.casefold() in memspec.WRITE_GATE_TOOL_NAMES:
         target = _write_target(tool_input, event.get("cwd"))
-        if target is None or expired(started_at):
+        if target is None:
             return None, []
         additions, prospective = _prospective_write(tool_name, tool_input, target)
         return _review_one_target(
@@ -2142,6 +2144,7 @@ def _waste_review(event, tool_name, tool_input, config, started_at):
 
 def _handle(event, started_at, defects=None, meter_claims=None, advice_claims=None):
     """Review source-bound dispatches, writes, then existing action guards."""
+    defects = [] if defects is None else defects
     # Dispatch prose is another authority-writing surface. Do not inspect read
     # queries or arbitrary shell strings as if they were new instructions.
     dispatch_name = str(event.get("tool_name", "")).casefold()
@@ -2151,17 +2154,26 @@ def _handle(event, started_at, defects=None, meter_claims=None, advice_claims=No
             for key in ("prompt", "message", "instructions"):
                 reason = rule_provenance.claim_violation(
                     dispatch.get(key), event.get("transcript_path"), require_citations=True,
-                    base=event.get("cwd"), seconds=max(0.0, 2.0-(time.monotonic()-started_at)),
-                    hard_deadline=True)
+                    base=event.get("cwd"), seconds=max(0.0, min(2.0-(time.monotonic()-started_at), remaining_seconds(started_at))),
+                    hard_deadline=True, notices=defects)
                 if reason:
                     return _deny_value(reason)
-    defects = [] if defects is None else defects
     tool_name = event.get("tool_name")
     if not isinstance(tool_name, str) or not tool_name:
         return None
     config = load_config(started_at)
     if config is None:
-        return None
+        # Configuration expiry cannot silently waive a recognized Markdown
+        # claim. Reuse reconstruction/admission; all other write guards keep
+        # their expired contract. This path never runs card or state mutations.
+        try:
+            value, notices = _write_review(event, tool_name, event.get("tool_input"), {}, started_at)
+            defects.extend(notices)
+            return value
+        except Exception as exc:
+            defects.append(f"write admission UNVERIFIED: expired review failed ({type(exc).__name__}); "
+                           "next check: inspect this exact tool call")
+            return None
     advisories = []
     try:
         guard_value = _guard_review(
@@ -2196,6 +2208,10 @@ def _handle(event, started_at, defects=None, meter_claims=None, advice_claims=No
                        "next check: inspect this exact tool call")
     if write_value is not None:
         return write_value
+    # Authority uncertainty must be visible on this call, not suppressed by the
+    # ordinary repeated-advice marker used for optional write suggestions.
+    defects.extend(notice for notice in notices if notice.startswith('[owner-attribution]'))
+    notices = tuple(notice for notice in notices if not notice.startswith('[owner-attribution]'))
     try:
         waste_value, waste_notice = _waste_review(
             event, tool_name, event.get("tool_input"), config, started_at
