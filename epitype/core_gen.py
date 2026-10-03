@@ -1004,7 +1004,7 @@ def main(argv=None, output=sys.stdout):
     parser.add_argument("vaults", nargs="+", type=Path)
     parser.add_argument("--out", required=True, type=Path, help="file to assemble the core block into")
     parser.add_argument("--cap-bytes", type=int, default=None,
-                        help="refuse to write past this size (default: config core_cap_bytes; unset means no cap)")
+                        help="warn past this size while keeping all rules (default: config core_cap_bytes; unset means no warning)")
     parser.add_argument("--dry-run", action="store_true", help="print the assembly, write nothing")
     parser.add_argument("--check", action="store_true",
                         help="compare the assembly with --out byte for byte; exit non-zero when they differ")
