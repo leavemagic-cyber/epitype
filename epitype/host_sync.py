@@ -9,7 +9,7 @@ import sys; sys.dont_write_bytecode = True
   - 只動兩個標記之間，其餘逐位元組不碰；
   - 標記必須剛好一對，重複／巢狀／順序顛倒一律拒絕，絕不猜使用者的意思；
   - 先備份再原子寫入；
-  - 每塊有位元組上限，超過就拒絕寫——那個檔每一場都整份載入，寫爆是天天付錢。
+  - 自訂 core 預算超限只提醒，保留完整指示；宿主載入限制與標記完整性另查。
 
 第一次 `--apply` 會把區塊建起來（附加在檔尾，或連檔案一起建）。舊的私人標記認得，會
 就地換成產品標記，不會在同一個檔裡長出第二塊一樣的內容。
@@ -36,7 +36,7 @@ from epitype import capture_route, core_gen, host_native, memspec
 Region = namedtuple("Region", "name text present current unrecognised", defaults=(0,))
 # key：狀態表的鍵。全域宿主檔一個宿主一個檔，用宿主名就分得開；專案根的檔案名兩個專案
 # 會一模一樣（都叫 AGENTS.md），所以那一種用絕對路徑。None＝這是全域宿主檔。
-Plan = namedtuple("Plan", "host path regions problems damaged key", defaults=(None,))
+Plan = namedtuple("Plan", "host path regions problems damaged key notices", defaults=(None, ()))
 
 STATE_FILENAME = "host_sync_state.json"
 
@@ -295,8 +295,7 @@ def _plan(host, label, key, path, wanted_of, home=None):
     except Exception as exc:
         return Plan(label, path, [], [f"組不出要寫的內容：{type(exc).__name__}: {exc}"], False, key)
 
-    # 設了 core_cap_bytes 就是規則塊的上限：core-gen 超過會拒寫，而代理真正讀到的是這裡
-    # 寫進去的字，這裡不守的話那個上限等於沒設。
+    # 自訂 core 預算只提醒，不能因此漏掉已授權的新指示；宿主載入與標記完整性另查。
     configured = memspec.config_options()
     rules_cap = core_gen._cap_of(None, configured)
     shared_index_cap = configured.get(memspec.CONFIG_SHARED_INDEX_CAP_BYTES_FIELD)
@@ -311,11 +310,10 @@ def _plan(host, label, key, path, wanted_of, home=None):
             )
             continue
         if name == memspec.HOST_SYNC_RULES_REGION and rules_cap is not None and size > rules_cap:
-            problems.append(
+            notices.append(
                 f"{name} 有 {size} 位元組，超過設定的 {memspec.CONFIG_CORE_CAP_BYTES_FIELD} "
-                f"{rules_cap}；先讓規則瘦身或調整上限再同步"
+                f"{rules_cap}；已保留完整新規則，容量僅提醒"
             )
-            continue
         if (key is None and name == memspec.HOST_SYNC_INDEX_REGION
                 and shared_index_cap is not None and size > shared_index_cap):
             problems.append(
@@ -365,7 +363,7 @@ def _plan(host, label, key, path, wanted_of, home=None):
         )
         regions.append(Region(name, text, found is not None, inner, unrecognised))
     problems.extend(_budget_problems(host, path, raw, regions, home))
-    return Plan(label, path, regions, problems, damaged, key)
+    return Plan(label, path, regions, problems, damaged, key, tuple(notices))
 
 
 PROJECT_SKIP_NO_ROOT = "找不到專案根（對話紀錄無 cwd 或目錄已不在）"
@@ -665,6 +663,8 @@ def check(vaults, hosts=None, home=None, output=sys.stdout):
     _report_skipped(skipped, output)
     drift = refused = 0
     for item in plans:
+        for notice in item.notices:
+            print(f"NOTE   {item.host}: {notice}", file=output)
         # 整個宿主停手時不要先講一句沒發生的事：標記壞掉那一種是一個位元組都不動的。
         if not item.damaged:
             for region in item.regions:
@@ -716,6 +716,8 @@ def apply(vaults, hosts=None, home=None, output=sys.stdout, actor=memspec.HOST_S
     _report_skipped(skipped, output)
     refused = written = 0
     for item in plans:
+        for notice in item.notices:
+            print(f"NOTE   {item.host}: {notice}", file=output)
         for problem in item.problems:
             print(f"REFUSE {item.host}: {problem}", file=output)
         if item.problems:
@@ -1235,7 +1237,7 @@ def _selftest():
                 and "使用者自己的索引" in log and "由 測試用的取代者 取代" in log,
             ))
 
-            # 設了 core_cap_bytes：規則塊超過就拒寫，索引照寫；沒設時同一份規則照常寫得進去。
+            # 自訂 core 預算只提醒，不因容量丟掉已核的新規則。
             fresh("corecap", "序言\n")
             if _state_path(home).exists():
                 _state_path(home).unlink()
@@ -1245,9 +1247,9 @@ def _selftest():
             code = apply([vault], hosts=["claude"], home=home, output=report)
             written = (home / ".claude" / "CLAUDE.md").read_text(encoding="utf-8")
             checks.append((
-                "規則塊超過設定的 core_cap_bytes：拒寫並指名上限，索引照寫",
-                code == EXIT_REFUSED and memspec.CONFIG_CORE_CAP_BYTES_FIELD in report.getvalue()
-                and begin not in written and "一張卡" in written,
+                "規則塊超過 core_cap_bytes 仍完整寫入，指名容量提醒",
+                code == EXIT_OK and memspec.CONFIG_CORE_CAP_BYTES_FIELD in report.getvalue()
+                and begin in written and "一張卡" in written,
             ))
             selftest_config.write_text(json.dumps({"vaults": [str(vault)]}), encoding="utf-8")
             code = apply([vault], hosts=["claude"], home=home, output=io.StringIO())

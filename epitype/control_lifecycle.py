@@ -61,11 +61,10 @@ _NO_PANE = "No preview is open"
 COLAB_ORIGIN = "https://colab.research.google.com"
 _COLAB_NOTEBOOK = re.compile(r"/drive/([A-Za-z0-9_-]{8,128})/?")
 
-# 只有這兩種分頁的建立能從工具結果確認是本場建的；擋下非瀏覽器工具的只有它們。
-# 分頁群組、無法確認的紀錄、Codex CUA 分頁仍只提醒。
+# 只有這兩種分頁的建立能從工具結果確認是本場建的。
+# 所有待收尾資源都只提醒，不封鎖與資源無關的工具。
 BLOCKING_KINDS = ("chrome-tab", "pane-tab")
-# 使用者整則訊息就是這四個字（不計空白標點），本場還開著的分頁就不再擋（仍會提醒）；給這個
-# session 沒有能關分頁的瀏覽器工具時用。只比對整則：「不要放行分頁」或轉貼的長段落都不算。
+# 舊口令仍相容；也接受有目標的自然保留指示與明確停止指示。
 RELEASE_PHRASE = "放行分頁"
 _NOT_LETTERS = re.compile(r"[\W_]+")
 # 擋住時仍要放行的工具：收尾本身要載入關分頁的工具、讀操作說明、問使用者、記待辦、停背景工作。
@@ -74,9 +73,8 @@ UNBLOCKED_TOOLS = frozenset((
     "TaskList", "TaskGet", "TaskStop", "EnterPlanMode", "ExitPlanMode",
 ))
 SHELL_TOOLS = frozenset(("Bash", "PowerShell"))
-# 保留宣告要拿最近幾分鐘內看到的網址核對；navigate 以外的點擊也可能換頁，舊網址不算數。
+# 相容舊呼叫端的常數，保留與否依分頁及最新網址狀態判斷，不依固定時限。
 KEEP_EVIDENCE_SECONDS = 300
-# Colab 單次執行階段最長約 24 小時；過了要重新宣告（重新核對網址）。
 KEEP_TTL_SECONDS = 24 * 3600
 _PYTHON_NAME = r"(?:python(?:\d+(?:\.\d+)?)?w?|py)(?:\.exe)?"
 _KEEP_COMMAND = re.compile(
@@ -312,9 +310,10 @@ def _cleanup(db, now):
     cutoff = now - RETENTION_SECONDS
     db.execute("DELETE FROM calls WHERE seen<?", (now - CALL_RETENTION_SECONDS,))
     db.execute("DELETE FROM events WHERE seen<?", (cutoff,))
-    db.execute("DELETE FROM resources WHERE changed<?", (cutoff,))
+    db.execute("DELETE FROM resources WHERE changed<? AND status<>'open'", (cutoff,))
     db.execute("DELETE FROM alerts WHERE seen<?", (cutoff,))
-    db.execute("DELETE FROM session_state WHERE updated<?", (cutoff,))
+    db.execute("DELETE FROM session_state WHERE updated<? AND session NOT IN "
+               "(SELECT session FROM resources WHERE status='open')", (cutoff,))
 
 
 def _fingerprint(kind, resource_id, opened):
@@ -921,51 +920,46 @@ def reminder(event: dict, path: Path, stage: str, *, claim=True) -> str | None:
 def _kept(state, kind, resource_id, opened, now):
     held = _marks(state, "kept").get(_key(kind, resource_id))
     return (isinstance(held, dict) and held.get("opened") == opened
-            and isinstance(held.get("since"), (int, float))
-            and now - held["since"] < KEEP_TTL_SECONDS)
+            and isinstance(held.get("since"), (int, float)))
 
 
 def blockers(event: dict, path: Path, *, record=False):
-    """Our confirmed tabs that must be closed before this non-browser call.
+    """Compatibility entrypoint: resource cleanup never blocks unrelated work."""
+    return []
 
-    Only the calling agent's own chrome-tab / pane-tab rows count. A Chrome tab
-    missing from the latest group listing is out of the agent's reach (closed by
-    someone else, dragged out, group dissolved, Chrome disconnected) and no longer
-    blocks; a declared running-VM Colab tab is exempt until its TTL or its URL
-    changes; tabs the owner released by message stop blocking. record=True counts
-    each denial per resource in the ledger.
-    """
-    name = event.get("tool_name")
+
+def navigation_target(event: dict, path: Path, tab=None, url=None):
+    """Select an owned idle Chrome tab; never redirect another actor's or kept VM tab."""
     session = event.get("session_id", event.get("sessionId"))
-    if (not isinstance(name, str) or not name or is_control_tool(name)
-            or name in UNBLOCKED_TOOLS or not isinstance(session, str) or not session
-            or not path.is_file()):
-        return []
+    if not isinstance(session, str) or not path.is_file():
+        return (str(tab), None) if tab is not None else (None, "尚無本場分頁證據，可先建立或選定分頁並填入 ID。")
     now = _now()
     with _database(path) as db:
         rows = [row for row in _pending(db, session, now, _agent(event))
-                if row[0] in BLOCKING_KINDS]
-        if not rows:
-            return []
+                if row[0] == "chrome-tab"]
         state = _state(db, session)
         visible = state.get("chrome_visible")
-        released = _marks(state, "released")
-        found = [
-            (kind, resource_id, opened) for kind, resource_id, opened, _ in rows
-            if not (kind == "chrome-tab" and isinstance(visible, list)
-                    and resource_id not in visible)
-            and not _kept(state, kind, resource_id, opened, now)
-            and (released.get(_key(kind, resource_id)) or {}).get("opened") != opened
-        ]
-        if record:
-            for kind, resource_id, opened in found:
-                db.execute(
-                    "INSERT INTO alerts(session,stage,fingerprint,seen,count) "
-                    "VALUES(?,'block',?,?,1) ON CONFLICT(session,stage,fingerprint) "
-                    "DO UPDATE SET seen=excluded.seen,count=count+1",
-                    (session, _fingerprint(kind, resource_id, opened), now),
-                )
-    return [(kind, resource_id) for kind, resource_id, _ in found]
+        rows = [row for row in rows if not isinstance(visible, list) or row[1] in visible]
+        if tab is not None:
+            rows = [row for row in rows if row[1] == str(tab)]
+            if not rows:
+                other = db.execute("SELECT session,agent FROM resources WHERE kind='chrome-tab' "
+                                   "AND resource_id=? AND status='open'", (str(tab),)).fetchall()
+                if other:
+                    return None, f"安全：分頁 {tab} 是其他場次／代理建立的，不能擅自導走。"
+                # An explicit existing tab may be one the owner handed over. Missing
+                # lifecycle ownership evidence is not evidence of unauthorized use.
+                return str(tab), None
+            kind, resource_id, opened, _ = rows[0]
+            if _kept(state, kind, resource_id, opened, now):
+                held = _marks(state, "kept")[_key(kind, resource_id)]
+                if _colab(url) != (held.get("authuser"), held.get("notebook")):
+                    return None, f"安全：分頁 {tab} 正保留給執行中的 VM，請在本場其他分頁導頁。"
+            return resource_id, None
+        available = [row[1] for row in rows if not _kept(state, row[0], row[1], row[2], now)]
+        if available:
+            return sorted(available)[0], None
+    return None, "尚無可用的本場空閒分頁，可建立或選定分頁；保留 VM 與已知他人的分頁不能導走。"
 
 
 def block_reason(rows, tool_name):
@@ -981,15 +975,14 @@ def block_reason(rows, tool_name):
     if pane:
         parts.append(f"內建瀏覽器分頁 {named(pane)}（用 tabs_close 關）")
     return (
-        f"Epitype 擋下 {tool_name}：本場自建的" + "、".join(parts) + "還開著。"
-        "先關掉自己建立的分頁、看到關閉結果再做別的事；之後要用再開新分頁。"
+        f"Epitype 提醒：本場自建的" + "、".join(parts) + "還開著。"
+        "用完時關掉自己建立的分頁並核對關閉結果。"
         "分頁其實已被關掉或不在群組裡時，呼叫 tabs_context_mcp／tabs_context 讓 Epitype 重新核對。"
         "若分頁正連著執行中的 Colab VM（關了 VM 會被收回），不要關：先讓 Epitype 看到它開著那本筆記本"
         "（Chrome 呼叫 tabs_context_mcp；內建瀏覽器用 navigate 打開該筆記本網址，"
-        "若這次 navigate 才把窗格打開，再呼叫 tabs_context 確認它停在 Colab），再單獨送出 "
+        "若這次 navigate 才把窗格打開，再呼叫 tabs_context 確認它停在 Colab），可送出 "
         "python -m epitype lifecycle keep <分頁ID> --authuser <N> --notebook <筆記本ID>"
-        "（只向 Epitype 登記，不會實際執行）。這個 session 沒有能關分頁的瀏覽器工具時，"
-        f"請使用者只回覆「{RELEASE_PHRASE}」四個字。使用者已要求停止時不要再操作，直接回報。"
+        "。使用者明確要求保留或停止時依指示處理，不要求特殊口令。"
     )
 
 
@@ -1014,8 +1007,8 @@ def keep_request(event: dict):
 def declare_keep(event: dict, path: Path, tab: str, authuser: str, notebook: str):
     """(accepted, message) for a running-VM keep declaration, checked against the ledger.
 
-    The tab must be this agent's own open tab, and a listing seen within
-    KEEP_EVIDENCE_SECONDS must show it on exactly this Colab notebook and account.
+    The tab must be this agent's own open tab, and its latest listing must show
+    exactly this Colab notebook and account. Time alone never proves completion.
     One tab per notebook and account.
     """
     session = event.get("session_id", event.get("sessionId"))
@@ -1034,9 +1027,9 @@ def declare_keep(event: dict, path: Path, tab: str, authuser: str, notebook: str
         key = _key(kind, tab)
         state = _state(db, session)
         seen = _marks(state, "colab").get(key)
-        if not isinstance(seen, dict) or now - seen.get("seen", 0) > KEEP_EVIDENCE_SECONDS:
-            return False, (f"Epitype 拒絕保留分頁 {tab}：最近 {KEEP_EVIDENCE_SECONDS // 60} 分鐘內"
-                           "沒看到它開著 Colab 筆記本（/drive/…）的網址。Chrome 先呼叫 tabs_context_mcp、"
+        if not isinstance(seen, dict) or seen.get("seen", 0) < opened:
+            return False, (f"Epitype 無法確認保留分頁 {tab}：目前紀錄"
+                           "沒看到它開著 Colab 筆記本（/drive/…）的網址。Chrome 可呼叫 tabs_context_mcp、"
                            "內建瀏覽器先用 navigate 打開該筆記本網址，再宣告。")
         if seen.get("unconfirmed"):
             return False, (f"Epitype 拒絕保留分頁 {tab}：這次 navigate 才打開內建瀏覽器，看不出最後停在"
@@ -1059,25 +1052,37 @@ def declare_keep(event: dict, path: Path, tab: str, authuser: str, notebook: str
             (session, call_id if isinstance(call_id, str) else "keep", "keep", kind, tab, now),
         )
     return True, (f"Epitype 已登記保留分頁 {tab}（Colab authuser={authuser}、筆記本 {notebook}）"
-                  "為執行中 VM 分頁：24 小時內、網址沒換就不擋。這行指令只用來登記，Epitype 已處理，"
-                  "不會實際執行。VM 跑完、結果下載核對後就關掉它。")
+                  "為執行中 VM 分頁，直到關閉、重新建立或網址換掉才更新保留狀態。"
+                  "VM 跑完、結果下載核對後就關掉它。")
 
 
 def owner_release(event: dict, path: Path) -> list:
-    """Stop blocking this session's open tabs when the owner's own message says so.
-
-    For a session with no browser tool left to close them. The tabs stay pending
-    and keep their reminders; a tab opened afterwards blocks again.
-    """
+    """Honor direct stop/keep/release language without changing or closing resources."""
     prompt = event.get("prompt")
     session = event.get("session_id", event.get("sessionId"))
-    if (not isinstance(prompt, str) or _NOT_LETTERS.sub("", prompt) != RELEASE_PHRASE
-            or not isinstance(session, str) or not session or not path.is_file()):
+    if (not isinstance(prompt, str) or not isinstance(session, str) or not session
+            or not path.is_file()):
+        return []
+    text = prompt.strip()
+    # Quoted history and negated release requests are not new owner instructions.
+    if re.search(r"[「『\"].*(?:放行|保留|停止).*[」』\"]|(?:不要|不准|別)\s*(?:放行|保留)", text):
+        return []
+    stopping = bool(re.search(r"(?:停止|暫停|停下來|先停|不要再操作|不用再操作)", text))
+    keeping = bool(re.search(r"(?:放行|保留|保持開啟|先別關|不要關)", text))
+    if not stopping and not keeping:
         return []
     now = _now()
     with _database(path) as db:
         db.execute("BEGIN IMMEDIATE")
         rows = [row for row in _pending(db, session, now) if row[0] in BLOCKING_KINDS]
+        if not stopping and _NOT_LETTERS.sub("", text) != RELEASE_PHRASE:
+            targeted = [row for row in rows if re.search(
+                r"(?<![A-Za-z0-9_-])" + re.escape(row[1]) + r"(?![A-Za-z0-9_-])", text)]
+            all_tabs = bool(re.search(r"(?:這些|全部|所有|本場|本次).*(?:分頁|頁面)", text))
+            if targeted:
+                rows = targeted
+            elif not all_tabs:
+                rows = []  # Ambiguous instructions do not choose a resource for the owner.
         if not rows:
             return []
         state = _state(db, session)
@@ -1094,7 +1099,7 @@ def owner_release(event: dict, path: Path) -> list:
 
 
 def release_notice(rows):
-    return ("Epitype 依使用者指示，不再擋本場還開著的分頁 " + ", ".join(value for _, value in rows[:3])
+    return ("Epitype 已記錄使用者保留／停止指示，涉及本場分頁 " + ", ".join(value for _, value in rows[:3])
             + (" 等" if len(rows) > 3 else "") + "；它們仍待收尾，之後能關時照樣要關。")
 
 
@@ -1119,8 +1124,12 @@ def kept_record(path: Path, tab: str, authuser: str, notebook: str, session=None
             for key, held in _marks(state, "kept").items():
                 if (key.split(":", 1)[-1] == tab and isinstance(held, dict)
                         and [held.get("authuser"), held.get("notebook")] == [authuser, notebook]
-                        and isinstance(held.get("since"), (int, float))
-                        and now - held["since"] < KEEP_TTL_SECONDS):
+                        and isinstance(held.get("since"), (int, float))):
+                    kind = key.split(":", 1)[0]
+                    row = db.execute("SELECT status,opened FROM resources WHERE session=? "
+                                     "AND kind=? AND resource_id=?", (owner, kind, tab)).fetchone()
+                    if not row or row[0] != "open" or row[1] != held.get("opened"):
+                        continue
                     return owner
     return None
 
@@ -1168,7 +1177,7 @@ def _keep_main(argv, path):
     owner = kept_record(path, args.tab, authuser, args.notebook, args.session)
     if owner is None:
         print("Epitype 沒有這筆保留登記。保留宣告由 PreToolUse hook 核對網址後才登記；"
-              "hook 沒啟用或核對沒過時，分頁仍會擋。", file=sys.stderr)
+              "hook 沒啟用或核對沒過時，分頁狀態仍未驗證。", file=sys.stderr)
         return 1
     print(f"Epitype 已登記保留分頁 {args.tab}（Colab authuser={authuser}、筆記本 {args.notebook}；"
           f"場次 {owner}）。VM 跑完、結果下載核對後就關掉它。")

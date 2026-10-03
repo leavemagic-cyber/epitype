@@ -108,6 +108,7 @@ def _repeat_guard_notices(vaults, started_at, now=None, deadline=None, *, event=
     if not ranked:
         return []
     advice = {}
+    advisory_cards = set()
     try:
         import pretooluse_gate
 
@@ -118,13 +119,17 @@ def _repeat_guard_notices(vaults, started_at, now=None, deadline=None, *, event=
                 Path(vault), started_at, [], deadline=deadline, event=event or {}
             ):
                 advice.setdefault(guard.card, guard.advice)
+                if getattr(guard, "on_hit", "block") == _memspec.ON_HIT_NOTE:
+                    advisory_cards.add(guard.card)
     except Exception:
         pass
     lines = []
     for card, count in ranked[: _memspec.GUARD_REPEAT_NOTICE_MAX_CARDS]:
-        lines.append(_memspec.GUARD_REPEAT_NOTICE.format(
+        line = _memspec.GUARD_REPEAT_NOTICE.format(
             count=count, card=card, advice=advice.get(card, "")
-        ).strip().rstrip(_memspec.ADVICE_COLON).strip())
+        ).strip().rstrip(_memspec.ADVICE_COLON).strip()
+        state = "目前僅提醒；" if card in advisory_cards else ""
+        lines.append("查找線索（" + state + "歷史紀錄，非授權或新增禁令）：" + line)
     return lines
 
 

@@ -447,6 +447,7 @@ def generate(vaults, out, cap_bytes=None, dry_run=False, config=None):
             1 for rule in rules if rule["layer"] not in memspec.RULE_GENERATED_LAYERS
         ),
         "errors": errors,
+        "over_cap": cap is not None and max(loaded.values()) > cap,
         "offenders": [],
         "pack": None,
         "text": text,
@@ -466,9 +467,7 @@ def generate(vaults, out, cap_bytes=None, dry_run=False, config=None):
         ]
         return result
     if cap is not None and result["measured"] > cap:
-        result["status"] = STATUS_OVER_CAP
         result["offenders"] = _longest(rules)
-        return result
     if dry_run:
         result["status"] = STATUS_DRY_RUN
         return result
@@ -538,6 +537,9 @@ def drifted(vaults, out):
 
 
 def _print(result, output):
+    if result.get("over_cap"):
+        print(f"NOTE core budget: loaded={result['measured']} cap={result['cap']}; "
+              "complete current rules retained", file=output)
     for error in result.get("errors") or ():
         print(f"（略過：{error}）", file=output)
     status = result["status"]
@@ -779,8 +781,8 @@ def _selftest():
 
             capped = generate([vault], out, cap_bytes=len(before) - 1, config={})
             checks.append((
-                "超上限＝拒絕寫出、列最長的卡、既有檔一個位元組都沒動",
-                capped["status"] == STATUS_OVER_CAP
+                "自訂預算超限仍寫完整規則，保留容量與最長卡片提醒",
+                capped["status"] == STATUS_UNCHANGED and capped["over_cap"]
                 and capped["cap"] == len(before) - 1
                 and 0 < len(capped["offenders"]) <= memspec.CORE_GEN_LONGEST_LISTED
                 and capped["offenders"][0]["bytes"]
@@ -788,9 +790,9 @@ def _selftest():
                 and out.read_bytes() == before,
             ))
             checks.append((
-                "上限由設定的 core_cap_bytes 供給；沒設就不擋",
+                "設定的 core_cap_bytes 供給提醒；沒設沒有超限提醒",
                 generate([vault], out, config={memspec.CONFIG_CORE_CAP_BYTES_FIELD: 10},
-                         dry_run=True)["status"] == STATUS_OVER_CAP
+                         dry_run=True)["over_cap"]
                 and generate([vault], out, config={}, dry_run=True)["cap"] is None,
             ))
 
@@ -854,10 +856,10 @@ def _selftest():
                 and generate([vault], root / "isolated.md", dry_run=True)["cap"] is None,
             ))
             checks.append((
-                "CLI 超上限回非零且沒有寫出檔案",
-                code == EXIT_REFUSED
-                and not (root / "capped.md").exists()
-                and "CORE-GEN over-cap" in output.getvalue(),
+                "CLI 超自訂預算仍寫出完整規則且保留提醒",
+                code == EXIT_OK
+                and (root / "capped.md").read_text(encoding="utf-8") == text
+                and "NOTE core budget" in output.getvalue(),
             ))
 
             # ── 宿主區（U-R3）─────────────────────────────────────────────
@@ -938,7 +940,7 @@ def _selftest():
                 and generate([hosted], hosted_out, cap_bytes=biggest, dry_run=True,
                              config={})["status"] == STATUS_DRY_RUN
                 and generate([hosted], hosted_out, cap_bytes=biggest - 1, dry_run=True,
-                             config={})["status"] == STATUS_OVER_CAP,
+                             config={})["over_cap"],
             ))
 
             hosted_pack = json.loads(pack_path(hosted).read_text(encoding="utf-8"))

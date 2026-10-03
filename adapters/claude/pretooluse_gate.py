@@ -1,24 +1,20 @@
 import sys, time; sys.dont_write_bytecode = True; _STARTED_AT = time.monotonic(); [getattr(stream, "reconfigure", lambda **_: None)(encoding="utf-8", errors="replace") for stream in (sys.stdin, sys.stdout, sys.stderr)]  # cp950 consoles must not break hook entrypoints.
-"""Claude PreToolUse adapter: the fail-open write-content gate and the action guard.
+"""PreToolUse advisory checks, deterministic input repairs, and retained safety.
 
-2026-09-09 (owner, docs/FAILURE_MODES.md §34) removed the scar-card `trigger:`
-interception, on the premise that irreversible actions belong to the host's own
-native rules (Claude `permissions.deny`, Codex `execpolicy`). 2026-09-16 that
-premise was tested and failed: Claude's Bash patterns match positionally with no
-AND operator, so four of the nine hazard classes moved across and five could not be
-expressed at all. The owner lifted the "cards may not carry an action condition"
-half of the ruling that day, and what came back is deliberately the narrow form —
-a card names literal fragments and the call is denied when *all* of them appear in
-its text. No regex, no shell parsing, no intent. Semantic judgement and genuinely
-irreversible actions stay with the host, exactly as §34 left them."""
+Write format, attribution uncertainty, resource cleanup and reading volume only
+advise. Explicit card on_hit values and native settings remain distinct from
+those checks; known other actors' tabs and retained VM tabs are preserved.
+"""
 
 from collections import namedtuple
+from copy import deepcopy
 import json
 import os
 from pathlib import Path
 import re
 import tempfile
 import uuid
+import subprocess
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
@@ -47,7 +43,7 @@ from _hook_common import (
     remaining_seconds,
     recall_marker_directory,
     release_meter,
-    resolve_vaults,
+    scoped_vaults as resolve_vaults,
     run_concurrent,
     run_synthetic,
     sequence_fields,
@@ -478,7 +474,7 @@ def _append_write_block(vault, rule, subject, target, started_at, session_id=Non
         vault,
         with_session(
             {
-                "kind": memspec.WRITE_GATE_LOG_KIND,
+                "kind": "write_note",
                 "rule": rule,
                 "filename": target.name,
                 **subject,
@@ -710,7 +706,7 @@ def _recurrence_review(card, target, additions, prospective, patch, started_at, 
     return _deny_value(reason[: memspec.WRITE_GATE_REASON_MAX_CHARS])
 
 
-_Guard = namedtuple("_Guard", "card tool substrings advice path requires unless when write_check advise_tool advise_fragments advise_text sequence audience", defaults=((), ""))
+_Guard = namedtuple("_Guard", "card tool substrings advice path requires unless when write_check advise_tool advise_fragments advise_text sequence audience on_hit", defaults=((), "", "block"))
 
 
 def _read_guard(path):
@@ -753,6 +749,8 @@ def _read_guard(path):
         entry["source_status"] = projected["provenance"]["status"]
         entry["source_render"] = rendered
         entry["source_issues"] = projected["provenance"].get("issues", [])
+        # Explicit card demotion leaves unrelated retained safety guards unchanged.
+        entry["on_hit"] = fields.get("on_hit", "block").strip().casefold()
         if projected['text'].strip():
             entry["advice"] = "\n".join(filter(None, (entry.get("advice", ""), rendered)))
         if entry.get("advise_text"):
@@ -1137,6 +1135,7 @@ def _guards(vault, started_at, defects, cap=None, deadline=None, *, event=None, 
                     entry.get("advise_text", ""),
                     tuple(entry.get("sequence") or ()),
                     entry.get("audience", ""),
+                    entry.get("on_hit", "block"),
                 )
             )
     return found
@@ -1200,14 +1199,20 @@ def _guard_review(event, tool_name, tool_input, config, started_at, defects, adv
                     proposed=action_receipts.Fact('__proposed__',start,start+1,True,tuple(actions))
                     judgments=action_sequence.check(guard.sequence,(*facts,proposed),{'__proposed__'},
                         covered=action_receipts.coverage(event,action_receipts.database_path(config_path())))
+                    safety = _sequence_preflight(event, actions, started_at, defects,
+                        read_files=any(j.verdict != 'allow' for j in judgments))
+                    if safety is not None:
+                        return safety
                     missing=next((j for j in judgments if j.verdict=='block'),None)
                     if missing:
                         _best_effort_audit(append_gate_log,vault,with_session({
-                            'kind':memspec.ACTION_GUARD_LOG_KIND,'rule':'tool_sequence','card':guard.card,
+                            'kind':'action_note','rule':'tool_sequence','card':guard.card,
                             'card_path':str(guard.path.relative_to(vault)),'tool':tool_name,
                             'digest':hashlib.sha256(haystack.encode('utf-8',errors='replace')).hexdigest()[:16]},
                             event.get('session_id')),started_at)
-                        return _deny_value(f'[{guard.card}] {missing.reason}\n{guard.advice}')
+                        if advisories is not None:
+                            advisories.append((guard.path, guard.card,
+                                f'查核提醒：{missing.reason}。已自動核對可讀取的現況；{guard.advice}'))
                     for allowed in (j for j in judgments if j.verdict=='allow'):
                         _best_effort_audit(append_gate_log,vault,with_session({
                             'kind':'sequence_allow','rule':'tool_sequence','card':guard.card,
@@ -1272,12 +1277,14 @@ def _guard_review(event, tool_name, tool_input, config, started_at, defects, adv
                 reason = memspec.ACTION_GUARD_REASON.format(
                     card=guard.card, tool=tool_name, fragments=fragments, advice=guard.advice
                 )
+            advisory_hit = (guard.on_hit != "block" or (missing == ["tabId"]
+                and tool_name == control_lifecycle.CHROME + "navigate"))
             _best_effort_audit(
                 append_gate_log,
                 vault,
                 with_session(
                     {
-                        "kind": memspec.ACTION_GUARD_LOG_KIND,
+                        "kind": "action_note" if advisory_hit else memspec.ACTION_GUARD_LOG_KIND,
                         "rule": memspec.ACTION_GUARD_RULE,
                         "card": guard.card,
                         "card_path": str(guard.path.relative_to(vault)),
@@ -1291,8 +1298,69 @@ def _guard_review(event, tool_name, tool_input, config, started_at, defects, adv
                 ),
                 started_at,
             )
-            # Source authorship, original and complete scope must remain together.
+            if advisory_hit:
+                if advisories is not None:
+                    advisories.append((guard.path, guard.card, "提醒：" + guard.advice))
+                else:
+                    defects.append("提醒：" + reason)
+                continue
+            # Explicit retained safety cards continue to return deny.
             return _deny_value(reason)
+    return None
+
+
+def _sequence_preflight(event, actions, started_at, notices, *, read_files=False):
+    """Run necessary existing prerequisite checks without inventing action authority."""
+    for action in actions:
+        target = Path(action.target)
+        if action.kind == "file.change" and read_files:
+            sensitive = (target.name.casefold().startswith(".env")
+                or target.suffix.casefold() in (".pem", ".key", ".p12", ".pfx")
+                or any(part.casefold() in (".ssh", ".aws", ".gnupg") for part in target.parts)
+                or re.search(r"(?:credential|secret|token)", target.name, re.I)
+                or target.name.casefold() in ("rclone.conf", "brain.json", "council_snapshot.json"))
+            if sensitive:
+                notices.append("未自動讀取可能含密鑰／憑證或生產狀態的目標：" + str(target)
+                               + "；保留宿主原生安全設定，由 owner 明確指示處理。")
+                continue
+            try:
+                if target.is_file():
+                    read_bytes = 0
+                    with target.open("rb") as stream:
+                        while not expired(started_at):
+                            chunk = stream.read(65536)
+                            if not chunk:
+                                break
+                            read_bytes += len(chunk)
+                    complete = read_bytes == target.stat().st_size
+                    notices.append(f"已自動讀取改檔目標 {target} 的舊內容：{read_bytes} bytes，"
+                                   + ("完整檔案；未回傳原文。" if complete else "本次只讀部分，餘段未驗證。"))
+            except OSError as exc:
+                notices.append(f"改檔前讀取未驗證：{target}（{type(exc).__name__}）；由寫檔工具回報目標錯誤。")
+        elif action.kind == "git.main_update":
+            try:
+                checked = subprocess.run(["git", "-C", str(target), "status", "--porcelain=v1"],
+                    capture_output=True, text=True, encoding="utf-8", errors="replace",
+                    timeout=max(.05, min(1.0, remaining_seconds(started_at))), check=False)
+            except (OSError, subprocess.TimeoutExpired):
+                return _deny_value(f"無法確認 main checkout {target} 的現況；先保留現有 Git 狀態。")
+            if checked.returncode:
+                return _deny_value(f"main checkout {target} 的 status 失敗；先保留現有 Git 狀態。")
+            if checked.stdout.strip():
+                return _deny_value(f"main checkout {target} 有未提交變更；先隔離或回報，不能覆蓋他人的工作。")
+            notices.append(f"已自動核對 main checkout {target}：工作樹乾淨。")
+        elif action.kind == "directory.delete":
+            # Worktree inspection is a prerequisite, never permission for permanent deletion.
+            if action.repository:
+                try:
+                    checked = subprocess.run(["git", "-C", action.repository, "worktree", "list", "--porcelain"],
+                        capture_output=True, text=True, encoding="utf-8", errors="replace",
+                        timeout=max(.05, min(1.0, remaining_seconds(started_at))), check=False)
+                    if checked.returncode == 0:
+                        notices.append(f"已自動查核 {action.repository} 的 worktree 清單；這不構成刪除授權。")
+                except (OSError, subprocess.TimeoutExpired):
+                    notices.append("worktree 查核未驗證，目標保持原狀。")
+            return _deny_value(f"永久刪除目錄 {target} 仍受安全界線保護；前置查核不等於刪除授權。")
     return None
 
 
@@ -1613,25 +1681,20 @@ def _write_check_review(event, config, target, prospective, patch, started_at, *
     reason = memspec.WRITE_CHECK_REASON.format(card=guard.card, path=target) + "\n" + guard.advice
     _best_effort_audit(
         append_gate_log, vault,
-        with_session({"kind": "write_block", "rule": "write_check", "card": guard.card,
+        with_session({"kind": "write_note", "rule": "write_check", "card": guard.card,
                       "target": str(target)}, event.get("session_id")),
         started_at,
     )
-    return _deny_value(reason)
+    return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": "編碼提醒（本次寫入放行）：" + reason}}
 
 
 def _review_one_target(event, config, target, additions, prospective, started_at, session_id,
                        patch=None):
-    """(deny value, advice lines) for one file this call would change.
+    """Collect write findings as advice without blocking an authorized update.
 
-    Rule A: new content that re-states what the owner already ruled out is blocked
-    against the Stop gate's decision cards. Rule R: a recurrence narrated into an
-    existing behaviour card that is not being armed is blocked (`_recurrence_review`).
-    Rule B: a card written into a registered vault must satisfy card_lint's contract
-    for its own type — FAIL blocks, WARN only advises. `prospective` is None whenever
-    the post-write text cannot be known exactly, and then Rule B does not judge: a
-    guessed result would block a card nobody wrote. `patch` is the envelope entry
-    these additions came from; Rule R applies it to the card on disk."""
+Unknown prospective content stays unknown. The card publisher remains responsible
+for exact source validation; writing a draft is not publishing verified authority.
+"""
 
     def oversized(text):
         return len(text.encode("utf-8", errors="replace")) > memspec.WRITE_GATE_MAX_CONTENT_BYTES
@@ -1653,16 +1716,16 @@ def _review_one_target(event, config, target, additions, prospective, started_at
                     card_metadata=bool(config) and _vault_card_path(target, resolve_vaults(config, event)) is not None,
                     notices=notices)
                 if reason:
-                    return _deny_value(reason), notices
+                    notices.append("歸屬查核提醒（本次寫入放行）：" + reason)
                 if event.get("stop_hook_active") or expired(started_at):
                     return None, notices
                 reason = (owner_rules.violation(before, after, resolve_vaults(config, event))
                           if after is not None else None)
                 if reason:
                     _best_effort_audit(append_gate_log, governance_vault(config),
-                        with_session({"kind": "write_block", "rule": "owner_rulings",
+                        with_session({"kind": "write_note", "rule": "owner_rulings",
                                       "target": str(target)}, session_id), started_at)
-                    return _deny_value(reason), notices
+                    notices.append("裁定生成段提醒（本次寫入放行）：" + reason)
         except (OSError, UnicodeError, ValueError) as exc:
             # Failure to reconstruct the old file does not exempt new claims.
             # Ordinary undecidable text retains the existing write-gate contract.
@@ -1672,10 +1735,10 @@ def _review_one_target(event, config, target, additions, prospective, started_at
                 base=target.parent, seconds=max(0.0, min(2.0-(time.monotonic()-started_at), remaining_seconds(started_at))),
                 hard_deadline=True, notices=notices)
             if reason:
-                return _deny_value(reason), notices
+                notices.append("歸屬查核提醒（本次寫入放行）：" + reason)
             if (owner_rules.BEGIN in str(prospective or "")
                     or owner_rules.BEGIN in locals().get("before", "")):
-                return _deny_value(f"交接裁定段無法驗證：{type(exc).__name__}"), notices
+                notices.append(f"交接裁定段無法驗證：{type(exc).__name__}；本次寫入放行，待同步正本。")
     if event.get("stop_hook_active"):
         return None, notices
     if patch is not None and patch.op == "delete":
@@ -1686,7 +1749,7 @@ def _review_one_target(event, config, target, additions, prospective, started_at
     write_check = _write_check_review(event, config, target, prospective, patch, started_at,
                                     diagnostics=notices)
     if write_check is not None:
-        return write_check, notices
+        notices.append(write_check["hookSpecificOutput"]["additionalContext"])
 
     if any(oversized(text) for text in additions):
         return None, notices
@@ -1710,7 +1773,7 @@ def _review_one_target(event, config, target, additions, prospective, started_at
             started_at,
             session_id,
         )
-        return _deny_value(reason[: memspec.WRITE_GATE_REASON_MAX_CHARS]), []
+        notices.append("既有裁定提醒（本次寫入放行）：" + reason[: memspec.WRITE_GATE_REASON_MAX_CHARS])
 
     if expired(started_at):
         return None, notices
@@ -1725,7 +1788,7 @@ def _review_one_target(event, config, target, additions, prospective, started_at
     except Exception:
         recurrence = None
     if recurrence is not None:
-        return recurrence, []
+        notices.append("事件紀錄提醒（本次寫入放行）：" + recurrence["hookSpecificOutput"]["permissionDecisionReason"])
 
     if prospective is None or expired(started_at):
         return None, notices
@@ -1736,10 +1799,6 @@ def _review_one_target(event, config, target, additions, prospective, started_at
         if advice:
             notices.append(advice)
         return None, notices
-    if "規則來源 " in reason:
-        # A retry cannot turn missing or forged source evidence into acceptance.
-        # This checks the stored interpretation, not permission for an action.
-        return _deny_value(reason), notices
     if not _write_marker(session_id, memspec.WRITE_GATE_CARD_RULE, target, prospective):
         return None, notices
     _best_effort_audit(
@@ -1751,7 +1810,8 @@ def _review_one_target(event, config, target, additions, prospective, started_at
         started_at,
         session_id,
     )
-    return _deny_value(reason), []
+    notices.append("卡片待補資料（本次寫入放行）：" + reason)
+    return None, notices
 
 
 def _envelope_text(tool_input):
@@ -2074,11 +2134,7 @@ def _read_state_path(vault, session_id):
 
 
 def _waste_review(event, tool_name, tool_input, config, started_at):
-    """(擋下的值, 提醒行)——同一場重複讀同一份內容，或整檔拉一個大檔。
-
-    這道問的不是「這次呼叫做了什麼壞事」，而是「這次呼叫有沒有必要」。省 token 是
-    owner 2026-09-18 最在意的一條，而它只在動手那一刻看得出來：事後檢討只能數浪費，
-    擋不住浪費。"""
+    """Reading volume/repetition gives advice without overriding the current task."""
     # 用到才載入：hashlib 要 6 ms，絕大多數呼叫走不到這裡。
     import hashlib
 
@@ -2101,8 +2157,8 @@ def _waste_review(event, tool_name, tool_input, config, started_at):
     bounds = [tool_input.get(field) for field in memspec.READ_WASTE_BOUND_FIELDS]
     bounded = any(str(value or "").strip() for value in bounds)
     if info.st_size >= memspec.READ_WASTE_BIG_FILE_BYTES and not bounded:
-        return _deny_value(memspec.READ_WASTE_BIG_FILE_REASON.format(
-            path=raw, size=info.st_size)), None
+        return None, (f"讀取提醒：{raw} 共 {info.st_size} bytes；"
+                      "內容量較大時分段讀完必要內容並保存已讀範圍，完整判斷仍須覆蓋全文。")
 
     # 「同一段」的身分要含全部的範圍欄位，不能只有 offset／limit。2026-09-20 Codex
     # 審查抓到：同一份 PDF 連續讀 1-3、4-6、7-9 頁，第三次會被擋，理由還錯稱這一段
@@ -2136,13 +2192,14 @@ def _waste_review(event, tool_name, tool_input, config, started_at):
         pass
 
     if count > 1 + memspec.READ_WASTE_FREE_REPEATS:
-        return _deny_value(memspec.READ_WASTE_REPEAT_REASON.format(count=count, path=raw)), None
+        return None, (f"讀取提醒：{raw} 同範圍第 {count} 次讀取；"
+                      "挑戰、驗收或明示重讀需要時照常讀取。")
     if count > 1:
         return None, memspec.READ_WASTE_REPEAT_NOTICE.format(count=count, path=raw)
     return None, None
 
 
-def _handle(event, started_at, defects=None, meter_claims=None, advice_claims=None):
+def _handle_review(event, started_at, defects=None, meter_claims=None, advice_claims=None):
     """Review source-bound dispatches, writes, then existing action guards."""
     defects = [] if defects is None else defects
     # Dispatch prose is another authority-writing surface. Do not inspect read
@@ -2157,7 +2214,7 @@ def _handle(event, started_at, defects=None, meter_claims=None, advice_claims=No
                     base=event.get("cwd"), seconds=max(0.0, min(2.0-(time.monotonic()-started_at), remaining_seconds(started_at))),
                     hard_deadline=True, notices=defects)
                 if reason:
-                    return _deny_value(reason)
+                    defects.append(reason)
     tool_name = event.get("tool_name")
     if not isinstance(tool_name, str) or not tool_name:
         return None
@@ -2231,12 +2288,7 @@ def _handle(event, started_at, defects=None, meter_claims=None, advice_claims=No
 
 
 def _control_review(event, tool_name, started_at):
-    """(擋下的值, 提醒行)——本場自建的瀏覽器分頁還開著，就先擋非瀏覽器工具。
-
-    owner 2026-10-03：提醒擋不住「等一下還要用」而留著的分頁，改成攔截。Colab 跑中 VM
-    的保留宣告也在這裡核對並登記；那行 shell 一律不放行執行，免得夾帶別的指令，也免得
-    登記了一個分頁就順便放過其他還開著的。壞了照舊放行並講一句——這道閘不能因為自己的錯
-    卡住工作。"""
+    """Record keep declarations and let their CLI deliver a normal result."""
     if expired(started_at):
         return None, None
     try:
@@ -2244,18 +2296,79 @@ def _control_review(event, tool_name, started_at):
         request = control_lifecycle.keep_request(event)
         if request is not None:
             accepted, message = control_lifecycle.declare_keep(event, path, *request)
-            rows = control_lifecycle.blockers(event, path, record=True) if accepted else []
-            if rows:
-                message += control_lifecycle.block_reason(rows, tool_name)
-            return _deny_value(message), None
-        rows = control_lifecycle.blockers(event, path, record=True)
-        if rows:
-            return _deny_value(control_lifecycle.block_reason(rows, tool_name)), None
+            return None, message
     except Exception as exc:
         if config_path().exists():
             print(memspec.GATE_DEGRADED_NOTICE.format(
                 gate="control lifecycle", reason=type(exc).__name__), file=sys.stderr)
     return None, None
+
+
+def _prepare_input(event, started_at, notices):
+    """Repair deterministic inputs, preserving the host's normal permission flow."""
+    payload = event.get("tool_input")
+    if not isinstance(payload, dict):
+        return None
+    name = str(event.get("tool_name", ""))
+    calls = [(name, payload), *memspec.nested_tool_calls(name, payload)]
+    for tool, fields in calls:
+        if tool == control_lifecycle.CHROME + "navigate":
+            target, reason = control_lifecycle.navigation_target(
+                event, control_lifecycle.database_path(config_path()), fields.get("tabId"), fields.get("url"))
+            if reason:
+                if reason.startswith("安全："):
+                    return _deny_value(reason)
+                notices.append(reason)
+            if fields.get("tabId") is None and target is not None:
+                fields["tabId"] = int(target) if target.isdigit() else target
+                notices.append(f"已自動選本場空閒分頁 {target} 導頁。")
+        if tool.casefold() in memspec.WRITE_GATE_CONTENT_TOOLS:
+            target = _write_target(fields, event.get("cwd"))
+            text = fields.get(memspec.WRITE_GATE_CONTENT_FIELD)
+            if (target is not None and target.suffix.casefold() in memspec.WRITE_CHECK_PS_SUFFIXES
+                    and isinstance(text, str) and not _ps_encoding_safe(text)):
+                fields[memspec.WRITE_GATE_CONTENT_FIELD] = "\ufeff" + text
+                notices.append(f"已為 {target.name} 自動保留 PowerShell 5.1 可辨識的 UTF-8 BOM。")
+                _verify_ps_syntax(fields[memspec.WRITE_GATE_CONTENT_FIELD], started_at, notices)
+    return None
+
+
+def _verify_ps_syntax(text, started_at, notices):
+    """Parse a temporary script with Windows PowerShell; never execute its content."""
+    if os.name != "nt" or expired(started_at):
+        notices.append("PowerShell 解析未驗證：本次環境或查核時間不足；寫入照常放行。")
+        return
+    handle, name = tempfile.mkstemp(prefix="epitype-ps-parse-", suffix=".ps1")
+    staging = Path(name)
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8", newline="") as stream:
+            stream.write(text)
+        quoted = str(staging).replace("'", "''")
+        command = "$tokens=$null; $errors=$null; [void][System.Management.Automation.Language.Parser]::ParseFile('" + quoted + "',[ref]$tokens,[ref]$errors); if($errors.Count){exit 1}"
+        checked = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
+            capture_output=True, timeout=max(.05, min(1.0, remaining_seconds(started_at))), check=False)
+        notices.append("已用 Windows PowerShell 解析寫入內容。" if checked.returncode == 0
+                       else "PowerShell 解析發現語法問題，請修正文法；本次寫入照常放行。")
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        notices.append(f"PowerShell 解析未驗證（{type(exc).__name__}）；本次寫入照常放行。")
+    finally:
+        staging.unlink(missing_ok=True)
+
+
+def _handle(event, started_at, defects=None, meter_claims=None, advice_claims=None):
+    notices = [] if defects is None else defects
+    prepared = deepcopy(event)
+    denied = _prepare_input(prepared, started_at, notices)
+    if denied is not None:
+        return denied
+    changed = prepared.get("tool_input") != event.get("tool_input")
+    value = _handle_review(prepared, started_at, notices, meter_claims, advice_claims)
+    if changed and (value or {}).get("hookSpecificOutput", {}).get("permissionDecision") != "deny":
+        if value is None:
+            value = {"hookSpecificOutput": {"hookEventName": "PreToolUse"}}
+        # updatedInput replaces the whole input. Omitting permissionDecision preserves native checks.
+        value["hookSpecificOutput"]["updatedInput"] = prepared["tool_input"]
+    return value
 
 
 def _selftest():
@@ -3587,6 +3700,9 @@ def main():
         if config_path().exists():
             event=action_receipts.refresh(event,action_receipts.database_path(config_path()))
         value = _handle(event, _STARTED_AT, defects, meter_claims, advice_claims)
+        updated = (value or {}).get("hookSpecificOutput", {}).get("updatedInput")
+        if isinstance(updated, dict):
+            event = {**event, "tool_input": updated}
         # 這一次呼叫碰到哪些檔，附記給回合閘用：說「我查過某個檔」的時候，那個檔名
         # 必須在這裡出現過。擋下的呼叫不記——那個檔根本沒被打開。
         if value is None or value.get("hookSpecificOutput", {}).get(
@@ -3602,7 +3718,7 @@ def main():
         if value is not None or meter_claims:
             output = (value or {}).get("hookSpecificOutput", {})
             is_deny = output.get("permissionDecision") == "deny"
-            if is_deny or not expired(_STARTED_AT):
+            if is_deny or isinstance(updated, dict) or not expired(_STARTED_AT):
                 lost = []
                 if meter_claims and not is_deny:
                     # 先搶、搶到才附：並行的 hook 行程只有一個說。搶到卻沒印出去的在下面放掉。

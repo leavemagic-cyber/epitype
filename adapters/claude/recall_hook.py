@@ -553,11 +553,13 @@ def _recall(event, started_at, config, delivery_markers=None, deliveries=None):
                 mark = _stale_state_mark(path)
                 if mark:
                     parts = (mark + parts[0], *parts[1:])
-            prefix = memspec.DECISION_PREFIX if decision is not None else ""
+            prefix = (memspec.DECISION_PREFIX if decision is not None else "") if source_projection is not None else "查找線索（來源未核；非授權或新增禁令） | "
             line = "- " + prefix + " | ".join(part for part in parts if part)
             if source_projection is not None:
                 source_routes[line] = (
                     "- 已核來源指路（正文／原句／範圍未載入，請讀卡片） | " + located)
+            else:
+                source_routes[line] = "- 查找線索（來源未核；非授權或新增禁令） | " + located
             origins[line] = (vault, card_identity, memspec.RECALL_DELIVERY_MODE_DECISION
                              if decision is not None else memspec.RECALL_DELIVERY_MODE_CARD)
             if decision is not None:
