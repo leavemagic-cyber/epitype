@@ -164,7 +164,7 @@ def _session(header, item):
     return None
 
 
-def _original(source, base, cache, budget):
+def _original(source, base, cache, budget, *, stable_prefix=None):
     budget.check()
     path_value = source.get("archive") or source.get("path")
     if not isinstance(path_value, str) or not path_value:
@@ -198,7 +198,9 @@ def _original(source, base, cache, budget):
             raw = _read_row(stream, source, budget)
     after = path.stat()
     if (after.st_size, after.st_mtime_ns) != fingerprint[1:]:
-        raise OSError("source changed while reading")
+        if stable_prefix is None or archived:
+            raise OSError("source changed while reading")
+        _verify_stable_prefix(path, stable_prefix, budget)
     digest = hashlib.sha256(raw).hexdigest()
     if digest != source.get("record_sha256"):
         raise ValueError("record hash does not match original source")
@@ -285,7 +287,7 @@ _CLAIM_OPEN = re.compile(r'<!--\s*EPITYPE CLAIM\b')
 _OWNER_CLAIM = re.compile(
     r'(?:owner|使用者|你)\s*(?:的\s*)?(?:原話|原句|逐字|裁定|規定|定的界線|'
     r'(?:已經?|曾經?|先前)?(?:要求|指示|決定|定規|授權|同意|說過))'
-    r'|owner\s+\d{1,4}[-/]\d{1,2}|你(?:說|定|訂)的'
+    r'|owner\s+\d{1,4}[-/]\d{1,2}|你(?:說|定|訂)的(?=\s*(?:界線|規則|限制|要求|指示|原話|原句|裁定|[「『“]))'
     r'|(?:owner|user)(?:[’\x27]s)?\s+(?:(?:has|had|already|previously|explicitly)\s+)*'
     r'(?:words|rul(?:ing|ed|es?)|directives?|instructions?|said|decided|requested|requires?|approved|ordered)',
     re.IGNORECASE)
@@ -295,7 +297,7 @@ _RESTRICTION = re.compile(
     r'(?:至少|最多|最少|固定)\s*\d|\b(?:must not|may only|can only|only allowed)\b|'
     r'\bnever\s+(?:use|run|submit|stop|cancel)\b|\b(?:at most|at least|maximum|minimum)\s*\d|'
     r'\b(?:cancel|stop|terminate)\b.{0,40}\b(?:after|over|exceeds?)\b', re.IGNORECASE)
-_NEW_RULE = re.compile(r'記下規則|新增規則|以後|一律|今後|門檻|訂定|制定|我這邊的判斷|規則[：:]|\b(?:policy|new rule|from now on)\b', re.IGNORECASE)
+_NEW_RULE = re.compile(r'記下規則|新增規則|以後|一律|今後|門檻|訂定|制定|主控自訂|我這邊的判斷|規則[：:]|\b(?:policy|new rule|from now on)\b', re.IGNORECASE)
 _HISTORY = re.compile(r'^\s*(?:[-*]\s*)?(?:歷史反例|錯誤紀錄|待更正|引用資料)[：:]')
 _DURATION_UNITS = r'分鐘|秒|小時|seconds?|minutes?|hours?'
 _THRESHOLD = re.compile(r'(?:超過|逾|\bafter|\bover|\bexceeds?)\s*(\d+(?:\.\d+)?)\s*('+_DURATION_UNITS+r')', re.IGNORECASE)
@@ -303,18 +305,41 @@ _DURATIONS = re.compile(r'(\d+(?:\.\d+)?)(?:\s*(?:[–—~～至到-]|to)\s*(\d+
 _UNITS = {'秒': 1, '分鐘': 60, '小時': 3600, 'second': 1, 'seconds': 1,
           'minute': 60, 'minutes': 60, 'hour': 3600, 'hours': 3600}
 _CANCEL = re.compile(r'取消|停止|終止|\b(?:cancel|stop|terminate)\b', re.IGNORECASE)
+_OPERATIVE_SUBJECT = re.compile(
+    r'前置檢查|建置|工作(?:程序|流程)?|任務|批次|跑批|訓練|回放|重掃|驗收|'
+    r'\b(?:preflight|build|job|task|batch|training|replay|worker|workflow)\b', re.IGNORECASE)
 
 
-def first_authorship(path, quotes, *, seconds=2.0, max_bytes=MAX_BYTES, _budget=None, member=None):
+def _verify_stable_prefix(path, origin, budget):
+    """Reread exactly the examined prefix; appending later records is harmless."""
+    length = origin['prefix_bytes']
+    if path.stat().st_size < length:
+        raise OSError('source changed during attribution scan')
+    digest = hashlib.sha256()
+    with path.open('rb') as stream:
+        remaining = length
+        while remaining:
+            chunk = budget.read(stream, min(remaining, 1024 * 1024))
+            if not chunk:
+                raise OSError('source changed during attribution scan')
+            digest.update(chunk)
+            remaining -= len(chunk)
+    if digest.hexdigest() != origin['prefix_sha256']:
+        raise OSError('source changed during attribution scan')
+
+
+def first_authorship(path, quotes, *, seconds=2.0, max_bytes=None, _budget=None, member=None):
     """Find first literal occurrences in original messages, never summaries.
 
-    A bounded scan starts at byte zero. A missing prefix, truncated row or read
-    budget exhaustion leaves unresolved quotes UNVERIFIED, not owner-authored.
-    Message IDs and physical lines are returned, not unrelated source bodies.
+    Scan the initial snapshot from byte zero, with bounded rows and a deadline,
+    rather than a fixed file-size ceiling. Reread its examined complete prefix
+    before returning evidence. Appends cannot alter earliest authorship; edits
+    to that prefix invalidate it. Unresolved quotes are never positive evidence.
     """
     pending = set(quotes)
     found = {}
-    budget = _budget or _ReadBudget(time.monotonic() + seconds, max_bytes)
+    budget = _budget or _ReadBudget(time.monotonic() + seconds,
+                                   float('inf') if max_bytes is None else max_bytes)
     try:
         path = Path(path)
         if path.suffix.casefold() not in ('.jsonl', '.zip'):
@@ -332,14 +357,26 @@ def first_authorship(path, quotes, *, seconds=2.0, max_bytes=MAX_BYTES, _budget=
                 stream = resources.enter_context(path.open('rb'))
             number = 0
             offset = 0
-            while pending:
-                raw = budget.read(stream, memspec.COMPACT_MAP_MAX_LINE_BYTES + 1, line=True)
+            digest = hashlib.sha256()
+            snapshot_size = (archive.getinfo(member).file_size
+                             if path.suffix.casefold() == '.zip' else before.st_size)
+            while pending and offset < snapshot_size:
+                raw = budget.read(stream, min(memspec.COMPACT_MAP_MAX_LINE_BYTES + 1,
+                                              snapshot_size - offset), line=True)
                 if not raw:
                     break
                 number += 1
                 if len(raw) > memspec.COMPACT_MAP_MAX_LINE_BYTES:
                     raise ValueError('oversized source row; earliest occurrence unknown')
-                row = json.loads(raw.decode('utf-8-sig'))
+                # A complete JSON value at EOF is valid without a trailing LF.
+                # Only an actually truncated snapshot tail lacks evidence.
+                try:
+                    row = json.loads(raw.decode('utf-8-sig'))
+                except (ValueError, UnicodeError):
+                    if not raw.endswith(b'\n') and offset + len(raw) == snapshot_size:
+                        break
+                    raise
+                digest.update(raw)
                 record = source_record(row)
                 if record:
                     role, body = record
@@ -349,16 +386,24 @@ def first_authorship(path, quotes, *, seconds=2.0, max_bytes=MAX_BYTES, _budget=
                             found[quote] = {
                                 'role': role, 'human_authored': role in ('U', 'Q') and _human_quote(body, quote),
                                 'line': number, 'byte_offset': offset,
-                                'message_id': row.get('uuid') or row.get('id') or payload.get('id'),
+                                'message_id': row.get('uuid') or row.get('id') or (
+                                    payload.get('id') if isinstance(payload, dict) else None),
                                 'record_sha256': hashlib.sha256(raw).hexdigest(),
                             }
                             pending.remove(quote)
                 offset += len(raw)
+                budget.check()
         after = path.stat()
-        if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
-            raise OSError('source changed during attribution scan')
+        if path.suffix.casefold() == '.zip':
+            if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+                raise OSError('source changed during attribution scan')
+        else:
+            prefix = {'prefix_bytes': offset, 'prefix_sha256': digest.hexdigest()}
+            _verify_stable_prefix(path, prefix, budget)
+            for origin in found.values():
+                origin.update(prefix)
     except (OSError, ValueError, TypeError, UnicodeError, zipfile.BadZipFile) as exc:
-        # No partial positive result survives an invalid or changing prefix.
+        # No positive result survives an invalid or rewritten examined prefix.
         reason = ('read-budget-exhausted' if isinstance(exc, _ReadBudgetExhausted)
                   else 'source-changed' if str(exc) == 'source changed during attribution scan'
                   else 'source-prefix-unreadable-or-invalid')
@@ -383,7 +428,9 @@ def _claim_source(source, quote, base, budget, *, human=False):
         fingerprint, origin = cached
         current = path.stat()
         if (current.st_size, current.st_mtime_ns) != fingerprint:
-            raise ValueError('source changed during claim validation')
+            if origin.get('status') != VERIFIED:
+                raise ValueError('source changed during claim validation')
+            _verify_stable_prefix(path, origin, budget)
     else:
         origin = first_authorship(path, [quote], _budget=budget)[quote]
     if origin['status'] != VERIFIED:
@@ -403,7 +450,7 @@ def _claim_source(source, quote, base, budget, *, human=False):
             if not locator['session_id']:
                 stream.seek(0)
                 locator['session_id'] = _session(budget.read(stream, 256*1024).decode('utf-8'), row)
-    role, text, _digest = _original(locator, base, None, budget)
+    role, text, _digest = _original(locator, base, None, budget, stable_prefix=origin)
     if quote not in text or human and (role not in ('U', 'Q') or not _human_quote(text, quote)):
         raise ValueError('cited text is assistant/quoted material, not owner words')
     if human and not origin['human_authored']:
@@ -430,14 +477,10 @@ def _prime_claim_sources(claims, base, budget):
             path = (base/path).resolve() if not path.is_absolute() else path.resolve()
             groups.setdefault(path, set()).add(quote)
     for path, quotes in groups.items():
-        before = path.stat()
         origins = first_authorship(path, quotes, _budget=budget)
         after = path.stat()
-        fingerprint = (before.st_size, before.st_mtime_ns)
-        if (after.st_size, after.st_mtime_ns) != fingerprint:
-            raise ValueError('source changed during claim validation')
         for quote, origin in origins.items():
-            budget.origins[(str(path), quote)] = fingerprint, origin
+            budget.origins[(str(path), quote)] = (after.st_size, after.st_mtime_ns), origin
 
 
 def _validate_claim(claim, base, budget):
@@ -531,40 +574,179 @@ def _labelled_quotations(line, inherited=False):
     return [m[0][1:-1] for m in selected]
 
 
+def _code_example(body, language):
+    """Recognize code data without letting fenced prose claim owner authority."""
+    import ast
+    if language in ('python', 'py', ''):
+        try:
+            tree = ast.parse(body)
+            if tree.body:
+                return True
+        except (SyntaxError, ValueError):
+            pass
+    if language in ('json', ''):
+        try:
+            return isinstance(json.loads(body), (dict, list))
+        except (ValueError, TypeError):
+            pass
+    return language in ('javascript', 'js', 'typescript', 'ts', 'bash', 'sh',
+                        'powershell', 'ps1', 'sql', 'ruby', 'go', 'rust', 'java',
+                        'c', 'cpp', 'csharp', 'yaml', 'yml', 'toml')
+
+
+def _prose_lines(text, budget, *, timeout_classification=False):
+    """Mask actual code examples; leave generic fences containing prose active."""
+    lines = text.splitlines()
+    index = 0
+    while index < len(lines):
+        budget.check()
+        opening = re.match(r'^\s*(`{3,}|~{3,})(\w*)\s*$', lines[index])
+        if opening:
+            end = index + 1
+            closing = re.compile(r'^\s*'+re.escape(opening[1][0])+r'{'+str(len(opening[1]))+r',}\s*$')
+            while end < len(lines) and not closing.match(lines[end]):
+                budget.check()
+                end += 1
+            if end < len(lines):
+                language = opening[2].casefold()
+                declared_code = language in ('python', 'py', 'json', 'javascript', 'js',
+                    'typescript', 'ts', 'bash', 'sh', 'powershell', 'ps1', 'sql', 'ruby',
+                    'go', 'rust', 'java', 'c', 'cpp', 'csharp', 'yaml', 'yml', 'toml')
+                if (declared_code if timeout_classification else
+                        _code_example('\n'.join(lines[index+1:end]), language)):
+                    lines[index:end+1] = [''] * (end-index+1)
+                else:
+                    lines[index] = lines[end] = ''
+                index = end
+        # Inline code literals, unlike plain quotations, are example data.
+        lines[index] = re.sub(r'`[^`\r\n]+`', '', lines[index])
+        index += 1
+    return lines
+
+
+def _operative_cancel(line):
+    """A conditional cancellation directive, not a report of an earlier action."""
+    if (not _OPERATIVE_SUBJECT.search(line) or not _RESTRICTION.search(line)
+            or not _CANCEL.search(line)):
+        return False
+    if re.search(r'(?:已經?|曾經?|當時|昨日|昨天|實測|觀察到).{0,50}(?:取消|停止|終止)|'
+                 r'\b(?:cancelled|canceled|stopped|terminated)\b', line, re.IGNORECASE):
+        return False
+    return bool(re.search(r'(?:超過|逾).{0,40}(?:就|直接|一律|應|才|要|必須).{0,8}(?:取消|停止|終止)|'
+                          r'\b(?:cancel|stop|terminate)\b.{0,40}\b(?:after|over|exceeds?)\b',
+                          line, re.IGNORECASE))
+
+
+def _has_claim_surface(text):
+    # Ordinary technical limits and task scope carry no asserted authority.
+    return bool(_OWNER_CLAIM.search(text) or _CLAIM_OPEN.search(text)
+                or _NEW_RULE.search(text) and _RESTRICTION.search(text)
+                or _operative_cancel(text))
+
+
+def _claim_worker_command():
+    import sys
+    return [sys.executable, '-B', '-m', 'epitype.rule_provenance', '--claim-worker']
+
+
+def _deadline_result(text, *, reaped=False):
+    # Timing out a declared code example cannot invent an authority claim.
+    fallback = _ReadBudget(time.monotonic()+0.1, 0)
+    try:
+        prose = '\n'.join(_prose_lines(text, fallback, timeout_classification=True))
+        if not _has_claim_surface(prose):
+            return None
+    except _ReadBudgetExhausted:
+        pass
+    return ('[owner-attribution] admission deadline exhausted; authority UNVERIFIED'
+            + (' (worker reaped)' if reaped else ''))
+
+
+def _bounded_claim(text, transcript_path, options, started):
+    """The hook's CPU/IO deadline is enforced by an owned, reaped subprocess."""
+    import subprocess
+    remaining = options['seconds'] - (time.monotonic() - started)
+    if remaining <= 0:
+        return _deadline_result(text)
+    packet = {'text': text, 'transcript_path': str(transcript_path) if transcript_path else None,
+              **options, 'base': str(options['base']) if options['base'] else None,
+              'seconds': remaining}
+    try:
+        run = subprocess.run(_claim_worker_command(),
+                             input=json.dumps(packet, ensure_ascii=False),
+                             text=True, encoding='utf-8', capture_output=True,
+                             cwd=Path(__file__).resolve().parents[1], timeout=remaining)
+    except subprocess.TimeoutExpired:
+        # subprocess.run kills and waits for this exact worker before raising.
+        return _deadline_result(text, reaped=True)
+    if run.returncode:
+        raise RuntimeError('owner-attribution worker failed: exit '+str(run.returncode))
+    result = json.loads(run.stdout)
+    if result is not None and not isinstance(result, str):
+        raise RuntimeError('owner-attribution worker returned invalid result')
+    return result
+
+
 def claim_violation(text, transcript_path=None, *, previous=None, require_citations=False,
-                    base=None, seconds=2.0, card_metadata=False):
+                    base=None, seconds=2.0, card_metadata=False, hard_deadline=False):
     """Return a blocking reason for new authority/restriction claims, else None.
 
-    Owner quotation in ordinary prose is checked automatically on Stop. Writes
-    additionally require an attached source locator. New operational limitations
-    need structured AI attribution plus dated observations. Historical examples
-    use explicit line labels. Fencing prose does not turn it into owner authority.
+    Owner quotations are checked automatically on every surface. Source markers
+    remain supported but are optional for true quotes. Only asserted new rules,
+    owner authority and operative cancellation require provenance. Hook callers
+    use hard_deadline to contain all CPU work in a bounded worker; ordinary text
+    without any claim surface returns immediately without source IO.
     """
     if not isinstance(text, str):
         return None
-    budget = _ReadBudget(time.monotonic()+seconds, MAX_BYTES)
+    started = time.monotonic()
+    if not _has_claim_surface(text):
+        return None
+    if hard_deadline:
+        return _bounded_claim(text, transcript_path, dict(previous=previous,
+            require_citations=require_citations, base=base, seconds=seconds,
+            card_metadata=card_metadata), started)
+    budget = _ReadBudget(started+seconds, float('inf'))
     base = Path(base or Path.cwd()).resolve()
     claims = []
     try:
-        markers = list(CLAIM_MARKER.finditer(text))
-        if len(markers) != len(list(_CLAIM_OPEN.finditer(text))):
+        lines = _prose_lines(text, budget)
+        prose = '\n'.join(lines)
+        markers = list(CLAIM_MARKER.finditer(prose))
+        if len(markers) != len(list(_CLAIM_OPEN.finditer(prose))):
             raise ValueError('malformed claim metadata')
         claims = [json.loads(match[1]) for match in markers]
         _prime_claim_sources(claims, base, budget)
         for claim in claims:
             _validate_claim(claim, base, budget)
-        added = set(text.splitlines())
+        originals = text.splitlines()
+        added = set(range(len(originals)))
         if previous is not None:
-            import difflib
+            # Count lines with their authority context. Moving an old heading
+            # onto old prose changes that context even when all words are old.
+            from collections import Counter
+            available = Counter()
+            previous_lines = previous.splitlines()
+            old_owner_section = False
+            for number, line in enumerate(_prose_lines(previous, budget)):
+                budget.check()
+                if line.lstrip().startswith('#'):
+                    old_owner_section = bool(_owner_labels(line))
+                available[(previous_lines[number], old_owner_section)] += 1
             added = set()
-            for op, _a, _b, c, d in difflib.SequenceMatcher(
-                    a=previous.splitlines(), b=text.splitlines(), autojunk=False).get_opcodes():
-                if op in ('insert', 'replace'):
-                    added.update(text.splitlines()[c:d])
+            current_owner_section = False
+            for number, line in enumerate(lines):
+                budget.check()
+                if line.lstrip().startswith('#'):
+                    current_owner_section = bool(_owner_labels(line))
+                key = originals[number], current_owner_section
+                if available[key]:
+                    available[key] -= 1
+                else:
+                    added.add(number)
         quotes = []
         in_owner_section = False
         new_owner_section = False
-        lines = text.splitlines()
         # Card metadata is admitted by the existing card_lint/validate path.
         # JSON proof payloads and descriptions are data, not free prose. Do not
         # let their embedded examples masquerade as newly asserted limitations.
@@ -572,25 +754,25 @@ def claim_violation(text, transcript_path=None, *, previous=None, require_citati
         if card_metadata and lines and lines[0].lstrip('\ufeff') == '---':
             frontmatter_end = next((i for i, line in enumerate(lines[1:], 1) if line == '---'), None)
         for number, line in enumerate(lines):
+            budget.check()
             if frontmatter_end is not None and number <= frontmatter_end:
                 continue
             if line.lstrip().startswith(('```', '~~~')):
                 continue
             if _HISTORY.match(line):
                 continue
-            original_line = line
             # The annotation is data, but prose beside it still makes claims.
             line = CLAIM_MARKER.sub('', line)
             if line.lstrip().startswith('#'):
                 in_owner_section = bool(_owner_labels(line))
-                new_owner_section = in_owner_section and original_line in added
+                new_owner_section = in_owner_section and number in added
                 if not (_labelled_quotations(line) or _RESTRICTION.search(line)):
                     continue
-            if (original_line not in added and not new_owner_section) or not line.strip():
+            if (number not in added and not new_owner_section) or not line.strip():
                 continue
             owner_claim = bool(_owner_labels(line)) or in_owner_section
             restriction = bool(_RESTRICTION.search(line)) and (
-                owner_claim or require_citations or bool(_NEW_RULE.search(line)))
+                owner_claim or bool(_NEW_RULE.search(line)) or _operative_cancel(line))
             if not owner_claim and not restriction:
                 continue
             matching = [claim for claim in claims if claim['text'] in line]
@@ -605,8 +787,6 @@ def claim_violation(text, transcript_path=None, *, previous=None, require_citati
                 continue
             if restriction and not owner_claim:
                 raise ValueError('new restriction lacks AI attribution, challengeable label and current evidence')
-            if require_citations:
-                raise ValueError('owner claim needs EPITYPE CLAIM metadata with original line/message ID')
             quoted = labelled
             if not quoted:
                 raise ValueError('owner claim has no exact quotation to verify')
@@ -617,6 +797,7 @@ def claim_violation(text, transcript_path=None, *, previous=None, require_citati
             if _RESTRICTION.search(unquoted):
                 raise ValueError('restriction outside owner quotation needs independent AI evidence')
             quotes.extend(quoted)
+        budget.check()
         if quotes:
             origins = first_authorship(transcript_path, quotes, _budget=budget)
             for quote in quotes:
@@ -625,6 +806,7 @@ def claim_violation(text, transcript_path=None, *, previous=None, require_citati
                     raise ValueError('owner attribution UNVERIFIED ('+origin.get('reason', 'occurrence-not-found')+'): original occurrence not found/readable')
                 if not origin['human_authored']:
                     raise ValueError(f'owner attribution rejected: first occurrence role={origin["role"]}, L{origin["line"]}')
+        budget.check()
     except (ValueError, TypeError, OSError, KeyError, UnicodeError) as exc:
         return f'[owner-attribution] {exc}'
     return None
@@ -855,3 +1037,12 @@ def _render_document(document):
         lines.append("原始 Owner 引句：" + document["quote"])
     lines.append(document["text"])
     return "\n".join(lines)
+
+
+if __name__ == '__main__':
+    import sys
+    if sys.argv[1:] != ['--claim-worker']:
+        raise SystemExit('only --claim-worker is supported')
+    sys.stdin.reconfigure(encoding='utf-8')
+    sys.stdout.reconfigure(encoding='utf-8')
+    print(json.dumps(claim_violation(**json.load(sys.stdin)), ensure_ascii=False))

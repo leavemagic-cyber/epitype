@@ -1180,12 +1180,13 @@ def _echo_overlap(config, session_id, message):
 
 def _handle(event, started_at, defects):
     message = event.get("last_assistant_message")
-    reason = rule_provenance.claim_violation(message, event.get("transcript_path"))
-    if reason:
-        # Source admission is not an advisory or a one-time card match. A
-        # re-entrant rewrite must not repeat the same false authority claim.
-        return {"decision": "block", "reason": reason}
     if event.get("stop_hook_active"):
+        # A rewrite is checked before its exemption. Normal turns instead check
+        # the complete text once below, avoiding two identical source scans.
+        reason = rule_provenance.claim_violation(message, event.get("transcript_path"),
+            seconds=max(0.0, 2.0-(time.monotonic()-started_at)), hard_deadline=True)
+        if reason:
+            return {"decision": "block", "reason": reason}
         # 這是被擋之後的重寫。規則不在這一輪重判（會無限迴圈），但有一件事只有這一輪
         # 看得到：重寫出來的東西跟剛才被擋那一段是不是幾乎一樣。owner 已經看過那一段，
         # 整段重貼等於同一段話給他看兩次。
@@ -1215,7 +1216,8 @@ def _handle(event, started_at, defects):
     if message.strip() not in memspec.join_turn_text(texts):
         texts.append(message)
     message = memspec.join_turn_text(texts)
-    reason = rule_provenance.claim_violation(message, event.get("transcript_path"))
+    reason = rule_provenance.claim_violation(message, event.get("transcript_path"),
+        seconds=max(0.0, 2.0-(time.monotonic()-started_at)), hard_deadline=True)
     if reason:
         return {"decision": "block", "reason": reason}
     config = load_config(started_at)

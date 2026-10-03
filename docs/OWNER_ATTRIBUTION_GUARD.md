@@ -15,8 +15,11 @@ summaries, metadata, delegated messages and tool-result user envelopes cannot
 establish human authorship. It reuses `capture.owner_reply_parts`: the prefix of
 the existing `<`, `《`, `<-` and `<=` reply formats is cited material; the suffix
 is the human reply. The first assistant occurrence, a cited prefix, an unreadable
-prefix, malformed row, changed source or exhausted read budget cannot pass as a
-human quotation. An assistant's normal quotation of genuine human words passes.
+prefix, malformed row, rewritten examined prefix or exhausted verification time
+cannot pass as a human quotation. An assistant's normal quotation of genuine
+human words passes without requiring an annotation, including file writes and
+dispatches. Appending records after the examined complete prefix is harmless;
+that prefix is reread and hash-checked. A partially written tail is not evidence.
 
 The generated compact map emits `owner_reply=... | cited_text=...`, putting the
 reply first before byte clipping. This preserves the physical source line. It
@@ -24,8 +27,10 @@ does not rewrite the host's model-generated compaction summary.
 
 ## Attached source locators
 
-New attributed claims in files or dispatches need one single-line JSON annotation
-per claim. Surround its JSON with the literal opening comment text
+Attributed quotations are automatically resolved against the event's original
+transcript. Optional single-line JSON annotations can supply another exact
+original source. Supplied annotations are always validated. Surround JSON with
+the literal opening comment text
 `<!--` + ` EPITYPE CLAIM ` and closing text ` -->`. Examples below are schema
 examples, with paths and words replaced by the actual original source.
 
@@ -38,12 +43,15 @@ both must match. Optional `record_sha256`, `byte_offset` and `role` must also
 match. The locator must identify the first original occurrence, and the text
 must equal the quotation; interpretations need AI attribution. Paths are relative
 to the target file's directory, or absolute. An unrelated true quotation cannot
-authorize a second claim or an adjacent prohibition. Headings, fences and prose
-beside annotations still undergo admission checks.
+authorize a second claim or an adjacent prohibition. Owner headings and prose
+beside annotations still undergo admission checks. Actual code examples and
+inline code literals are data; a generic fence around owner prose is not an
+exemption. Technical descriptions and ordinary task constraints with no owner
+attribution or newly asserted operating rule do not need claim metadata.
 
 ## AI-derived restrictions
 
-A new operational restriction needs explicit AI authorship, `challengeable:true`,
+A newly asserted operational rule needs explicit AI authorship, `challengeable:true`,
 the same subject in its text and observations, and source-bound dated evidence.
 The human-readable label should say it was proposed by the lead and can be
 challenged. A label without evidence does not pass.
@@ -58,6 +66,8 @@ freshness interval invented by this guard. A duration cancellation threshold is
 compared in seconds against the upper observed range for the same subject; a
 ten-minute timeout contradicting a normal fifteen-to-twenty-five-minute range is
 rejected. An unexplained cancellation ratio is unverified.
+Conditional cancellation directives are checked even without a leading phrase
+such as "new rule"; an ordinary report of an earlier cancellation is not one.
 Cancellation also requires `cancel_condition` in both the proposed text and
 source evidence, plus source-bound `checkpoint`, `redo_cost` and `recovery`.
 Elapsed time or silent logs alone cannot justify discarding valid work.
@@ -68,12 +78,21 @@ earliest authorship through their original source locators.
 
 ## Boundaries and diagnostics
 
-* The scan uses the existing source read budget, with a two-second admission
-  deadline. Multiple attached claims sharing one file scan its prefix once in
-  that admission, then reread and hash-check each cited row. There is no persistent
-  positive cache. A large or changing source can produce a conservative block;
-  inspect the exact original prefix and rerun with an explicit adequate budget.
-* Only inserted/replaced prose is judged on file edits. Registered memory-card
+* Hook admission shares one two-second budget across its calls. Claim evaluation
+  runs in an owned subprocess with a hard CPU/IO timeout; timeout kills and reaps
+  that worker. Ordinary prose without authority or operating rules returns
+  without source IO. Timeout does not invent an authority claim in code data;
+  unresolved authority remains UNVERIFIED. Direct helper calls additionally
+  check deadlines throughout scanning and classification.
+* Transcript admission streams bounded rows through the initial snapshot without
+  the former 64 MiB file-size ceiling. It checks the earliest physical occurrence
+  and rereads the examined prefix. Multiple attached claims sharing one file scan
+  its prefix once, then reread/hash-check cited rows. There is no persistent
+  positive cache. An unreadable prefix, rewrite or exhausted deadline still blocks
+  a claim. Existing explicit card-verification resource budgets remain supported.
+* File edits use linear counts of lines and their owner-heading context instead
+  of quadratic sequence matching. Unchanged prose is skipped; moving an owner
+  heading onto old prose changes its authority context and is checked. Registered memory-card
   frontmatter continues through the existing card lint/provenance path. A fake
   frontmatter wrapper in an ordinary plan does not exempt its prose.
 * Lines explicitly labelled as historical error reports or cited data are data,
@@ -89,10 +108,14 @@ earliest authorship through their original source locators.
   fields and external hook timeouts must be checked during deployment.
 * The guard never modifies originals, removes files, changes the host config,
   authorizes external actions or overrides higher-priority instructions.
+* Unexpected write-review exceptions preserve the existing fail-open contract
+  and emit `write admission UNVERIFIED` with the exception type. They are not a
+  successful verification.
 
 ## Verification and installation
 
-Run `python tests/run_all.py --jobs 4` in an isolated checkout; its helper isolates
+Run `python -u tests/run_all.py --jobs 1` in an isolated checkout with TEMP/TMP
+outside the source tree; its helper isolates
 the home/config for hook selftests. Replay an explicitly named original with
 `python tests/owner_attribution_regression.py --real-transcript <original.jsonl>`.
 The regression packet also invokes the real Stop/PreToolUse subprocess entry
@@ -101,7 +124,8 @@ The explicit incident replay freezes the full original prefix through its reply
 in test-owned temporary storage and hash-compares it to the named original.
 This preserves every earlier message and assertion while an active logger may
 append. The temporary payload is removed with the test fixture. A separate test
-asserts that changing sources during runtime admission remain blocked.
+asserts that stable-prefix appends pass while prefix rewrites remain blocked.
+Repeat the incident command with `--admission-seconds 2` for the daily deadline.
 
 Installation belongs to the lead after reviewing the commit and test artifacts:
 
@@ -115,6 +139,8 @@ Installation belongs to the lead after reviewing the commit and test artifacts:
    an existing nightly task also follows the reviewed repository. Existing dynamic
    shims then load its adapters. Repair registration gaps through the existing
    installer after review, not a parallel hook.
+   This is a global root selection, not a per-session trial: other sessions load
+   the selected adapters on their next hook call, and nightly follows that root.
 4. Verify one false attribution is blocked and one genuine quotation passes in
    each host. Confirm write/dispatch denials and compact-map separation. Read back
    the configured root and loaded code. A passing isolated test is not deployment

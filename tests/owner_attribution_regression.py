@@ -22,6 +22,11 @@ import stop_gate as stop
 ASSISTANT_WORDS = '大量重掃照原計畫做成 Colab 工作，由我來跑，所以校準資料不用放到 lobshsu'
 OWNER_WORDS = '能用dot就用dot'
 REAL_TRANSCRIPT = None
+ADMISSION_SECONDS = 5.0
+if '--admission-seconds' in sys.argv:
+    index = sys.argv.index('--admission-seconds')
+    ADMISSION_SECONDS = float(sys.argv[index + 1])
+    del sys.argv[index:index + 2]
 if '--real-transcript' in sys.argv:
     index = sys.argv.index('--real-transcript')
     REAL_TRANSCRIPT = Path(sys.argv[index + 1])
@@ -130,16 +135,31 @@ class OwnerAttributionRegression(unittest.TestCase):
             event = {**self.event, 'last_assistant_message': f'owner 原話：「{OWNER_WORDS}」'}
             self.assertIsNone(stop._handle(event, time.monotonic(), []))
 
+    def test_normal_stop_checks_aggregated_authority_once(self):
+        event = {**self.event, 'last_assistant_message': f'owner 原話：「{OWNER_WORDS}」'}
+        with patch.object(provenance, 'claim_violation', wraps=provenance.claim_violation) as check:
+            self.assertIsNone(stop._handle(event, time.monotonic(), []))
+        self.assertEqual(check.call_count, 1)
+
+    def test_bad_authority_before_last_message_still_blocks(self):
+        self.rows.extend([
+            {'type': 'assistant', 'message': {'content': [
+                {'type': 'text', 'text': f'owner 原話：「{ASSISTANT_WORDS}」'}]}},
+            {'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': '一般進度。'}]}}])
+        self.write_rows()
+        event = {**self.event, 'last_assistant_message': '一般進度。'}
+        self.assertEqual(stop._handle(event, time.monotonic(), [])['decision'], 'block')
+
     def test_missing_original_and_budget_exhaustion_are_not_passes(self):
         self.assertIsNotNone(provenance.claim_violation(f'owner 原話：「{OWNER_WORDS}」', self.root/'missing.jsonl'))
         self.assertEqual(provenance.first_authorship(self.path, [OWNER_WORDS], max_bytes=1)[OWNER_WORDS]['status'], provenance.UNVERIFIED)
 
-    def test_real_write_requires_citation_and_checks_true_source(self):
+    def test_real_write_auto_verifies_true_quote_without_citation(self):
         text = f'owner 原話：「{OWNER_WORDS}」'
         event = {**self.event, 'tool_name': 'Write',
                  'tool_input': {'file_path': str(self.root/'runbook.md'), 'content': text}}
         result = pretool._handle(event, time.monotonic(), [])
-        self.assertEqual(result['hookSpecificOutput']['permissionDecision'], 'deny')
+        self.assertNotEqual((result or {}).get('hookSpecificOutput', {}).get('permissionDecision'), 'deny')
         event['tool_input']['content'] += '\n'+self.marker(self.owner_claim())
         result = pretool._handle(event, time.monotonic(), [])
         self.assertNotEqual((result or {}).get('hookSpecificOutput', {}).get('permissionDecision'), 'deny')
@@ -325,6 +345,11 @@ class OwnerAttributionRegression(unittest.TestCase):
         after = before.replace('討論文字', 'owner 原話')
         self.assertIsNotNone(provenance.claim_violation(after, self.path, previous=before))
 
+    def test_moving_existing_owner_heading_cannot_promote_unchanged_prose(self):
+        before = f'# 討論文字\n- 「{ASSISTANT_WORDS}」\n# owner 原話\n- 「{OWNER_WORDS}」'
+        after = f'# owner 原話\n- 「{ASSISTANT_WORDS}」\n# 討論文字\n- 「{OWNER_WORDS}」'
+        self.assertIsNotNone(provenance.claim_violation(after, self.path, previous=before))
+
     def test_a_valid_marker_cannot_hide_a_second_malformed_marker(self):
         text = self.marker(self.owner_claim())+'\n<!-- EPITYPE CLAIM broken -->'
         self.assertIn('malformed', provenance.claim_violation(text))
@@ -372,7 +397,7 @@ class OwnerAttributionRegression(unittest.TestCase):
         after = before+'\n**再犯（2026-09-25）**：Run 區塊又拆成兩條指令。\n'
         self.assertIsNone(provenance.claim_violation(after, previous=before, require_citations=True))
 
-    def test_a_source_changing_during_admission_still_blocks(self):
+    def test_source_append_preserves_verified_stable_prefix(self):
         read = provenance._ReadBudget.read
         appended = False
         def append_after_read(budget, stream, size, **kwargs):
@@ -385,7 +410,140 @@ class OwnerAttributionRegression(unittest.TestCase):
             return result
         with patch.object(provenance._ReadBudget, 'read', append_after_read):
             result = provenance.claim_violation(f'owner 原話：「{OWNER_WORDS}」', self.path)
+        self.assertIsNone(result)
+
+    def test_source_prefix_rewrite_during_admission_still_blocks(self):
+        read = provenance._ReadBudget.read
+        rewritten = False
+        def rewrite_after_read(budget, stream, size, **kwargs):
+            nonlocal rewritten
+            result = read(budget, stream, size, **kwargs)
+            if not rewritten:
+                rewritten = True
+                raw = self.path.read_bytes().replace(b'Colab', b'XXXXX')
+                self.path.write_bytes(raw)
+            return result
+        with patch.object(provenance._ReadBudget, 'read', rewrite_after_read):
+            result = provenance.claim_violation(f'owner 原話：「{OWNER_WORDS}」', self.path)
         self.assertIn('source-changed', result)
+
+    def test_incomplete_snapshot_tail_is_not_positive_evidence(self):
+        self.path.write_text(json.dumps(self.rows[1], ensure_ascii=False)[:-2], encoding='utf-8')
+        self.assertIsNotNone(provenance.claim_violation(f'owner 原話：「{OWNER_WORDS}」', self.path))
+
+    def test_complete_json_at_eof_without_newline_is_verified(self):
+        # Message IDs are optional for automatic quotation lookup. An unrelated
+        # payload field must not break the supported host-user message shape.
+        row = {'type': 'user', 'payload': [], 'message': {'content': OWNER_WORDS}}
+        self.path.write_text(json.dumps(row, ensure_ascii=False), encoding='utf-8')
+        self.assertIsNone(provenance.claim_violation(f'owner 原話：「{OWNER_WORDS}」', self.path,
+                                                    hard_deadline=True))
+
+    def test_daily_unannotated_sentences_pass_both_hosts(self):
+        truth = '先改回用正常codex'
+        self.rows.append({'type': 'user', 'sessionId': 'incident', 'uuid': 'daily',
+                          'message': {'content': truth}})
+        self.write_rows()
+        cases = [('Write', 'owner 10-03「'+truth+'」'),
+                 ('Write', 'API 每次最多 100 筆。'),
+                 ('Task', '只改文件，禁止修改產品程式。'),
+                 ('Write', '```python\nassert label == "owner 10-03"\n```'),
+                 ('Stop', '你訂的餐廳已列入行程。'),
+                 ('Stop', '以下為測試資料：\n```json\n{"label": "owner 10-03"}\n```')]
+        for arguments in ((), ('--codex',)):
+            for tool, text in cases:
+                with self.subTest(host=arguments, tool=tool, text=text):
+                    event = {**self.event, 'last_assistant_message': text} if tool == 'Stop' else {
+                        **self.event, 'tool_name': tool, 'tool_input': {
+                            'file_path': str(self.root/'daily.md'), 'content': text, 'prompt': text}}
+                    script = 'stop_gate.py' if tool == 'Stop' else 'pretooluse_gate.py'
+                    result = common.run_synthetic(ROOT/'adapters/claude'/script, event,
+                                                  self.config, arguments=arguments)
+                    output = json.loads(result.stdout) if result.stdout.strip() else {}
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertNotEqual(output.get('decision'), 'block', output)
+                    self.assertNotEqual(output.get('hookSpecificOutput', {}).get('permissionDecision'),
+                                        'deny', output)
+
+    def test_cancel_directives_without_prompt_prefix_block_both_hosts(self):
+        for arguments in ((), ('--codex',)):
+            for text in ('前置檢查超過 10 分鐘沒有前進，就直接取消。',
+                         '前置檢查超過預估一半以上就直接取消。'):
+                result = common.run_synthetic(ROOT/'adapters/claude/stop_gate.py',
+                    {**self.event, 'last_assistant_message': text}, self.config, arguments=arguments)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(result.stdout)['decision'], 'block', result.stdout)
+        for text in ('API 每次最多 100 筆。', '前置檢查正常要15–25分鐘。',
+                     'API 請求超過30秒，就直接取消。',
+                     '昨天前置檢查超過10分鐘，已取消。'):
+            self.assertIsNone(provenance.claim_violation(text))
+
+    def test_true_quote_after_64mib_passes_but_earlier_assistant_still_blocks(self):
+        padding = (json.dumps({'type': 'progress', 'data': 'x'*60000})+'\n').encode()
+        with self.path.open('wb') as stream:
+            while stream.tell() <= 65*1024*1024:
+                stream.write(padding)
+            for row in self.rows:
+                stream.write((json.dumps(row, ensure_ascii=False)+'\n').encode())
+        self.assertIsNone(provenance.claim_violation(f'owner 原話：「{OWNER_WORDS}」', self.path,
+                                                    hard_deadline=True))
+        self.assertIn('role=A', provenance.claim_violation(f'owner 原話：「{ASSISTANT_WORDS}」',
+                                                          self.path, hard_deadline=True))
+
+    def test_repeated_markdown_returns_promptly_without_authority(self):
+        old = '| a | b |\n'*20000
+        target = self.root/'table.md'
+        target.write_text(old, encoding='utf-8')
+        event = {**self.event, 'tool_name': 'Edit', 'tool_input': {
+            'file_path': str(target), 'old_string': old, 'new_string': '# 表格\n'+old}}
+        start = time.monotonic()
+        result = common.run_synthetic(ROOT/'adapters/claude/pretooluse_gate.py', event, self.config)
+        self.assertLess(time.monotonic()-start, 2.0)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output = json.loads(result.stdout) if result.stdout.strip() else {}
+        self.assertNotEqual(output.get('hookSpecificOutput', {}).get('permissionDecision'), 'deny')
+
+    def test_hard_deadline_terminates_and_reaps_cpu_bound_worker(self):
+        # Exercise an actually non-yielding CPU loop, rather than a fake clock.
+        worker = [sys.executable, '-c', 'while True: pass']
+        import subprocess
+        processes = []
+        popen = subprocess.Popen
+        def launch_worker(*args, **kwargs):
+            process = popen(*args, **kwargs)
+            processes.append(process)
+            return process
+        start = time.monotonic()
+        with patch.object(provenance, '_claim_worker_command', return_value=worker), \
+             patch('subprocess.Popen', side_effect=launch_worker):
+            reason = provenance.claim_violation(f'owner 原話：「{OWNER_WORDS}」', self.path,
+                                               seconds=0.3, hard_deadline=True)
+        self.assertIn('deadline exhausted', reason)
+        self.assertLess(time.monotonic()-start, 1.5)
+        # run() owns kill + wait. Capture its real Popen object independently.
+        self.assertEqual(len(processes), 1)
+        self.assertIsNotNone(processes[0].poll(), 'CPU worker must be exited and reaped')
+        with patch.object(provenance, '_claim_worker_command', side_effect=AssertionError('no worker')):
+            self.assertIsNone(provenance.claim_violation('API 每次最多 100 筆。',
+                                                        seconds=0, hard_deadline=True))
+
+    def test_cpu_timeout_on_code_example_does_not_invent_authority(self):
+        worker = [sys.executable, '-c', 'while True: pass']
+        with patch.object(provenance, '_claim_worker_command', return_value=worker):
+            self.assertIsNone(provenance.claim_violation(
+                '```python\nassert label == "owner 10-03"\n```',
+                seconds=0.3, hard_deadline=True))
+        self.assertIsNone(provenance.claim_violation(
+            '```python\nassert label == "owner 10-03"\n```', seconds=0, hard_deadline=True))
+
+    def test_repetitive_diff_with_real_authority_still_checks_new_claim(self):
+        old = '| a | b |\n'*20000
+        start = time.monotonic()
+        self.assertIsNone(provenance.claim_violation(old+f'owner 原話：「{OWNER_WORDS}」',
+            self.path, previous=old, hard_deadline=True))
+        self.assertLess(time.monotonic()-start, 2.0)
+        self.assertIsNotNone(provenance.claim_violation(old+f'owner 原話：「{ASSISTANT_WORDS}」',
+            self.path, previous=old, hard_deadline=True))
 
     @unittest.skipUnless(REAL_TRANSCRIPT, 'explicit original transcript required')
     def test_real_original_snapshot_record_replay(self):
@@ -413,8 +571,10 @@ class OwnerAttributionRegression(unittest.TestCase):
         self.assertEqual(owner[0], 'U')
         self.assertFalse(provenance._human_quote(owner[1], ASSISTANT_WORDS))
         self.assertTrue(provenance._human_quote(owner[1], OWNER_WORDS))
-        bad = provenance.claim_violation(f'owner 原話：「{ASSISTANT_WORDS}」', snapshot, seconds=5)
-        good = provenance.claim_violation(f'owner 原話：「{OWNER_WORDS}」', snapshot, seconds=5)
+        bad = provenance.claim_violation(f'owner 原話：「{ASSISTANT_WORDS}」', snapshot, seconds=ADMISSION_SECONDS,
+                                         hard_deadline=True)
+        good = provenance.claim_violation(f'owner 原話：「{OWNER_WORDS}」', snapshot, seconds=ADMISSION_SECONDS,
+                                          hard_deadline=True)
         self.assertIn('role=A, L16845', bad)
         self.assertIsNone(good)
 

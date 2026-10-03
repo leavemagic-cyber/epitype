@@ -1648,6 +1648,7 @@ def _review_one_target(event, config, target, additions, prospective, started_at
                     after if after is not None else "\n".join(additions),
                     event.get("transcript_path"), previous=before if after is not None else None,
                     require_citations=True, base=target.parent,
+                    seconds=max(0.0, 2.0-(time.monotonic()-started_at)), hard_deadline=True,
                     card_metadata=_vault_card_path(target, resolve_vaults(config, event)) is not None)
                 if reason:
                     return _deny_value(reason), notices
@@ -1666,7 +1667,8 @@ def _review_one_target(event, config, target, additions, prospective, started_at
             candidate = prospective if isinstance(prospective, str) else "\n".join(additions)
             reason = rule_provenance.claim_violation(
                 candidate, event.get("transcript_path"), require_citations=True,
-                base=target.parent)
+                base=target.parent, seconds=max(0.0, 2.0-(time.monotonic()-started_at)),
+                hard_deadline=True)
             if reason:
                 return _deny_value(reason), notices
             if (owner_rules.BEGIN in str(prospective or "")
@@ -2149,7 +2151,8 @@ def _handle(event, started_at, defects=None, meter_claims=None, advice_claims=No
             for key in ("prompt", "message", "instructions"):
                 reason = rule_provenance.claim_violation(
                     dispatch.get(key), event.get("transcript_path"), require_citations=True,
-                    base=event.get("cwd"))
+                    base=event.get("cwd"), seconds=max(0.0, 2.0-(time.monotonic()-started_at)),
+                    hard_deadline=True)
                 if reason:
                     return _deny_value(reason)
     defects = [] if defects is None else defects
@@ -2187,8 +2190,10 @@ def _handle(event, started_at, defects=None, meter_claims=None, advice_claims=No
         write_value, notices = _write_review(
             event, tool_name, event.get("tool_input"), config, started_at
         )
-    except Exception:
+    except Exception as exc:
         write_value, notices = None, ()
+        defects.append(f"write admission UNVERIFIED: review failed ({type(exc).__name__}); "
+                       "next check: inspect this exact tool call")
     if write_value is not None:
         return write_value
     try:
@@ -2915,7 +2920,7 @@ def _selftest():
                     if line.strip()
                 ] if write_log.is_file() else []
 
-            def append_incident(path, text=recurrence_line, session=None):
+            def append_incident(path, text=recurrence_line, session=None, extra=None):
                 return write_call(
                     "Edit",
                     {
@@ -2924,6 +2929,7 @@ def _selftest():
                         "new_string": recurrence_body + "\n" + text + "\n",
                     },
                     session=session,
+                    extra=extra,
                 )
 
             run_card = write_vault / "feedback-run-button.md"
@@ -3033,12 +3039,8 @@ def _selftest():
                 "type": "user", "sessionId": "ordinary-owner", "uuid": "original-owner",
                 "timestamp": "2026-06-18T00:00:00Z",
                 "message": {"content": ordinary_owner_words}}, ensure_ascii=False) + "\n", encoding="utf-8")
-            ordinary_proof = "<!-- EPITYPE CLAIM " + json.dumps({
-                "kind": "owner-directive", "text": ordinary_owner_words, "quote": ordinary_owner_words,
-                "source": {"path": str(ordinary_source), "line": 1, "message_id": "original-owner"}},
-                ensure_ascii=False) + " -->"
             for index, text in enumerate((
-                "owner 2026-06-18：「驗證程式片段太大問題，免得以後再犯。」\n" + ordinary_proof,
+                "owner 2026-06-18：「驗證程式片段太大問題，免得以後再犯。」",
                 "## 我最大的錯（永遠別再犯）",
                 "這是行為層的防再犯規則，2026-09-20 起適用。",
                 "- 不要再犯沒有對於各商品有不同判斷方式（2026-07-12）",
@@ -3046,7 +3048,8 @@ def _selftest():
                 ordinary_card = write_vault / f"feedback-ordinary-{index}.md"
                 ordinary_card.write_text(
                     recurrence_card(f"feedback-ordinary-{index}"), encoding="utf-8")
-                ordinary.append(append_incident(ordinary_card, text))
+                ordinary.append(append_incident(ordinary_card, text,
+                    extra={"transcript_path": os.fspath(ordinary_source)}))
             checks.append((
                 "「免得以後再犯」「永遠別再犯」「防再犯」「不要再犯」是一般用語，不是事故敘述，放行",
                 all(
