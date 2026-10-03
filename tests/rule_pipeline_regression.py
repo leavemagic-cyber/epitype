@@ -4,6 +4,7 @@ sys.dont_write_bytecode = True
 from pathlib import Path
 sys.path[:0] = [str(Path(__file__).resolve().parents[1]), str(Path(__file__).resolve().parent)]
 import copy
+import hashlib
 import json
 import time
 import unittest
@@ -92,6 +93,27 @@ class RulePipeline(unittest.TestCase):
         reason, _advice = gate._card_review("rule-source-test.md", changed,
                                           before_text=before, source_path=self.target)
         self.assertIn("來源", reason)
+
+    def test_frozen_legacy_metadata_hash_stays_strict(self):
+        before = '---\nname: synthetic\nmetadata:\n  type: rule\n  modified: 2026-09-24T08:01:40.599Z\n---\nKeep existing evidence.\n'
+        after = before.replace('2026-09-24T08:01:40.599Z', '2026-10-03T13:54:05.506Z')
+        frozen = json.dumps([{
+            'name': ['name: synthetic'],
+            'metadata': ['metadata:', '  type: rule', '  modified: 2026-09-24T08:01:40.599Z'],
+        }, 'Keep existing evidence.'], ensure_ascii=False, sort_keys=True)
+        # The frozen value comes from the original algorithm, not the new
+        # default binding calculation. No baseline pin is migrated or relaxed.
+        self.assertEqual(rule_pipeline._meaning(before, include_source=False,
+                                               exclude_metadata_modified=False), frozen)
+        fields, _ = memspec.frontmatter_text(before)
+        with patch('epitype.rule_legacy.check') as check:
+            rule_pipeline.legacy_integrity(fields, self.target, card_text=before)
+            original_sha = check.call_args.args[1]
+            self.assertEqual(original_sha, hashlib.sha256(frozen.encode()).hexdigest())
+            rule_pipeline.legacy_integrity(fields, self.target, card_text=after)
+            self.assertNotEqual(check.call_args.args[1], original_sha)
+        self.assertEqual(rule_pipeline._meaning(before, include_source=False),
+                         rule_pipeline._meaning(after, include_source=False))
 
     def test_ai_interpretation_and_owner_approval_are_distinct(self):
         document = copy.deepcopy(self.document)

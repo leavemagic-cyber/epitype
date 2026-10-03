@@ -47,7 +47,7 @@ def is_rule(fields, card_type, text=""):
             or card_type in _BEHAVIOUR_TYPES and bool(_NORMATIVE.search(text)))
 
 
-def _meaning(text, *, include_source=True):
+def _meaning(text, *, include_source=True, exclude_metadata_modified=True):
     lines, closing = memspec.split_frontmatter(text)
     body = "\n".join(text.splitlines()[closing + 1:]) if closing is not None else text
     # Aliases and dates are retrieval maintenance; descriptions, scope, author,
@@ -71,7 +71,8 @@ def _meaning(text, *, include_source=True):
             key = match.group(1)
             metadata_child_indent = None
             blocks.setdefault(key, [])
-        elif key == memspec.METADATA_FIELD and line.strip() and not line.lstrip().startswith("#"):
+        elif (exclude_metadata_modified and key == memspec.METADATA_FIELD
+              and line.strip() and not line.lstrip().startswith("#")):
             # This direct metadata date is maintenance, separate from rule meaning.
             # Keep every other metadata value, including deeper `modified` keys.
             indent = len(line) - len(line.lstrip(" "))
@@ -294,7 +295,10 @@ def legacy_integrity(fields, path, *, card_text=None):
     text = card_text if card_text is not None else Path(path).read_text(encoding='utf-8-sig')
     current, _problem = memspec.frontmatter_text(text)
     from . import rule_legacy
-    meaning_sha256 = hashlib.sha256(_meaning(text, include_source=False).encode()).hexdigest()
+    # The pinned legacy baseline was made with the original complete metadata
+    # hash. Date maintenance is exempt only in reviewed payload bindings.
+    meaning_sha256 = hashlib.sha256(_meaning(
+        text, include_source=False, exclude_metadata_modified=False).encode()).hexdigest()
     check = rule_legacy.check(Path(path).resolve(), meaning_sha256)
     if not is_rule(current, current.get('type', ''), text):
         # Previously enrolled rules retain their identity even after a shell
