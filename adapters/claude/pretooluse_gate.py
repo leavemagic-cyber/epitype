@@ -706,7 +706,7 @@ def _recurrence_review(card, target, additions, prospective, patch, started_at, 
     return _deny_value(reason[: memspec.WRITE_GATE_REASON_MAX_CHARS])
 
 
-_Guard = namedtuple("_Guard", "card tool substrings advice path requires unless when write_check advise_tool advise_fragments advise_text sequence audience on_hit", defaults=((), "", "block"))
+_Guard = namedtuple("_Guard", "card tool substrings advice path requires unless when write_check advise_tool advise_fragments advise_text sequence audience on_hit", defaults=((), "", "note"))
 
 
 def _read_guard(path):
@@ -750,7 +750,7 @@ def _read_guard(path):
         entry["source_render"] = rendered
         entry["source_issues"] = projected["provenance"].get("issues", [])
         # Explicit card demotion leaves unrelated retained safety guards unchanged.
-        entry["on_hit"] = fields.get("on_hit", "block").strip().casefold()
+        entry["on_hit"] = fields.get("on_hit", "note").strip().casefold()
         if projected['text'].strip():
             entry["advice"] = "\n".join(filter(None, (entry.get("advice", ""), rendered)))
         if entry.get("advise_text"):
@@ -1135,7 +1135,7 @@ def _guards(vault, started_at, defects, cap=None, deadline=None, *, event=None, 
                     entry.get("advise_text", ""),
                     tuple(entry.get("sequence") or ()),
                     entry.get("audience", ""),
-                    entry.get("on_hit", "block"),
+                    entry.get("on_hit", "note"),
                 )
             )
     return found

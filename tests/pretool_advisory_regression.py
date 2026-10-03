@@ -170,6 +170,43 @@ class AdvisoryRegression(unittest.TestCase):
         with mock.patch.object(gate, "_guards", return_value=[guard._replace(on_hit="block")]):
             self.assertTrue(self.denied(gate._guard_review(event, "Bash", event["tool_input"], self.config, time.monotonic(), [], [])))
 
+    def test_implicit_new_guard_defaults_to_note_explicit_valid_block_survives(self):
+        from epitype import rule_context
+        from rule_source_fixtures import source_bound_card
+        path = self.vault / "implicit-guard.md"
+        text = ("---\nname: implicit-guard\ndescription: isolated fixture guard\n"
+                "source_agent: codex\nmetadata:\n  type: scar\nguard_tool: Bash\n"
+                "guard_all_of:\n  - fixture-command\nguard_advice: isolated fixture advice\n"
+                "---\nSynthetic guard body.\n")
+        path.write_text(source_bound_card(text, path, source_root=self.root / "sources",
+            case_id="implicit-new-guard"), encoding="utf-8")
+        event = pre("implicit", "Bash", {"command": "fixture-command"})
+        entry = gate._read_guard(path)
+        self.assertEqual(entry["source_status"], "VERIFIED")
+        self.assertEqual(entry["on_hit"], "note")
+        self.assertEqual(gate._Guard(*self.guard()[:-1]).on_hit, "note")
+        with mock.patch.object(rule_context, "applicability", return_value=("MATCH", "fixture scope")):
+            if old:
+                self.before_block("new guard without on_hit", lambda: old._guard_review(
+                    event, "Bash", event["tool_input"], self.config, time.monotonic(), [], []))
+            advice = []
+            self.assertIsNone(gate._guard_review(event, "Bash", event["tool_input"],
+                self.config, time.monotonic(), [], advice))
+            self.assertTrue(advice)
+            # Exercise loader fallback separately from the frontmatter default.
+            legacy_entry = {key: value for key, value in entry.items() if key != "on_hit"}
+            with mock.patch.object(gate, "_read_guard", return_value=legacy_entry):
+                self.assertEqual(gate._guards(self.vault, time.monotonic(), [], event=event)[0].on_hit, "note")
+            explicit = source_bound_card(text.replace("guard_tool: Bash", "on_hit: block\nguard_tool: Bash"),
+                path, source_root=self.root / "sources", case_id="explicit-retained-guard")
+            path.write_text(explicit, encoding="utf-8")
+            explicit_entry = gate._read_guard(path)
+            self.assertEqual(explicit_entry["source_status"], "VERIFIED")
+            self.assertEqual(explicit_entry["on_hit"], "block")
+            self.assertTrue(self.denied(gate._guard_review(event, "Bash", event["tool_input"],
+                self.config, time.monotonic(), [], [])))
+        print("AFTER advisory: implicit new guard; explicit VERIFIED block remains deny")
+
     def test_a14_encoding_is_repaired_and_parser_finishes(self):
         target = self.root / "fixture.ps1"
         guard = self.guard()._replace(write_check=memspec.WRITE_CHECK_PS51_UTF8_BOM)
