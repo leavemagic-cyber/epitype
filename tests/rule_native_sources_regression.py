@@ -13,7 +13,7 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from epitype import capture_route, host_native, memspec, rule_legacy, rule_pipeline
+from epitype import capture_route, host_native, host_sync, memspec, rule_legacy, rule_pipeline
 
 NATIVE_FIELDS = (
     'host_claude_env:\n  CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS: "4"\n'
@@ -195,6 +195,50 @@ class NativeSourceConsumers(unittest.TestCase):
                 # Force a fresh positive rendering on the next original format.
                 self.path.unlink()
                 self.assertEqual(self.call()[0][1], 0)
+
+    def test_missing_original_warns_and_real_sync_finishes_for_both_hosts(self):
+        for host in ('claude', 'codex'):
+            with self.subTest(host=host):
+                self.card(host=host, card_type='rule', native=NATIVE_FIELDS
+                    + 'metadata:\n  type: rule\n'
+                    + 'layer: resident\nsection: execution\norder: 1\n'
+                    + 'approved_by: synthetic-reviewer\napproved_at: 2026-10-03\n')
+                self.source.unlink()
+                report = io.StringIO()
+                result = host_sync.apply(self.vaults, hosts=['claude', 'codex'],
+                    home=self.home, output=report)
+                self.assertEqual(result, host_sync.EXIT_OK, report.getvalue())
+                self.assertIn('UNVERIFIED', report.getvalue())
+                for target in (self.home / '.claude' / 'CLAUDE.md', self.home / '.codex' / 'AGENTS.md'):
+                    rendered = target.read_text(encoding='utf-8')
+                    self.assertIn(self.document['text'], rendered)
+                    self.assertIn('原始對話無法讀取', rendered)
+                self.assertEqual(self.call(host_native.check)[0], (0, 0))
+                settings = json.loads(self.settings.read_text(encoding='utf-8'))
+                self.assertIn('Read(user-file)', settings['permissions']['deny'])
+                self.assertEqual(settings['env']['USER_VALUE'], 'keep')
+
+    def test_missing_original_does_not_hide_native_payload_changes(self):
+        self.card()
+        self.install()
+        self.source.unlink()
+        self.path.write_text(self.path.read_text(encoding='utf-8').replace(
+            '  - Bash(git clean:*)\n', ''), encoding='utf-8')
+        self.assert_refuses_preserving('complete rule body')
+
+    def test_empty_bound_native_declarations_retire_reminder_only_block(self):
+        self.card()
+        self.install()
+        scope = self.scope()
+        scope.update(actions=['reminders'], conditions=['shell pattern'], exceptions=['existing safety boundaries'])
+        self.card(scope=scope, native='host_claude_deny: []\nhost_codex_rules: []\n')
+        result, report = self.call()
+        self.assertEqual(result[1], 0, report)
+        settings = json.loads(self.settings.read_text(encoding='utf-8'))
+        self.assertNotIn('Bash(git clean:*)', settings['permissions']['deny'])
+        self.assertIn('Read(user-file)', settings['permissions']['deny'])
+        self.assertEqual(settings['env']['USER_VALUE'], 'keep')
+        self.assertEqual(self.call(host_native.check)[0], (0, 0))
 
     def test_render_preserves_whole_user_files_hooks_comments_and_handwritten_rules(self):
         self.card()
@@ -430,7 +474,7 @@ class NativeSourceConsumers(unittest.TestCase):
         with patch.object(Path, 'read_text', fail):
             self.assert_refuses_preserving('PermissionError')
 
-    def test_source_read_failure_refuses(self):
+    def test_source_read_failure_warns_and_preserves_existing_settings(self):
         self.card()
         self.install()
         original_open = Path.open
@@ -439,7 +483,12 @@ class NativeSourceConsumers(unittest.TestCase):
                 raise PermissionError('synthetic original unreadable')
             return original_open(path, *args, **kwargs)
         with patch.object(Path, 'open', fail):
-            self.assert_refuses_preserving()
+            before = self.snapshot()
+            for function in (host_native.check, host_native.apply):
+                result, report = self.call(function)
+                self.assertEqual(result, (0, 0), report)
+                self.assertIn('UNVERIFIED original source unavailable', report)
+                self.assertEqual(self.snapshot(), before)
 
     def test_failed_vault_scan_is_not_an_empty_desired_set(self):
         self.card()

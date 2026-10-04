@@ -2244,3 +2244,31 @@ A peer session that sent exactly `放行分頁` as plain text would be
 indistinguishable from the owner, and a session nobody can answer (`claude -p`,
 a scheduled run) that loses its browser tools has no way out but a Chrome
 disconnect or a built-in browser listing.
+
+## 49. A missing original conversation stopped rule synchronization (2026-10-04)
+
+Two cards pointed to a Codex session path that had moved into archived_sessions.
+The common projection treated unavailable source evidence as a publication
+failure, refusing the entire core block and native settings batch. Restoring
+the actual archive pointers repaired those two records but left the recurring
+product defect in place. The owner explicitly removed this workflow restriction.
+
+Core generation and native synchronization now retain the complete bound card
+content and mark its source UNVERIFIED when the original is unreadable. The
+original-source inspector and action-authority consumers keep their evidence
+status. A readable identity mismatch, modified payload or malformed card still
+reports an error; unavailable history never conceals those separate defects.
+Reciprocal successor links and expiry remain effective even with absent original
+conversations, so retired cards do not reappear.
+
+The shell-quoting scar had already become a reminder, but a blank native deny
+declaration and contextual scope still prevented its former native block from
+retiring. Native lists now accept an explicit `[]` withdrawal; a bound empty
+declaration has no active native instruction to test against reminder prose.
+Nonempty declarations retain event scope checks and malformed empty declarations
+remain errors. Handwritten or independently owned restrictions are preserved.
+
+Regression coverage uses both Codex and Claude original record formats and
+the actual host sync in isolated homes. It checks warning delivery, preserved
+user settings, missing-source successors and expired rules, mixed missing and
+invalid originals, and unchanged output after a real integrity failure.

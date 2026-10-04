@@ -144,18 +144,82 @@ class RulePipeline(unittest.TestCase):
                 self.assertEqual(host_sync.rules_text([self.vault], host),
                                  host_sync.project_rules_text(self.vault, host))
 
+    def test_missing_original_is_advisory_in_core_and_both_host_views(self):
+        self.target.write_text(self.card(), encoding="utf-8")
+        out = self.root / "core.md"
+        core_gen.generate([self.vault], out, config={})
+        self.original.path.unlink()
+        result = core_gen.generate([self.vault], out, config={})
+        self.assertEqual(result["status"], "written", result)
+        rendered = out.read_text(encoding="utf-8")
+        self.assertIn(self.document["text"], rendered)
+        self.assertIn("原始對話無法讀取", rendered)
+        pack = json.loads(Path(result["pack"]).read_text(encoding="utf-8"))
+        evidence = pack["cards"][0]["provenance"]
+        self.assertEqual(evidence["status"], "UNVERIFIED")
+        self.assertTrue(evidence["source_unavailable"])
+        self.assertFalse(evidence["action_authorization"])
+        self.assertNotEqual(core_gen.check([self.vault], out)["status"], core_gen.STATUS_UNREADABLE)
+        for host in ("codex", "claude"):
+            self.assertEqual(host_sync.project_rules_text(self.vault, host),
+                             core_gen.host_view(rendered, host).rstrip())
+        fields, _ = memspec.frontmatter_fields(self.target)
+        with self.assertRaises(ValueError):
+            rule_pipeline.projection(fields, self.target)
+
     def test_invalid_projection_preserves_prior_output_no_silent_partial_success(self):
         self.target.write_text(self.card(), encoding="utf-8")
         out = self.root / "core.md"
         core_gen.generate([self.vault], out, config={})
         previous = out.read_bytes()
-        self.original.path.unlink()
+        self.original.path.write_bytes(self.original.path.read_bytes().replace(
+            self.original.quote.encode(), b"fabricated directive"))
         result = core_gen.generate([self.vault], out, config={})
         self.assertEqual(result["status"], core_gen.STATUS_UNREADABLE)
         self.assertEqual(out.read_bytes(), previous)
         self.assertEqual(core_gen.check([self.vault], out)["status"], core_gen.STATUS_UNREADABLE)
         with self.assertRaises(ValueError):
             host_sync.project_rules_text(self.vault, "codex")
+
+    def test_missing_original_does_not_hide_changed_payload_or_revive_expiry(self):
+        self.target.write_text(self.card(), encoding="utf-8")
+        self.original.path.unlink()
+        self.target.write_text(self.target.read_text(encoding="utf-8") + "Extra unreviewed rule.\n", encoding="utf-8")
+        rules, errors = core_gen.collect_rules([self.vault])
+        self.assertFalse(rules)
+        self.assertTrue(any("complete rule body" in error for error in errors))
+        document = copy.deepcopy(self.document)
+        document["scope"]["expiry"] = "2000-01-01"
+        self.target.write_text(self.card(document), encoding="utf-8")
+        rules, errors = core_gen.collect_rules([self.vault])
+        self.assertFalse(errors)
+        self.assertFalse(rules)
+
+    def test_missing_original_does_not_hide_another_source_identity_error(self):
+        document = copy.deepcopy(self.document)
+        missing = copy.deepcopy(document['sources'][0])
+        missing['path'] = str(self.root / 'missing-original.jsonl')
+        document['sources'][0]['record_sha256'] = '0' * 64
+        document['sources'].append(missing)
+        self.target.write_text(self.card(document), encoding='utf-8')
+        rules, errors = core_gen.collect_rules([self.vault])
+        self.assertFalse(rules)
+        self.assertTrue(any('INVALID' in error and 'identity' in error for error in errors))
+
+    def test_missing_original_keeps_reciprocal_successor_without_reviving_predecessor(self):
+        successor = self.vault / 'rule-source-successor.md'
+        self.target.write_text(self.card(status='superseded', superseded_by=successor.name), encoding='utf-8')
+        document = copy.deepcopy(self.document)
+        document['supersedes'] = [self.target.name]
+        successor.write_text(self.card(document), encoding='utf-8')
+        self.original.path.unlink()
+        rules, errors = core_gen.collect_rules([self.vault])
+        self.assertFalse(errors)
+        self.assertEqual([row['path'] for row in rules], [successor.name])
+        self.assertEqual(rules[0]['provenance']['status'], 'UNVERIFIED')
+        self.target.write_text(self.card(status='active'), encoding='utf-8')
+        rules, errors = core_gen.collect_rules([self.vault])
+        self.assertTrue(any('predecessor is still active' in error for error in errors))
 
     def test_source_lint_rejects_projection_mutation(self):
         self.target.write_text(self.card(text='"擴大為所有案件都必須問 Owner"'), encoding="utf-8")

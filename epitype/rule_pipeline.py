@@ -127,7 +127,8 @@ def expired(document, now=None):
     return limit <= (now or datetime.now(timezone.utc))
 
 
-def supersession_issues(fields, card_path, *, card_text=None, seconds=5.0):
+def supersession_issues(fields, card_path, *, card_text=None, seconds=5.0,
+                       allow_unavailable_sources=False, source_notices=None):
     """Verify reciprocal identities and both endpoint payloads without recursion.
 
     The prospective root can be supplied by a write caller; every other node is
@@ -202,9 +203,12 @@ def supersession_issues(fields, card_path, *, card_text=None, seconds=5.0):
             canonical = copy.deepcopy(new_doc)
             canonical["supersedes"] = [str(identity(value, successor)) for value in declared]
             reviewed = dict(new, **{rule_provenance.FIELD: rule_provenance.serialize(canonical)})
-            result = rule_provenance.validate_supersession(old, reviewed, prior, successor)
-            if not result.verified:
+            result = rule_provenance.validate_supersession(old, reviewed, prior, successor,
+                allow_unavailable_sources=allow_unavailable_sources)
+            if not result.verified and not (allow_unavailable_sources and result.source_unavailable):
                 raise ValueError("; ".join(result.issues))
+            if result.source_unavailable and source_notices is not None:
+                source_notices.extend(result.issues)
             remaining()
             edges.add(pair)
         pending.extend(path for path in pair if path not in examined)
@@ -266,7 +270,7 @@ def admission(before, after, card_type, card_path):
     return []
 
 
-def inspect_card(fields, path, *, card_text=None):
+def inspect_card(fields, path, *, card_text=None, allow_unavailable_sources=False):
     """One original-source, complete-payload and successor check for every caller."""
     result = rule_provenance.validate(fields, path)
     if rule_provenance.FIELD not in fields:
@@ -276,15 +280,23 @@ def inspect_card(fields, path, *, card_text=None):
             if not check.allowed:
                 result.status = rule_provenance.INVALID
                 result.issues.extend(check.issues)
-    if result.verified:
+    if result.verified or allow_unavailable_sources and result.source_unavailable:
+        notices = []
         try:
             text = card_text if card_text is not None else Path(path).read_text(encoding="utf-8-sig")
-            issues = payload_issues(result.document, text) + supersession_issues(fields, path, card_text=text)
+            issues = payload_issues(result.document, text) + supersession_issues(fields, path,
+                card_text=text, allow_unavailable_sources=allow_unavailable_sources,
+                source_notices=notices)
         except (ValueError, OSError) as error:
             issues = ["rule card cannot be verified: " + str(error)]
         if issues:
             result.status = rule_provenance.INVALID
+            result.source_unavailable = False
             result.issues.extend(issues)
+        elif notices:
+            result.status = rule_provenance.UNVERIFIED
+            result.source_unavailable = True
+            result.issues.extend(notices)
     return result
 
 
@@ -309,7 +321,7 @@ def legacy_integrity(fields, path, *, card_text=None):
     return check
 
 
-def projection(fields, path, *, legacy_text="", card_text=None):
+def projection(fields, path, *, legacy_text="", card_text=None, allow_unavailable_sources=False):
     """Return source-labelled data; malformed supplied evidence never falls back."""
     payload = Path(path).read_bytes()
     snapshot = payload.decode('utf-8-sig').replace('\r\n', '\n').replace('\r', '\n')
@@ -320,13 +332,15 @@ def projection(fields, path, *, legacy_text="", card_text=None):
         raise ValueError(Path(path).name + ': rule card snapshot INVALID: ' + problem)
     # Locators and caller headers are not authority. The provenance envelope
     # itself can change without changing its separately bound rule meaning.
-    result = inspect_card(current_fields, path, card_text=snapshot)
-    if (rule_provenance.FIELD in current_fields and not result.verified
+    result = inspect_card(current_fields, path, card_text=snapshot,
+                          allow_unavailable_sources=allow_unavailable_sources)
+    available_for_publication = result.verified or allow_unavailable_sources and result.source_unavailable
+    if (rule_provenance.FIELD in current_fields and not available_for_publication
             or result.status == rule_provenance.INVALID):
         raise ValueError(Path(path).name + ": rule provenance " + result.status + ": "
                          + "; ".join(result.issues))
     document = result.document
-    text = document["text"] if result.verified else legacy_text
+    text = document["text"] if available_for_publication else legacy_text
     if Path(path).read_bytes() != payload:
         raise ValueError(Path(path).name + ': rule card changed during source verification')
     provenance = result.to_dict()
@@ -337,7 +351,7 @@ def projection(fields, path, *, legacy_text="", card_text=None):
             "supersedes": document.get("supersedes", []),
             "authorship": document.get("author", "UNVERIFIED"),
             "kind": document.get("kind", "legacy-unverified"),
-            "expired": result.verified and expired(document), "document": document}
+            "expired": available_for_publication and expired(document), "document": document}
 
 
 def render_projection(projected, *, card_path=None):
@@ -345,6 +359,12 @@ def render_projection(projected, *, card_path=None):
     if projected["expired"]:
         return ""
     if projected["provenance"]["status"] != rule_provenance.VERIFIED:
+        if projected["provenance"].get("source_unavailable"):
+            document = projected["document"]
+            return ("來源未核：原始對話無法讀取；保留卡片記載內容。\n"
+                    + "卡片記載作者：" + document["author"] + "\n"
+                    + "適用範圍（卡片記載）：" + rule_provenance.serialize(document["scope"]) + "\n"
+                    + projected["text"] + "\n來源卡：" + str(card_path or projected["card_path"]))
         return memspec.RULE_SOURCE_LEGACY_REFERENCE + projected["text"]
     rendered = rule_provenance._render_document(projected["document"])
     if projected["document"]["kind"] == "ai-derived":

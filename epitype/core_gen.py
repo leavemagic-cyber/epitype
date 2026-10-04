@@ -93,7 +93,8 @@ def collect_rules(vaults):
             from epitype import rule_pipeline
             try:
                 projected = rule_pipeline.projection(
-                    fields, path, legacy_text=fields.get(memspec.RULE_TEXT_FIELD, ""), card_text=text)
+                    fields, path, legacy_text=fields.get(memspec.RULE_TEXT_FIELD, ""), card_text=text,
+                    allow_unavailable_sources=True)
             except ValueError as exc:
                 errors.append(f"{vault}｜{relative}: {exc}")
                 continue
@@ -169,7 +170,8 @@ def _section_lines(members):
 
 
 def _display_rule(rule):
-    if rule.get("provenance", {}).get("status") != "VERIFIED":
+    if (rule.get("provenance", {}).get("status") != "VERIFIED"
+            and not rule.get("provenance", {}).get("source_unavailable")):
         return rule["text"]
     from epitype import rule_pipeline
     return rule_pipeline.render_projection(
@@ -196,11 +198,15 @@ def assemble(rules):
         note += memspec.CORE_GEN_OUTPUT_NOTE_HOSTS_SUFFIX.format(host_only=len(host_only))
     lines = [memspec.CORE_GEN_OUTPUT_TITLE, note, ""]
     legacy = [rule for rule in rules if rule["layer"] in memspec.RULE_GENERATED_LAYERS
-              and rule.get("provenance", {}).get("status") != "VERIFIED"]
+              and rule.get("provenance", {}).get("status") != "VERIFIED"
+              and not rule.get("provenance", {}).get("source_unavailable")]
     if legacy:
         manifests = "、".join(str(pack_path(vault)) for vault in sorted({rule["vault"] for rule in legacy}))
         lines.extend((f"來源未核的舊卡：本生成包共 {len(legacy)} 條；原正文保留，尚未完成原句、作者與範圍遷移。"
                       "未帶已核來源欄位的條目均屬此類；逐卡狀態見 " + manifests + "。", ""))
+    unavailable = [rule for rule in rules if rule.get("provenance", {}).get("source_unavailable")]
+    if unavailable:
+        lines.extend((f"原始對話無法讀取：{len(unavailable)} 條仍照卡片內容生成，來源狀態保留 UNVERIFIED。", ""))
     if floor:
         lines.append(memspec.CORE_GEN_FLOOR_HEADING)
         lines.extend(

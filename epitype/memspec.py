@@ -3465,6 +3465,16 @@ def _host_declared(front_lines, field):
     )
 
 
+def _host_empty_sequence(front_lines, field):
+    return any(
+        not raw_line[:1].isspace()
+        and (match := TOP_LEVEL_FIELD.match(raw_line)) is not None
+        and match.group(1) == field
+        and strip_inline_comment(match.group(2)).strip() == "[]"
+        for raw_line in front_lines
+    )
+
+
 def host_native_values(front_lines):
     """({欄位: 解析後的值}, [問題])——卡片體檢與 `epitype sync` 共用的唯一讀法。
 
@@ -3511,7 +3521,7 @@ def host_native_values(front_lines):
 
     if _host_declared(front_lines, HOST_CLAUDE_DENY_FIELD):
         rules = sequence_items(front_lines, HOST_CLAUDE_DENY_FIELD)
-        if not rules:
+        if not rules and not _host_empty_sequence(front_lines, HOST_CLAUDE_DENY_FIELD):
             problems.append(HOST_FIELD_NOT_LIST_REASON.format(field=HOST_CLAUDE_DENY_FIELD))
         kept = []
         for rule in rules:
@@ -3560,7 +3570,7 @@ def host_native_values(front_lines):
 
     if _host_declared(front_lines, HOST_CODEX_RULES_FIELD):
         items = sequence_items(front_lines, HOST_CODEX_RULES_FIELD)
-        if not items:
+        if not items and not _host_empty_sequence(front_lines, HOST_CODEX_RULES_FIELD):
             problems.append(HOST_FIELD_NOT_LIST_REASON.format(field=HOST_CODEX_RULES_FIELD))
         rules = []
         for item in items:

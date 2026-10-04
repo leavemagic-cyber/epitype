@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Continue rule generation and host synchronization when an original conversation file is unavailable. Keep the bound card text, declared author and scope with an UNVERIFIED notice; preserve payload integrity, expiry, reciprocal replacement links and unrelated user settings.
+
+- Retire fully bound, explicitly empty native declarations even when their remaining reminder has contextual prose, removing obsolete owned blocks without clearing handwritten safety settings.
+
 - Require original-source, author, scope and complete-payload evidence before capture, promotion or starter templates publish a rule. Preserve unproved captures and historical context in unpublished drafts; an Owner verification stamp alone cannot supply the missing source. Source-bound recall now displays the original quotation beside its AI author and scope, superseding the earlier quote-hiding test requirement.
 
 - Isolate each selftest's home, Codex home and Epitype configuration from live pinned baselines. Give positive capture fixtures real scoped synthetic originals, retain missing-source rejection and all other publication boundaries, and route native migration fixtures to their own explicit configuration.

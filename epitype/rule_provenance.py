@@ -78,6 +78,7 @@ class Verification:
     issues: list[str] = field(default_factory=list)
     document: dict = field(default_factory=dict, repr=False)
     records: list[dict] = field(default_factory=list)
+    source_unavailable: bool = False
 
     @property
     def verified(self):
@@ -86,6 +87,7 @@ class Verification:
     def to_dict(self):
         # Original message bodies can contain unrelated private data.
         return {"status": self.status, "issues": list(self.issues),
+                "source_unavailable": self.source_unavailable,
                 "key": self.document.get("key"), "kind": self.document.get("kind"),
                 "author": self.document.get("author"),
                 "scope": self.document.get("scope"), "records": list(self.records),
@@ -1188,6 +1190,7 @@ def validate(fields, card_path=None, cache=None, *, seconds=5.0, max_bytes=MAX_B
     original = []
     base = Path(card_path).resolve().parent if card_path else Path.cwd()
     unavailable = False
+    unavailable_issues = 0
     for source in sources:
         if (not isinstance(source, dict) or not _HASH.fullmatch(str(source.get("record_sha256", "")))
                 or not isinstance(source.get("session_id"), str) or not source.get("session_id")
@@ -1202,11 +1205,15 @@ def validate(fields, card_path=None, cache=None, *, seconds=5.0, max_bytes=MAX_B
             return _budget_unverified(result)
         except OSError:
             unavailable = True
+            unavailable_issues += 1
             result.issues.append("original source unavailable; next check: restore the exact source locator")
         except (ValueError, UnicodeError, zipfile.BadZipFile, KeyError):
             result.issues.append("original source identity, record boundary or role validation failed")
     if len(original) != len(sources):
-        result.status = UNVERIFIED if unavailable else INVALID
+        # A missing original is a publication notice, while an independently
+        # observed identity or shape error remains an actual invalid record.
+        result.source_unavailable = unavailable and len(result.issues) == unavailable_issues
+        result.status = UNVERIFIED if result.source_unavailable else INVALID
         return result
     owner_sources = []
     for index, (role, text, _hash) in enumerate(original):
@@ -1274,11 +1281,13 @@ def validate(fields, card_path=None, cache=None, *, seconds=5.0, max_bytes=MAX_B
     return result
 
 
-def validate_supersession(before, after, before_path=None, after_path=None, cache=None):
+def validate_supersession(before, after, before_path=None, after_path=None, cache=None,
+                         *, allow_unavailable_sources=False):
     """A successor cannot silently swallow another key, project or case."""
     old = validate(before, before_path, cache)
     new = validate(after, after_path, cache)
-    if not old.verified or not new.verified:
+    if not all(result.verified or allow_unavailable_sources and result.source_unavailable
+               for result in (old, new)):
         return Verification(UNVERIFIED, ["both supersession endpoints require verified provenance"])
     changes = (old.document["key"] != new.document["key"] or any(
         old.document["scope"][name] != new.document["scope"][name]
@@ -1299,6 +1308,9 @@ def validate_supersession(before, after, before_path=None, after_path=None, cach
     if before_path and Path(before_path).name not in new.document["supersedes"] and str(
             before_path) not in new.document["supersedes"]:
         return Verification(INVALID, ["successor must explicitly list prior card identity"])
+    if old.source_unavailable or new.source_unavailable:
+        return Verification(UNVERIFIED, old.issues + new.issues, document=new.document,
+                            records=new.records, source_unavailable=True)
     return new
 
 

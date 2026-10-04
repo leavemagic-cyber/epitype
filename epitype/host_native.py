@@ -248,7 +248,8 @@ def collect(vaults, *, event=None, diagnostics=None, seconds=5.0, owned_cards=()
                     continue
                 try:
                     if 'rule_provenance' in fields:
-                        projected = rule_pipeline.projection(fields, path, card_text=text)
+                        projected = rule_pipeline.projection(fields, path, card_text=text,
+                                                             allow_unavailable_sources=True)
                         if identity and native_paths is not None and not (
                                 projected['expired'] or fields.get('status', '').strip() in memspec.STOP_GATE_SILENT_STATUSES
                                 or memspec.card_expired(fields.get(memspec.VALID_UNTIL_FIELD))
@@ -271,7 +272,8 @@ def collect(vaults, *, event=None, diagnostics=None, seconds=5.0, owned_cards=()
                     card=relative, problem=problem or 'unclosed native card frontmatter'))
                 continue
             try:
-                projected = rule_pipeline.projection(fields, path, card_text=text)
+                projected = rule_pipeline.projection(fields, path, card_text=text,
+                                                     allow_unavailable_sources=True)
             except (ValueError, OSError, UnicodeError) as exc:
                 problems.append(memspec.HOST_NATIVE_CARD_INVALID_REASON.format(
                     card=relative, problem=str(exc)))
@@ -283,8 +285,15 @@ def collect(vaults, *, event=None, diagnostics=None, seconds=5.0, owned_cards=()
             if (projected['expired'] or memspec.card_expired(fields.get(memspec.VALID_UNTIL_FIELD))
                     or memspec.card_expired(fields.get(memspec.GRANT_EXPIRES_FIELD))):
                 continue
+            values, invalid = memspec.host_native_values(front)
+            if invalid:
+                problems.extend(memspec.HOST_NATIVE_CARD_INVALID_REASON.format(
+                    card=relative, problem=problem) for problem in invalid)
+                continue
             scope = projected['document'].get('scope')
-            if scope is not None:
+            # Empty, fully bound declarations withdraw owned native settings.
+            # No active native instruction needs the reminder's language scope.
+            if scope is not None and any(values.values()):
                 applicable, reason = rule_context.applicability(scope, event or {})
                 if applicable == 'OUTSIDE':
                     continue
@@ -293,12 +302,9 @@ def collect(vaults, *, event=None, diagnostics=None, seconds=5.0, owned_cards=()
                         card=relative, problem='UNVERIFIED rule scope: ' + reason))
                     continue
             if projected['provenance']['status'] != 'VERIFIED':
-                diagnostics.append(f'{relative}: UNVERIFIED legacy source; compatibility is not Owner authorship or scope proof')
-            values, invalid = memspec.host_native_values(front)
-            if invalid:
-                problems.extend(memspec.HOST_NATIVE_CARD_INVALID_REASON.format(
-                    card=relative, problem=problem) for problem in invalid)
-                continue
+                source = ('original source unavailable; synchronization continues with bound card content'
+                          if projected['provenance'].get('source_unavailable') else 'legacy source')
+                diagnostics.append(f'{relative}: UNVERIFIED {source}; compatibility is not Owner authorship or scope proof')
             for section, field in ((SECTION_ENV, memspec.HOST_CLAUDE_ENV_FIELD),
                                    (SECTION_CONFIG, memspec.HOST_CODEX_CONFIG_FIELD)):
                 for key, value in values.get(field, {}).items():
