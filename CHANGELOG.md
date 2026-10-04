@@ -1,5 +1,7 @@
 # Changelog
 
+- Allow verified English execution cards to reference pinned provenance kept with the retained Chinese version, and generate plain core text without repeating source quotations or dates. Existing source, payload, scope, and supersession checks remain in force.
+
 ## Unreleased
 
 - Continue rule generation and host synchronization when an original conversation file is unavailable. Keep the bound card text, declared author and scope with an UNVERIFIED notice; preserve payload integrity, expiry, reciprocal replacement links and unrelated user settings.

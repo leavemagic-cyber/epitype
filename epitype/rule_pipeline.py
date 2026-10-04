@@ -347,6 +347,7 @@ def projection(fields, path, *, legacy_text="", card_text=None, allow_unavailabl
     if hasattr(result, "legacy_integrity"):
         provenance["legacy_integrity"] = result.legacy_integrity
     return {"text": text, "provenance": provenance, "card_path": str(path),
+            "display": current_fields.get("core_display", "").strip(),
             "source_sha256": hashlib.sha256(payload).hexdigest(),
             "supersedes": document.get("supersedes", []),
             "authorship": document.get("author", "UNVERIFIED"),
@@ -358,6 +359,8 @@ def render_projection(projected, *, card_path=None):
     """Render a projection without re-reading the record it just verified."""
     if projected["expired"]:
         return ""
+    if projected.get("display") == "plain" and projected["provenance"]["status"] == rule_provenance.VERIFIED:
+        return projected["text"]
     if projected["provenance"]["status"] != rule_provenance.VERIFIED:
         if projected["provenance"].get("source_unavailable"):
             document = projected["document"]

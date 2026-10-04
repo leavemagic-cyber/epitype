@@ -4,6 +4,8 @@
 
 ## 卡片資料
 
+核准的英文執行卡可用 `rule_provenance: {"ref": "<absolute retained-source JSON>", "sha256": "<SHA256>"}` 指向中文版留存資料中的完整來源文件。每次解析重讀並核對完整文件雜湊；不允許巢狀引用，完整來源與正文綁定仍走相同驗證。引用文件的 `approval` 可保存批准者及日期，英文卡不必重複保存引句與日期。`core_display: plain` 只在來源通過驗證時生成規則正文；作者、原句、日期及取代資料留在來源文件，不注入上線正文。其他卡保留原顯示方式。
+
 `rule_provenance` 使用 JSON 字串，沿用目前 YAML 檔頭讀取方式。內容包含：
 
 - `version`、`key`、`kind`（`owner-directive` 或 `ai-derived`）、`author`、`quote`、`text`。

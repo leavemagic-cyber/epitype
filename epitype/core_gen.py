@@ -114,8 +114,11 @@ def collect_rules(vaults):
                 "authorship": projected["authorship"],
                 "kind": projected["kind"],
                 "supersedes": projected["supersedes"],
-                "approved_by": fields.get(memspec.RULE_APPROVED_BY_FIELD, "").strip(),
-                "approved_at": fields.get(memspec.RULE_APPROVED_AT_FIELD, "").strip(),
+                "approved_by": fields.get(memspec.RULE_APPROVED_BY_FIELD, "").strip()
+                    or (projected.get("document") or {}).get("approval", {}).get("by", ""),
+                "approved_at": fields.get(memspec.RULE_APPROVED_AT_FIELD, "").strip()
+                    or (projected.get("document") or {}).get("approval", {}).get("at", ""),
+                "core_display": fields.get("core_display", "").strip(),
                 "hosts": tuple(
                     memspec.sequence_items(front_lines or (), memspec.RULE_HOSTS_FIELD)
                 ),
@@ -170,6 +173,8 @@ def _section_lines(members):
 
 
 def _display_rule(rule):
+    if rule.get("core_display") == "plain" and rule.get("provenance", {}).get("status") == "VERIFIED":
+        return rule["text"]
     if (rule.get("provenance", {}).get("status") != "VERIFIED"
             and not rule.get("provenance", {}).get("source_unavailable")):
         return rule["text"]

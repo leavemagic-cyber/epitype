@@ -97,12 +97,28 @@ class Verification:
 def parse(fields):
     value = fields.get(FIELD)
     if isinstance(value, dict):
-        return value
-    if not isinstance(value, str) or not value.strip():
+        result = value
+    elif not isinstance(value, str) or not value.strip():
         return None
-    result = json.loads(value)
+    else:
+        result = json.loads(value)
     if not isinstance(result, dict):
         raise ValueError("rule_provenance must be a JSON object")
+    if "ref" in result:
+        # Keep source quotations and dates in the retained source document,
+        # while binding the exact English card to that reviewed evidence.
+        if set(result) != {"ref", "sha256"} or not isinstance(result["ref"], str):
+            raise ValueError("external rule provenance requires only ref and sha256")
+        source = Path(result["ref"])
+        if not source.is_absolute() or not _HASH.fullmatch(str(result["sha256"])):
+            raise ValueError("external rule provenance needs an absolute path and SHA256")
+        with source.open("rb") as stream:
+            raw = stream.read(1024 * 1024 + 1)
+        if len(raw) > 1024 * 1024 or hashlib.sha256(raw).hexdigest() != result["sha256"]:
+            raise ValueError("external rule provenance size or hash mismatch")
+        result = json.loads(raw.decode("utf-8-sig"))
+        if not isinstance(result, dict) or "ref" in result:
+            raise ValueError("external rule provenance must contain one complete document")
     return result
 
 
