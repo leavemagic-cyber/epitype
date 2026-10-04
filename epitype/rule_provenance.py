@@ -1255,13 +1255,29 @@ def validate(fields, card_path=None, cache=None, *, seconds=5.0, max_bytes=MAX_B
             elif not origin['human_authored']:
                 result.issues.append('owner-directive quotation first occurred in assistant/quoted text')
     elif _RESTRICTION.search(document['text']):
+        approval = document.get('approval', {})
+        index = approval.get('source') if isinstance(approval, dict) else None
+        explicitly_approved = (
+            isinstance(approval, dict) and approval.get('by') == 'owner'
+            and _integer(index) and index in owner_sources
+            and approval.get('quote') == document['quote']
+            and approval.get('text_sha256') == hashlib.sha256(document['text'].encode('utf-8')).hexdigest()
+            and document.get('scope_basis', {}).get('source') == index
+            and re.search(r'同意|核准|批准|\b(?:approve[ds]?|agree[ds]?)\b',
+                          _owner_text(document['quote']), re.IGNORECASE)
+        )
         constraint = document.get('restriction_evidence')
         try:
-            if not isinstance(constraint, dict) or constraint.get('text') != document['text']:
+            if explicitly_approved:
+                # Verified owner adoption differs from AI-created restrictions.
+                # The interpretation remains AI-authored.
+                pass
+            elif not isinstance(constraint, dict) or constraint.get('text') != document['text']:
                 raise ValueError('AI restriction requires restriction_evidence for the exact interpretation')
-            if constraint.get('author') != document['author']:
+            elif constraint.get('author') != document['author']:
                 raise ValueError('restriction evidence author differs from interpretation author')
-            _validate_claim(constraint, base, budget)
+            else:
+                _validate_claim(constraint, base, budget)
         except (ValueError, OSError, TypeError, KeyError) as exc:
             result.issues.append(str(exc))
     basis = document["scope_basis"]
