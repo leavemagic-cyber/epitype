@@ -562,6 +562,25 @@ NOTICE_MARKER_DIRECTORY = "epitype_notices"
 # 2026-09-03 對抗審查 #4：marker 只建不收會在 temp 無限累積；超過這個年齡就清掉。
 NOTICE_MARKER_TTL_SECONDS = 24 * 3600
 # 同場提醒去重的「目標」：先取結構化的路徑／分頁／網址欄位，再取指令；都沒有就用整份輸入。
+# 分頁收尾提醒（control_lifecycle）。只提醒、不擋；開頭是 LIFECYCLE_SAFETY_PREFIX 的導頁理由
+# 例外：那是把別的場次／代理建立的、或保留給執行中 VM 的分頁導走，PreToolUse 照擋（a04）。
+LIFECYCLE_PENDING_REMINDER = ("Epitype 查到本次仍未確認收尾：{summary}。用完請只關自己建立的資源並核對工具結果；"
+                              "若使用者已要求停止，不要為收尾再操作，改為如實回報。")
+LIFECYCLE_SUMMARY_TABS = "分頁 {names}"
+LIFECYCLE_SUMMARY_GROUPS = "分頁群組 {names}"
+LIFECYCLE_SUMMARY_CONTROLLER = "操控工作階段"
+LIFECYCLE_SUMMARY_UNCERTAIN = "無法確認的瀏覽器操作"
+LIFECYCLE_SUMMARY_KEPT = "宣告保留的 Colab VM 分頁 {names}（VM 跑完、結果核對後就關）"
+LIFECYCLE_MORE_SUFFIX = " 等"
+LIFECYCLE_UNTRACKED_CALL = "Epitype 無法追蹤這次瀏覽器操作：工具沒有提供本次呼叫的識別碼。"
+LIFECYCLE_UNVERIFIED_RESULT = "Epitype 無法從這次工具結果確認瀏覽器開關；請查實際分頁清單並回報未驗範圍。"
+LIFECYCLE_SAFETY_PREFIX = "安全："
+LIFECYCLE_FOREIGN_TAB = "安全：分頁 {tab} 是其他場次／代理建立的，不能擅自導走。"
+LIFECYCLE_KEPT_TAB = "安全：分頁 {tab} 正保留給執行中的 VM，請在本場其他分頁導頁。"
+LIFECYCLE_NO_TAB_EVIDENCE = "尚無本場分頁證據，可先建立或選定分頁並填入 ID。"
+LIFECYCLE_NO_IDLE_TAB = "尚無可用的本場空閒分頁，可建立或選定分頁；保留 VM 與已知他人的分頁不能導走。"
+LIFECYCLE_RELEASE_NOTICE = ("Epitype 已記錄使用者保留／停止指示，涉及本場分頁 {names}；"
+                            "它們仍待收尾，之後能關時照樣要關。")
 NOTICE_TARGET_FIELDS = ("file_path", "notebook_path", "path", "filePath", "file_paths", "paths",
                         "url", "tabId", "command")
 
@@ -3818,9 +3837,29 @@ _EN = {
     "STOP_NOTE_MATCHED_TEXT": "Matched text: {fragment}",
     "STOP_NOTE_NOTICE": "Epitype: last reply hit {rule} of {decision}{details}; no need to resend.",
     "STOP_NOTE_ADVICE_PART": "; advice: {text}",
-    "STOP_NOTE_OWNER_QUOTE_PART": '; owner said: "{text}"',
+    "STOP_NOTE_OWNER_QUOTE_PART": '; in their words: "{text}"',
     "STOP_NOTE_CARD_TEXT_PART": '; card: "{text}"',
     "STOP_NOTE_MATCHED_PART": '; matched: "{text}"',
+    "LIFECYCLE_PENDING_REMINDER": ("Epitype found cleanup not yet confirmed this session: {summary}. When done, close only "
+                                   "what you opened and check the tool result; if the user asked to stop, do not act "
+                                   "again just to clean up, report it as it stands."),
+    "LIFECYCLE_SUMMARY_TABS": "tabs {names}",
+    "LIFECYCLE_SUMMARY_GROUPS": "tab groups {names}",
+    "LIFECYCLE_SUMMARY_CONTROLLER": "a computer-control session",
+    "LIFECYCLE_SUMMARY_UNCERTAIN": "browser actions that could not be confirmed",
+    "LIFECYCLE_SUMMARY_KEPT": "Colab VM tabs declared kept {names} (close them once the VM finishes and the result is checked)",
+    "LIFECYCLE_MORE_SUFFIX": " etc.",
+    "LIFECYCLE_UNTRACKED_CALL": "Epitype cannot track this browser action: the tool gave no id for this call.",
+    "LIFECYCLE_UNVERIFIED_RESULT": ("Epitype could not confirm from this tool result whether a browser tab opened or "
+                                    "closed; check the actual tab list and report what was not verified."),
+    "LIFECYCLE_SAFETY_PREFIX": "Safety: ",
+    "LIFECYCLE_FOREIGN_TAB": "Safety: tab {tab} was opened by another session or agent; do not navigate it away.",
+    "LIFECYCLE_KEPT_TAB": "Safety: tab {tab} is kept for a running VM; navigate in another tab of this session.",
+    "LIFECYCLE_NO_TAB_EVIDENCE": "No tab of this session is on record yet; open or pick a tab and pass its ID.",
+    "LIFECYCLE_NO_IDLE_TAB": ("No idle tab of this session is available; open or pick one. Tabs kept for a VM and "
+                              "tabs known to be someone else's cannot be navigated away."),
+    "LIFECYCLE_RELEASE_NOTICE": ("Epitype recorded the user's keep/stop instruction for this session's tabs {names}; "
+                                 "they still need cleanup and must be closed once that is possible."),
     "RULE_SOURCE_LEGACY_REFERENCE": "Source UNVERIFIED (legacy reference): ",
     "RULE_SOURCE_AUTHOR_LABEL": "Author: ",
     "STOP_NOTE_DELIVERY": "Reminders from the previous reply (what was sent is sent — do not rewrite it, do not apologise, just follow them from here): {notes}",

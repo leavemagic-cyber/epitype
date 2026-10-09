@@ -2539,7 +2539,7 @@ cannot receive can be withdrawn and named instead."""
             target, reason = control_lifecycle.navigation_target(
                 event, control_lifecycle.database_path(config_path()), fields.get("tabId"), fields.get("url"))
             if reason:
-                if reason.startswith("安全："):
+                if reason.startswith(memspec.LIFECYCLE_SAFETY_PREFIX):
                     return _deny_value(reason)
                 notices.append(reason)
             if fields.get("tabId") is None and target is not None:

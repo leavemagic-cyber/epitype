@@ -23,6 +23,8 @@ import sys
 import time
 from urllib.parse import parse_qs, urlsplit
 
+from epitype import memspec
+
 
 DB_FILENAME = "control_lifecycle.sqlite3"
 SCHEMA_VERSION = 2
@@ -777,7 +779,7 @@ def observe(event: dict, path: Path) -> str | None:
     if not is_tracked_tool(name):
         return None
     if not isinstance(session, str) or not session or not isinstance(call_id, str) or not call_id:
-        return "Epitype 無法追蹤這次瀏覽器操作：工具沒有提供本次呼叫的識別碼。"
+        return memspec.LIFECYCLE_UNTRACKED_CALL
     tool_input = event.get("tool_input")
     tool_input = tool_input if isinstance(tool_input, dict) else {}
     response = event.get("tool_response")
@@ -821,7 +823,7 @@ def observe(event: dict, path: Path) -> str | None:
             "SELECT 1 FROM events WHERE session=? AND call_id=? AND action='open' "
             "AND kind LIKE 'unverified%' LIMIT 1", (session, call_id)
         ).fetchone():
-            return "Epitype 無法從這次工具結果確認瀏覽器開關；請查實際分頁清單並回報未驗範圍。"
+            return memspec.LIFECYCLE_UNVERIFIED_RESULT
     return None
 
 
@@ -838,6 +840,10 @@ def _pending(db, session, now, agent=None, creator="agent"):
     ) if agent is None or row[3] == agent]
 
 
+def _named(values, limit):
+    return ", ".join(values[:limit]) + (memspec.LIFECYCLE_MORE_SUFFIX if len(values) > limit else "")
+
+
 def _summary(pending, kept=()):
     pending = [(row[0], row[1]) for row in pending]
     held = [value for kind, value in pending if (kind, value) in kept]
@@ -849,16 +855,16 @@ def _summary(pending, kept=()):
     uncertain = any(kind.startswith("unverified") for kind, _ in pending)
     parts = []
     if tabs:
-        parts.append("分頁 " + ", ".join(tabs[:3]) + (" 等" if len(tabs) > 3 else ""))
+        parts.append(memspec.LIFECYCLE_SUMMARY_TABS.format(names=_named(tabs, 3)))
     if groups:
-        parts.append("分頁群組 " + ", ".join(groups[:2]))
+        parts.append(memspec.LIFECYCLE_SUMMARY_GROUPS.format(names=", ".join(groups[:2])))
     if controller:
-        parts.append("操控工作階段")
+        parts.append(memspec.LIFECYCLE_SUMMARY_CONTROLLER)
     if uncertain:
-        parts.append("無法確認的瀏覽器操作")
+        parts.append(memspec.LIFECYCLE_SUMMARY_UNCERTAIN)
     if held:
-        parts.append("宣告保留的 Colab VM 分頁 " + ", ".join(held[:3]) + "（VM 跑完、結果核對後就關）")
-    return "、".join(parts)
+        parts.append(memspec.LIFECYCLE_SUMMARY_KEPT.format(names=", ".join(held[:3])))
+    return memspec.LIST_JOINER.join(parts)
 
 
 def finish_subagent(event: dict, path: Path) -> int:
@@ -898,9 +904,12 @@ def reminder(event: dict, path: Path, stage: str, *, claim=True) -> str | None:
         state = _state(db, session)
         kept = {(kind, resource_id) for kind, resource_id, opened, _ in pending
                 if _kept(state, kind, resource_id, opened, now)}
+        released = {(kind, resource_id) for kind, resource_id, opened, _ in pending
+                    if _released(state, kind, resource_id, opened)}
         if stage == "tool":
-            # 宣告保留的 VM 分頁是刻意留著的；工具階段不提醒，訊息階段才提醒用完要關。
-            pending = [row for row in pending if (row[0], row[1]) not in kept]
+            # 宣告保留的 VM 分頁是刻意留著的；使用者說保留或停止的分頁，每次工具呼叫都催關
+            # 就是違背他的指示。兩者工具階段都不提醒，訊息階段照樣提醒用完要關。
+            pending = [row for row in pending if (row[0], row[1]) not in kept | released]
         if not pending:
             return None
         marks = [_fingerprint(kind, resource_id, opened)
@@ -919,11 +928,7 @@ def reminder(event: dict, path: Path, stage: str, *, claim=True) -> str | None:
                     "DO UPDATE SET seen=excluded.seen,count=count+1",
                     (session, stage, mark, now),
                 )
-        return (
-            "Epitype 查到本次仍未確認收尾：" + _summary(pending, kept) +
-            "。用完請只關自己建立的資源並核對工具結果；若使用者已要求停止，"
-            "不要為收尾再操作，改為如實回報。"
-        )
+        return memspec.LIFECYCLE_PENDING_REMINDER.format(summary=_summary(pending, kept))
 
 
 def _kept(state, kind, resource_id, opened, now):
@@ -932,16 +937,17 @@ def _kept(state, kind, resource_id, opened, now):
             and isinstance(held.get("since"), (int, float)))
 
 
-def blockers(event: dict, path: Path, *, record=False):
-    """Compatibility entrypoint: resource cleanup never blocks unrelated work."""
-    return []
+def _released(state, kind, resource_id, opened):
+    """The owner's keep/stop covers this opening only; a reopened id starts over."""
+    held = _marks(state, "released").get(_key(kind, resource_id))
+    return isinstance(held, dict) and held.get("opened") == opened
 
 
 def navigation_target(event: dict, path: Path, tab=None, url=None):
     """Select an owned idle Chrome tab; never redirect another actor's or kept VM tab."""
     session = event.get("session_id", event.get("sessionId"))
     if not isinstance(session, str) or not path.is_file():
-        return (str(tab), None) if tab is not None else (None, "尚無本場分頁證據，可先建立或選定分頁並填入 ID。")
+        return (str(tab), None) if tab is not None else (None, memspec.LIFECYCLE_NO_TAB_EVIDENCE)
     now = _now()
     with _database(path) as db:
         rows = [row for row in _pending(db, session, now, _agent(event))
@@ -955,7 +961,7 @@ def navigation_target(event: dict, path: Path, tab=None, url=None):
                 other = db.execute("SELECT session,agent FROM resources WHERE kind='chrome-tab' "
                                    "AND resource_id=? AND status='open'", (str(tab),)).fetchall()
                 if other:
-                    return None, f"安全：分頁 {tab} 是其他場次／代理建立的，不能擅自導走。"
+                    return None, memspec.LIFECYCLE_FOREIGN_TAB.format(tab=tab)
                 # An explicit existing tab may be one the owner handed over. Missing
                 # lifecycle ownership evidence is not evidence of unauthorized use.
                 return str(tab), None
@@ -963,36 +969,12 @@ def navigation_target(event: dict, path: Path, tab=None, url=None):
             if _kept(state, kind, resource_id, opened, now):
                 held = _marks(state, "kept")[_key(kind, resource_id)]
                 if _colab(url) != (held.get("authuser"), held.get("notebook")):
-                    return None, f"安全：分頁 {tab} 正保留給執行中的 VM，請在本場其他分頁導頁。"
+                    return None, memspec.LIFECYCLE_KEPT_TAB.format(tab=tab)
             return resource_id, None
         available = [row[1] for row in rows if not _kept(state, row[0], row[1], row[2], now)]
         if available:
             return sorted(available)[0], None
-    return None, "尚無可用的本場空閒分頁，可建立或選定分頁；保留 VM 與已知他人的分頁不能導走。"
-
-
-def block_reason(rows, tool_name):
-    chrome = [value for kind, value in rows if kind == "chrome-tab"]
-    pane = [value for kind, value in rows if kind == "pane-tab"]
-
-    def named(values):
-        return ", ".join(values[:3]) + (" 等" if len(values) > 3 else "")
-
-    parts = []
-    if chrome:
-        parts.append(f"Chrome 分頁 {named(chrome)}（用 tabs_close_mcp 關）")
-    if pane:
-        parts.append(f"內建瀏覽器分頁 {named(pane)}（用 tabs_close 關）")
-    return (
-        f"Epitype 提醒：本場自建的" + "、".join(parts) + "還開著。"
-        "用完時關掉自己建立的分頁並核對關閉結果。"
-        "分頁其實已被關掉或不在群組裡時，呼叫 tabs_context_mcp／tabs_context 讓 Epitype 重新核對。"
-        "若分頁正連著執行中的 Colab VM（關了 VM 會被收回），不要關：先讓 Epitype 看到它開著那本筆記本"
-        "（Chrome 呼叫 tabs_context_mcp；內建瀏覽器用 navigate 打開該筆記本網址，"
-        "若這次 navigate 才把窗格打開，再呼叫 tabs_context 確認它停在 Colab），可送出 "
-        "python -m epitype lifecycle keep <分頁ID> --authuser <N> --notebook <筆記本ID>"
-        "。使用者明確要求保留或停止時依指示處理，不要求特殊口令。"
-    )
+    return None, memspec.LIFECYCLE_NO_IDLE_TAB
 
 
 def keep_request(event: dict):
@@ -1108,8 +1090,7 @@ def owner_release(event: dict, path: Path) -> list:
 
 
 def release_notice(rows):
-    return ("Epitype 已記錄使用者保留／停止指示，涉及本場分頁 " + ", ".join(value for _, value in rows[:3])
-            + (" 等" if len(rows) > 3 else "") + "；它們仍待收尾，之後能關時照樣要關。")
+    return memspec.LIFECYCLE_RELEASE_NOTICE.format(names=_named([value for _, value in rows], 3))
 
 
 def kept_record(path: Path, tab: str, authuser: str, notebook: str, session=None):

@@ -173,9 +173,6 @@ class ControlBlockRegression(unittest.TestCase):
     def context(self, output):
         return ((output or {}).get("hookSpecificOutput") or {}).get("additionalContext", "")
 
-    def blocked(self, session, name="Bash", agent=None):
-        return lifecycle.blockers(pre(session, name, agent=agent), self.path)
-
     def open_tabs(self, session, agent=None):
         """Tabs this agent created, has not closed and has not kept for a running VM."""
         return sorted((row["kind"], row["id"]) for row in lifecycle.status(self.path, session)["pending"]
@@ -228,17 +225,7 @@ class ControlBlockRegression(unittest.TestCase):
         lifecycle.observe(chrome_create(session, "c1", 101), self.path)
         for name in ("Bash", "PowerShell", "Agent", "Task", "Write", "Edit", "Read", "Grep",
                      "WebFetch", "mcp__context7__query-docs"):
-            self.assertEqual(self.blocked(session, name), [], name)
             self.assertIn("Epitype 查到本次仍未確認收尾：分頁 101", self.reminded(session, name), name)
-        for name in ("mcp__claude-in-chrome__navigate", "mcp__Claude_Browser__tabs_close",
-                     "mcp__computer-use__screenshot", "mcp__cua_repl__js", "ToolSearch",
-                     "Skill", "AskUserQuestion", "TodoWrite", "TaskStop"):
-            self.assertEqual(self.blocked(session, name), [], name)
-        reason = lifecycle.block_reason([("chrome-tab", "101"), ("pane-tab", "seed")], "Write")
-        self.assertTrue(reason.startswith("Epitype 提醒："), reason)
-        self.assertIn("Chrome 分頁 101", reason)
-        self.assertIn("內建瀏覽器分頁 seed", reason)
-        self.assertIn("lifecycle keep", reason)
 
     # 2. owner 原有分頁、無法確認歸屬的分頁都不擋
     def test_owner_tabs_and_unattributable_tabs_never_block(self):
@@ -246,7 +233,6 @@ class ControlBlockRegression(unittest.TestCase):
         # 清單裡的 456 不是這次建的：記都不記，更不會擋。
         lifecycle.observe(chrome_create(session, "c1", 101), self.path)
         lifecycle.observe(chrome_close(session, "c2", 101, OWNER_TAB), self.path)
-        self.assertEqual(self.blocked(session), [])
         # 標準第一步 createIfEmpty 沒有先前快照，分不出是不是這次建的：只提醒、不擋。
         lifecycle.observe(post("first", "c1", "mcp__claude-in-chrome__tabs_context_mcp",
                                {"createIfEmpty": True},
@@ -254,7 +240,6 @@ class ControlBlockRegression(unittest.TestCase):
                                                "tabGroupId": 9}))), self.path)
         self.assertEqual(lifecycle.status(self.path, "first")["pending"],
                          [{"kind": "unverified-chrome", "id": "7"}])
-        self.assertEqual(self.blocked("first"), [])
         self.assertIsNotNone(lifecycle.reminder(pre("first", "Bash"), self.path, "tool"))
         # 內建瀏覽器裡不是我們工具開的分頁（使用者自己開、頁面彈出）也不記。
         lifecycle.observe(post("pane-owner", "p1", "mcp__Claude_Browser__tabs_context", {},
@@ -262,7 +247,6 @@ class ControlBlockRegression(unittest.TestCase):
                                    {"tabId": "seed", "origin": "https://a.example", "isActive": True},
                                    {"tabId": "popup-2", "origin": "https://b.example", "isActive": False}]},
                                    "The Browser pane is currently displayed.")), self.path)
-        self.assertEqual(self.blocked("pane-owner"), [])
         # 群組只有本場分頁時，群組紀錄本身不擋（混入別人分頁時不能整組關）。
         lifecycle.observe(post("group", "g1", "mcp__claude-in-chrome__tabs_context_mcp", {},
                                mcp("No tab group exists for this session.")), self.path)
@@ -273,7 +257,6 @@ class ControlBlockRegression(unittest.TestCase):
         lifecycle.observe(chrome_close("group", "g3", 8, OWNER_TAB), self.path)
         self.assertIn({"kind": "chrome-group", "id": "5"},
                       lifecycle.status(self.path, "group")["pending"])
-        self.assertEqual(self.blocked("group"), [])
 
     def test_listing_lines_without_url_still_count(self):
         # 清單行沒有網址時照樣算在群組裡；只是不能拿來核對 Colab。
@@ -346,7 +329,6 @@ class ControlBlockRegression(unittest.TestCase):
             "Opened tab tab-1 in the background — the user's current tab stays in front.")), self.path)
         self.assertEqual(self.open_tabs(session), [("pane-tab", "seed"), ("pane-tab", "tab-1")])
         self.assertIn("分頁 seed, tab-1", self.reminded(session))
-        self.assertIn("tabs_close", lifecycle.block_reason(self.open_tabs(session), "Bash"))
         lifecycle.observe(post(session, "p3", "mcp__Claude_Browser__tabs_close", {"tabId": "tab-1"},
                                pane("Closed tab tab-1.")), self.path)
         self.assertEqual(self.open_tabs(session), [("pane-tab", "seed")])
@@ -598,11 +580,25 @@ class ControlBlockRegression(unittest.TestCase):
                       ((output or {}).get("hookSpecificOutput") or {}).get("additionalContext", ""))
         self.assertEqual(released(), [{"action": "release", "kind": "chrome-tab", "id": "101"}])
         self.assertNotEqual(self.decision(self.hook(pre(session, "Bash", {"command": "ls"}))), "deny")
-        # 仍待收尾、仍會提醒；放行之後新開的分頁照樣提醒。
+        # 仍待收尾：訊息階段照樣提醒，工具階段不再每次催關；放行之後新開的分頁照樣提醒。
         self.assertEqual(lifecycle.status(self.path, session)["pending"],
                          [{"kind": "chrome-tab", "id": "101"}])
+        self.assertEqual(self.reminded(session), "")
         self.hook(chrome_create(session, "c2", 102))
         self.assertIn("102", self.reminded(session))
+        self.assertNotIn("101", self.reminded(session))
+
+    def test_a_release_covers_only_the_opening_it_named(self):
+        session = "reopen-" + uuid.uuid4().hex
+        lifecycle.observe(chrome_create(session, "c1", 101), self.path)
+        self.assertEqual(lifecycle.owner_release({"session_id": session, "prompt": "保留分頁 101"},
+                                                 self.path), [("chrome-tab", "101")])
+        self.assertEqual(self.reminded(session), "")
+        self.assertIn("分頁 101", lifecycle.reminder(pre(session, "Bash"), self.path, "prompt",
+                                                   claim=False) or "")
+        lifecycle.observe(chrome_close(session, "c2", 101), self.path)
+        lifecycle.observe(chrome_create(session, "c3", 101), self.path)
+        self.assertIn("分頁 101", self.reminded(session))
 
     def test_keep_has_no_clock_and_reopened_id_starts_over(self):
         # 保留沒有時限：VM 跑多久就留多久，時間本身不證明跑完（A03；CORE-25）。

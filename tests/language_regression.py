@@ -373,6 +373,61 @@ class NoteLabelsFollowTheLanguage(_HookCase):
         self.assertIsNone(CJK.search(context), context)
 
 
+_LIFECYCLE_PROBE = """
+import json
+from epitype import control_lifecycle as c, memspec as m
+pending = [("chrome-tab", "1", 0, ""), ("chrome-tab", "2", 0, ""), ("chrome-tab", "3", 0, ""),
+           ("pane-tab", "4", 0, ""), ("chrome-group", "5", 0, ""), ("cua-controller", "x", 0, ""),
+           ("unverified-chrome", "7", 0, ""), ("chrome-tab", "9", 0, "")]
+print(json.dumps({
+    "summary": c._summary(pending, {("chrome-tab", "9")}),
+    "release": c.release_notice([("chrome-tab", str(i)) for i in range(4)]),
+    "reminder": m.LIFECYCLE_PENDING_REMINDER.format(summary="X"),
+    "foreign": m.LIFECYCLE_FOREIGN_TAB.format(tab=7), "kept": m.LIFECYCLE_KEPT_TAB.format(tab=7),
+    "evidence": m.LIFECYCLE_NO_TAB_EVIDENCE, "idle": m.LIFECYCLE_NO_IDLE_TAB,
+    "untracked": m.LIFECYCLE_UNTRACKED_CALL, "unverified": m.LIFECYCLE_UNVERIFIED_RESULT,
+    "prefix": m.LIFECYCLE_SAFETY_PREFIX}))
+"""
+# 分頁收尾提醒在搬進 memspec 之前的逐字輸出。
+ZH_LIFECYCLE = {
+    "summary": "分頁 1, 2, 3 等、分頁群組 5、操控工作階段、無法確認的瀏覽器操作、"
+               "宣告保留的 Colab VM 分頁 9（VM 跑完、結果核對後就關）",
+    "release": "Epitype 已記錄使用者保留／停止指示，涉及本場分頁 0, 1, 2 等；它們仍待收尾，之後能關時照樣要關。",
+    "reminder": "Epitype 查到本次仍未確認收尾：X。用完請只關自己建立的資源並核對工具結果；若使用者已要求停止，"
+                "不要為收尾再操作，改為如實回報。",
+    "foreign": "安全：分頁 7 是其他場次／代理建立的，不能擅自導走。",
+    "kept": "安全：分頁 7 正保留給執行中的 VM，請在本場其他分頁導頁。",
+    "evidence": "尚無本場分頁證據，可先建立或選定分頁並填入 ID。",
+    "idle": "尚無可用的本場空閒分頁，可建立或選定分頁；保留 VM 與已知他人的分頁不能導走。",
+    "untracked": "Epitype 無法追蹤這次瀏覽器操作：工具沒有提供本次呼叫的識別碼。",
+    "unverified": "Epitype 無法從這次工具結果確認瀏覽器開關；請查實際分頁清單並回報未驗範圍。",
+    "prefix": "安全：",
+}
+
+
+class LifecycleTextFollowsTheLanguage(_HookCase):
+    def texts(self, language):
+        result = subprocess.run([sys.executable, "-c", _LIFECYCLE_PROBE], capture_output=True,
+                                text=True, encoding="utf-8", env=self.environment(language), cwd=str(ROOT))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def test_chinese_is_byte_identical(self):
+        self.assertEqual(self.texts(None), ZH_LIFECYCLE)
+
+    def test_english_has_no_chinese_and_keeps_the_safety_prefix(self):
+        english = self.texts(memspec.LANGUAGE_EN)
+        for name, text in english.items():
+            with self.subTest(name=name):
+                self.assertIsNone(CJK.search(text), text)
+        # PreToolUse denies a navigate whose reason starts with the prefix (a04); a
+        # translated reason that lost it would quietly stop protecting the tab.
+        for name in ("foreign", "kept"):
+            self.assertTrue(english[name].startswith(english["prefix"]), english[name])
+        for name in ("evidence", "idle"):
+            self.assertFalse(english[name].startswith(english["prefix"]), english[name])
+
+
 class InstallerWritesTheFieldOnlyOnce(unittest.TestCase):
     """全新安裝寫一行；既有設定檔一個位元組都不碰。"""
 
