@@ -37,16 +37,20 @@ if '--selftest' in sys.argv:
 
 # Attribution findings only note since owner 2026-10-03 (6f6fce1; CORE-25): no surface
 # denies or blocks. A write carries the finding in the call's context under WRITE_NOTE,
-# the Stop gate prints it on stderr under STOP_NOTE, and a dispatch prints the bare
-# finding on stderr. An "authority UNVERIFIED:" notice is not a finding; it never blocked.
+# a dispatch under DISPATCH_NOTE, and the Stop gate leaves it under STOP_NOTE as a note
+# for the next prompt's context. stderr, which the model never sees, carries a finding
+# only when the hook's own deadline has passed and no output is emitted; the surface
+# helpers read it for that case, and test_findings_reach_the_model_context pins the
+# context path. An "authority UNVERIFIED:" notice is not a finding; it never blocked.
 WRITE_NOTE = '歸屬查核提醒（本次寫入放行）：'
+DISPATCH_NOTE = '歸屬查核提醒（本次派工放行）：'
 STOP_NOTE = 'Epitype 提醒（歸屬／來源核對）：'
 NOTICE = 'authority UNVERIFIED: '
 
 
 def attribution_finding(lines):
     for line in lines:
-        for prefix in (WRITE_NOTE, STOP_NOTE, ''):
+        for prefix in (WRITE_NOTE, DISPATCH_NOTE, STOP_NOTE):
             if line.startswith(prefix + '[owner-attribution]') and NOTICE not in line:
                 return line
     return None
@@ -98,20 +102,51 @@ class OwnerAttributionRegression(unittest.TestCase):
         output = json.loads(result.stdout) if result.stdout.strip() else {}
         self.assertNotEqual(output.get('decision'), 'block', output)
         self.assertNotEqual(output.get('hookSpecificOutput', {}).get('permissionDecision'), 'deny', output)
+        notes = common.take_notes(common.load_config(time.monotonic()), event['session_id'])
+        diagnostic = '\n'.join([result.stderr, *notes])
         lines = (output.get('hookSpecificOutput', {}).get('additionalContext', '').splitlines()
-                 + result.stderr.splitlines())
-        return output, result.stderr, attribution_finding(lines)
+                 + diagnostic.splitlines())
+        return output, diagnostic, attribution_finding(lines)
 
     def handled(self, gate, event):
         """Run a gate in process and return its attribution finding, or None."""
         defects = []
-        value = gate._handle({**event, 'session_id': 'incident-' + uuid.uuid4().hex},
-                             time.monotonic(), defects)
+        session = 'incident-' + uuid.uuid4().hex
+        value = gate._handle({**event, 'session_id': session}, time.monotonic(), defects)
         output = (value or {}).get('hookSpecificOutput', {})
         self.assertNotEqual((value or {}).get('decision'), 'block', value)
         self.assertNotEqual(output.get('permissionDecision'), 'deny', value)
-        return attribution_finding(output.get('additionalContext', '').splitlines()
+        notes = common.take_notes(common.load_config(time.monotonic()), session)
+        return attribution_finding(output.get('additionalContext', '').splitlines() + notes
                                    + [line for item in defects for line in str(item).splitlines()])
+
+    def test_findings_reach_the_model_context(self):
+        """A dispatch finding rides in the call's additionalContext and a Stop finding in
+        the note delivered with the next prompt; neither depends on stderr."""
+        false = f'owner 原話：「{ASSISTANT_WORDS}」'
+        for arguments in ((), ('--codex',)):
+            for tool in ('Task', 'Stop'):
+                with self.subTest(host=arguments, tool=tool):
+                    session = 'context-' + uuid.uuid4().hex
+                    event = ({**self.event, 'session_id': session, 'last_assistant_message': false}
+                             if tool == 'Stop' else {**self.event, 'session_id': session,
+                                                     'tool_name': 'Task', 'tool_input': {'prompt': false}})
+                    script = 'stop_gate.py' if tool == 'Stop' else 'pretooluse_gate.py'
+                    result = common.run_synthetic(ROOT/'adapters/claude'/script, event, self.config,
+                                                  arguments=arguments)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    output = json.loads(result.stdout) if result.stdout.strip() else {}
+                    context = output.get('hookSpecificOutput', {}).get('additionalContext', '')
+                    notes = common.take_notes(common.load_config(time.monotonic()), session)
+                    if tool == 'Task':
+                        reached = context.splitlines()
+                        self.assertTrue(any(line.startswith(DISPATCH_NOTE + '[owner-attribution]')
+                                            for line in reached), (output, result.stderr))
+                    else:
+                        self.assertEqual(result.stdout.strip(), '', 'Stop never emits a veto')
+                        self.assertTrue(any(line.startswith(STOP_NOTE + '[owner-attribution]')
+                                            for line in notes), (notes, result.stderr))
+                    self.assertNotIn('[owner-attribution]', result.stderr)
 
     def limitation(self, timeout=30):
         now = datetime.now(timezone.utc)-timedelta(seconds=2)

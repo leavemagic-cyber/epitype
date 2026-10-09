@@ -1175,7 +1175,10 @@ def _is_subagent_stop(event):
 
 
 def _source_notice(event, message, started_at, defects):
-    """A failed or incomplete attribution check is one observation, never a veto."""
+    """A failed or incomplete attribution check is one observation, never a veto.
+
+    It is left as a note for the next prompt's context: stderr never reaches the
+    model, and Stop's own additionalContext would start another model turn."""
     notices = []
     try:
         reason = rule_provenance.claim_violation(message, event.get("transcript_path"),
@@ -1184,9 +1187,13 @@ def _source_notice(event, message, started_at, defects):
     except Exception as exc:
         reason = "UNVERIFIED: " + type(exc).__name__
     if reason or notices:
-        detail = _one_line(reason or notices[0])[:240]
-        defects.append("Epitype 提醒（歸屬／來源核對）：" + detail
-                       + "；本回合放行，不需重送。")
+        line = memspec.STOP_NOTE_ATTRIBUTION.format(detail=_one_line(reason or notices[0])[:240])
+        config = load_config(started_at)
+        session_id = event.get("session_id", event.get("sessionId"))
+        if config is None or not session_id:
+            defects.append(line)
+        else:
+            _best_effort_audit(leave_note, config, session_id, line)
 
 
 def _verdict(event, message, config, started_at, defects, turn=None):

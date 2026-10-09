@@ -2419,17 +2419,20 @@ def _handle_review(event, started_at, defects=None, meter_claims=None, advice_cl
     defects = [] if defects is None else defects
     # Dispatch prose is another authority-writing surface. Do not inspect read
     # queries or arbitrary shell strings as if they were new instructions.
+    # Findings ride in this call's additionalContext: stderr never reaches the model.
+    dispatch_notes = []
     dispatch_name = str(event.get("tool_name", "")).casefold()
     if any(name in dispatch_name for name in ("task", "agent", "send_message")):
         dispatch = event.get("tool_input", {})
         if isinstance(dispatch, dict):
             for key in ("prompt", "message", "instructions"):
+                found = []
                 reason = rule_provenance.claim_violation(
                     dispatch.get(key), event.get("transcript_path"), require_citations=True,
                     base=event.get("cwd"), seconds=max(0.0, min(2.0-(time.monotonic()-started_at), remaining_seconds(started_at))),
-                    hard_deadline=True, notices=defects)
-                if reason:
-                    defects.append(reason)
+                    hard_deadline=True, notices=found)
+                dispatch_notes.extend(memspec.DISPATCH_NOTE_ATTRIBUTION_LABEL + line
+                                      for line in (*found, *filter(None, (reason,))))
     tool_name = event.get("tool_name")
     if not isinstance(tool_name, str) or not tool_name:
         return None
@@ -2438,6 +2441,8 @@ def _handle_review(event, started_at, defects=None, meter_claims=None, advice_cl
         # Configuration expiry cannot silently waive a recognized Markdown
         # claim. Reuse reconstruction/admission; all other write guards keep
         # their expired contract. This path never runs card or state mutations.
+        # Past the deadline main emits no context, so stderr is the only channel left.
+        defects.extend(dispatch_notes)
         try:
             value, notices = _write_review(event, tool_name, event.get("tool_input"), {}, started_at)
             defects.extend(notices)
@@ -2480,10 +2485,10 @@ def _handle_review(event, started_at, defects=None, meter_claims=None, advice_cl
                        "next check: inspect this exact tool call")
     if write_value is not None:
         return write_value
-    # Authority uncertainty must be visible on this call, not suppressed by the
-    # ordinary repeated-advice marker used for optional write suggestions.
-    defects.extend(notice for notice in notices if notice.startswith('[owner-attribution]'))
-    notices = tuple(notice for notice in notices if not notice.startswith('[owner-attribution]'))
+    # Authority uncertainty is labelled and shown in this call's context.
+    notices = tuple(dispatch_notes) + tuple(
+        memspec.WRITE_NOTE_ATTRIBUTION_LABEL + notice if notice.startswith('[owner-attribution]')
+        else notice for notice in notices)
     try:
         waste_value, waste_notice = _waste_review(
             event, tool_name, event.get("tool_input"), config, started_at

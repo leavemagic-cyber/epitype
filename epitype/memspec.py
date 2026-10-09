@@ -1265,6 +1265,8 @@ WRITE_NOTE_OWNER_RULINGS_LABEL = "裁定生成段提醒（本次寫入放行）�
 WRITE_NOTE_FORBIDDEN_LABEL = "既有裁定提醒（本次寫入放行）："
 WRITE_NOTE_RECURRENCE_LABEL = "事件紀錄提醒（本次寫入放行）："
 WRITE_NOTE_CARD_LABEL = "卡片待補資料（本次寫入放行）："
+DISPATCH_NOTE_ATTRIBUTION_LABEL = "歸屬查核提醒（本次派工放行）："
+STOP_NOTE_ATTRIBUTION = "Epitype 提醒（歸屬／來源核對）：{detail}；本回合放行，不需重送。"
 WRITE_NOTE_BOM_TOO_LARGE = ("{name} 含非 ASCII 字元卻沒有 UTF-8 BOM，"
                             "PowerShell 5.1 會讀錯；內容太大，閘門無法代為補上，請自行在檔頭加 BOM。")
 READ_WASTE_REPEAT_REASON = (
@@ -3784,6 +3786,8 @@ _EN = {
     "WRITE_NOTE_FORBIDDEN_LABEL": "Existing ruling note (this write proceeds): ",
     "WRITE_NOTE_RECURRENCE_LABEL": "Incident record note (this write proceeds): ",
     "WRITE_NOTE_CARD_LABEL": "Card data to fill in (this write proceeds): ",
+    "DISPATCH_NOTE_ATTRIBUTION_LABEL": "Attribution note (this dispatch proceeds): ",
+    "STOP_NOTE_ATTRIBUTION": "Epitype note (attribution/source check): {detail}; this turn proceeds, no need to resend.",
     "WRITE_NOTE_BOM_TOO_LARGE": ("{name} has non-ASCII characters but no UTF-8 BOM, so PowerShell 5.1 "
                                  "will misread it; the content is too large for the gate to add one, "
                                  "so add the BOM at the top of the file yourself."),
