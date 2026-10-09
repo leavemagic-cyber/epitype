@@ -10,6 +10,7 @@ from pathlib import Path
 import tempfile
 import time
 import unittest
+import uuid
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -33,6 +34,22 @@ if '--real-transcript' in sys.argv:
     del sys.argv[index:index + 2]
 if '--selftest' in sys.argv:
     sys.argv.remove('--selftest')
+
+# Attribution findings only note since owner 2026-10-03 (6f6fce1; CORE-25): no surface
+# denies or blocks. A write carries the finding in the call's context under WRITE_NOTE,
+# the Stop gate prints it on stderr under STOP_NOTE, and a dispatch prints the bare
+# finding on stderr. An "authority UNVERIFIED:" notice is not a finding; it never blocked.
+WRITE_NOTE = '歸屬查核提醒（本次寫入放行）：'
+STOP_NOTE = 'Epitype 提醒（歸屬／來源核對）：'
+NOTICE = 'authority UNVERIFIED: '
+
+
+def attribution_finding(lines):
+    for line in lines:
+        for prefix in (WRITE_NOTE, STOP_NOTE, ''):
+            if line.startswith(prefix + '[owner-attribution]') and NOTICE not in line:
+                return line
+    return None
 
 
 class OwnerAttributionRegression(unittest.TestCase):
@@ -68,6 +85,33 @@ class OwnerAttributionRegression(unittest.TestCase):
 
     def marker(self, claim):
         return '<!-- EPITYPE CLAIM ' + json.dumps(claim, ensure_ascii=False) + ' -->'
+
+    def surface(self, event, script, arguments=(), clock=None):
+        """Run one hook as the host would; return (output, stderr, attribution finding).
+
+        Each run gets its own session: a note already shown to a session is not shown
+        again, which would hide the second surface's finding."""
+        event = {**event, 'session_id': 'incident-' + uuid.uuid4().hex}
+        result = common.run_synthetic(ROOT/'adapters/claude'/script, event, self.config,
+                                      arguments=arguments, clock=clock)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output = json.loads(result.stdout) if result.stdout.strip() else {}
+        self.assertNotEqual(output.get('decision'), 'block', output)
+        self.assertNotEqual(output.get('hookSpecificOutput', {}).get('permissionDecision'), 'deny', output)
+        lines = (output.get('hookSpecificOutput', {}).get('additionalContext', '').splitlines()
+                 + result.stderr.splitlines())
+        return output, result.stderr, attribution_finding(lines)
+
+    def handled(self, gate, event):
+        """Run a gate in process and return its attribution finding, or None."""
+        defects = []
+        value = gate._handle({**event, 'session_id': 'incident-' + uuid.uuid4().hex},
+                             time.monotonic(), defects)
+        output = (value or {}).get('hookSpecificOutput', {})
+        self.assertNotEqual((value or {}).get('decision'), 'block', value)
+        self.assertNotEqual(output.get('permissionDecision'), 'deny', value)
+        return attribution_finding(output.get('additionalContext', '').splitlines()
+                                   + [line for item in defects for line in str(item).splitlines()])
 
     def limitation(self, timeout=30):
         now = datetime.now(timezone.utc)-timedelta(seconds=2)
@@ -134,6 +178,7 @@ class OwnerAttributionRegression(unittest.TestCase):
                 self.write_rows()
             event = {**self.event, 'last_assistant_message': f'owner 原話：「{OWNER_WORDS}」'}
             self.assertIsNone(stop._handle(event, time.monotonic(), []))
+            self.assertIsNone(self.handled(stop, event))
 
     def test_normal_stop_checks_aggregated_authority_once(self):
         event = {**self.event, 'last_assistant_message': f'owner 原話：「{OWNER_WORDS}」'}
@@ -141,14 +186,14 @@ class OwnerAttributionRegression(unittest.TestCase):
             self.assertIsNone(stop._handle(event, time.monotonic(), []))
         self.assertEqual(check.call_count, 1)
 
-    def test_bad_authority_before_last_message_still_blocks(self):
+    def test_bad_authority_before_last_message_is_still_noted(self):
         self.rows.extend([
             {'type': 'assistant', 'message': {'content': [
                 {'type': 'text', 'text': f'owner 原話：「{ASSISTANT_WORDS}」'}]}},
             {'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': '一般進度。'}]}}])
         self.write_rows()
         event = {**self.event, 'last_assistant_message': '一般進度。'}
-        self.assertEqual(stop._handle(event, time.monotonic(), [])['decision'], 'block')
+        self.assertIsNotNone(self.handled(stop, event))
 
     def test_missing_original_and_budget_exhaustion_are_not_passes(self):
         self.assertIsNotNone(provenance.claim_violation(f'owner 原話：「{OWNER_WORDS}」', self.root/'missing.jsonl'))
@@ -158,11 +203,9 @@ class OwnerAttributionRegression(unittest.TestCase):
         text = f'owner 原話：「{OWNER_WORDS}」'
         event = {**self.event, 'tool_name': 'Write',
                  'tool_input': {'file_path': str(self.root/'runbook.md'), 'content': text}}
-        result = pretool._handle(event, time.monotonic(), [])
-        self.assertNotEqual((result or {}).get('hookSpecificOutput', {}).get('permissionDecision'), 'deny')
+        self.assertIsNone(self.handled(pretool, event))
         event['tool_input']['content'] += '\n'+self.marker(self.owner_claim())
-        result = pretool._handle(event, time.monotonic(), [])
-        self.assertNotEqual((result or {}).get('hookSpecificOutput', {}).get('permissionDecision'), 'deny')
+        self.assertIsNone(self.handled(pretool, event))
 
     def test_false_citation_and_summary_citation_block(self):
         for line in (1, 3, 99):
@@ -178,8 +221,8 @@ class OwnerAttributionRegression(unittest.TestCase):
         patch_text = '*** Begin Patch\n*** Add File: dispatch.md\n+'+text+'\n*** End Patch'
         for name, tool_input in (('apply_patch', {'input': patch_text}), ('Task', {'prompt': text}),
                                  ('collaboration.send_message', {'message': text})):
-            result = pretool._handle({**self.event, 'tool_name': name, 'tool_input': tool_input}, time.monotonic(), [])
-            self.assertEqual(result['hookSpecificOutput']['permissionDecision'], 'deny')
+            self.assertIsNotNone(self.handled(
+                pretool, {**self.event, 'tool_name': name, 'tool_input': tool_input}), name)
 
     def test_python_literal_writes_share_the_guard_and_reads_are_not_mistaken(self):
         target = self.root/'plan.md'
@@ -187,8 +230,9 @@ class OwnerAttributionRegression(unittest.TestCase):
                               (f'owner 原話：「{OWNER_WORDS}」\n'+self.marker(self.owner_claim()), False)):
             source = f'from pathlib import Path\np=Path({str(target)!r})\np.write_text({text!r}, encoding="utf-8")'
             for command in ("python - <<'PY'\n"+source+'\nPY', 'python -c '+shlex.quote(source)):
-                result = pretool._handle({**self.event, 'tool_name': 'Bash', 'tool_input': {'command': command}}, time.monotonic(), [])
-                self.assertEqual((result or {}).get('hookSpecificOutput', {}).get('permissionDecision') == 'deny', blocked)
+                finding = self.handled(pretool, {**self.event, 'tool_name': 'Bash',
+                                                 'tool_input': {'command': command}})
+                self.assertEqual(finding is not None, blocked)
                 self.assertFalse(target.exists(), 'preflight must not execute submitted code')
         command = 'python -c '+shlex.quote(f'print("owner 原話：{ASSISTANT_WORDS}")')
         self.assertIsNone(pretool._handle({**self.event, 'tool_name': 'Bash', 'tool_input': {'command': command}}, time.monotonic(), []))
@@ -199,14 +243,14 @@ class OwnerAttributionRegression(unittest.TestCase):
         new = f'owner 原話：「{ASSISTANT_WORDS}」'
         source = f'from pathlib import Path\np=Path({str(target)!r})\ns=p.read_text(encoding="utf-8")\ns=s.replace("一般計畫", {new!r})\np.write_text(s, encoding="utf-8")'
         event = {**self.event, 'tool_name': 'Bash', 'tool_input': {'command': "python - <<'PY'\n"+source+'\nPY'}}
-        self.assertEqual(pretool._handle(event, time.monotonic(), [])['hookSpecificOutput']['permissionDecision'], 'deny')
+        self.assertIsNotNone(self.handled(pretool, event))
         self.assertEqual(target.read_text(encoding='utf-8'), '一般計畫')
 
     def test_python_path_alias_and_assigned_write_are_checked(self):
         text = f'owner 原話：「{ASSISTANT_WORDS}」'
         source = f'import pathlib as pl\np=pl.Path({str(self.root/"plan.md")!r})\nn=p.write_text({text!r})'
         event = {**self.event, 'tool_name': 'Bash', 'tool_input': {'command': 'python -c '+shlex.quote(source)}}
-        self.assertEqual(pretool._handle(event, time.monotonic(), [])['hookSpecificOutput']['permissionDecision'], 'deny')
+        self.assertIsNotNone(self.handled(pretool, event))
 
     def test_unimported_path_method_is_not_assumed_to_be_a_file_write(self):
         source = f'query=Path("search.md")\nquery.write_text({ASSISTANT_WORDS!r})'
@@ -216,8 +260,7 @@ class OwnerAttributionRegression(unittest.TestCase):
         for text, denied in (('ordinary report', False), (f'owner 原話：「{ASSISTANT_WORDS}」', True)):
             source = f'from pathlib import Path\np=Path("plan.md")\np.write_text({text!r}+generate())'
             event = {**self.event, 'tool_name': 'Bash', 'tool_input': {'command': 'python -c '+shlex.quote(source)}}
-            result = pretool._handle(event, time.monotonic(), [])
-            self.assertEqual((result or {}).get('hookSpecificOutput', {}).get('permissionDecision') == 'deny', denied)
+            self.assertEqual(self.handled(pretool, event) is not None, denied)
 
     def test_python_control_flow_does_not_reuse_an_assumed_path(self):
         source = f'from pathlib import Path\np=Path("plan.md")\nif enabled:\n p=query\np.write_text({ASSISTANT_WORDS!r})'
@@ -233,27 +276,24 @@ class OwnerAttributionRegression(unittest.TestCase):
             writes = pretool._literal_python_writes('python -c '+shlex.quote(source), str(self.root))
             self.assertIsNone(writes[0][2], 'negative count replaces all, so UTF-8 expansion must remain bounded')
 
-    def test_stop_rewrite_cannot_repeat_false_attribution(self):
+    def test_stop_retry_still_notes_false_attribution(self):
         event = {**self.event, 'stop_hook_active': True,
                  'last_assistant_message': f'owner 原話：「{ASSISTANT_WORDS}」'}
-        self.assertEqual(stop._handle(event, time.monotonic(), [])['decision'], 'block')
+        self.assertIsNotNone(self.handled(stop, event))
 
     def test_write_during_stop_rewrite_still_checks_authorship(self):
         event = {**self.event, 'stop_hook_active': True, 'tool_name': 'Write', 'tool_input': {
             'file_path': str(self.root/'plan.md'), 'content': f'owner 原話：「{ASSISTANT_WORDS}」'}}
-        result = pretool._handle(event, time.monotonic(), [])
-        self.assertEqual(result['hookSpecificOutput']['permissionDecision'], 'deny')
+        self.assertIsNotNone(self.handled(pretool, event))
 
     def test_unreadable_old_file_does_not_exempt_a_new_false_claim(self):
         target = self.root/'plan.md'
         target.write_bytes(b'\xff')
         event = {**self.event, 'tool_name': 'Write', 'tool_input': {
             'file_path': str(target), 'content': f'owner 原話：「{ASSISTANT_WORDS}」'}}
-        result = pretool._handle(event, time.monotonic(), [])
-        self.assertEqual(result['hookSpecificOutput']['permissionDecision'], 'deny')
+        self.assertIsNotNone(self.handled(pretool, event))
         event['tool_input']['content'] = '一般進度'
-        self.assertNotEqual((pretool._handle(event, time.monotonic(), []) or {}).get(
-            'hookSpecificOutput', {}).get('permissionDecision'), 'deny')
+        self.assertIsNone(self.handled(pretool, event))
 
     def test_multiple_citations_batch_one_original_prefix(self):
         second = copy.deepcopy(self.owner_claim())
@@ -362,21 +402,14 @@ class OwnerAttributionRegression(unittest.TestCase):
         for arguments in ((), ('--codex',)):
             for quoted, blocked in ((ASSISTANT_WORDS, True), (OWNER_WORDS, False)):
                 event = {**self.event, 'last_assistant_message': f'owner 原話：「{quoted}」'}
-                result = common.run_synthetic(ROOT/'adapters/claude/stop_gate.py', event,
-                                              self.config, arguments=arguments)
-                self.assertEqual(result.returncode, 0, result.stderr)
-                output = json.loads(result.stdout) if result.stdout.strip() else {}
-                self.assertEqual(output.get('decision') == 'block', blocked, result.stderr)
+                _output, stderr, finding = self.surface(event, 'stop_gate.py', arguments)
+                self.assertEqual(finding is not None, blocked, stderr)
             for claim_text, blocked in ((f'owner 裁定：「{ASSISTANT_WORDS}」', True),
                 (f'owner 裁定：「{OWNER_WORDS}」\n'+self.marker(self.owner_claim()), False)):
                 event = {**self.event, 'tool_name': 'Write', 'tool_input': {
                     'file_path': str(self.root/'dispatch.md'), 'content': claim_text}}
-                result = common.run_synthetic(ROOT/'adapters/claude/pretooluse_gate.py', event,
-                                              self.config, arguments=arguments)
-                self.assertEqual(result.returncode, 0, result.stderr)
-                output = json.loads(result.stdout) if result.stdout.strip() else {}
-                self.assertEqual(output.get('hookSpecificOutput', {}).get('permissionDecision') == 'deny',
-                                 blocked, result.stderr)
+                output, stderr, finding = self.surface(event, 'pretooluse_gate.py', arguments)
+                self.assertEqual(finding is not None, blocked, (output, stderr))
 
     def test_other_quotes_on_same_line_are_not_misattributed(self):
         text = f'偏好「其他文字」已設好。owner 原話：「{OWNER_WORDS}」。按「設定」修改。'
@@ -457,22 +490,16 @@ class OwnerAttributionRegression(unittest.TestCase):
                         **self.event, 'tool_name': tool, 'tool_input': {
                             'file_path': str(self.root/'daily.md'), 'content': text, 'prompt': text}}
                     script = 'stop_gate.py' if tool == 'Stop' else 'pretooluse_gate.py'
-                    result = common.run_synthetic(ROOT/'adapters/claude'/script, event,
-                                                  self.config, arguments=arguments)
-                    output = json.loads(result.stdout) if result.stdout.strip() else {}
-                    self.assertEqual(result.returncode, 0, result.stderr)
-                    self.assertNotEqual(output.get('decision'), 'block', output)
-                    self.assertNotEqual(output.get('hookSpecificOutput', {}).get('permissionDecision'),
-                                        'deny', output)
+                    output, stderr, finding = self.surface(event, script, arguments)
+                    self.assertIsNone(finding, (output, stderr))
 
-    def test_cancel_directives_without_prompt_prefix_block_both_hosts(self):
+    def test_cancel_directives_without_prompt_prefix_are_noted_both_hosts(self):
         for arguments in ((), ('--codex',)):
             for text in ('前置檢查超過 10 分鐘沒有前進，就直接取消。',
                          '前置檢查超過預估一半以上就直接取消。'):
-                result = common.run_synthetic(ROOT/'adapters/claude/stop_gate.py',
-                    {**self.event, 'last_assistant_message': text}, self.config, arguments=arguments)
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(json.loads(result.stdout)['decision'], 'block', result.stdout)
+                output, stderr, finding = self.surface(
+                    {**self.event, 'last_assistant_message': text}, 'stop_gate.py', arguments)
+                self.assertIsNotNone(finding, (output, stderr))
         for text in ('API 每次最多 100 筆。', '前置檢查正常要15–25分鐘。',
                      'API 請求超過30秒，就直接取消。',
                      '昨天前置檢查超過10分鐘，已取消。'):
@@ -497,11 +524,9 @@ class OwnerAttributionRegression(unittest.TestCase):
         event = {**self.event, 'tool_name': 'Edit', 'tool_input': {
             'file_path': str(target), 'old_string': old, 'new_string': '# 表格\n'+old}}
         start = time.monotonic()
-        result = common.run_synthetic(ROOT/'adapters/claude/pretooluse_gate.py', event, self.config)
+        output, stderr, finding = self.surface(event, 'pretooluse_gate.py')
         self.assertLess(time.monotonic()-start, 2.0)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        output = json.loads(result.stdout) if result.stdout.strip() else {}
-        self.assertNotEqual(output.get('hookSpecificOutput', {}).get('permissionDecision'), 'deny')
+        self.assertIsNone(finding, (output, stderr))
 
     def test_hard_deadline_terminates_and_reaps_cpu_bound_worker(self):
         # Exercise an actually non-yielding CPU loop, rather than a fake clock.
@@ -560,7 +585,7 @@ class OwnerAttributionRegression(unittest.TestCase):
         self.write_rows()
         return truth, invented
 
-    def check_surface(self, text, tool, arguments, blocked, previous='一般進度。', clock=None):
+    def check_surface(self, text, tool, arguments, flagged, previous='一般進度。', clock=None):
         target = self.root/'fix3.md'
         target.write_text(previous, encoding='utf-8')
         event = {**self.event, 'last_assistant_message': text} if tool == 'Stop' else {
@@ -568,15 +593,10 @@ class OwnerAttributionRegression(unittest.TestCase):
                 {'prompt': text} if tool == 'Task' else
                 {'file_path': str(target), 'old_string': previous, 'new_string': text}
                 if tool == 'Edit' else {'file_path': str(target), 'content': text})}
-        result = common.run_synthetic(ROOT/'adapters/claude'/(
-            'stop_gate.py' if tool == 'Stop' else 'pretooluse_gate.py'),
-            event, self.config, arguments=arguments, clock=clock)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        output = json.loads(result.stdout) if result.stdout.strip() else {}
-        denied = output.get('decision') == 'block' or output.get(
-            'hookSpecificOutput', {}).get('permissionDecision') == 'deny'
-        self.assertEqual(denied, blocked, (tool, arguments, text, output, result.stderr))
-        return output, result.stderr
+        output, stderr, finding = self.surface(
+            event, 'stop_gate.py' if tool == 'Stop' else 'pretooluse_gate.py', arguments, clock)
+        self.assertEqual(finding is not None, flagged, (tool, arguments, text, output, stderr))
+        return output, stderr
 
     def test_fix3_all_rereview_counterexamples_all_surfaces_both_hosts(self):
         for arguments in ((), ('--codex',)):
@@ -823,12 +843,8 @@ class OwnerAttributionRegression(unittest.TestCase):
                     event = {**self.event, 'tool_name': tool, 'tool_input': {
                         'file_path': str(reference), 'content': card_front+body,
                         'old_string': '一般進度。', 'new_string': body}}
-                    run = common.run_synthetic(ROOT/'adapters/claude/pretooluse_gate.py',
-                        event, self.config, arguments=arguments)
-                    self.assertEqual(run.returncode, 0, run.stderr)
-                    output = json.loads(run.stdout) if run.stdout.strip() else {}
-                    self.assertEqual(output.get('hookSpecificOutput', {}).get('permissionDecision') == 'deny',
-                        blocked, (tool, arguments, output, run.stderr))
+                    output, stderr, finding = self.surface(event, 'pretooluse_gate.py', arguments)
+                    self.assertEqual(finding is not None, blocked, (tool, arguments, output, stderr))
 
     def test_fix4_explicit_continuation_and_local_adoption(self):
         truth, invented = self.review_source(())
@@ -869,13 +885,11 @@ class OwnerAttributionRegression(unittest.TestCase):
 
         def measure(arguments, mode):
             began = time.monotonic()
-            run = common.run_synthetic(ROOT/'adapters/claude/stop_gate.py',
-                {**self.event, 'last_assistant_message': text}, self.config, arguments=arguments)
+            output, stderr, finding = self.surface(
+                {**self.event, 'last_assistant_message': text}, 'stop_gate.py', arguments)
             elapsed = time.monotonic()-began
-            self.assertEqual(run.returncode, 0, run.stderr)
-            output = json.loads(run.stdout) if run.stdout.strip() else {}
-            blocked = output.get('decision') == 'block'
-            diagnostic = json.dumps(output)+run.stderr
+            blocked = finding is not None
+            diagnostic = json.dumps(output)+stderr
             self.assertLess(elapsed, 3.5, diagnostic)
             if blocked:
                 self.assertIn('UNVERIFIED', diagnostic)
