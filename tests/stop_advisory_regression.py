@@ -37,6 +37,12 @@ class StopAdvisory(unittest.TestCase):
         else:
             self.assertIsNone(value)
 
+    def notes(self):
+        """The attribution notice is a note for the next prompt, not stderr (item 2,
+        2026-10-10): stderr never reaches the model."""
+        import _hook_common as common
+        return common.take_notes(common.load_config(time.monotonic()), self.event()["session_id"])
+
     def rows(self):
         path = self.vault / memspec.GATE_LOG_FILENAME
         return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
@@ -93,8 +99,10 @@ class StopAdvisory(unittest.TestCase):
                 result = stop._handle(self.event(stop_hook_active=True), time.monotonic(), defects)
                 self.assert_disposition(result)
                 if not BASELINE:
-                    self.assertEqual(len(defects), 1)
-                    self.assertNotIn("\n", defects[0])
+                    notes = self.notes()
+                    self.assertEqual(len(notes), 1, (notes, defects))
+                    self.assertNotIn("\n", notes[0])
+                    self.assertEqual(defects, [])
 
     def test_stop_attribution_timeout_is_advisory(self):
         with patch.object(stop.rule_provenance, "claim_violation",
@@ -103,7 +111,8 @@ class StopAdvisory(unittest.TestCase):
             result = stop._handle(self.event(), time.monotonic(), defects)
             self.assert_disposition(result)
             if not BASELINE:
-                self.assertEqual(len(defects), 1)
+                self.assertEqual(len(self.notes()), 1, defects)
+                self.assertEqual(defects, [])
 
     def test_a40_child_does_not_require_root_format_or_cleanup(self):
         card = turn_fixtures.decision(turn_check=memspec.TURN_CHECK_PROMPT_BLOCK)
@@ -149,6 +158,54 @@ class StopAdvisory(unittest.TestCase):
                     self.assertEqual(result.returncode, 0, result.stderr)
                     output = json.loads(result.stdout) if result.stdout.strip() else {}
                     self.assertNotEqual(output.get("decision"), "block")
+
+
+class StopNoteSaysWhatToDo(unittest.TestCase):
+    """The Stop note names the card and check and carries the advice, the owner's words
+    and the matched fragment, all within STOP_NOTE_MAX_CHARS."""
+
+    def test_short_fields_appear_whole(self):
+        card = turn_fixtures.decision(key="短卡", advice="細節寫進檔案", quote="不要整段貼回來")
+        note = stop._stop_note(card, "forbidden", "整段貼回")
+        self.assertEqual(note, memspec.STOP_NOTE_NOTICE.format(
+            decision="短卡", rule="forbidden", details=(
+                memspec.STOP_NOTE_ADVICE_PART.format(text="細節寫進檔案")
+                + memspec.STOP_NOTE_OWNER_QUOTE_PART.format(text="不要整段貼回來")
+                + memspec.STOP_NOTE_MATCHED_PART.format(text="整段貼回"))))
+
+    def test_long_fields_are_clipped_to_the_budget_and_none_is_dropped(self):
+        key = "feedback_reasked_a_decided_item_auto_shutter_tier_with_a_long_tail"
+        card = turn_fixtures.decision(key=key, advice="先查裁定紀錄再開問。" * 20,
+                                      quote="已經裁過的事不要再問我。" * 20)
+        note = stop._stop_note(card, "forbidden", "要不要改成自動快門" * 10)
+        self.assertLessEqual(len(note), memspec.STOP_NOTE_MAX_CHARS)
+        self.assertIn(key[:memspec.STOP_NOTE_KEY_MIN_CHARS - 1], note)
+        for label, text in ((memspec.STOP_NOTE_ADVICE_PART, "先查裁定紀錄"),
+                            (memspec.STOP_NOTE_OWNER_QUOTE_PART, "已經裁過的事"),
+                            (memspec.STOP_NOTE_MATCHED_PART, "要不要改成")):
+            self.assertIn(label.format(text=text).split(text)[0] + text, note)
+        self.assertEqual(note, " ".join(note.split()), "leave_note would cut a note that it collapses")
+
+    def test_a_card_without_owner_words_is_not_labelled_as_owner(self):
+        card = turn_fixtures.decision(decided_by="ai-autonomous", advice="", quote="卡片說明文字")
+        note = stop._stop_note(card, "forbidden", "")
+        self.assertIn(memspec.STOP_NOTE_CARD_TEXT_PART.format(text="卡片說明文字"), note)
+        self.assertNotIn(memspec.STOP_NOTE_OWNER_QUOTE_PART.format(text="卡片說明文字"), note)
+
+    def test_the_hook_leaves_that_note(self):
+        card = turn_fixtures.decision(forbidden=("forbidden-text",), advice="改說實際跑了什麼")
+        notes = []
+        with patch.object(stop, "_vaults", return_value=["unused"]), \
+                patch.object(stop, "_decisions", return_value=[card]), \
+                patch.object(stop, "_claim_marker", return_value=True), \
+                patch.object(stop, "_audit"), \
+                patch.object(stop, "leave_note", lambda config, session, text: notes.append(text)):
+            self.assertIsNone(stop._verdict({"session_id": "note"}, "forbidden-text",
+                                            {"vaults": []}, time.monotonic(), []))
+        self.assertEqual(len(notes), 1)
+        self.assertIn("測試卡", notes[0])
+        self.assertIn("改說實際跑了什麼", notes[0])
+        self.assertIn("forbidden-text", notes[0])
 
 
 if __name__ == "__main__":

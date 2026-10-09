@@ -1236,15 +1236,53 @@ def _verdict(event, message, config, started_at, defects, turn=None):
                                require_notes=True)
     if verdict is None:
         return None
-    decision, rule, reason, _fragment = verdict
+    decision, rule, reason, fragment = verdict
     if not _claim_marker(session_id, decision.key, message):
         return None
     _audit(config, decision.key, rule, started_at, session_id, _message_digest(message),
            kind=memspec.STOP_NOTE_LOG_KIND, card_path=decision.path)
-    # 舊理由含「請改寫」等字眼；提醒只記檢查名稱，不把舊阻擋指令送回模型。
-    notice = memspec.STOP_NOTE_NOTICE.format(decision=decision.key, rule=rule)
-    _best_effort_audit(leave_note, config, session_id, notice)
+    # 舊理由含「請改寫」等字眼，不送回模型；提醒自己組卡片建議、原話與命中片段。
+    _best_effort_audit(leave_note, config, session_id, _stop_note(decision, rule, fragment))
     return None
+
+
+def _clip(text, chars):
+    if len(text) <= chars:
+        return text
+    return text[:chars - 1] + memspec.STOP_NOTE_ELLIPSIS if chars > 0 else ""
+
+
+def _stop_note(decision, rule, fragment):
+    """One note of at most STOP_NOTE_MAX_CHARS: card key and check, then the card's advice,
+    the owner's words (or the card's description) and the matched fragment, each clipped
+    to a fair share of the room left."""
+    quote_part = (memspec.STOP_NOTE_OWNER_QUOTE_PART
+                  if decision.decided_by == memspec.OWNER_EXPLICIT_DECIDER
+                  else memspec.STOP_NOTE_CARD_TEXT_PART)
+    advice, quote = _one_line(decision.advice), _one_line(decision.quote)
+    parts = [(template, text) for template, text in (
+        (memspec.STOP_NOTE_ADVICE_PART, advice),
+        (quote_part, "" if quote == advice else quote),
+        (memspec.STOP_NOTE_MATCHED_PART, _one_line(fragment))) if text]
+
+    def room(key):
+        bare = "".join(template.format(text="") for template, _ in parts)
+        return memspec.STOP_NOTE_MAX_CHARS - len(
+            memspec.STOP_NOTE_NOTICE.format(decision=key, rule=rule, details=bare))
+
+    key = _one_line(decision.key)
+    deficit = min(sum(len(text) for _, text in parts), memspec.STOP_NOTE_DETAIL_MIN_CHARS) - room(key)
+    if deficit > 0 and len(key) > memspec.STOP_NOTE_KEY_MIN_CHARS:
+        key = _clip(key, max(memspec.STOP_NOTE_KEY_MIN_CHARS, len(key) - deficit))
+    budget = max(0, room(key))
+    shares = {}
+    order = sorted(range(len(parts)), key=lambda index: len(parts[index][1]))
+    for done, index in enumerate(order):
+        shares[index] = min(len(parts[index][1]), budget // (len(order) - done))
+        budget -= shares[index]
+    details = "".join(template.format(text=_clip(text, shares[index]))
+                      for index, (template, text) in enumerate(parts) if shares[index])
+    return memspec.STOP_NOTE_NOTICE.format(decision=key, rule=rule, details=details)
 
 
 # 開頭圍籬：行首（可縮排，清單裡的區塊會縮）三個以上反引號或波浪號，後面第一個詞是語言

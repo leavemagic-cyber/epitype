@@ -1703,9 +1703,19 @@ STOP_NOTE_MAX_CHARS = 140
 STOP_NOTE_FORBIDDEN = "別說「{fragment}」（{decision}）"
 STOP_NOTE_POLICY = "{advice} ({decision})"
 STOP_NOTE_MATCHED_TEXT = "對照文字：{fragment}"
-# 回合閘不擋：命中只留這一行給下一則提問。只寫卡名與檢查名，不把命中的字或改寫指令送回模型。
-STOP_NOTE_NOTICE = ("Epitype 提醒：回覆命中 {decision} 的 {rule} 檢查；"
-                    "後續請核對當次指示與實際來源，這一則不用重送。")
+# 回合閘不擋：命中只留這一行給下一則提問，整行不超過 STOP_NOTE_MAX_CHARS。只有卡名與檢查名
+# 的提醒說不出下一則該照什麼做，所以附上卡片建議、owner 原話（不是 owner 明示的卡改用卡片說明）
+# 與命中片段各一段，超長就按比例截短；舊的「請改寫」阻擋理由不送回模型。
+STOP_NOTE_NOTICE = "Epitype 提醒：回覆命中 {decision} 的 {rule} 檢查{details}。這一則不用重送。"
+STOP_NOTE_ADVICE_PART = "；建議：{text}"
+STOP_NOTE_OWNER_QUOTE_PART = "；owner 原話：「{text}」"
+STOP_NOTE_CARD_TEXT_PART = "；卡片說明：「{text}」"
+STOP_NOTE_MATCHED_PART = "；對照文字：「{text}」"
+STOP_NOTE_ELLIPSIS = "…"
+# 卡名太長時至少留這麼多字給上面三段，卡名本身截短：卡名只是查找用的把手，三段才是要照做的內容。
+# 截短的卡名仍至少留 STOP_NOTE_KEY_MIN_CHARS 字，人才查得到是哪張卡。
+STOP_NOTE_DETAIL_MIN_CHARS = 60
+STOP_NOTE_KEY_MIN_CHARS = 24
 RULE_SOURCE_LEGACY_REFERENCE = "既有記錄（來源未驗證；僅供查找）："
 RULE_SOURCE_AUTHOR_LABEL = "作者："
 STOP_NOTE_DELIVERY = "上一則回覆的提醒（已經送出的不用重寫、不用道歉，接下來照做）：{notes}"
@@ -3805,8 +3815,11 @@ _EN = {
     "STOP_GATE_REWRITE_HINT": "Add only the missing content; do not repeat the previous text.",
     "STOP_NOTE_FORBIDDEN": 'do not say "{fragment}" ({decision})',
     "STOP_NOTE_MATCHED_TEXT": "Matched text: {fragment}",
-    "STOP_NOTE_NOTICE": ("Epitype note: the last reply hit the {rule} check of {decision}; "
-                         "check the instruction and source. No need to resend it."),
+    "STOP_NOTE_NOTICE": "Epitype: last reply hit {rule} of {decision}{details}; no need to resend.",
+    "STOP_NOTE_ADVICE_PART": "; advice: {text}",
+    "STOP_NOTE_OWNER_QUOTE_PART": '; owner said: "{text}"',
+    "STOP_NOTE_CARD_TEXT_PART": '; card: "{text}"',
+    "STOP_NOTE_MATCHED_PART": '; matched: "{text}"',
     "RULE_SOURCE_LEGACY_REFERENCE": "Source UNVERIFIED (legacy reference): ",
     "RULE_SOURCE_AUTHOR_LABEL": "Author: ",
     "STOP_NOTE_DELIVERY": "Reminders from the previous reply (what was sent is sent — do not rewrite it, do not apologise, just follow them from here): {notes}",

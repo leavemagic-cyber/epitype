@@ -57,9 +57,12 @@ ZH_GUARD_NOTE = (
     "\n既有記錄（來源未驗證；僅供查找）：Run git status first, then name each path you actually changed"
     "\n作者：UNVERIFIED"
 )
+# 2026-10-10 派工第 4 條改了需求：只有卡名與檢查名的提醒說不出該照什麼做，所以這一句補回
+# 卡片建議與命中片段（出貨卡沒寫 advice，建議取自卡片說明，截在 140 字內）。
 ZH_STOP_NOTE = (
-    "Epitype 提醒：回覆命中 No hedged completion 的 forbidden 檢查；"
-    "後續請核對當次指示與實際來源，這一則不用重送。"
+    "Epitype 提醒：回覆命中 No hedged completion 的 forbidden 檢查"
+    "；建議：should work now is a guess wearing the clothes of…"
+    "；對照文字：「that should fix it」。這一則不用重送。"
 )
 
 
