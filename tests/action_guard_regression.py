@@ -20,10 +20,11 @@ import unittest
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path[:0] = [str(ROOT), str(ROOT / "adapters" / "claude")]
+sys.path[:0] = [str(ROOT), str(ROOT / "adapters" / "claude"), str(ROOT / "tests")]
 from epitype import compliance, memspec
 import _hook_common as common
 import pretooluse_gate as pretool
+from rule_source_fixtures import owner_bound_card
 
 HEREDOC_WITH_BACKSLASH = "python - <<'PY'\n" + r"path = 'C:\Users\x'" + "\nPY\n"
 PLAIN_HEREDOC = "python - <<'PY'\nprint(sum(range(10)))\nPY\n"
@@ -63,9 +64,15 @@ class ActionGuardRegression(unittest.TestCase):
         # These tests pin what a guard matches, so a guard card here declares on_hit: block.
         # The default since owner 2026-10-03 (CORE-25) is a note; pretool_advisory_regression
         # pins that default.
+        # Only a verified source may deny, so a blocking fixture is bound to a synthetic
+        # owner directive; an unverified one only reminds (rule_guard_sources_regression).
         if "guard_tool" in fields:
             fields.setdefault("on_hit", "block")
-        (self.vault / filename).write_text(card(**fields), encoding="utf-8")
+        text = card(**fields)
+        if fields.get("on_hit") == "block":
+            text = owner_bound_card(text, self.vault / filename,
+                                    source_root=self.root / "sources", case_id=filename)
+        (self.vault / filename).write_text(text, encoding="utf-8")
         # Discovery is cached against the manifest; a fresh card must be re-read.
         cache = pretool._guard_cache(self.vault)
         if cache.exists():
@@ -1028,7 +1035,12 @@ class FieldCombination(unittest.TestCase):
             "on_hit": "block",
         }
         fields.update(overrides)
-        (self.vault / "scar-mismatch.md").write_text(card(**fields), encoding="utf-8")
+        text = card(**fields)
+        if fields.get("on_hit") == "block":
+            # Only a verified source may deny; bind the blocking fixture to one.
+            text = owner_bound_card(text, self.vault / "scar-mismatch.md",
+                                    source_root=self.root / "sources", case_id="scar-mismatch")
+        (self.vault / "scar-mismatch.md").write_text(text, encoding="utf-8")
         cache = pretool._guard_cache(self.vault)
         if cache.exists():
             cache.unlink()

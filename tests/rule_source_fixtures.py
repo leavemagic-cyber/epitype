@@ -75,3 +75,38 @@ def source_bound_card(text, card_path, *, source_root, case_id, host='codex'):
     document = rule_pipeline.bind_payload(document, text, reviewer='synthetic-test-reviewer', reviewed_at=stamp)
     encoded = json.dumps(rule_provenance.serialize(document), ensure_ascii=False)
     return text.replace('---\n', '---\nrule_provenance: ' + encoded + '\n', 1)
+
+
+def owner_bound_card(text, card_path, *, source_root, case_id):
+    """Bind a guard fixture to a verified owner directive with global scope.
+
+    Only a VERIFIED source may deny (CORE-08/CORE-25), so a fixture that pins a
+    guard's deny mechanics needs one; the source is a synthetic human record."""
+    card_path = Path(card_path)
+    source_root = Path(source_root)
+    source_root.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha256((str(card_path) + '\n' + case_id + '\n' + text).encode()).hexdigest()
+    sid = 'synthetic-owner-guard-' + digest[:24]
+    mid = 'synthetic-owner-message-' + digest[:24]
+    quote = '隔離測試 host 全域所有動作：採用 ' + case_id + ' 測試守衛規則。'
+    source = source_root / (digest + '.jsonl')
+    row = {'type': 'response_item', 'payload': {'type': 'message', 'role': 'user', 'id': mid,
+           'content': [{'type': 'input_text', 'text': quote}]}}
+    meta = (json.dumps({'type': 'session_meta', 'payload': {'id': sid}}) + '\n').encode()
+    raw = (json.dumps(row, ensure_ascii=False) + '\n').encode()
+    if source.exists() and source.read_bytes() != meta + raw:
+        raise ValueError('synthetic source identity collision')
+    source.write_bytes(meta + raw)
+    document = {'version': 1, 'key': 'synthetic-' + card_path.stem, 'kind': 'owner-directive',
+        'author': 'owner', 'quote': quote, 'text': quote,
+        'sources': [{'path': str(source), 'byte_offset': len(meta), 'line': 2,
+            'record_sha256': hashlib.sha256(raw).hexdigest(), 'session_id': sid,
+            'message_id': mid, 'role': 'U'}],
+        'scope': {'level': 'global', 'project': None, 'case': None, 'actions': ['*'],
+            'conditions': [], 'expiry': 'unspecified', 'exceptions': []},
+        'scope_basis': {'source': 0, 'quote': quote, 'reviewed_by': 'synthetic-test-reviewer',
+            'reviewed_at': '2026-10-10', 'rationale': 'The synthetic human source declares global scope.'},
+        'supersedes': []}
+    document = rule_pipeline.bind_payload(document, text, reviewer='synthetic-test-reviewer')
+    encoded = json.dumps(json.dumps(document, ensure_ascii=False), ensure_ascii=False)
+    return text.replace('---\n', '---\nrule_provenance: ' + encoded + '\n', 1)

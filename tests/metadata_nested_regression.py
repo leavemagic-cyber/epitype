@@ -18,7 +18,8 @@ import unittest
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path[:0] = [str(ROOT), str(ROOT / "adapters" / "claude")]
+sys.path[:0] = [str(ROOT), str(ROOT / "adapters" / "claude"), str(ROOT / "tests")]
+from rule_source_fixtures import owner_bound_card
 from epitype import card_lint, harvest, memsearch, memspec, scar_census, views
 import _hook_common as common
 import pretooluse_gate as pretool
@@ -268,11 +269,14 @@ class ActionGuard(GateFixture):
         return (value or {}).get("hookSpecificOutput", {}).get("permissionDecisionReason")
 
     def guard_card(self, parent):
-        self.card(
-            "---\nname: 巢狀守衛\ndescription: 2026-09-30 守衛欄位被包進下一層\n"
-            "metadata:\n  type: scar\n"
-            + ("" if parent == "metadata" else parent + ":\n")
-            + indented(self.GUARD_FIELDS) + "---\nbody\n", "scar-nested.md")
+        # Only a verified source may deny, so the blocking guard is source-bound.
+        text = ("---\nname: 巢狀守衛\ndescription: 2026-09-30 守衛欄位被包進下一層\n"
+                "metadata:\n  type: scar\n"
+                + ("" if parent == "metadata" else parent + ":\n")
+                + indented(self.GUARD_FIELDS) + "---\nbody\n")
+        self.card(owner_bound_card(text, self.vault / "scar-nested.md",
+                                   source_root=self.root / "sources", case_id="scar-nested"),
+                  "scar-nested.md")
 
     def test_a_guard_under_metadata_still_denies(self):
         self.guard_card("metadata")
