@@ -49,17 +49,17 @@ GUARD_CARD = "starter-stage-explicit-paths-bash.md"
 SPEECH_CARD = "starter-no-hedged-completion.md"
 
 # owner 機器上現在看到的那兩句，逐字。片段與建議取自出貨卡，所以卡片改了這裡也要改——
-# 那正是重點：預設語言的輸出不准因為這次的改動而變形。
-ZH_GUARD_REASON = (
-    "🛑 傷疤卡（Stage explicit paths, not the whole tree）：這次 Bash 同時含有 "
-    "「git add -A」——Run git status first, then name each path you actually changed"
+# 那正是重點：預設語言的輸出不准因為這次的改動而變形。出貨卡只提醒、回合閘不擋
+# （owner 2026-10-03；CORE-25），所以這兩句是放行時的提醒，不是拒絕理由。
+ZH_GUARD_NOTE = (
+    "Epitype [Stage explicit paths, not the whole tree]：提醒：Run git status first, "
+    "then name each path you actually changed"
     "\n既有記錄（來源未驗證；僅供查找）：Run git status first, then name each path you actually changed"
     "\n作者：UNVERIFIED"
 )
-ZH_STOP_REASON = (
-    "⚖ 不要說「that should fix it」，請改寫。"
-    "（No hedged completion：should work now is a guess wearing the clothes of a result）"
-    "只補缺少的內容，不用重貼前文。"
+ZH_STOP_NOTE = (
+    "Epitype 提醒：回覆命中 No hedged completion 的 forbidden 檢查；"
+    "後續請核對當次指示與實際來源，這一則不用重送。"
 )
 
 
@@ -241,7 +241,8 @@ class _HookCase(unittest.TestCase):
         self.assertTrue(result.stdout.strip(), f"{script.name} 沒有擋下來：{result.stderr}")
         return json.loads(result.stdout)
 
-    def guard_reason(self, language=None, config_language=None):
+    def guard_note(self, language=None, config_language=None):
+        """The context the guard adds to the call it lets through."""
         self.install(GUARD_CARD)
         if config_language is not None:
             self.write_config(config_language)
@@ -250,42 +251,55 @@ class _HookCase(unittest.TestCase):
             "tool_name": "Bash", "tool_input": {"command": command},
             "session_id": "lang-guard", "cwd": str(self.root),
         }, self.environment(language))
-        return value["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertNotIn("permissionDecision", value["hookSpecificOutput"])
+        return value["hookSpecificOutput"]["additionalContext"]
 
-    def stop_reason(self, language=None):
+    def stop_note(self, language=None):
+        """The one note the Stop gate leaves for the next prompt; Stop never blocks."""
+        import time
+        import _hook_common as common
+
         self.install(SPEECH_CARD)
         sentence = _sequence(_card(SPEECH_CARD), memspec.EXAMPLE_BLOCKS_FIELD)[0]
-        value = self.run_hook(STOP, {
-            "hook_event_name": "Stop", "stop_hook_active": False,
-            "last_assistant_message": sentence,
-            "session_id": "lang-stop", "cwd": str(self.root),
-        }, self.environment(language))
-        self.assertEqual(value["decision"], "block")
-        return value["reason"]
+        result = subprocess.run(
+            [sys.executable, str(STOP)],
+            input=json.dumps({"hook_event_name": "Stop", "stop_hook_active": False,
+                              "last_assistant_message": sentence,
+                              "session_id": "lang-stop", "cwd": str(self.root)}, ensure_ascii=False),
+            capture_output=True, text=True, encoding="utf-8",
+            env=self.environment(language), cwd=str(self.root),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "", "回合閘不擋")
+        with patch.dict(os.environ, {memspec.EPITYPE_CONFIG_ENV: str(self.config)}):
+            notes = common.take_notes(common.load_config(time.monotonic()), "lang-stop")
+        self.assertEqual(len(notes), 1, f"{STOP.name} 沒有留下提醒：{result.stderr}")
+        return notes[0]
 
 
 class EnglishHooksSayNothingInChinese(_HookCase):
     """真的掛鉤行程，英文設定，擋下來的那一句不含任何中日韓字。"""
 
-    def test_a_starter_guard_block_is_english(self):
+    def test_a_starter_guard_note_is_english(self):
         # 語言從設定檔來：陌生人不會設環境變數，他拿到的是安裝器寫的那一行。
-        reason = self.guard_reason(config_language=memspec.LANGUAGE_EN)
-        self.assertIn("Bash", reason)
-        self.assertIsNone(CJK.search(reason), reason)
+        note = self.guard_note(config_language=memspec.LANGUAGE_EN)
+        self.assertIn("Stage explicit paths, not the whole tree", note)
+        self.assertIsNone(CJK.search(note), note)
 
-    def test_a_starter_stop_block_is_english(self):
-        reason = self.stop_reason(language=memspec.LANGUAGE_EN)
-        self.assertIsNone(CJK.search(reason), reason)
+    def test_a_starter_stop_note_is_english(self):
+        note = self.stop_note(language=memspec.LANGUAGE_EN)
+        self.assertIn("No hedged completion", note)
+        self.assertIsNone(CJK.search(note), note)
 
 
 class DefaultLanguageOutputIsPinned(_HookCase):
     """不設語言＝使用者現在看到的那一句，逐字。"""
 
-    def test_the_guard_block_is_byte_identical(self):
-        self.assertEqual(self.guard_reason(), ZH_GUARD_REASON)
+    def test_the_guard_note_is_byte_identical(self):
+        self.assertEqual(self.guard_note(), ZH_GUARD_NOTE)
 
-    def test_the_stop_block_is_byte_identical(self):
-        self.assertEqual(self.stop_reason(), ZH_STOP_REASON)
+    def test_the_stop_note_is_byte_identical(self):
+        self.assertEqual(self.stop_note(), ZH_STOP_NOTE)
 
     def test_a_broken_config_does_not_stop_the_hook(self):
         # 設定檔壞掉時掛鉤讀不到 vault，本來就不會擋；這裡要的是「不會炸」。

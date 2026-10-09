@@ -1278,8 +1278,7 @@ def _verdict(event, message, config, started_at, defects, turn=None):
     _audit(config, decision.key, rule, started_at, session_id, _message_digest(message),
            kind=memspec.STOP_NOTE_LOG_KIND, card_path=decision.path)
     # 舊理由含「請改寫」等字眼；提醒只記檢查名稱，不把舊阻擋指令送回模型。
-    notice = (f"Epitype 提醒：回覆命中 {decision.key} 的 {rule} 檢查；"
-              "後續請核對當次指示與實際來源，這一則不用重送。")
+    notice = memspec.STOP_NOTE_NOTICE.format(decision=decision.key, rule=rule)
     _best_effort_audit(leave_note, config, session_id, notice)
     return None
 

@@ -7,6 +7,7 @@
 token，反而為了這個原則浪費token 就完全本末倒置」。
 
 所以卡片可以標 `on_hit: note`：照樣比對、照樣進帳，不擋；下一則提問時附一行提醒。
+回合閘現在一律不擋（owner 2026-10-03；CORE-25）：沒標處置的卡也走同一條提醒路。
 """
 import sys
 
@@ -83,12 +84,12 @@ class NoteInsteadOfBlock(unittest.TestCase):
             {"session_id": session, "cwd": str(self.root), "prompt": "下一件事"},
             time.monotonic(), [])
 
-    def test_unmarked_card_still_blocks(self):
+    def test_unmarked_card_is_noted_like_a_note_card(self):
         self.card("no-flattery")
-        value = self.stop("好問題，我來看看。")
-        self.assertIsNotNone(value, "沒標處置的卡，行為一個字都不能變")
-        self.assertEqual(value["decision"], "block")
-        self.assertEqual(self.log_kinds(), [memspec.STOP_GATE_LOG_KIND])
+        self.assertIsNone(self.stop("好問題，我來看看。"), "回合閘不擋，沒標處置的卡也一樣")
+        self.assertEqual(self.log_kinds(), [memspec.STOP_NOTE_LOG_KIND])
+        context = self.prompt()["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("no-flattery 的 forbidden", context)
 
     def test_note_card_lets_the_turn_end(self):
         self.card("no-flattery", "on_hit: note\n")
@@ -106,7 +107,8 @@ class NoteInsteadOfBlock(unittest.TestCase):
         first = self.prompt()
         self.assertIsNotNone(first)
         context = first["hookSpecificOutput"]["additionalContext"]
-        self.assertIn("好問題", context)
+        # 提醒寫卡名與檢查名，不把命中的字或舊的改寫指令送回模型。
+        self.assertIn("no-flattery 的 forbidden", context)
         self.assertIn("不用重寫", context)
         second = self.prompt()
         text = "" if second is None else second["hookSpecificOutput"]["additionalContext"]
@@ -120,15 +122,16 @@ class NoteInsteadOfBlock(unittest.TestCase):
         text = "" if value is None else value["hookSpecificOutput"]["additionalContext"]
         self.assertNotIn("不用重寫", text)
 
-    def test_a_blocking_rule_outranks_a_note(self):
+    def test_an_unmarked_rule_and_a_note_rule_make_one_note(self):
+        # 沒有會擋的規則可以排在前面了：同一則回覆兩張卡都命中，只記第一個、只提醒一次。
         self.card("no-flattery", "on_hit: note\n")
         (self.vault / "no-hedge.md").write_text(
             CARD.format(name="no-hedge", extra="").replace("好問題", "應該可以"),
             encoding="utf-8", newline="\n")
-        value = self.stop("好問題，這樣應該可以。")
-        self.assertIsNotNone(value)
-        self.assertIn("應該可以", value["reason"])
-        self.assertEqual(self.log_kinds(), [memspec.STOP_GATE_LOG_KIND])
+        self.assertIsNone(self.stop("好問題，這樣應該可以。"))
+        self.assertEqual(self.log_kinds(), [memspec.STOP_NOTE_LOG_KIND])
+        context = self.prompt()["hookSpecificOutput"]["additionalContext"]
+        self.assertEqual(context.count("Epitype 提醒：回覆命中"), 1, context)
 
     def test_notes_do_not_pile_up(self):
         self.card("no-flattery", "on_hit: note\n")
@@ -138,11 +141,12 @@ class NoteInsteadOfBlock(unittest.TestCase):
         self.assertLessEqual(len(common.take_notes(loaded, "note-1")),
                              memspec.STOP_NOTE_MAX_PENDING)
 
-    def test_unknown_value_is_reported_and_still_blocks(self):
+    def test_unknown_value_is_reported_and_still_noted(self):
         from epitype import card_lint
 
         self.card("no-flattery", "on_hit: whisper\n")
-        self.assertIsNotNone(self.stop("好問題，我來看看。"), "打錯值要落在安全的那一邊")
+        self.assertIsNone(self.stop("好問題，我來看看。"))
+        self.assertEqual(self.log_kinds(), [memspec.STOP_NOTE_LOG_KIND], "打錯值也不能讓命中消失")
         _type, findings = card_lint.check_card(self.vault / "no-flattery.md", "no-flattery.md")
         self.assertTrue(any(code == "on-hit" for _level, code, _text in findings))
 

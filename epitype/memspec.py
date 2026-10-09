@@ -1192,6 +1192,9 @@ ACTION_GUARD_REASON_MAX_CHARS = WRITE_GATE_REASON_MAX_CHARS
 ACTION_GUARD_LOG_KIND = "action_block"
 ACTION_GUARD_RULE = "action_guard"
 ACTION_GUARD_REASON = "🛑 傷疤卡（{card}）：這次 {tool} 同時含有 {fragments}——{advice}"
+# 沒寫 on_hit: block 的卡只提醒：呼叫放行，代理看到的是這一行，不是拒絕理由。
+ACTION_GUARD_ADVISORY_LINE = "Epitype [{card}]：{excerpt}"
+ACTION_GUARD_NOTE = "提醒：{advice}"
 # 另一類危害不是「呼叫裡出現了什麼字」，而是「呼叫少了什麼」。派工不指名模型就是這種：
 # 空欄位會沿用主線那個貴模型去做機械工作，而字面比對永遠看不到一個不存在的欄位。所以
 # 守衛卡也能宣告「這個工具的呼叫必須帶哪些欄位」——機制只問欄位在不在，該帶什麼、為何
@@ -1700,6 +1703,9 @@ STOP_NOTE_MAX_CHARS = 140
 STOP_NOTE_FORBIDDEN = "別說「{fragment}」（{decision}）"
 STOP_NOTE_POLICY = "{advice} ({decision})"
 STOP_NOTE_MATCHED_TEXT = "對照文字：{fragment}"
+# 回合閘不擋：命中只留這一行給下一則提問。只寫卡名與檢查名，不把命中的字或改寫指令送回模型。
+STOP_NOTE_NOTICE = ("Epitype 提醒：回覆命中 {decision} 的 {rule} 檢查；"
+                    "後續請核對當次指示與實際來源，這一則不用重送。")
 RULE_SOURCE_LEGACY_REFERENCE = "既有記錄（來源未驗證；僅供查找）："
 RULE_SOURCE_AUTHOR_LABEL = "作者："
 STOP_NOTE_DELIVERY = "上一則回覆的提醒（已經送出的不用重寫、不用道歉，接下來照做）：{notes}"
@@ -3762,6 +3768,8 @@ _EN = {
     "WRITE_GATE_CARD_REASON": "🧾 card type check ({card_type}): {path} still fails after this write — {problems}. Example: {example}",
     "WRITE_GATE_CARD_ADVICE": "🧾 card suggestion ({card_type}): {path} {problems}",
     "ACTION_GUARD_REASON": "🛑 Scar card ({card}): this {tool} call contains all of {fragments} — {advice}",
+    "ACTION_GUARD_ADVISORY_LINE": "Epitype [{card}]: {excerpt}",
+    "ACTION_GUARD_NOTE": "Note: {advice}",
     "ACTION_GUARD_REQUIRES_REASON": "🛑 Scar card ({card}): this {tool} call does not carry {fields} — {advice}",
     "ACTION_GUARD_WHEN_REASON": "🛑 Scar card ({card}): {pairs} on this {tool} call is a combination that must not go together — {advice}",
     "READ_WASTE_REPEAT_NOTICE": "ℹ this session has already read this same range and it has not changed (time {count}): {path}",
@@ -3780,6 +3788,8 @@ _EN = {
     "STOP_GATE_REWRITE_HINT": "Add only the missing content; do not repeat the previous text.",
     "STOP_NOTE_FORBIDDEN": 'do not say "{fragment}" ({decision})',
     "STOP_NOTE_MATCHED_TEXT": "Matched text: {fragment}",
+    "STOP_NOTE_NOTICE": ("Epitype note: the last reply hit the {rule} check of {decision}; "
+                         "check the instruction and source. No need to resend it."),
     "RULE_SOURCE_LEGACY_REFERENCE": "Source UNVERIFIED (legacy reference): ",
     "RULE_SOURCE_AUTHOR_LABEL": "Author: ",
     "STOP_NOTE_DELIVERY": "Reminders from the previous reply (what was sent is sent — do not rewrite it, do not apologise, just follow them from here): {notes}",

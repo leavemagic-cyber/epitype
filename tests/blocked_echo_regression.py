@@ -11,6 +11,9 @@
 重複的那一段 owner 早就看到了，再擋只是第三輪。owner 原話：「我們本意設定那個原則是為了節省
 token，反而為了這個原則浪費token 就完全本末倒置」。所以在第一次擋下的理由裡提醒
 只補缺少的內容、不用重貼前文（那是唯一來得及的時機）；真的重貼了只記帳、下一則提醒，不擋。
+
+回合閘現在一律不擋（owner 2026-10-03；CORE-25）：沒有被擋下的那一段，也就沒有重寫要比。
+舊版本留下的重寫事件只核對來源，不再判重貼、不再要求縮短交付；第一次的提醒說這一則不用重送。
 """
 import sys
 
@@ -77,23 +80,26 @@ class RepeatingABlockedTurn(unittest.TestCase):
     def notes(self, session="echo-1"):
         return common.take_notes(self.loaded, session)
 
-    def test_pasting_the_same_thing_again_is_noted_not_blocked(self):
+    def test_a_repasted_retry_is_neither_blocked_nor_asked_to_shrink(self):
         self.remember()
         self.assertIsNone(self.retry(BLOCKED), "重複的那一段已經在 owner 眼前，再擋只是第三輪")
-        self.assertTrue(any("同一段話看了兩次" in note for note in self.notes()))
+        self.assertFalse(any("同一段話看了兩次" in note for note in self.notes()))
 
-    def test_it_is_on_the_books(self):
+    def test_a_retry_is_not_judged_again(self):
         self.remember()
-        self.retry(BLOCKED)
-        rows = [json.loads(line) for line in
-                (self.vault / memspec.GATE_LOG_FILENAME).read_text(encoding="utf-8").splitlines()]
-        self.assertEqual([(row["kind"], row["decision"]) for row in rows],
-                         [(memspec.STOP_NOTE_LOG_KIND, memspec.BLOCKED_ECHO_DECISION)])
+        defects = []
+        self.assertIsNone(stop_gate._handle(
+            {"session_id": "echo-1", "stop_hook_active": True, "last_assistant_message": BLOCKED},
+            __import__("time").monotonic(), defects))
+        log = self.vault / memspec.GATE_LOG_FILENAME
+        rows = ([json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+                if log.is_file() else [])
+        self.assertEqual([row for row in rows if row.get("decision") == memspec.BLOCKED_ECHO_DECISION], [])
 
-    def test_a_small_edit_is_still_the_same_paste(self):
+    def test_a_small_edit_of_the_paste_is_not_judged_either(self):
         self.remember()
-        self.retry(BLOCKED.replace("68/68", "68 分之 68"))
-        self.assertTrue(self.notes())
+        self.assertIsNone(self.retry(BLOCKED.replace("68/68", "68 分之 68")))
+        self.assertEqual(self.notes(), [])
 
     def test_saying_only_what_changed_leaves_no_note(self):
         self.remember()
@@ -110,17 +116,19 @@ class RepeatingABlockedTurn(unittest.TestCase):
         self.retry("好。")
         self.assertEqual(self.notes(), [])
 
-    def test_the_first_block_already_says_not_to_repaste(self):
-        # 能避免重貼的時機只有第一次擋下的那一刻；等重貼發生了才講，owner 已經看了兩次。
+    def test_the_first_note_already_says_not_to_resend(self):
+        # 能避免重貼的時機只有第一次命中的那一刻；回合不擋，提醒本身就說這一則不用重送。
         card = "\n".join(["---", "name: no-hedge", "description: 不說含糊的完成",
                           "forbidden:", '  - "應該可以"', "---", "", "測試用。", ""])
         (self.vault / "no-hedge.md").write_text(card, encoding="utf-8", newline="\n")
         value = stop_gate._handle(
             {"session_id": "echo-first", "cwd": str(self.root),
              "last_assistant_message": "這樣應該可以。"}, __import__("time").monotonic(), [])
-        self.assertIsNotNone(value)
-        self.assertIn("只補缺少的內容", value["reason"])
-        self.assertIn("不用重貼前文", value["reason"])
+        self.assertIsNone(value)
+        notes = self.notes("echo-first")
+        self.assertEqual(len(notes), 1, notes)
+        self.assertIn("no-hedge", notes[0])
+        self.assertIn("這一則不用重送", notes[0])
 
 
 def _selftest():

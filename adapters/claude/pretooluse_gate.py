@@ -1302,9 +1302,10 @@ def _guard_review(event, tool_name, tool_input, config, started_at, defects, adv
             )
             if advisory_hit:
                 if advisories is not None:
-                    advisories.append((guard.path, guard.card, "提醒：" + guard.advice))
+                    advisories.append((guard.path, guard.card,
+                                       memspec.ACTION_GUARD_NOTE.format(advice=guard.advice)))
                 else:
-                    defects.append("提醒：" + reason)
+                    defects.append(memspec.ACTION_GUARD_NOTE.format(advice=reason))
                 continue
             # Explicit retained safety cards continue to return deny.
             return _deny_value(reason)
@@ -2264,7 +2265,7 @@ def _allow_context(event, notices=(), config=None, started_at=None, meter_claims
     for path, card, excerpt in advisories:
         if shown == 2:
             break
-        line = f"Epitype [{card}]：{excerpt}"
+        line = memspec.ACTION_GUARD_ADVISORY_LINE.format(card=card, excerpt=excerpt)
         if (payload_fits("PreToolUse", "\n".join([*lines, line]),
                          config[memspec.CONFIG_BUDGET_BYTES_FIELD])
                 and _notice_marker(session_id, "tool-advice:" + str(path.resolve()))):
