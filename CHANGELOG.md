@@ -4,6 +4,8 @@
 
 ## Unreleased
 
+- Stop 自測改成驗提醒行為：同樣的輸入照樣要認出同一張卡、同一類檢查，改斷言記成 stop_note、下一則提問收到一行提醒、絕不送出 block；14 題舊的「會擋」斷言是 10-03 改成只提醒後留下的過時考卷。行程內讀卡那一題改指向自測設定，不再讀到這台機器的真設定。
+
 - Continue rule generation and host synchronization when an original conversation file is unavailable. Keep the bound card text, declared author and scope with an UNVERIFIED notice; preserve payload integrity, expiry, reciprocal replacement links and unrelated user settings.
 
 - Retire fully bound, explicitly empty native declarations even when their remaining reminder has contextual prose, removing obsolete owned blocks without clearing handwritten safety settings.

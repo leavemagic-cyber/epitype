@@ -1680,6 +1680,24 @@ def _selftest():
                     if line.strip()
                 ]
 
+            def noted(session_id, decision, rule, rows=None):
+                # Stop 不擋：命中只記一列 stop_note，提醒留給同一場的下一則提問。
+                return any(
+                    row.get("kind") == memspec.STOP_NOTE_LOG_KIND
+                    and row.get("decision") == decision
+                    and row.get("rule") == rule
+                    and row.get("session_id") == session_id
+                    for row in (gate_rows() if rows is None else rows)
+                )
+
+            def notes(session_id, note_vault=vault):
+                from _hook_common import _notes_path
+
+                target = _notes_path({memspec.CONFIG_VAULTS_FIELD: [note_vault]}, session_id)
+                if target is None or not target.is_file():
+                    return []
+                return target.read_text(encoding="utf-8").splitlines()
+
             def run(message, session=None, extra=None):
                 session_id = session or f"stopgate-{uuid.uuid4().hex}"
                 if session_id not in sessions:
@@ -1706,34 +1724,32 @@ def _selftest():
                 "我建議虛擬盤先用不同參數跑一週再說。"
             )
             log_rows = gate_rows()
+            forbidden_notes = notes(forbidden_session)
             checks.append((
-                "a forbidden phrase is blocked and audited as stop_block",
+                "a forbidden phrase is noted, not blocked, and audited as stop_note",
                 forbidden_result.returncode == 0
-                and forbidden_value.get("decision") == "block"
-                and "虛擬盤與實盤參數一致" in forbidden_value.get("reason", "")
-                and "virtual-mirrors-live，2026-08-13" in forbidden_value.get("reason", "")
-                and "虛擬盤先用不同參數" in forbidden_value.get("reason", "")
+                and not forbidden_value
                 and any(
-                    row.get("kind") == memspec.STOP_GATE_LOG_KIND
+                    row.get("kind") == memspec.STOP_NOTE_LOG_KIND
                     and row.get("decision") == "virtual-mirrors-live"
                     and row.get("rule") == _FORBIDDEN_RULE
                     for row in log_rows
-                ),
+                )
+                and not any(row.get("kind") == memspec.STOP_GATE_LOG_KIND for row in log_rows),
             ))
             checks.append((
-                "the stop_block audit row carries the event's session_id",
-                any(
-                    row.get("kind") == memspec.STOP_GATE_LOG_KIND
-                    and row.get("decision") == "virtual-mirrors-live"
-                    and row.get("session_id") == forbidden_session
-                    for row in log_rows
-                ),
+                "the stop_note audit row carries the event's session_id",
+                noted(forbidden_session, "virtual-mirrors-live", _FORBIDDEN_RULE, log_rows),
             ))
             checks.append((
-                "the blocking payload carries decision and reason and nothing else",
-                set(forbidden_value) == {"decision", "reason"}
-                and len(forbidden_result.stdout.encode("utf-8")) <= memspec.HOOK_MAX_OUTPUT_BYTES
-                and not forbidden_result.stderr,
+                "a finding emits no payload; one bounded notice naming the card and rule waits"
+                " for the next prompt",
+                not forbidden_result.stdout.strip()
+                and not forbidden_result.stderr
+                and len(forbidden_notes) == 1
+                and "virtual-mirrors-live" in forbidden_notes[0]
+                and _FORBIDDEN_RULE in forbidden_notes[0]
+                and len(forbidden_notes[0]) <= memspec.STOP_NOTE_MAX_CHARS,
             ))
 
             # U64: citing a forbidden phrase as evidence is not re-proposing it.
@@ -1780,16 +1796,15 @@ def _selftest():
             mixed_source = root / "mixed-owner.jsonl"
             mixed_source.write_text(json.dumps({"type": "user", "message": {
                 "content": "虛擬盤先用不同參數不行"}}, ensure_ascii=False)+"\n", encoding="utf-8")
-            mixed_result, mixed_value, _ = run(
+            mixed_result, mixed_value, mixed_session = run(
                 "owner 說過「虛擬盤先用不同參數」不行，但我還是想虛擬盤先用不同參數看看。",
                 extra={"transcript_path": str(mixed_source)},
             )
             checks.append((
-                "同訊息一次加引號、一次沒加：沒加引號那次仍照擋",
+                "同訊息一次加引號、一次沒加：沒加引號那次仍照記（提醒、不擋）",
                 mixed_result.returncode == 0
-                and mixed_value.get("decision") == "block"
-                and "虛擬盤與實盤參數一致" in mixed_value.get("reason", "")
-                and "虛擬盤先用不同參數" in mixed_value.get("reason", ""),
+                and not mixed_value
+                and noted(mixed_session, "virtual-mirrors-live", _FORBIDDEN_RULE),
             ))
 
             contextual = namedtuple("_ContextualProbe", "key forbidden")(
@@ -1807,15 +1822,14 @@ def _selftest():
                 ) == "背景想降低標準。",
             ))
 
-            question_result, question_value, _ = run(
+            question_result, question_value, question_session = run(
                 "先講結論。虛擬盤要不要改成鏡像實盤，還是維持現狀？"
             )
             checks.append((
-                "a question naming the ruling by two of its aliases is blocked",
+                "a question naming the ruling by two of its aliases is noted, not blocked",
                 question_result.returncode == 0
-                and question_value.get("decision") == "block"
-                and question_value.get("reason", "").startswith("此事 owner 已於 2026-08-13 裁定：")
-                and "不得再問" in question_value.get("reason", ""),
+                and not question_value
+                and noted(question_session, "virtual-mirrors-live", _QUESTION_RULE),
             ))
 
             statement_result, statement_value, _ = run(
@@ -1828,10 +1842,10 @@ def _selftest():
                 and not statement_value,
             ))
 
-            split_result, split_value, _ = run(
+            split_result, split_value, split_session = run(
                 "虛擬盤跟排程甲要不要一起處理？"
             )
-            two_alias_result, two_alias_value, _ = run(
+            two_alias_result, two_alias_value, two_alias_session = run(
                 "排程甲跟排程乙要不要一起處理？"
             )
             checks.append((
@@ -1839,8 +1853,9 @@ def _selftest():
                 " while two aliases of one card are",
                 split_result.returncode == 0
                 and not split_value
-                and two_alias_value.get("decision") == "block"
-                and "排程由 owner 決定" in two_alias_value.get("reason", ""),
+                and not any(row.get("session_id") == split_session for row in gate_rows())
+                and not two_alias_value
+                and noted(two_alias_session, "schedule-owner-only", _QUESTION_RULE),
             ))
 
             active_event = {
@@ -1874,9 +1889,11 @@ def _selftest():
                 if path.is_file()
             )
             checks.append((
-                "the same message is blocked once per session, from the recall marker directory",
-                first_value.get("decision") == "block"
+                "the same message is noted once per session, from the recall marker directory",
+                not first_value
                 and not second_value
+                and sum(row.get("session_id") == repeat_session for row in gate_rows()) == 1
+                and noted(repeat_session, "virtual-mirrors-live", _FORBIDDEN_RULE)
                 and len(markers) == 1
                 and markers[0].startswith(memspec.STOP_GATE_MARKER_PREFIX),
             ))
@@ -1886,7 +1903,7 @@ def _selftest():
                 not recall_marker_directory(repeat_session).exists(),
             ))
 
-            codex_result, codex_value, _ = run(
+            codex_result, codex_value, codex_session = run(
                 "我建議虛擬盤先用不同參數跑一週再說。",
                 extra={
                     "transcript_path": os.fspath(root / "synthetic.jsonl"),
@@ -1894,10 +1911,10 @@ def _selftest():
                 },
             )
             checks.append((
-                "the Codex-shaped event blocks through the same adapter",
+                "the Codex-shaped event is noted, not blocked, through the same adapter",
                 codex_result.returncode == 0
-                and set(codex_value) == {"decision", "reason"}
-                and codex_value.get("decision") == "block",
+                and not codex_value
+                and noted(codex_session, "virtual-mirrors-live", _FORBIDDEN_RULE),
             ))
 
             # A cache that outlived the card it summarised would silently stop
@@ -1909,14 +1926,15 @@ def _selftest():
                 mirror.read_text(encoding="utf-8").replace("  - 兩套參數\n", "  - 兩套參數\n  - 分開調參\n"),
                 encoding="utf-8",
             )
-            edited_result, edited_value, _ = run("我打算分開調參，兩邊各自最佳化。")
+            # 這句只含新加的禁語：命中這張卡的 forbidden 就證明讀到的是改寫後的卡。
+            edited_result, edited_value, edited_session = run("我打算分開調參，兩邊各自最佳化。")
             checks.append((
                 "the manifest cache is written and a rewritten card is re-read",
                 cached_before.get("version") == _DECISION_CACHE_VERSION
                 and len(cached_before.get("manifest") or ()) >= 3
                 and edited_result.returncode == 0
-                and edited_value.get("decision") == "block"
-                and "分開調參" in edited_value.get("reason", ""),
+                and not edited_value
+                and noted(edited_session, "virtual-mirrors-live", _FORBIDDEN_RULE),
             ))
 
             plain_vault = root / "plain-vault"
@@ -1996,19 +2014,20 @@ def _selftest():
             ))
 
             # Owner 2026-09-09 (§30): Stop keeps the decision gate and writes no
-            # commitment ledger. A turn whose tail is a promise still blocks on the
-            # forbidden phrase, and leaves nothing behind in the vault.
+            # commitment ledger. A turn whose tail is a promise is still noted on the
+            # forbidden phrase, and leaves no commitment ledger behind.
             ledger = vault / memspec.FTS_INDEX_DIRECTORY / "commitments.jsonl"
             before = ledger.stat().st_mtime_ns if ledger.exists() else None
             promise = "我等一下會把參數表補上。"
-            blocked_result, blocked_value, _ = run(
+            blocked_result, blocked_value, blocked_session = run(
                 "我建議虛擬盤先用不同參數跑一週再說。" + promise
             )
             after = ledger.stat().st_mtime_ns if ledger.exists() else None
             checks.append((
-                "a promise in the turn's tail still blocks and writes no ledger",
+                "a promise in the turn's tail is still noted and writes no ledger",
                 blocked_result.returncode == 0
-                and blocked_value.get("decision") == "block"
+                and not blocked_value
+                and noted(blocked_session, "virtual-mirrors-live", _FORBIDDEN_RULE)
                 and before == after,
             ))
 
@@ -2084,7 +2103,6 @@ def _selftest():
             ))
             bad_result, bad_value, bad_session = fence_run(
                 "好，直接跑這個：\n```bash\n" + original + "\n```\n")
-            bad_reason = bad_value.get("reason", "")
             fence_log = fence_vault / memspec.GATE_LOG_FILENAME
             fence_rows = [
                 json.loads(line)
@@ -2092,28 +2110,19 @@ def _selftest():
                              if fence_log.exists() else ())
                 if line.strip()
             ]
-            bad_logged = any(
-                row.get("kind") == memspec.STOP_GATE_LOG_KIND
-                and row.get("decision") == "執行鍵區塊"
-                and row.get("rule") == memspec.FENCE_SHELL_RULE
-                and row.get("session_id") == bad_session
-                for row in fence_rows
-            )
-            blocked_bad = (
+            bad_notes = notes(bad_session, fence_vault)
+            noted_bad = (
                 bad_result.returncode == 0
-                and bad_value.get("decision") == "block"
-                and "執行鍵區塊" in bad_reason
-                and "第 1 個程式碼區塊（bash）" in bad_reason
-                and "Windows PowerShell 5.1" in bad_reason
-                and "第 1 行" in bad_reason
-                and "&&" in bad_reason
-                and "owner 按執行會直接失敗" in bad_reason
-                and bad_logged
+                and not bad_value
+                and noted(bad_session, "執行鍵區塊", memspec.FENCE_SHELL_RULE, fence_rows)
+                and len(bad_notes) == 1
+                and "執行鍵區塊" in bad_notes[0]
+                and memspec.FENCE_SHELL_RULE in bad_notes[0]
             )
-            # 逾時放行不算通過：這題要證明的就是原句一定被擋。
+            # 逾時放行不算通過：這題要證明的就是原句一定被認出來。
             checks.append((
-                "fence_shell: 09-25 原句由 Windows PowerShell 擋下；缺解析器時放行並回報",
-                blocked_bad if native_powershell else (
+                "fence_shell: 09-25 原句由 Windows PowerShell 認出並記成提醒；缺解析器時放行並回報",
+                noted_bad if native_powershell else (
                     bad_result.returncode == 0
                     and not bad_result.stdout.strip()
                     and "FileNotFoundError" in bad_result.stderr
@@ -2194,6 +2203,9 @@ def _selftest():
 
             saved_parser = globals()["_parse_shell_blocks"]
             globals()["_parse_shell_blocks"] = recording
+            saved_config = os.environ.get(memspec.EPITYPE_CONFIG_ENV)
+            # 行程內讀卡會查設定檔的舊規則基準；不指向自測設定，就會讀到這台機器的真設定。
+            os.environ[memspec.EPITYPE_CONFIG_ENV] = os.fspath(config)
             try:
                 _FENCE_RESULTS.clear()
                 plain_decisions = _decisions(vault, time.monotonic(), [])
@@ -2204,6 +2216,10 @@ def _selftest():
                 )
             finally:
                 globals()["_parse_shell_blocks"] = saved_parser
+                if saved_config is None:
+                    os.environ.pop(memspec.EPITYPE_CONFIG_ENV, None)
+                else:
+                    os.environ[memspec.EPITYPE_CONFIG_ENV] = saved_config
             checks.append((
                 "fence_shell: 沒有任何卡宣告 fence_shell 時，即使有壞的 bash 區塊也完全不啟動解析器",
                 plain_decisions
@@ -2351,21 +2367,28 @@ def _selftest():
                     {"session_id": session_id, "hook_event_name": "Stop",
                      "stop_hook_active": False, "last_assistant_message": message},
                     big_config, environment=home)
-                return result, json.loads(result.stdout) if result.stdout.strip() else {}
+                return result, json.loads(result.stdout) if result.stdout.strip() else {}, session_id
 
-            fresh_result, fresh_value = big_run("這裡有晚到禁語。")
+            def big_rows():
+                target = big_vault / memspec.GATE_LOG_FILENAME
+                return [json.loads(line) for line in target.read_text(encoding="utf-8").splitlines()
+                        if line.strip()] if target.exists() else []
+
+            fresh_result, fresh_value, fresh_session = big_run("這裡有晚到禁語。")
             big_run("今天先到這裡。")
             big_cache = big_vault / memspec.FTS_INDEX_DIRECTORY / _DECISION_CACHE_FILENAME
             legacy = json.loads(big_cache.read_text(encoding="utf-8"))
             legacy["version"] = _DECISION_CACHE_VERSION - 1
             big_cache.write_text(json.dumps(legacy, ensure_ascii=False), encoding="utf-8")
-            upgraded_result, upgraded_value = big_run("這裡有晚到禁語。")
+            upgraded_result, upgraded_value, upgraded_session = big_run("這裡有晚到禁語。")
             checks.append((
-                "快取換版＋超過上限張卡：排在後面的武裝卡升級後第一回合仍然擋，沒認完的在 stderr 講出來",
+                "快取換版＋超過上限張卡：排在後面的武裝卡升級後第一回合仍然認得出來，沒認完的在 stderr 講出來",
                 # 前提：這張卡確實排在上限之後——全新的庫第一回合認不到它，而且有講。
-                not fresh_value and capped_line in fresh_result.stderr
-                and upgraded_value.get("decision") == "block"
-                and "晚到禁語" in upgraded_value.get("reason", "")
+                not fresh_value
+                and not any(row.get("session_id") == fresh_session for row in big_rows())
+                and capped_line in fresh_result.stderr
+                and not upgraded_value
+                and noted(upgraded_session, "晚到的卡", _FORBIDDEN_RULE, big_rows())
                 and capped_line in upgraded_result.stderr,
             ))
 
@@ -2414,10 +2437,12 @@ def _selftest():
 
             blown = time.monotonic() - memspec.HOOK_TIMEOUT_SECONDS - 1
             checks.append((
-                "期限在 marker 寫下之後才到：block 照樣送出，不會只留帳不擋",
-                _emits({"decision": "block", "reason": "x"}, blown)
+                "Stop 永遠不送出 block：期限前後都不送；其他值期限內才送",
+                not _emits({"decision": "block", "reason": "x"}, blown)
+                and not _emits({"decision": "block", "reason": "x"}, time.monotonic())
                 and not _emits(None, time.monotonic())
-                and not _emits({"decision": "approve"}, blown),
+                and not _emits({"decision": "approve"}, blown)
+                and _emits({"decision": "approve"}, time.monotonic()),
             ))
     except Exception as exc:
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
