@@ -1,4 +1,9 @@
-"""Fresh source, complete interpretation and scope through real tool callers."""
+"""Fresh source, complete interpretation and scope through real tool callers.
+
+A guard denies only when its card says on_hit: block; the default since owner
+2026-10-03 (6f6fce1; CORE-25) is a note, pinned in pretool_advisory_regression.
+These tests are about the source binding, so their guard cards declare on_hit:
+block inside the bound text, and the binding stays valid."""
 import sys
 sys.dont_write_bytecode = True
 from pathlib import Path
@@ -87,6 +92,8 @@ class GuardSources(unittest.TestCase):
             'guard_all_of': ['guard-hit-marker'], 'guard_advice': '隔離測試建議。'}
         if fields is not None:
             actual = {'name': document['key'], 'type': 'rule', 'status': 'active', **fields}
+        if 'guard_tool' in actual:
+            actual.setdefault('on_hit', 'block')
         text = self.write_card(actual)
         document = rule_pipeline.bind_payload(document, text, reviewer='synthetic-guard-reviewer')
         text = text.replace('---\n', '---\nrule_provenance: '
@@ -103,7 +110,8 @@ class GuardSources(unittest.TestCase):
 
     def legacy(self):
         return self.write_card({'name': 'legacy-guard', 'type': 'rule', 'guard_tool': 'Bash',
-            'guard_all_of': ['guard-hit-marker'], 'guard_advice': 'legacy advice'})
+            'guard_all_of': ['guard-hit-marker'], 'guard_advice': 'legacy advice',
+            'on_hit': 'block'})
 
     def event(self, *, tool='exec_command', context=None):
         event = {'tool_name': tool, 'tool_input': {'command': 'guard-hit-marker'},
@@ -118,6 +126,11 @@ class GuardSources(unittest.TestCase):
 
     def denial(self, value):
         return (value or {}).get('hookSpecificOutput', {}).get('permissionDecisionReason')
+
+    def allowed_context(self, value):
+        output = (value or {}).get('hookSpecificOutput', {})
+        self.assertNotIn('permissionDecision', output)
+        return output.get('additionalContext', '')
 
     def baseline(self):
         digest = hashlib.sha256(rule_pipeline._meaning(
@@ -337,15 +350,22 @@ class GuardSources(unittest.TestCase):
             self.assertIsNotNone(self.denial(self.call()))
 
     def test_real_write_caller_obeys_source_case_and_reports_unknown(self):
+        # The encoding check only notes (owner 2026-10-03; CORE-25). A Write is repaired
+        # whatever the cards say, so an Edit, which only the card's note covers, is what
+        # shows the source scope being obeyed.
         self.card(scope=self.scope(level='case', project=str(self.root), case='case-A'),
                   fields={'write_check': memspec.WRITE_CHECK_PS51_UTF8_BOM})
-        event = self.event(tool='Write', context={'case': 'case-A'})
-        event['tool_input'] = {'file_path': str(self.root / 'synthetic.ps1'), 'content': '中文內容'}
-        reason = self.denial(self.call(event))
-        self.assertIn(self.document['quote'], reason)
-        self.assertIn('適用範圍：', reason)
+        target = self.root / 'synthetic.ps1'
+        target.write_text('# 中文內容\nWrite-Output 1\n', encoding='utf-8')
+        event = self.event(tool='Edit', context={'case': 'case-A'})
+        event['tool_input'] = {'file_path': str(target), 'old_string': '1', 'new_string': '2'}
+        context = self.allowed_context(self.call(event))
+        self.assertIn('編碼提醒（本次寫入放行）', context)
+        self.assertIn(self.document['quote'], context)
+        self.assertIn('適用範圍：', context)
         event['rule_context']['case'] = 'case-B'
-        self.assertIsNone(self.denial(self.call(event)))
+        event['session_id'] = 'synthetic-guard-call-case-b'
+        self.assertNotIn('編碼提醒', self.allowed_context(self.call(event)))
         del event['rule_context']
         defects = []
         result = self.call(event, defects)
