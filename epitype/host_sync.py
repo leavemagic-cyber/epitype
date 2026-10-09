@@ -184,6 +184,16 @@ def project_index_text(vault):
     return _index_of(vault) or ""
 
 
+def project_index_pointer(vault):
+    """索引超過每場固定成本上限時改放的短指標：完整索引留在庫裡，用到才讀。
+
+    拒寫會讓專案根留著上一版索引，已作廢的規則每一場照樣被載入。
+    """
+    index = (Path(vault).resolve() / memspec.HOST_SYNC_INDEX_FILENAME).as_posix()
+    return (f"- 專案記憶索引：`{index}`\n"
+            "- 需要這個專案的記憶時先讀這個檔；它超過每場固定成本上限，所以不整份放在這裡。")
+
+
 def split_region(raw, begin, end):
     """(前段, 區塊內容, 後段)；區塊不存在回 None，標記不合法就 raise。"""
     opens, closes = raw.count(begin), raw.count(end)
@@ -276,12 +286,13 @@ def plan_for(host, vaults, home=None):
     }, home)
 
 
-def _plan(host, label, key, path, wanted_of, home=None):
+def _plan(host, label, key, path, wanted_of, home=None, over_cap=None):
     """一個目標檔要改什麼：每塊的現況與應有內容，以及擋住寫入的問題。
 
     `host` 是真正的宿主（決定規則視圖與載入上限），`label` 是輸出裡的名字，`key` 是狀態
     表的鍵（專案檔用絕對路徑，見 Plan）。`wanted_of` 晚一步才叫：檔案讀不動時要先報那一
-    件，不是先報組不出內容——先講的那一句會被當成原因。
+    件，不是先報組不出內容——先講的那一句會被當成原因。`over_cap` 是{區名: 替代內容}：
+    該塊超過每場固定成本上限時改寫替代內容並提醒，沒有替代的塊照舊拒寫。
     """
     try:
         _raw_bytes, raw, _newline = read_host(path)
@@ -303,6 +314,13 @@ def _plan(host, label, key, path, wanted_of, home=None):
         shared_index_cap = None
     for name, text in wanted.items():
         size = len(text.encode("utf-8"))
+        if size > memspec.HOST_SYNC_REGION_CAP_BYTES and (over_cap or {}).get(name):
+            notices.append(
+                f"{name} 有 {size} 位元組，超過每場固定成本上限 "
+                f"{memspec.HOST_SYNC_REGION_CAP_BYTES}；改寫成指向完整索引的短指標"
+            )
+            text = over_cap[name]
+            size = len(text.encode("utf-8"))
         if size > memspec.HOST_SYNC_REGION_CAP_BYTES:
             problems.append(
                 f"{name} 有 {size} 位元組，超過每場固定成本上限 "
@@ -497,7 +515,8 @@ def project_plan(host, root, vault, home=None):
                 wanted[name] = text
         return wanted
 
-    return _plan(host, label, os.fspath(path), path, wanted_of, home)
+    return _plan(host, label, os.fspath(path), path, wanted_of, home, over_cap={
+        memspec.HOST_SYNC_PROJECT_INDEX_REGION: project_index_pointer(vault)})
 
 
 def _plans(vaults, hosts=None, home=None):

@@ -385,6 +385,55 @@ class ProjectSync(unittest.TestCase):
         # 規則塊仍寫得進去（一塊有問題不連累另一塊），但索引塊不能進。
         self.assertNotIn(INDEX_BEGIN, agents.read_text(encoding="utf-8"))
 
+    def test_an_oversized_index_becomes_a_pointer_instead_of_leaving_the_old_one(self):
+        project, vault = self._project("money")
+        code, report = self._apply([self.governance, vault])
+        self.assertEqual(code, host_sync.EXIT_OK, report)
+        agents = project / "AGENTS.md"
+        self.assertIn("- [收據](receipt.md)", agents.read_text(encoding="utf-8"))
+        cap = memspec.HOST_SYNC_REGION_CAP_BYTES
+        index = vault / memspec.HOST_SYNC_INDEX_FILENAME
+        pointer_line = (vault.resolve() / memspec.HOST_SYNC_INDEX_FILENAME).as_posix()
+
+        # 剛好等於上限：整份照寫。
+        index.write_text("# money 入口\n" + "x" * cap, encoding="utf-8")
+        self.assertEqual(len(host_sync.project_index_text(vault).encode("utf-8")), cap)
+        code, report = self._apply([self.governance, vault])
+        self.assertEqual(code, host_sync.EXIT_OK, report)
+        self.assertIn("x" * cap, agents.read_text(encoding="utf-8"))
+        self.assertNotIn(pointer_line, agents.read_text(encoding="utf-8"))
+
+        # 多一個位元組：比對只提醒不拒絕，寫入換成指向完整索引的短指標。
+        index.write_text("# money 入口\n- [新卡](fresh.md)\n" + "y" * cap, encoding="utf-8")
+        size = len(host_sync.project_index_text(vault).encode("utf-8"))
+        self.assertGreater(size, cap)
+        code, report = self._check([self.governance, vault])
+        self.assertEqual(code, host_sync.EXIT_DRIFT, report)
+        self.assertNotIn("REFUSE", report)
+        note = [line for line in report.splitlines()
+                if line.startswith("NOTE   project:money/AGENTS.md")]
+        self.assertEqual(len(note), 1, report)
+        self.assertIn(str(size), note[0])
+        self.assertIn(str(cap), note[0])
+
+        code, report = self._apply([self.governance, vault])
+        self.assertEqual(code, host_sync.EXIT_OK, report)
+        self.assertNotIn("REFUSE", report)
+        self.assertIn(f"{size}", report)
+        text = agents.read_text(encoding="utf-8")
+        self.assertIn(pointer_line, text)
+        self.assertNotIn("x" * cap, text)
+        self.assertNotIn("y" * 100, text)
+        self.assertNotIn("- [新卡](fresh.md)", text)
+        self.assertIn(PROJECT_RULE_TEXT, text)
+        self.assertEqual(text.count(INDEX_BEGIN), 1)
+        block = text.split(INDEX_BEGIN, 1)[1].split(INDEX_END, 1)[0]
+        self.assertEqual(len(block.strip().splitlines()), 2)
+
+        # 指標寫進去之後就是我們的內容：下一次比對一致，不再報漂移。
+        code, report = self._check([self.governance, vault])
+        self.assertEqual(code, host_sync.EXIT_OK, report)
+
     def test_the_project_root_comes_from_the_transcript_not_a_registry(self):
         project, vault = self._project("money")
         self.assertEqual(capture_route.project_root_of(vault), project)
