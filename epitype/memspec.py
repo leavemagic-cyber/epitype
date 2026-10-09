@@ -1741,7 +1741,7 @@ STOP_NOTE_MATCHED_TEXT = "對照文字：{fragment}"
 STOP_NOTE_NOTICE = "Epitype 提醒：回覆命中 {decision} 的 {rule} 檢查{details}。這一則不用重送。"
 STOP_NOTE_ADVICE_PART = "；建議：{text}"
 # 不寫「owner」：2026-09-27 owner 確認這個稱呼不出現在使用者看得到的提醒裡。
-STOP_NOTE_OWNER_QUOTE_PART = "；原話：「{text}」"
+STOP_NOTE_OWNER_QUOTE_PART = "；來源原話：「{text}」"
 STOP_NOTE_CARD_TEXT_PART = "；卡片說明：「{text}」"
 STOP_NOTE_MATCHED_PART = "；對照文字：「{text}」"
 STOP_NOTE_ELLIPSIS = "…"
@@ -3852,7 +3852,7 @@ _EN = {
     "STOP_NOTE_MATCHED_TEXT": "Matched text: {fragment}",
     "STOP_NOTE_NOTICE": "Epitype: last reply hit {rule} of {decision}{details}; no need to resend.",
     "STOP_NOTE_ADVICE_PART": "; advice: {text}",
-    "STOP_NOTE_OWNER_QUOTE_PART": '; in their words: "{text}"',
+    "STOP_NOTE_OWNER_QUOTE_PART": '; source words: "{text}"',
     "STOP_NOTE_CARD_TEXT_PART": '; card: "{text}"',
     "STOP_NOTE_MATCHED_PART": '; matched: "{text}"',
     "LIFECYCLE_PENDING_REMINDER": ("Epitype found cleanup not yet confirmed this session: {summary}. When done, close only "
