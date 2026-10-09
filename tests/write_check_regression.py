@@ -33,13 +33,27 @@ class WriteCheckRegression(unittest.TestCase):
         write_config(self.config, [self.vault])
 
     def verdict(self, name, tool_input):
+        """Whether the gate flags the write as unsafe for PowerShell 5.1."""
+        return any(self.outcome(name, tool_input))
+
+    def outcome(self, name, tool_input):
+        """(repaired, noted) for one call.
+
+        The check never denies (owner 2026-10-03): a Write is repaired in place, its
+        updatedInput carrying the BOM in front of the same content, and an Edit or a
+        patch, whose result the gate cannot rewrite, is allowed with an encoding note."""
         event = {"hook_event_name": "PreToolUse", "tool_name": name,
                  "tool_input": tool_input, "cwd": str(self.root),
                  "session_id": uuid.uuid4().hex}
         result = run_synthetic(Path(pretooluse_gate.__file__), event, self.config)
         self.assertEqual(result.returncode, 0, result.stderr)
         payload = json.loads(result.stdout) if result.stdout.strip() else {}
-        return payload.get("hookSpecificOutput", {}).get("permissionDecision") == "deny"
+        output = payload.get("hookSpecificOutput", {})
+        self.assertNotIn("permissionDecision", output)
+        updated = output.get("updatedInput")
+        repaired = (updated is not None
+                    and updated.get("content") == "\ufeff" + tool_input.get("content", ""))
+        return repaired, "編碼提醒（本次寫入放行）" in output.get("additionalContext", "")
 
     def test_card_contract_and_new_files(self):
         _type, findings = card_lint.check_card(self.card, self.card.name)
@@ -141,13 +155,28 @@ class WriteCheckRegression(unittest.TestCase):
                             for level, rule, _reason in findings))
 
     def test_rule_is_card_driven(self):
+        # The note on an edit the gate cannot rewrite follows the card. A Write is
+        # repaired with or without a card: adding the BOM is deterministic.
+        existing = self.root / "no-rule-edit.ps1"
+        existing.write_text("# 中文\nWrite-Output 1\n", encoding="utf-8")
+        edit = {"file_path": str(existing), "old_string": "1", "new_string": "2"}
+        write = {"file_path": str(self.root / "no-rule.ps1"), "content": "# 中文\n"}
+        self.assertEqual(self.outcome("Edit", edit), (False, True))
         self.card.write_text(self.card.read_text(encoding="utf-8").replace(
             "write_check: ps51_utf8_bom", "status: superseded\nwrite_check: ps51_utf8_bom"),
             encoding="utf-8")
-        target = self.root / "no-rule.ps1"
-        self.assertFalse(self.verdict("Write", {"file_path": str(target), "content": "# 中文\n"}))
+        self.assertEqual(self.outcome("Edit", edit), (False, False))
+        self.assertEqual(self.outcome("Write", write), (True, False))
         self.card.unlink()
-        self.assertFalse(self.verdict("Write", {"file_path": str(target), "content": "# 中文\n"}))
+        self.assertEqual(self.outcome("Edit", edit), (False, False))
+        self.assertEqual(self.outcome("Write", write), (True, False))
+
+    def test_oversized_repair_is_named_not_dropped(self):
+        # A repaired input too large for the hook output cannot reach the host; the
+        # gate must say the BOM is missing rather than emit nothing.
+        big = "# 中文說明\n" + ("Write-Output 1\n" * 30000)
+        self.assertEqual(self.outcome("Write", {"file_path": str(self.root / "big.ps1"),
+                                                "content": big}), (False, True))
 
 
 if __name__ == "__main__":

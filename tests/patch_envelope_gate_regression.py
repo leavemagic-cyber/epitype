@@ -32,6 +32,13 @@ import stop_gate
 
 
 FORBIDDEN_PHRASE = "先改完再說"
+# 寫檔的內容規則只提醒（owner 2026-10-03）：放行，命中寫成這兩種提醒行。
+FORBIDDEN_NOTE = "既有裁定提醒（本次寫入放行）"
+CARD_NOTE = "卡片待補資料（本次寫入放行）"
+
+
+def _noted(notices, label=FORBIDDEN_NOTE, fragment=FORBIDDEN_PHRASE):
+    return any(line.startswith(label) and fragment in line for line in notices)
 
 
 def _decision(path):
@@ -117,6 +124,7 @@ class TheWriteGateOnEnvelopes(unittest.TestCase):
             "+改成先想清楚",
         ))
         self.assertIsNone(deny)
+        self.assertFalse(_noted(_notices))
 
     def test_a_context_line_carrying_the_phrase_is_not_a_restatement(self):
         deny, _notices = self._review(_envelope(
@@ -126,16 +134,17 @@ class TheWriteGateOnEnvelopes(unittest.TestCase):
             "+無關的一行",
         ))
         self.assertIsNone(deny)
+        self.assertFalse(_noted(_notices))
 
-    def test_an_added_line_carrying_the_phrase_is_blocked(self):
-        deny, _notices = self._review(_envelope(
+    def test_an_added_line_carrying_the_phrase_is_noted(self):
+        deny, notices = self._review(_envelope(
             "*** Update File: note.md",
             "@@ hunk",
             " 上下文一行",
             "+%s" % FORBIDDEN_PHRASE,
         ))
-        self.assertIsNotNone(deny)
-        self.assertIn(FORBIDDEN_PHRASE, json.dumps(deny, ensure_ascii=False))
+        self.assertIsNone(deny)
+        self.assertTrue(_noted(notices), notices)
 
     def test_the_tool_name_list_is_not_what_opened_this_path(self):
         # §11 把 diff 形狀的工具排除在 WRITE_GATE_TOOL_NAMES 之外的理由仍然成立，
@@ -145,27 +154,28 @@ class TheWriteGateOnEnvelopes(unittest.TestCase):
 
     def test_a_clean_file_in_the_same_envelope_is_untouched(self):
         with patch.object(pre, "_review_one_target", wraps=pre._review_one_target) as reviewed:
-            deny, _notices = self._review(_envelope(
+            deny, notices = self._review(_envelope(
                 "*** Add File: clean.md",
                 "+完全沒問題的一行",
                 "*** Add File: dirty.md",
                 "+%s" % FORBIDDEN_PHRASE,
             ))
-        self.assertIsNotNone(deny)
+        self.assertIsNone(deny)
+        self.assertEqual(sum(_noted([line]) for line in notices), 1, notices)
         judged = [call.args[2].name for call in reviewed.call_args_list]
         self.assertEqual(judged, ["clean.md", "dirty.md"])
-        self.assertIn("dirty.md", json.dumps(deny, ensure_ascii=False)
-                      + str(reviewed.call_args_list[-1]))
+        self.assertIn("dirty.md", str(reviewed.call_args_list[-1]))
 
     def test_one_undecidable_file_does_not_excuse_the_rest(self):
-        # 路徑解不出來的那個檔標未知，後面那個違規的照樣要擋。
-        deny, _notices = self._review(_envelope(
+        # 路徑解不出來的那個檔標未知，後面那個違規的照樣要提醒。
+        deny, notices = self._review(_envelope(
             "*** Add File: ",
             "+無處可放",
             "*** Add File: dirty.md",
             "+%s" % FORBIDDEN_PHRASE,
         ))
-        self.assertIsNotNone(deny)
+        self.assertIsNone(deny)
+        self.assertTrue(_noted(notices), notices)
 
     def test_a_broken_envelope_is_neither_judged_nor_an_error(self):
         deny, notices = self._review("*** Begin Patch\n*** Add File: x.md\n+%s" % FORBIDDEN_PHRASE)
@@ -183,6 +193,7 @@ class TheWriteGateOnEnvelopes(unittest.TestCase):
             deny, _notices = self._review(_envelope(
                 "*** Add File: dirty.md", "+%s" % FORBIDDEN_PHRASE))
         self.assertIsNone(deny)
+        self.assertFalse(_noted(_notices))
 
     def test_a_block_is_audited_as_a_write_block(self):
         with patch.object(pre, "_best_effort_audit") as audited:
@@ -197,6 +208,7 @@ class TheWriteGateOnEnvelopes(unittest.TestCase):
         deny, _notices = self._review(_envelope(
             "*** Add File: huge.md", "+%s%s" % (FORBIDDEN_PHRASE, giant)))
         self.assertIsNone(deny)
+        self.assertFalse(_noted(_notices))
 
 
 class TheCardContractOnEnvelopes(unittest.TestCase):
@@ -222,9 +234,10 @@ class TheCardContractOnEnvelopes(unittest.TestCase):
     def _review(self, text):
         return pre._write_review(self.event, "Bash", {"command": text}, {}, time.monotonic())
 
-    def test_an_add_file_card_without_frontmatter_is_blocked(self):
-        deny, _notices = self._review(_envelope("*** Add File: 新卡.md", "+只有一句話，沒有前置欄位"))
-        self.assertIsNotNone(deny)
+    def test_an_add_file_card_without_frontmatter_is_noted(self):
+        deny, notices = self._review(_envelope("*** Add File: 新卡.md", "+只有一句話，沒有前置欄位"))
+        self.assertIsNone(deny)
+        self.assertTrue(any(line.startswith(CARD_NOTE) for line in notices), notices)
 
     def test_an_update_file_card_is_left_unknown(self):
         with patch.object(pre, "_card_review") as reviewed:

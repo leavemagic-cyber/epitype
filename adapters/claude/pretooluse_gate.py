@@ -28,12 +28,14 @@ from epitype import rule_provenance
 from _hook_common import (
     isolated_temp_root,
     GATE_LOG_MAX_BYTES,
+    append_context,
     append_gate_log,
     claim_meter,
     compile_bounded_regex,
     config_path,
     declared_frontmatter,
     emit,
+    encode_payload,
     expired,
     governance_vault,
     load_config,
@@ -2494,8 +2496,11 @@ def _control_review(event, tool_name, started_at):
     return None, None
 
 
-def _prepare_input(event, started_at, notices):
-    """Repair deterministic inputs, preserving the host's normal permission flow."""
+def _prepare_input(event, started_at, notices, repairs=None):
+    """Repair deterministic inputs, preserving the host's normal permission flow.
+
+`repairs` collects (file name, notice) for each BOM added, so a repair the host
+cannot receive can be withdrawn and named instead."""
     payload = event.get("tool_input")
     if not isinstance(payload, dict):
         return None
@@ -2518,7 +2523,10 @@ def _prepare_input(event, started_at, notices):
             if (target is not None and target.suffix.casefold() in memspec.WRITE_CHECK_PS_SUFFIXES
                     and isinstance(text, str) and not _ps_encoding_safe(text)):
                 fields[memspec.WRITE_GATE_CONTENT_FIELD] = "\ufeff" + text
-                notices.append(f"已為 {target.name} 自動保留 PowerShell 5.1 可辨識的 UTF-8 BOM。")
+                notice = f"已為 {target.name} 自動保留 PowerShell 5.1 可辨識的 UTF-8 BOM。"
+                notices.append(notice)
+                if repairs is not None:
+                    repairs.append((target.name, notice))
                 _verify_ps_syntax(fields[memspec.WRITE_GATE_CONTENT_FIELD], started_at, notices)
     return None
 
@@ -2548,7 +2556,8 @@ def _verify_ps_syntax(text, started_at, notices):
 def _handle(event, started_at, defects=None, meter_claims=None, advice_claims=None):
     notices = [] if defects is None else defects
     prepared = deepcopy(event)
-    denied = _prepare_input(prepared, started_at, notices)
+    repairs = []
+    denied = _prepare_input(prepared, started_at, notices, repairs)
     if denied is not None:
         return denied
     changed = prepared.get("tool_input") != event.get("tool_input")
@@ -2558,6 +2567,17 @@ def _handle(event, started_at, defects=None, meter_claims=None, advice_claims=No
             value = {"hookSpecificOutput": {"hookEventName": "PreToolUse"}}
         # updatedInput replaces the whole input. Omitting permissionDecision preserves native checks.
         value["hookSpecificOutput"]["updatedInput"] = prepared["tool_input"]
+        if repairs and len(encode_payload(value).encode("utf-8")) > memspec.HOOK_MAX_OUTPUT_BYTES:
+            # emit() refuses a payload over the hard limit, which would drop the repair
+            # and every note with it while the unrepaired write goes ahead. The review
+            # above saw the repaired text, so the missing BOM is named here instead.
+            del value["hookSpecificOutput"]["updatedInput"]
+            for name, notice in repairs:
+                notices[:] = [line for line in notices if line != notice]
+                notices.append(f"未能為 {name} 自動補 BOM：補上後的輸入超過 hook 輸出上限。")
+                value = append_context(value, "PreToolUse", (
+                    f"編碼提醒（本次寫入放行）：{name} 含非 ASCII 字元卻沒有 UTF-8 BOM，"
+                    "PowerShell 5.1 會讀錯；內容太大，閘門無法代為補上，請自行在檔頭加 BOM。"))
     return value
 
 
