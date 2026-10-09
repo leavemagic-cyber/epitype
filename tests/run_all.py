@@ -133,9 +133,32 @@ SELFTESTS = (
     Path("tests") / "sequence_replay_regression.py",
     Path("tests") / "compliance_coverage_regression.py",
     Path("tests") / "metadata_nested_regression.py",
+    Path("tests") / "pretool_advisory_regression.py",
+    Path("tests") / "core_budget_advisory_regression.py",
+    Path("tests") / "lifecycle_fail_open_regression.py",
+    Path("tests") / "recall_advisory_regression.py",
+    Path("tests") / "stop_advisory_regression.py",
+    Path("tests") / "recall_successor_regression.py",
+    Path("tests") / "prompt_block_regression.py",
+    Path("tests") / "owner_annotation_spans_regression.py",
+    Path("tests") / "owner_reply_placeholder_regression.py",
     # 2026-09-09 U-J：git_gate_regression.py 只驗傷疤卡 trigger 的命令比對，那條路徑
     # 整條移除後一併退役（不可逆 git 動作改由宿主原生規則負責）。
 )
+
+
+# tests/*_regression.py files that are deliberately not suites, each with its reason. A
+# file in neither SELFTESTS nor here is a test that silently never runs (nine such files
+# went unrun from 2026-09-27 to 2026-10-10), so the run fails and names it.
+NOT_SUITES = {
+}
+
+
+def _unregistered_regressions(repo_root):
+    registered = {path.as_posix() for path in SELFTESTS} | set(NOT_SUITES)
+    return [path.relative_to(repo_root).as_posix()
+            for path in sorted((repo_root / "tests").glob("*_regression.py"))
+            if path.relative_to(repo_root).as_posix() not in registered]
 
 
 def _emit(text, stream):
@@ -231,6 +254,10 @@ def main(argv=None):
     offenders = _unresolved_fixture_roots(repo_root)
     if offenders:
         print("RESULT FAIL fixture roots must use Path(temp_dir).resolve(): " + ", ".join(offenders), file=sys.stderr)
+    unregistered = _unregistered_regressions(repo_root)
+    if unregistered:
+        print("RESULT FAIL regression files never run (add to SELFTESTS, or to NOT_SUITES with a reason): "
+              + ", ".join(unregistered), file=sys.stderr)
     # CI 另跑全倉隱私掃描；本機只跑 selftest 的話，v1.4.0 那種只在 CI 紅的情況會再發生。
     scan = subprocess.run(
         [sys.executable, str(repo_root / "tests" / "privacy_lint.py")],
@@ -242,7 +269,8 @@ def main(argv=None):
     if scan.returncode != 0:
         print("RESULT FAIL privacy scan of tracked files", file=sys.stderr)
     print(f"TOTAL PASS {passed}/{len(SELFTESTS)}")
-    return 0 if passed == len(SELFTESTS) and not offenders and scan.returncode == 0 else 1
+    return (0 if passed == len(SELFTESTS) and not offenders and not unregistered
+            and scan.returncode == 0 else 1)
 
 
 if __name__ == "__main__":
