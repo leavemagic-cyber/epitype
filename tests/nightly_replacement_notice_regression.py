@@ -159,16 +159,19 @@ def main():
                 [{"id": 14, "counts": night["counts"]}])),
         ))
 
-    # 規則超過設定的 core_cap_bytes：規則塊拒寫，索引照寫（不是整晚跳過）。
+    # 規則超過設定的 core_cap_bytes：上限只提醒（6f6fce1，CORE-25），規則塊與索引都照寫，
+    # 這一晚不算不乾淨，但夜報要講出上限。
     with tempfile.TemporaryDirectory(prefix="epitype-nightly-capped-") as temp_dir:
         root = Path(temp_dir).resolve()
         home, vault, host_path = _fixture(root, "我的開頭\n")
         capped = _night(home, vault, '{"core_cap_bytes": 10}')
         written = host_path.read_text(encoding="utf-8")
         checks.append((
-            "規則超上限的夜晚：索引照寫、規則塊不寫、拒寫講出上限",
-            "一張卡" in written and rules_begin not in written
-            and any("core_cap_bytes" in line for line in capped["errors"]),
+            "規則超上限的夜晚：索引照寫、規則塊照寫、夜報提醒講出上限",
+            "一張卡" in written and rules_begin in written
+            and "Honesty governs this contract." in written
+            and capped["errors"] == []
+            and "core_cap_bytes" in (capped.get("note") or ""),
         ))
 
     # 組報告是讀的動作：沒有明說要寫，宿主檔一個位元組都不能動（2026-09-18 事故）。

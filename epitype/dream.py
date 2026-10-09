@@ -2175,6 +2175,8 @@ def _section_host_sync(vaults, today, since_date, config, context=None):
     replaced = replaced_in(done)
     # 拒寫要人動手，放進 errors：開場那一行才會說這一晚不乾淨。
     refused = [line for line in done.splitlines() if line.startswith("REFUSE")]
+    # 容量上限只提醒、照寫（CORE-25）；夜報不帶出 NOTE 的話，這個提醒就沒有人看得到。
+    notices = [line for line in done.splitlines() if line.startswith("NOTE")]
     stale = _stale_registrations(context)
     return {
         # 漂移只數 DRIFT 行。以前數的是「所有非空行」，連 NOTE 都算進去——只有一個區塊
@@ -2188,6 +2190,7 @@ def _section_host_sync(vaults, today, since_date, config, context=None):
         + (["epitype install --dry-run", "epitype install"] if stale else []),
         # 登記落後要人動手（改的是宿主的設定檔），放進 errors：開場那一行才會說。
         "errors": refused + stale,
+        "note": "；".join(line.strip() for line in notices),
     }
 
 
