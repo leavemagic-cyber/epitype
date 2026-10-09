@@ -724,8 +724,16 @@ class ControlLifecycleRegression(unittest.TestCase):
         self.assertEqual(count("resources", "stale"), 2)
         at(start + 8 * day, "fresh", "b", listing,
            "Wall time: 0.01 seconds\nOutput: " + json.dumps([{"id": "new"}]))
-        for table in ("calls", "events", "resources", "session_state", "alerts"):
+        for table in ("calls", "events", "alerts"):
             self.assertEqual(count(table, "stale"), 0, table)
+        # A row still open survives retention (6f6fce1): another session must not take over a
+        # tab it does not own just because the ledger forgot it. Closed rows are still pruned.
+        with closing(sqlite3.connect(self.path)) as db:
+            survivors = db.execute("SELECT kind,resource_id,status FROM resources WHERE session=?",
+                                   ("stale",)).fetchall()
+        self.assertEqual(survivors, [("cua-controller", "repl", "open")])
+        # Its session state (keep and release marks) stays with it.
+        self.assertEqual(count("session_state", "stale"), 1)
         self.assertEqual(count("calls", "fresh"), 1)
         self.assertIn({"kind": "cua-tab:iab", "id": "new"},
                       lifecycle.status(self.path, "fresh")["pending"])
