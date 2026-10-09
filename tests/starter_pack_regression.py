@@ -25,6 +25,7 @@ import os
 import tempfile
 import time
 import unittest
+import uuid
 from unittest.mock import patch
 
 from epitype import card_lint, memspec, starter
@@ -155,14 +156,31 @@ class StarterCardsBlockThroughTheRealGates(_VaultCase):
              "last_assistant_message": message}, time.monotonic(), [])
 
     def shell(self, tool, command):
+        # One session per call: a card's advice is otherwise shown once per session.
         return pretool._handle(
             {"tool_name": tool, "tool_input": {"command": command},
-             "session_id": "starter-guard"}, time.monotonic(), [])
+             "session_id": "starter-guard-" + uuid.uuid4().hex}, time.monotonic(), [])
 
     def denial(self, value):
         return (value or {}).get("hookSpecificOutput", {}).get("permissionDecisionReason")
 
-    def test_speech_cards_block_their_own_blocking_examples(self):
+    def advised(self, value, card):
+        """Whether the call was allowed with this card's advice line in its context."""
+        output = (value or {}).get("hookSpecificOutput", {})
+        name = _fields(card)[memspec.NAME_FIELD]
+        return ("permissionDecision" not in output
+                and f"Epitype [{name}]" in output.get("additionalContext", ""))
+
+    def noted(self, session):
+        """Cards the Stop gate noted for this session; Stop never blocks."""
+        path = self.vault / memspec.GATE_LOG_FILENAME
+        rows = ([json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+                if path.is_file() else [])
+        return [row.get("decision") for row in rows
+                if row.get("kind") == memspec.STOP_NOTE_LOG_KIND and row.get("session_id") == session]
+
+    def test_speech_cards_note_their_own_blocking_examples(self):
+        # 回合閘一律不擋（owner 2026-10-03；CORE-25）：例句命中＝回合照常結束、記一筆提醒。
         for index, card in enumerate(starter.shipped_cards()):
             fields = _fields(card)
             if fields.get(memspec.ACTION_GUARD_TOOL_FIELD, "").strip():
@@ -174,9 +192,10 @@ class StarterCardsBlockThroughTheRealGates(_VaultCase):
                 self.install_one(card)
                 for number, sentence in enumerate(
                         _sequence(card, memspec.EXAMPLE_BLOCKS_FIELD)):
-                    value = self.speak(sentence, f"block-{index}-{number}")
-                    self.assertIsNotNone(value, f"{card.name} 擋不到自己的例句：{sentence}")
-                    self.assertEqual(value["decision"], "block")
+                    session = f"block-{index}-{number}"
+                    self.assertIsNone(self.speak(sentence, session))
+                    self.assertEqual(self.noted(session), [_fields(card)[memspec.NAME_FIELD]],
+                                     f"{card.name} 認不出自己的例句：{sentence}")
 
     def test_speech_cards_let_their_own_allowing_examples_through(self):
         for index, card in enumerate(starter.shipped_cards()):
@@ -187,9 +206,9 @@ class StarterCardsBlockThroughTheRealGates(_VaultCase):
                 self.install_one(card)
                 for number, sentence in enumerate(
                         _sequence(card, memspec.EXAMPLE_ALLOWS_FIELD)):
-                    self.assertIsNone(
-                        self.speak(sentence, f"allow-{index}-{number}"),
-                        f"{card.name} 誤擋：{sentence}")
+                    session = f"allow-{index}-{number}"
+                    self.assertIsNone(self.speak(sentence, session), f"{card.name} 誤擋：{sentence}")
+                    self.assertEqual(self.noted(session), [], f"{card.name} 誤記：{sentence}")
 
     def test_the_whole_set_together_still_lets_the_allowing_examples_through(self):
         # 一張一張測過關，五張一起裝仍可能互相誤擋——陌生人拿到的是五張一起。
@@ -202,8 +221,10 @@ class StarterCardsBlockThroughTheRealGates(_VaultCase):
         for number, sentence in enumerate(allowed):
             self.assertIsNone(self.speak(sentence, f"together-{number}"),
                               f"五張一起裝時誤擋：{sentence}")
+            self.assertEqual(self.noted(f"together-{number}"), [], f"五張一起裝時誤記：{sentence}")
 
-    def test_guard_cards_deny_their_own_blocking_examples(self):
+    def test_guard_cards_advise_on_their_own_blocking_examples(self):
+        # 出貨卡沒寫 on_hit: block，命中只提醒、放行（owner 2026-10-03；CORE-25）。
         for card in starter.shipped_cards():
             tool = _fields(card).get(memspec.ACTION_GUARD_TOOL_FIELD, "").strip()
             if not tool:
@@ -212,12 +233,12 @@ class StarterCardsBlockThroughTheRealGates(_VaultCase):
                 self.setUp()
                 self.install_one(card)
                 for command in _sequence(card, memspec.EXAMPLE_BLOCKS_FIELD):
-                    reason = self.denial(self.shell(tool, command))
-                    self.assertIsNotNone(reason, f"{card.name} 擋不到：{command}")
-                    self.assertIn(_fields(card)[memspec.NAME_FIELD], reason)
+                    self.assertTrue(self.advised(self.shell(tool, command), card),
+                                    f"{card.name} 認不出：{command}")
                 for command in _sequence(card, memspec.EXAMPLE_ALLOWS_FIELD):
-                    self.assertIsNone(self.denial(self.shell(tool, command)),
-                                      f"{card.name} 誤擋：{command}")
+                    value = self.shell(tool, command)
+                    self.assertIsNone(self.denial(value), f"{card.name} 誤擋：{command}")
+                    self.assertFalse(self.advised(value, card), f"{card.name} 誤提醒：{command}")
 
     def test_a_guard_card_does_not_reach_into_another_tool(self):
         # Bash 卡與 PowerShell 卡是兩張，正因為一張守衛只認一個工具家族。
@@ -225,9 +246,10 @@ class StarterCardsBlockThroughTheRealGates(_VaultCase):
                     if _fields(card).get(memspec.ACTION_GUARD_TOOL_FIELD) == "Bash")
         self.install_one(bash)
         command = _sequence(bash, memspec.EXAMPLE_BLOCKS_FIELD)[0]
-        self.assertIsNotNone(self.denial(self.shell("Bash", command)))
-        self.assertIsNone(self.denial(self.shell("PowerShell", command)),
-                          "Bash 卡不該管到 PowerShell；那是另一張卡的事")
+        self.assertTrue(self.advised(self.shell("Bash", command), bash))
+        other = self.shell("PowerShell", command)
+        self.assertIsNone(self.denial(other))
+        self.assertFalse(self.advised(other, bash), "Bash 卡不該管到 PowerShell；那是另一張卡的事")
 
     def test_the_note_card_leaves_a_note_instead_of_ending_the_turn(self):
         card = next(card for card in starter.shipped_cards()

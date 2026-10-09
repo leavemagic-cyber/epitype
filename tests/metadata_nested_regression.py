@@ -173,15 +173,23 @@ class GateFixture(unittest.TestCase):
         return stop._handle(
             {"session_id": session, "last_assistant_message": message}, time.monotonic(), [])
 
+    def noted(self, session="nested"):
+        """(card, rule) pairs the Stop gate noted for this session; Stop never blocks."""
+        path = self.vault / memspec.GATE_LOG_FILENAME
+        rows = ([json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+                if path.is_file() else [])
+        return [(row.get("decision"), row.get("rule")) for row in rows
+                if row.get("kind") == memspec.STOP_NOTE_LOG_KIND and row.get("session_id") == session]
+
 
 class StopGate(GateFixture):
-    def test_a_forbidden_list_under_metadata_still_blocks(self):
+    # 回合閘一律不擋（owner 2026-10-03；CORE-25）：讀得到的裁定命中＝一筆 stop_note。
+    def test_a_forbidden_list_under_metadata_is_still_read(self):
         self.card(NESTED_RULING)
-        value = self.stop_verdict()
-        self.assertEqual((value or {}).get("decision"), "block", value)
-        self.assertIn("合成禁語甲", value["reason"])
+        self.assertIsNone(self.stop_verdict())
+        self.assertEqual(self.noted(), [("nested-ruling", "forbidden")])
 
-    def test_the_real_hook_process_blocks_the_same_card(self):
+    def test_the_real_hook_process_notes_the_same_card(self):
         self.card(NESTED_RULING)
         # 子行程的「同一段已擋過一次」標記落在暫存目錄；不隔離的話它會留在真的 %TEMP%，
         # 第二次跑這一題就被當成重送而放行。
@@ -195,7 +203,9 @@ class StopGate(GateFixture):
             environment={name: str(scratch) for name in ("TMPDIR", "TEMP", "TMP")})
         self.assertEqual(result.returncode, 0, result.stderr)
         value = json.loads(result.stdout) if result.stdout.strip() else {}
-        self.assertEqual(value.get("decision"), "block", (result.stdout, result.stderr))
+        self.assertNotEqual(value.get("decision"), "block", result.stdout)
+        self.assertEqual(self.noted("nested-process"), [("nested-ruling", "forbidden")],
+                         (result.stdout, result.stderr))
 
     def test_nested_and_top_level_cards_yield_the_same_ruling(self):
         nested = stop._read_decision(self.card(NESTED_RULING, "nested.md"))
@@ -206,22 +216,26 @@ class StopGate(GateFixture):
     def test_the_example_lines_behave_as_written(self):
         self.card(NESTED_RULING)
         self.assertIsNone(self.stop_verdict("這一句沒有問題", session="allowed"))
+        self.assertEqual(self.noted("allowed"), [])
 
     def test_a_field_under_another_parent_still_blocks_nothing(self):
         path = self.card(OTHER_PARENT_RULING)
         self.assertIsNone(stop._read_decision(path))
         self.assertIsNone(self.stop_verdict())
+        self.assertEqual(self.noted(), [])
 
     def test_a_nested_status_retires_the_ruling(self):
         path = self.card(NESTED_RULING.replace("  status: active\n", "  status: superseded\n"))
         self.assertIsNone(stop._read_decision(path))
         self.assertIsNone(self.stop_verdict())
+        self.assertEqual(self.noted(), [])
 
     def test_a_top_level_list_wins_over_the_nested_one(self):
         path = self.card(NESTED_RULING.replace(
             "metadata:\n", "forbidden:\n  - 頂層禁語\nmetadata:\n"))
         self.assertEqual(stop._read_decision(path)[memspec.FORBIDDEN_FIELD], ["頂層禁語"])
         self.assertIsNone(self.stop_verdict())
+        self.assertEqual(self.noted(), [])
 
     def test_a_cache_that_called_the_card_inert_is_not_trusted(self):
         # 修正前的閘把這張卡認成「不是裁定」並存進快取；換版之後那個負例要重認，
@@ -235,14 +249,16 @@ class StopGate(GateFixture):
         loaded["version"] = stop._DECISION_CACHE_VERSION - 1
         loaded["decisions"][path.name] = None
         cache.write_text(json.dumps(loaded, ensure_ascii=False), encoding="utf-8")
-        self.assertEqual((self.stop_verdict() or {}).get("decision"), "block")
+        self.assertIsNone(self.stop_verdict())
+        self.assertEqual(self.noted(), [("nested-ruling", "forbidden")])
 
 
 class ActionGuard(GateFixture):
     HEREDOC_WITH_BACKSLASH = "python - <<'PY'\n" + r"path = 'C:\Users\x'" + "\nPY\n"
+    # A guard denies only when its card declares on_hit: block; the default is a note.
     GUARD_FIELDS = (
         'guard_tool: Bash\nguard_all_of:\n  - "<<"\n  - "\\\\"\n'
-        "guard_advice: 改用寫檔工具建檔\n"
+        "guard_advice: 改用寫檔工具建檔\non_hit: block\n"
     )
 
     def denial(self, tool_name, tool_input):
@@ -270,15 +286,27 @@ class ActionGuard(GateFixture):
         self.guard_card("extra")
         self.assertIsNone(self.denial("Bash", {"command": self.HEREDOC_WITH_BACKSLASH}))
 
-    def test_a_write_check_under_metadata_still_denies(self):
+    def test_a_write_check_under_metadata_is_still_read(self):
+        # The encoding check only notes (owner 2026-10-03). A Write is repaired with or
+        # without a card, so an Edit, which only the card's note covers, shows it is read.
         self.card(
             "---\nname: ps51\ndescription: PowerShell 5.1 需要 UTF-8 BOM\n"
             "metadata:\n  type: feedback\n  last_verified_at: 2026-09-27\n"
             "  aliases: [PowerShell BOM]\n  write_check: ps51_utf8_bom\n---\nBody\n", "ps51.md")
-        target = self.root / "new.ps1"
-        self.assertIsNotNone(self.denial("Write", {"file_path": str(target), "content": "# 中文\n"}))
-        self.assertIsNone(self.denial(
-            "Write", {"file_path": str(target), "content": "\ufeff# 中文\n"}))
+        target = self.root / "existing.ps1"
+        edit = {"file_path": str(target), "old_string": "1", "new_string": "2"}
+
+        def noted(session):
+            value = pretool._handle({"tool_name": "Edit", "tool_input": edit, "session_id": session},
+                                    time.monotonic(), [])
+            output = (value or {}).get("hookSpecificOutput", {})
+            self.assertNotIn("permissionDecision", output)
+            return "編碼提醒（本次寫入放行）" in output.get("additionalContext", "")
+
+        target.write_text("# 中文\nWrite-Output 1\n", encoding="utf-8")
+        self.assertTrue(noted("nested-edit-plain"))
+        target.write_text("\ufeff# 中文\nWrite-Output 1\n", encoding="utf-8")
+        self.assertFalse(noted("nested-edit-bom"))
 
     def test_field_spans_point_at_the_card_s_own_lines(self):
         # 再犯閘靠這些行號把豁免欄位的行從差異裡拿掉；搬過的行要指回檔案裡原本那一行。
