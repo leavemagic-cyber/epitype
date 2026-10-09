@@ -830,12 +830,10 @@ def _language_units(prose):
     return units, letters
 
 
-def _owner_language_gap(decision, message, turn, event, defects):
-    """回覆給 owner 的說明文字不是他的語言，就回一句理由。子代理的回合不查。"""
-    if isinstance(event, dict) and (
-            event.get("hook_event_name") == memspec.SUBAGENT_STOP_EVENT
-            or event.get("agent_id")):
-        return None
+def _owner_language_measure(decision, text, defects):
+    """(目標語言占比, 外文字母數, 門檻, 語言名)；卡片的目標語言不認得就回 None。
+
+    回合結束閘與 PreToolUse 的中途提醒共用這一份量法，兩邊對同一張卡不能有兩種讀法。"""
     target = (decision.turn_check_target or memspec.TURN_LANGUAGE_DEFAULT_TARGET).casefold()
     spec = memspec.TURN_LANGUAGE_SCRIPTS.get(target)
     if spec is None:
@@ -847,17 +845,28 @@ def _owner_language_gap(decision, message, turn, event, defects):
     raw = str(decision.turn_check_limit or "").strip()
     minimum = int(raw) if raw.isdigit() and 0 < int(raw) <= 100 else (
         memspec.TURN_LANGUAGE_DEFAULT_MIN_SHARE)
-    # 只量最後一則：中途的工具旁白另算，不讓它把一則中文結論拖下水。
+    units, letters = _language_units(_owner_prose(text))
+    foreign = sum(count for script, count in letters.items() if script not in scripts)
+    total = sum(units.values())
+    share = round(100 * sum(units.get(script, 0) for script in scripts) / total) if total else 0
+    return share, foreign, minimum, language
+
+
+def _owner_language_gap(decision, message, turn, event, defects):
+    """回覆給 owner 的說明文字不是他的語言，就回一句理由。子代理的回合不查。"""
+    if isinstance(event, dict) and (
+            event.get("hook_event_name") == memspec.SUBAGENT_STOP_EVENT
+            or event.get("agent_id")):
+        return None
+    # 只量最後一則：中途的工具旁白由 PreToolUse 的中途提醒量，不讓它把一則中文結論拖下水。
     final = event.get("last_assistant_message") if isinstance(event, dict) else None
     if not isinstance(final, str) or not final.strip():
         final = message
-    units, letters = _language_units(_owner_prose(final))
-    foreign = sum(count for script, count in letters.items() if script not in scripts)
-    if foreign < memspec.TURN_LANGUAGE_MIN_FOREIGN_LETTERS:
+    measured = _owner_language_measure(decision, final, defects)
+    if measured is None:
         return None
-    total = sum(units.values())
-    share = round(100 * sum(units.get(script, 0) for script in scripts) / total) if total else 0
-    if share >= minimum:
+    share, foreign, minimum, language = measured
+    if foreign < memspec.TURN_LANGUAGE_MIN_FOREIGN_LETTERS or share >= minimum:
         return None
     return memspec.TURN_LANGUAGE_REASON.format(
         language=language, share=share, advice=decision.advice)

@@ -2041,6 +2041,188 @@ def _context_meter_line(event, config, started_at):
     return found[0], directory, found[1], found[2]
 
 
+def _midturn_scan(lines, checked):
+    """(還沒量過的文字段 [(id, 文字)] 依時間先後, 是否已碰到停止點)。
+
+    量過的段永遠在前、沒量過的在後，所以倒著走碰到第一個量過的段就能停。
+    工具回傳記在 user 那一側但不結束回合；isMeta／壓縮摘要也不是真人提問。"""
+    found = []
+    for raw in reversed(lines):
+        # 先用位元組篩掉不可能相關的列再解析：工具回傳列可達數 MB。文字裡的引號一定被跳脫，
+        # 所以帶引號的 "tool_result" 只會是結構上的型別值，而它在列首附近。
+        if b'"text"' not in raw and b'"user"' not in raw:
+            continue
+        if b'"tool_result"' in raw[:4096]:
+            continue
+        try:
+            row = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(row, dict) or row.get("isSidechain"):
+            continue
+        if isinstance(row.get("payload"), dict):
+            # Codex rollout：這裡只認 Claude 的紀錄形狀；不停下來的話每次都要讀滿上限。
+            found.reverse()
+            return found, True
+        message = row.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        if row.get("type") == "user":
+            if row.get("isMeta") or row.get("isCompactSummary"):
+                continue
+            if isinstance(content, list) and any(
+                    isinstance(block, dict) and block.get("type") == "tool_result"
+                    for block in content):
+                continue
+            if isinstance(content, (str, list)):
+                found.reverse()
+                return found, True
+            continue
+        if row.get("type") != "assistant" or not isinstance(content, list):
+            continue
+        row_id = str(row.get("uuid") or "")
+        for index in range(len(content) - 1, -1, -1):
+            block = content[index]
+            if not isinstance(block, dict) or block.get("type") != "text":
+                continue
+            text = block.get("text")
+            if not isinstance(text, str) or not text.strip() or not row_id:
+                continue
+            block_id = f"{row_id}:{index}"
+            if block_id in checked:
+                found.reverse()
+                return found, True
+            found.append((block_id, text))
+    found.reverse()
+    return found, False
+
+
+def _midturn_texts(transcript_path, checked, started_at):
+    """這一回合還沒量過的助理文字段。只讀檔尾：對話檔可以超過 150 MB。"""
+    path = Path(str(transcript_path))
+    size = path.stat().st_size
+    span = memspec.CONTEXT_METER_TAIL_FIRST_BYTES
+    with path.open("rb") as stream:
+        while True:
+            start = max(0, size - span)
+            stream.seek(start)
+            lines = stream.read(size - start).split(b"\n")
+            if start:
+                lines = lines[1:]
+            found, stopped = _midturn_scan(lines, checked)
+            if (stopped or not start or span >= memspec.STOP_GATE_TURN_TAIL_BYTES
+                    or expired(started_at)):
+                return found
+            span = min(span * 4, memspec.STOP_GATE_TURN_TAIL_BYTES)
+
+
+def _midturn_state(path):
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return [], []
+    if not isinstance(state, dict):
+        return [], []
+    return ([str(item) for item in state.get("checked") or ()],
+            [str(item) for item in state.get("pending") or ()])
+
+
+def _save_midturn_state(path, checked, pending):
+    # 並行的工具呼叫各有一個 hook 行程：先寫暫存再換名，讀的一方不會讀到半個檔。
+    keep = memspec.TURN_LANGUAGE_MIDTURN_KEEP_IDS
+    temporary = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(json.dumps({"checked": checked[-keep:], "pending": pending[-keep:]}),
+                         encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def _owner_language_decisions(config, event, started_at):
+    """回合結束閘認得的 owner_language 裁定，卡片照它的規矩從檔案重讀。
+
+    找卡沿用回合結束閘自己的裁定快取（它每回合結束都更新）：整庫盤點加輪替重驗實測一次
+    約 450 ms，而這裡在工具呼叫之前跑。快取不在或版本不合才退回整庫載入。"""
+    import stop_gate
+    from epitype import tool_sequence
+
+    found = []
+    for vault in stop_gate._vaults(config, event):
+        vault = Path(vault).resolve()
+        _manifest, cached, _cursor = stop_gate._read_cache(
+            vault / memspec.FTS_INDEX_DIRECTORY / stop_gate._DECISION_CACHE_FILENAME)
+        if cached:
+            decisions = [
+                stop_gate._decision_from_ruling(vault, card_path, ruling, event=event, defects=[])
+                for card_path, ruling in sorted(cached.items())
+                if isinstance(ruling, dict) and ruling.get(stop_gate._KEY)
+                and ruling.get(memspec.TURN_CHECK_FIELD) == memspec.TURN_CHECK_OWNER_LANGUAGE]
+        else:
+            decisions = stop_gate._decisions(vault, started_at, [], event=event)
+        found.extend(
+            decision for decision in decisions
+            if decision is not None
+            and decision.turn_check == memspec.TURN_CHECK_OWNER_LANGUAGE
+            and decision.applies_to != memspec.APPLIES_TO_WRITE
+            and tool_sequence.applies(decision.audience, event))
+    return found
+
+
+def _midturn_language_line(event, config, started_at, fits):
+    """工具之間寫給 owner 的文字不是卡片指定的語言，回一行提醒；其餘一律 None。
+
+    只提醒、不擋。量法、門檻與目標語言都取自回合結束閘的 owner_language 卡。每段文字最多
+    提醒一次；外文字母還不夠判的段留著，跟下一段合起來量。任何例外都不輸出。"""
+    try:
+        if (config is None or started_at is None or expired(started_at)
+                or event.get("agent_id") or event.get("agentId")):
+            return None
+        session_id = event.get("session_id")
+        transcript = event.get("transcript_path")
+        if not (isinstance(session_id, str) and session_id
+                and isinstance(transcript, str) and transcript):
+            return None
+        directory = notice_marker_directory(session_id)
+        state_path = directory / memspec.TURN_LANGUAGE_MIDTURN_STATE_FILE
+        checked, pending = _midturn_state(state_path)
+        found = _midturn_texts(transcript, set(checked), started_at)
+        ids = [block_id for block_id, _text in found]
+        if not ids or set(ids) <= set(pending) or expired(started_at):
+            return None
+        import stop_gate
+
+        measured, chosen = None, None
+        for decision in _owner_language_decisions(config, event, started_at):
+            measured = stop_gate._owner_language_measure(
+                decision, "\n\n".join(text for _id, text in found), [])
+            if measured is not None:
+                chosen = decision
+                break
+        if expired(started_at):
+            return None
+        directory.mkdir(parents=True, exist_ok=True)
+        if measured is None:
+            _save_midturn_state(state_path, checked + ids, [])
+            return None
+        share, foreign, minimum, language = measured
+        if share >= minimum:
+            _save_midturn_state(state_path, checked + ids, [])
+            return None
+        if foreign < memspec.TURN_LANGUAGE_MIN_FOREIGN_LETTERS:
+            _save_midturn_state(state_path, checked, ids)
+            return None
+        _save_midturn_state(state_path, checked + ids, [])
+        template = memspec.TURN_LANGUAGE_MIDTURN_NOTICE
+        room = memspec.TURN_LANGUAGE_MIDTURN_MAX_CHARS - len(
+            template.format(language=language, share=share, advice=""))
+        advice = " ".join(str(chosen.advice or "").split())
+        if len(advice) > room:
+            advice = advice[:room - 1] + "…" if room > 1 else ""
+        line = template.format(language=language, share=share, advice=advice)
+        if not fits(line) or not _notice_marker(session_id, "midturn-language:" + ids[0]):
+            return None
+        return line
+    except Exception:
+        return None
+
+
 def _finish_advice(claims, emitted):
     import hashlib
     from epitype import rule_context
@@ -2116,6 +2298,12 @@ def _allow_context(event, notices=(), config=None, started_at=None, meter_claims
             print(memspec.GATE_DEGRADED_NOTICE.format(
                 gate="control lifecycle", reason=type(exc).__name__), file=sys.stderr)
     if meter_claims is not None:
+        language_line = _midturn_language_line(
+            event, config, started_at,
+            lambda line: payload_fits("PreToolUse", "\n".join([*lines, line]),
+                                      config[memspec.CONFIG_BUDGET_BYTES_FIELD]))
+        if language_line:
+            lines.append(language_line)
         meter = _context_meter_line(event, config, started_at)
         if meter is not None and payload_fits(
                 "PreToolUse", "\n".join([*lines, meter[0]]),

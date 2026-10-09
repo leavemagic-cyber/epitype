@@ -91,6 +91,7 @@ SELFTESTS = (
     Path("tests") / "core_drift_contract_vault_regression.py",
     Path("tests") / "review_scope_regression.py",
     Path("tests") / "turn_check_regression.py",
+    Path("tests") / "midturn_language_regression.py",
     Path("tests") / "patch_envelope_gate_regression.py",
     Path("tests") / "write_check_regression.py",
     Path("tests") / "control_lifecycle_regression.py",

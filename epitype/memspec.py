@@ -1439,6 +1439,14 @@ TURN_LANGUAGE_REASON = (
     "📌 這則回覆的說明文字大多不是{language}（只佔 {share}%）。請改用{language}重寫；"
     "程式碼、路徑、指令名可以保留原文。{advice}"
 )
+# 回合中途：工具之間寫給 owner 的文字由 PreToolUse 用同一張卡、同一份量法提醒（只提醒、不擋）。
+# 每一段文字最多提醒一次；太短判不了的先留著，跟下一段合起來再量，連串英文短訊才抓得到。
+TURN_LANGUAGE_MIDTURN_NOTICE = (
+    "📌 Epitype：剛才工具之間給 owner 看的文字，{language}只佔 {share}%；接下來的進度短訊請用{language}。{advice}"
+)
+TURN_LANGUAGE_MIDTURN_MAX_CHARS = 150
+TURN_LANGUAGE_MIDTURN_STATE_FILE = "midturn_language.json"
+TURN_LANGUAGE_MIDTURN_KEEP_IDS = 64
 TURN_LANGUAGE_UNKNOWN_DEFECT = (
     "⚠ Epitype 回合閘：裁定 {decision} 的 turn_check_target「{target}」不認得"
     "（可用的是 {known}），這一項暫不生效。"
@@ -3764,6 +3772,7 @@ _EN = {
     "REQUIRE_HINT_TEMPLATE": "one of: {items}",
     "TURN_CHECK_UNKNOWN_DEFECT": '⚠ Epitype stop gate: turn_check "{name}" on ruling {decision} is not a built-in check (available: {known}), so this one did not apply.',
     "TURN_LANGUAGE_REASON": "📌 most of this reply's prose is not in {language} (only {share}%). Rewrite it in {language}; code, paths and command names may stay as they are.{advice}",
+    "TURN_LANGUAGE_MIDTURN_NOTICE": "📌 Epitype: the text shown to the owner between tool calls is only {share}% {language}; write the next progress lines in {language}.{advice}",
     "TURN_LANGUAGE_UNKNOWN_DEFECT": '⚠ Epitype Stop gate: ruling {decision} has turn_check_target "{target}", which is not recognised (known: {known}); this check is off for now.',
     "TURN_LENGTH_REASON": '📌 this turn is {chars} characters, over the {limit} limit from "{decision}", and the owner did not ask for the full version this time. Put the detail in a file; keep the reply to the conclusion, the numbers and the file links.{advice}',
     "TURN_CITED_UNREAD_REASON": '📌 this turn said "{claim}", but no tool call in this session ever opened {path}. Per "{decision}": read it, or change the claim to say it was not read.{advice}',
