@@ -1,4 +1,9 @@
-"""An agent-created browser tab left open blocks the next non-browser tool call."""
+"""An agent-created browser tab left open is tracked and reminded until its close is confirmed.
+
+Cleaning up is a reminder, not a gate (owner 2026-10-03, 6f6fce1; CORE-25): no call is
+denied for an open tab. What still denies is navigating another session's tab or
+redirecting a kept VM tab away from its notebook (tests/pretool_advisory_regression A04).
+"""
 
 import sys
 sys.dont_write_bytecode = True
@@ -171,15 +176,31 @@ class ControlBlockRegression(unittest.TestCase):
     def blocked(self, session, name="Bash", agent=None):
         return lifecycle.blockers(pre(session, name, agent=agent), self.path)
 
-    # 1. 開分頁→Bash 被擋；關分頁→放行（走真的 hook 行程）
-    def test_open_tab_blocks_bash_until_its_close_is_confirmed(self):
+    def open_tabs(self, session, agent=None):
+        """Tabs this agent created, has not closed and has not kept for a running VM."""
+        return sorted((row["kind"], row["id"]) for row in lifecycle.status(self.path, session)["pending"]
+                      if row["kind"] in lifecycle.BLOCKING_KINDS and not row.get("kept")
+                      and row.get("agent") == agent)
+
+    def kept(self, session):
+        return [row["id"] for row in lifecycle.status(self.path, session)["pending"] if row.get("kept")]
+
+    def reminded(self, session, name="Bash", agent=None):
+        """The tool-stage reminder this call would get, without using it up."""
+        return lifecycle.reminder(pre(session, name, agent=agent), self.path, "tool", claim=False) or ""
+
+    def reachable(self, session):
+        """The idle tab a navigate without tabId would be pointed at; None when out of reach."""
+        return lifecycle.navigation_target(pre(session, lifecycle.CHROME + "navigate"), self.path)[0]
+
+    # 1. 開分頁→Bash 放行並提醒；關分頁才算收尾（走真的 hook 行程）
+    def test_open_tab_is_reminded_until_its_close_is_confirmed(self):
         session = "open-close-" + uuid.uuid4().hex
         self.assertIsNone(self.hook(chrome_create(session, "c1", 101)))
-        denied = self.hook(pre(session, "Bash", {"command": "git status"}))
-        self.assertEqual(self.decision(denied), "deny")
-        self.assertIn("Epitype 擋下 Bash", self.reason(denied))
-        self.assertIn("101", self.reason(denied))
-        self.assertIn("tabs_close_mcp", self.reason(denied))
+        reminded = self.hook(pre(session, "Bash", {"command": "git status"}))
+        self.assertIsNone(self.decision(reminded))
+        self.assertIn("Epitype 查到本次仍未確認收尾", self.context(reminded))
+        self.assertIn("分頁 101", self.context(reminded))
         # 擋的時候仍能用瀏覽器工具與載入工具去收尾。
         for name in ("mcp__claude-in-chrome__tabs_close_mcp", "mcp__claude-in-chrome__computer",
                      "ToolSearch", "AskUserQuestion"):
@@ -187,29 +208,34 @@ class ControlBlockRegression(unittest.TestCase):
         # 只呼叫 close 不算；要等到「Closed tab 101」的結果。
         self.hook(post(session, "c2", "mcp__claude-in-chrome__tabs_close_mcp", {"tabId": 101},
                        mcp("The \"tabs_close_mcp\" tool did not respond in time.", error=True)))
-        self.assertEqual(self.decision(self.hook(pre(session, "Bash", {"command": "ls"}))), "deny")
+        again = self.hook(pre(session, "Bash", {"command": "ls"}))
+        self.assertIsNone(self.decision(again))
+        self.assertEqual(self.open_tabs(session), [("chrome-tab", "101")])
+        # 提醒記在帳本：工具階段同一個分頁只提醒 REMINDER_LIMITS 次，不每次都講。
+        self.assertNotIn("仍未確認收尾", self.context(again))
+        with closing(sqlite3.connect(self.path)) as db:
+            count = db.execute("SELECT SUM(count) FROM alerts WHERE session=? AND stage='tool'",
+                               (session,)).fetchone()[0]
+        self.assertEqual(count, lifecycle.REMINDER_LIMITS["tool"])
         self.hook(chrome_close(session, "c3", 101, OWNER_TAB))
         allowed = self.hook(pre(session, "Bash", {"command": "git status"}))
         self.assertNotEqual(self.decision(allowed), "deny")
+        self.assertNotIn("仍未確認收尾", self.context(allowed))
         self.assertEqual(lifecycle.status(self.path, session)["pending"], [])
-        # 每次擋下都記在帳本，數得出擋了幾次。
-        with closing(sqlite3.connect(self.path)) as db:
-            count = db.execute("SELECT SUM(count) FROM alerts WHERE session=? AND stage='block'",
-                               (session,)).fetchone()[0]
-        self.assertEqual(count, 2)
 
-    def test_every_non_browser_tool_is_blocked_and_reason_is_plain_chinese(self):
+    def test_every_non_browser_tool_is_reminded_and_reason_is_plain_chinese(self):
         session = "kinds"
         lifecycle.observe(chrome_create(session, "c1", 101), self.path)
         for name in ("Bash", "PowerShell", "Agent", "Task", "Write", "Edit", "Read", "Grep",
                      "WebFetch", "mcp__context7__query-docs"):
-            self.assertEqual(self.blocked(session, name), [("chrome-tab", "101")], name)
+            self.assertEqual(self.blocked(session, name), [], name)
+            self.assertIn("Epitype 查到本次仍未確認收尾：分頁 101", self.reminded(session, name), name)
         for name in ("mcp__claude-in-chrome__navigate", "mcp__Claude_Browser__tabs_close",
                      "mcp__computer-use__screenshot", "mcp__cua_repl__js", "ToolSearch",
                      "Skill", "AskUserQuestion", "TodoWrite", "TaskStop"):
             self.assertEqual(self.blocked(session, name), [], name)
         reason = lifecycle.block_reason([("chrome-tab", "101"), ("pane-tab", "seed")], "Write")
-        self.assertIn("Epitype 擋下 Write", reason)
+        self.assertTrue(reason.startswith("Epitype 提醒："), reason)
         self.assertIn("Chrome 分頁 101", reason)
         self.assertIn("內建瀏覽器分頁 seed", reason)
         self.assertIn("lifecycle keep", reason)
@@ -256,7 +282,8 @@ class ControlBlockRegression(unittest.TestCase):
             "Created new tab. Tab ID: 123",
             "Tab Context:\n- Executed on tabId: 123\n- Available tabs:\n"
             "  • tabId 456: Existing\n  • tabId 123: New Tab")), self.path)
-        self.assertEqual(self.blocked(session), [("chrome-tab", "123")])
+        self.assertEqual(self.open_tabs(session), [("chrome-tab", "123")])
+        self.assertEqual(self.reachable(session), "123")
         self.assertEqual(lifecycle._listing(
             '- Available tabs:\n  • tabId 9: "a (b) (\\"c\\")" ("https://x.example/p")\n  • tabId 10: T', ()),
             {"9": "https://x.example/p", "10": None})
@@ -266,42 +293,48 @@ class ControlBlockRegression(unittest.TestCase):
         self.assertEqual(lifecycle._listing(listing, ()), {"5": None, "6": "https://a.example/"})
         self.assertEqual(lifecycle._listing(listing, (), origins=True), {"5": "v2", "6": "https://a.example/"})
 
-    def test_tab_out_of_reach_stops_blocking_but_stays_pending(self):
+    def test_tab_out_of_reach_is_not_navigated_but_stays_pending(self):
+        # 碰得到的分頁才會被選去導頁；碰不到的照舊待收尾、照舊提醒，不冒充已關閉。
         session = "reach"
         lifecycle.observe(chrome_create(session, "c1", 101), self.path)
-        self.assertEqual(self.blocked(session), [("chrome-tab", "101")])
-        # 使用者手動關掉或拖出群組：清單裡沒有它了。代理碰不到，不再擋；但也不冒充已關閉。
+        self.assertEqual(self.reachable(session), "101")
+        # 使用者手動關掉或拖出群組：清單裡沒有它了。
         lifecycle.observe(chrome_context(session, "c2", OWNER_TAB), self.path)
-        self.assertEqual(self.blocked(session), [])
+        self.assertIsNone(self.reachable(session))
         self.assertIn({"kind": "chrome-tab", "id": "101"},
                       lifecycle.status(self.path, session)["pending"])
-        # 又出現在群組裡（被拖回來）就再擋。
+        self.assertIn("分頁 101", self.reminded(session))
+        # 又出現在群組裡（被拖回來）就又碰得到。
         lifecycle.observe(chrome_context(session, "c3", (101, "New Tab", "chrome://newtab/")), self.path)
-        self.assertEqual(self.blocked(session), [("chrome-tab", "101")])
-        # Chrome 斷線：代理沒辦法關，不能卡死它。
+        self.assertEqual(self.reachable(session), "101")
+        # Chrome 斷線：代理碰不到。
         lifecycle.observe(post(session, "c4", "mcp__claude-in-chrome__tabs_context_mcp",
                                {"createIfEmpty": True},
                                mcp("⚠️ **Claude in Chrome is not connected**\n\nThe Chrome extension isn't reachable right now.")),
                           self.path)
-        self.assertEqual(self.blocked(session), [])
+        self.assertIsNone(self.reachable(session))
         lifecycle.observe(chrome_context(session, "c5", (101, "New Tab", "chrome://newtab/")), self.path)
-        self.assertEqual(self.blocked(session), [("chrome-tab", "101")])
+        self.assertEqual(self.reachable(session), "101")
         lifecycle.observe(post(session, "c6", "mcp__claude-in-chrome__tabs_context_mcp", {},
                                mcp("No tab group exists for this session.")), self.path)
-        self.assertEqual(self.blocked(session), [])
+        self.assertIsNone(self.reachable(session))
+        self.assertEqual(self.open_tabs(session), [("chrome-tab", "101")])
 
-    def test_subagent_tab_blocks_only_that_subagent(self):
+    def test_subagent_tab_is_reminded_only_to_that_subagent(self):
         session = "split"
         lifecycle.observe(chrome_create(session, "s1", 201, agent="sub-1"), self.path)
-        self.assertEqual(self.blocked(session, agent="sub-1"), [("chrome-tab", "201")])
-        self.assertEqual(self.blocked(session), [])
-        self.assertEqual(self.blocked(session, agent="sub-2"), [])
+        self.assertEqual(self.open_tabs(session, agent="sub-1"), [("chrome-tab", "201")])
+        self.assertIn("分頁 201", self.reminded(session, agent="sub-1"))
+        self.assertEqual(self.open_tabs(session), [])
+        self.assertEqual(self.reminded(session), "")
+        self.assertEqual(self.reminded(session, agent="sub-2"), "")
         # 子代理結束、分頁轉給主線：現在換主線要關。
         lifecycle.finish_subagent({"session_id": session, "agent_id": "sub-1"}, self.path)
-        self.assertEqual(self.blocked(session), [("chrome-tab", "201")])
+        self.assertEqual(self.open_tabs(session), [("chrome-tab", "201")])
+        self.assertIn("分頁 201", self.reminded(session))
 
     # 3. 內建瀏覽器
-    def test_built_in_browser_tabs_block_until_closed(self):
+    def test_built_in_browser_tabs_stay_open_until_closed(self):
         session = "pane"
         lifecycle.observe(post(session, "p1", "mcp__Claude_Browser__preview_start",
                                {"url": "https://example.com"}, pane_json(
@@ -311,15 +344,16 @@ class ControlBlockRegression(unittest.TestCase):
         lifecycle.observe(post(session, "p2", "mcp__Claude_Browser__tabs_create", {}, pane_json(
             {"serverId": "preview-local_x", "tabId": "tab-1", "reused": False, "type": "browser"},
             "Opened tab tab-1 in the background — the user's current tab stays in front.")), self.path)
-        self.assertEqual(sorted(self.blocked(session)), [("pane-tab", "seed"), ("pane-tab", "tab-1")])
-        self.assertIn("tabs_close", lifecycle.block_reason(self.blocked(session), "Bash"))
+        self.assertEqual(self.open_tabs(session), [("pane-tab", "seed"), ("pane-tab", "tab-1")])
+        self.assertIn("分頁 seed, tab-1", self.reminded(session))
+        self.assertIn("tabs_close", lifecycle.block_reason(self.open_tabs(session), "Bash"))
         lifecycle.observe(post(session, "p3", "mcp__Claude_Browser__tabs_close", {"tabId": "tab-1"},
                                pane("Closed tab tab-1.")), self.path)
-        self.assertEqual(self.blocked(session), [("pane-tab", "seed")])
+        self.assertEqual(self.open_tabs(session), [("pane-tab", "seed")])
         lifecycle.observe(post(session, "p4", "mcp__Claude_Browser__tabs_close", {"tabId": "seed"}, pane(
             "Closed tab seed. That was the last tab, so the Browser pane is now closed — "
             "use `preview_start` to open it again.")), self.path)
-        self.assertEqual(self.blocked(session), [])
+        self.assertEqual(self.open_tabs(session), [])
         self.assertEqual(lifecycle.status(self.path, session)["pending"], [])
         # 內建瀏覽器關著時 navigate 回的是真實的開窗格 JSON（不是 Executed on tabId）。
         # 指定 tabId 的呼叫回「No preview is open」可能只是指錯對象，不算窗格關了。
@@ -327,21 +361,23 @@ class ControlBlockRegression(unittest.TestCase):
         lifecycle.observe(post(session, "p4c", "mcp__Claude_Browser__navigate",
                                {"tabId": "nope", "url": "https://a.example/"}, mcp(NO_PREVIEW, error=True)),
                           self.path)
-        self.assertEqual(self.blocked(session), [("pane-tab", "seed")])
+        self.assertEqual(self.open_tabs(session), [("pane-tab", "seed")])
         lifecycle.observe(post(session, "p4d", "mcp__Claude_Browser__tabs_close", {"tabId": "seed"}, pane(
             "Closed tab seed. That was the last tab, so the Browser pane is now closed — "
             "use `preview_start` to open it again.")), self.path)
         self.assertIsNone(self.hook(pane_navigate_opening(session, "p5", "https://a.example/x")))
-        self.assertEqual(self.blocked(session), [("pane-tab", "seed")])
-        self.assertEqual(self.decision(self.hook(pre(session, "Bash", {"command": "ls"}))), "deny")
+        self.assertEqual(self.open_tabs(session), [("pane-tab", "seed")])
+        reminded = self.hook(pre(session, "Bash", {"command": "ls"}))
+        self.assertIsNone(self.decision(reminded))
+        self.assertIn("分頁 seed", self.context(reminded))
         # 窗格開著時 navigate 只回來源網域：沿用分頁，不新增紀錄。
         lifecycle.observe(pane_navigate_open(session, "p5b", "seed", "https://b.example/y"), self.path)
-        self.assertEqual(self.blocked(session), [("pane-tab", "seed")])
+        self.assertEqual(self.open_tabs(session), [("pane-tab", "seed")])
         # tabs_context 是內建瀏覽器的完整清單：使用者把整個窗格關掉，清單就證明它關了。
         lifecycle.observe(post(session, "p6", "mcp__Claude_Browser__tabs_context", {}, pane_json(
             {"browserOpen": False, "tabs": []}, "The Browser pane isn't open yet, so there are no tabs.")),
             self.path)
-        self.assertEqual(self.blocked(session), [])
+        self.assertEqual(self.open_tabs(session), [])
         self.assertEqual(lifecycle.status(self.path, session)["pending"], [])
         # 沿用既有分頁（reused: true）不是這次建的。
         lifecycle.observe(post(session, "p7", "mcp__Claude_Browser__preview_start", {"url": "https://b"},
@@ -350,16 +386,16 @@ class ControlBlockRegression(unittest.TestCase):
         self.assertEqual(lifecycle.status(self.path, session)["pending"], [])
         # 窗格沒開時工具回錯誤「No preview is open」：這本身就證明分頁都關了。
         lifecycle.observe(pane_navigate_opening(session, "p8", "https://c.example/"), self.path)
-        self.assertEqual(self.blocked(session), [("pane-tab", "seed")])
+        self.assertEqual(self.open_tabs(session), [("pane-tab", "seed")])
         lifecycle.observe(post(session, "p9", "mcp__Claude_Browser__tabs_context", {}, mcp(
             NO_PREVIEW, error=True)), self.path)
-        self.assertEqual(self.blocked(session), [])
+        self.assertEqual(self.open_tabs(session), [])
         # 開本機檔案的 preview_start 沒有分頁 ID：只記成無法確認，不擋。
         lifecycle.observe(post(session, "p10", "mcp__Claude_Browser__preview_start",
                                {"url": "file:///C:/x/map.html"}, mcp(
                                    "opened file:///C:/x/map.html in the preview pane (files outside "
                                    "the project folder render as static snapshots)")), self.path)
-        self.assertEqual(self.blocked(session), [])
+        self.assertEqual(self.open_tabs(session), [])
         self.assertTrue(any(row["kind"] == "unverified-control"
                             for row in lifecycle.status(self.path, session)["pending"]))
 
@@ -376,13 +412,12 @@ class ControlBlockRegression(unittest.TestCase):
                        {"tabId": 101, "url": COLAB},
                        mcp(f"Navigated to {COLAB}",
                            listed((101, "job.ipynb - Colab", COLAB)))))
-        # 宣告那一行由 hook 登記、不放行執行，免得夾帶別的指令。
+        # 宣告那一行由 hook 登記，指令本身照常執行並讀回登記（A03）。
         declared = self.hook(pre(session, "Bash", keep_command(101), call_id="keep-1"))
-        self.assertEqual(self.decision(declared), "deny")
-        self.assertIn("已登記保留分頁 101", self.reason(declared))
-        self.assertIn("不會實際執行", self.reason(declared))
-        self.assertNotIn("Epitype 擋下", self.reason(declared))
+        self.assertIsNone(self.decision(declared))
+        self.assertIn("已登記保留分頁 101", self.context(declared))
         self.assertNotEqual(self.decision(self.hook(pre(session, "Bash", {"command": "git status"}))), "deny")
+        self.assertEqual(self.reminded(session), "", "保留給執行中 VM 的分頁在工具階段不提醒")
         self.assertEqual(lifecycle.status(self.path, session)["pending"],
                          [{"kind": "chrome-tab", "id": "101", "kept": True}])
         self.assertIn("keep", [row["action"] for row in lifecycle.status(self.path, session)["events"]])
@@ -398,12 +433,14 @@ class ControlBlockRegression(unittest.TestCase):
              "--notebook", NOTEBOOK], capture_output=True, text=True, encoding="utf-8",
             errors="replace", env=self.environment, cwd=ROOT, timeout=15, check=False)
         self.assertEqual(missing.returncode, 1)
-        # 分頁被導去別的網址：豁免作廢，再擋。
+        # 分頁被導去別的網址：保留作廢，又是待收尾的分頁。
         self.hook(post(session, "c3", "mcp__claude-in-chrome__navigate",
                        {"tabId": 101, "url": "https://github.com/"},
                        mcp("Navigated to https://github.com/",
                            listed((101, "GitHub", "https://github.com/")))))
-        self.assertEqual(self.decision(self.hook(pre(session, "Bash", {"command": "ls"}))), "deny")
+        self.assertIsNone(self.decision(self.hook(pre(session, "Bash", {"command": "ls"}))))
+        self.assertEqual(self.kept(session), [])
+        self.assertEqual(self.open_tabs(session), [("chrome-tab", "101")])
 
     def test_keep_declaration_cannot_be_casual(self):
         session = "casual"
@@ -425,13 +462,14 @@ class ControlBlockRegression(unittest.TestCase):
         accepted, message = lifecycle.declare_keep(pre("mismatch", "Bash"), self.path, "456", "3", NOTEBOOK)
         self.assertFalse(accepted)
         self.assertIn("不是本場自建", message)
-        # 網址是 5 分鐘前看到的：先重新看一次。
+        # 證據只看「分頁開著之後看到過這本筆記本」，不看隔了多久：時間本身不是證據，
+        # AI 自加的時間上限只提醒（CORE-25；6f6fce1 拿掉了 5 分鐘門檻）。
         self.colab_tab("stale")
         later = lifecycle._now() + lifecycle.KEEP_EVIDENCE_SECONDS + 1
         with mock.patch.object(lifecycle, "_now", return_value=later):
             accepted, message = lifecycle.declare_keep(pre("stale", "Bash"), self.path, "101", "3", NOTEBOOK)
-        self.assertFalse(accepted)
-        self.assertIn("最近 5 分鐘", message)
+        self.assertTrue(accepted, message)
+        self.assertIn("已登記保留分頁 101", message)
         # 同一台 VM 只留一個分頁。
         self.colab_tab("twice", "a", 101)
         self.colab_tab("twice", "b", 102)
@@ -439,7 +477,8 @@ class ControlBlockRegression(unittest.TestCase):
         accepted, message = lifecycle.declare_keep(pre("twice", "Bash"), self.path, "102", "3", NOTEBOOK)
         self.assertFalse(accepted)
         self.assertIn("每台 VM 只留一個分頁", message)
-        self.assertEqual(self.blocked("twice"), [("chrome-tab", "102")])
+        self.assertEqual(self.kept("twice"), ["101"])
+        self.assertEqual(self.open_tabs("twice"), [("chrome-tab", "102")])
         # 子代理不能替主線的分頁宣告。
         self.colab_tab("sub")
         self.assertFalse(lifecycle.declare_keep(pre("sub", "Bash", agent="sub-1"), self.path,
@@ -469,25 +508,28 @@ class ControlBlockRegression(unittest.TestCase):
         ):
             self.assertIsNone(lifecycle.keep_request(pre("s", "Bash", {"command": command})), command)
         self.assertIsNone(lifecycle.keep_request(pre("s", "Write", {"command": keep_command(101)["command"]})))
-        # 夾帶其他指令的宣告不算宣告，照樣擋。
+        # 夾帶其他指令的宣告不算宣告：不登記，分頁照樣待收尾、照樣提醒。
         session = "chained-" + uuid.uuid4().hex
         self.hook(chrome_create(session, "c1", 101))
         self.hook(chrome_context(session, "c2", (101, "job.ipynb - Colab", COLAB)))
         chained = self.hook(pre(session, "Bash", {
             "command": keep_command(101)["command"] + " && git status"}))
-        self.assertEqual(self.decision(chained), "deny")
-        self.assertIn("Epitype 擋下 Bash", self.reason(chained))
+        self.assertIsNone(self.decision(chained))
+        self.assertNotIn("已登記保留", self.context(chained))
+        self.assertIn("分頁 101", self.context(chained))
+        self.assertEqual(self.kept(session), [])
         rejected = self.hook(pre(session, "Bash", keep_command(101, notebook="1ZZZZZZZZZZZ")))
-        self.assertEqual(self.decision(rejected), "deny")
-        self.assertIn("不符", self.reason(rejected))
+        self.assertIsNone(self.decision(rejected))
+        self.assertIn("不符", self.context(rejected))
+        self.assertEqual(self.kept(session), [])
         # 登記了一個分頁，不能順便放過另一個還開著的。
         self.hook(chrome_create(session, "c3", 102))
         both = self.hook(pre(session, "Bash", keep_command(101)))
-        self.assertEqual(self.decision(both), "deny")
-        self.assertIn("已登記保留分頁 101", self.reason(both))
-        self.assertIn("Epitype 擋下 Bash", self.reason(both))
-        self.assertIn("102", self.reason(both))
-        self.assertEqual(self.decision(self.hook(pre(session, "Bash", {"command": "ls"}))), "deny")
+        self.assertIsNone(self.decision(both))
+        self.assertIn("已登記保留分頁 101", self.context(both))
+        self.assertIn("102", self.context(both))
+        self.assertEqual(self.kept(session), ["101"])
+        self.assertEqual(self.open_tabs(session), [("chrome-tab", "102")])
 
     def test_built_in_browser_colab_tab_is_proved_by_its_navigate(self):
         session = "pane-colab-" + uuid.uuid4().hex
@@ -495,18 +537,20 @@ class ControlBlockRegression(unittest.TestCase):
         # 落在哪個網域（可能被導去登入頁），要等清單顯示它停在 Colab。
         self.hook(pane_navigate_opening(session, "p1", COLAB))
         early = self.hook(pre(session, "Bash", keep_command("seed"), call_id="keep-early"))
-        self.assertIn("先呼叫 tabs_context", self.reason(early))
+        self.assertIsNone(self.decision(early))
+        self.assertIn("先呼叫 tabs_context", self.context(early))
+        self.assertEqual(self.kept(session), [])
         self.hook(post(session, "p2", "mcp__Claude_Browser__tabs_context", {}, pane_json(
             {"browserOpen": True, "tabs": [{"tabId": "seed", "origin": COLAB_ORIGIN, "isActive": True}]},
             "")))
         declared = self.hook(pre(session, "Bash", keep_command("seed"), call_id="keep-p"))
-        self.assertIn("已登記保留分頁 seed", self.reason(declared))
-        self.assertNotEqual(self.decision(self.hook(pre(session, "Bash", {"command": "ls"}))), "deny")
-        # 擋下理由叫代理呼叫 tabs_context：宣告之後再看到 Colab 網域，豁免不能因此作廢。
+        self.assertIn("已登記保留分頁 seed", self.context(declared))
+        self.assertEqual(self.kept(session), ["seed"])
+        # 提醒叫代理呼叫 tabs_context：宣告之後再看到 Colab 網域，保留不能因此作廢。
         self.hook(post(session, "p2b", "mcp__Claude_Browser__tabs_context", {}, pane_json(
             {"browserOpen": True, "tabs": [{"tabId": "seed", "origin": COLAB_ORIGIN, "isActive": True}]},
             "")))
-        self.assertNotEqual(self.decision(self.hook(pre(session, "Bash", {"command": "ls"}))), "deny")
+        self.assertEqual(self.kept(session), ["seed"])
         # 開窗格後被導去登入頁：清單的網域不是 Colab，證據作廢。
         login = "pane-login-" + uuid.uuid4().hex
         lifecycle.observe(pane_navigate_opening(login, "l1", COLAB), self.path)
@@ -515,9 +559,10 @@ class ControlBlockRegression(unittest.TestCase):
             "")), self.path)
         self.assertIn("沒看到它開著 Colab 筆記本",
                       lifecycle.declare_keep(pre(login, "Bash"), self.path, "seed", "3", NOTEBOOK)[1])
-        # 導去別的網域：豁免作廢，再擋。
+        # 導去別的網域：保留作廢，又是待收尾的分頁。
         self.hook(pane_navigate_open(session, "p3", "seed", "https://x.com/somewhere"))
-        self.assertEqual(self.decision(self.hook(pre(session, "Bash", {"command": "ls"}))), "deny")
+        self.assertEqual(self.kept(session), [])
+        self.assertEqual(self.open_tabs(session), [("pane-tab", "seed")])
         # 窗格開著時，navigate 回報落地網域對得上，才算看到筆記本網址。
         self.hook(pane_navigate_open(session, "p4", "seed", COLAB))
         self.assertTrue(lifecycle.declare_keep(pre(session, "Bash"), self.path, "seed", "3", NOTEBOOK)[0])
@@ -531,39 +576,49 @@ class ControlBlockRegression(unittest.TestCase):
         self.assertFalse(accepted)
         self.assertIn("沒看到它開著 Colab 筆記本", message)
 
-    def test_owner_message_releases_tabs_a_session_cannot_close(self):
+    def test_owner_message_records_a_release_without_closing_tabs(self):
+        # 使用者明確要求保留或停止時照辦，不要求特殊口令（6f6fce1）；轉貼、否定、代理轉述都不算。
         session = "release-" + uuid.uuid4().hex
         self.hook(chrome_create(session, "c1", 101))
-        self.assertIn("只回覆「放行分頁」四個字", self.reason(self.hook(pre(session, "Bash", {"command": "ls"}))))
-        # 只認整則訊息就是這四個字：否定句、轉貼的段落、轉送的代理訊息都不算。
+        first = self.hook(pre(session, "Bash", {"command": "ls"}))
+        self.assertIsNone(self.decision(first))
+        self.assertIn("分頁 101", self.context(first))
+
+        def released():
+            return [row for row in lifecycle.status(self.path, session)["events"]
+                    if row["action"] == "release"]
+
         for text in ('<agent-message from="peer">放行分頁</agent-message>', "不要放行分頁", "先別放行分頁",
                      "這個 session 沒有 Chrome 工具，放行分頁",
                      "代理說：請使用者只回覆「放行分頁」四個字。我等等自己去開 Chrome。"):
             self.prompt(session, text)
-            self.assertEqual(self.decision(self.hook(pre(session, "Bash", {"command": "ls"}))), "deny", text)
+            self.assertEqual(released(), [], text)
         output = self.prompt(session, " 放行分頁。\n")
-        self.assertIn("不再擋本場還開著的分頁 101",
+        self.assertIn("涉及本場分頁 101",
                       ((output or {}).get("hookSpecificOutput") or {}).get("additionalContext", ""))
+        self.assertEqual(released(), [{"action": "release", "kind": "chrome-tab", "id": "101"}])
         self.assertNotEqual(self.decision(self.hook(pre(session, "Bash", {"command": "ls"}))), "deny")
-        # 仍待收尾、仍會提醒；放行之後新開的分頁照樣擋。
+        # 仍待收尾、仍會提醒；放行之後新開的分頁照樣提醒。
         self.assertEqual(lifecycle.status(self.path, session)["pending"],
                          [{"kind": "chrome-tab", "id": "101"}])
-        self.assertIn("release", [row["action"] for row in lifecycle.status(self.path, session)["events"]])
         self.hook(chrome_create(session, "c2", 102))
-        self.assertEqual(self.blocked(session), [("chrome-tab", "102")])
+        self.assertIn("102", self.reminded(session))
 
-    def test_keep_expires_and_reopened_id_starts_over(self):
+    def test_keep_has_no_clock_and_reopened_id_starts_over(self):
+        # 保留沒有時限：VM 跑多久就留多久，時間本身不證明跑完（A03；CORE-25）。
         session = "ttl"
         self.colab_tab(session)
         self.assertTrue(lifecycle.declare_keep(pre(session, "Bash"), self.path, "101", "3", NOTEBOOK)[0])
-        self.assertEqual(self.blocked(session), [])
+        self.assertEqual(self.open_tabs(session), [])
         later = lifecycle._now() + lifecycle.KEEP_TTL_SECONDS + 1
         with mock.patch.object(lifecycle, "_now", return_value=later):
-            self.assertEqual(self.blocked(session), [("chrome-tab", "101")])
+            self.assertEqual(self.kept(session), ["101"])
+            self.assertEqual(self.open_tabs(session), [])
         # 關掉後同一個 ID 重新開：舊宣告不沿用。
         lifecycle.observe(chrome_close(session, "x1", 101), self.path)
         lifecycle.observe(chrome_create(session, "x2", 101), self.path)
-        self.assertEqual(self.blocked(session), [("chrome-tab", "101")])
+        self.assertEqual(self.kept(session), [])
+        self.assertEqual(self.open_tabs(session), [("chrome-tab", "101")])
         with closing(sqlite3.connect(self.path)) as db:
             state = json.loads(db.execute("SELECT data FROM session_state WHERE session=?",
                                           (session,)).fetchone()[0])
