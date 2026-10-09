@@ -311,6 +311,15 @@ def _cleanup(db, now):
     db.execute("DELETE FROM calls WHERE seen<?", (now - CALL_RETENTION_SECONDS,))
     db.execute("DELETE FROM events WHERE seen<?", (cutoff,))
     db.execute("DELETE FROM resources WHERE changed<? AND status<>'open'", (cutoff,))
+    # A controller row is its own session's REPL; no other session can use or take it, so
+    # keeping it protects nothing once that session's own record is gone. Epitype has no
+    # session-end hook, so "gone" means the session has no events, calls or fresh state left
+    # after the retention prune above. Open tab/VM rows stay (another session must not take
+    # them over). Remove this when a session-end hook closes the controller directly.
+    db.execute("DELETE FROM resources WHERE kind='cua-controller' AND status='open' "
+               "AND session NOT IN (SELECT session FROM events) "
+               "AND session NOT IN (SELECT session FROM calls) "
+               "AND session NOT IN (SELECT session FROM session_state WHERE updated>=?)", (cutoff,))
     db.execute("DELETE FROM alerts WHERE seen<?", (cutoff,))
     db.execute("DELETE FROM session_state WHERE updated<? AND session NOT IN "
                "(SELECT session FROM resources WHERE status='open')", (cutoff,))
