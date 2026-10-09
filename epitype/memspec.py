@@ -723,6 +723,10 @@ RULE_HOSTS_REASON = "{field} 的 {value} 不在 {allowed}"
 RULE_HOSTS_ON_FLOOR_REASON = "{layer} 層不得帶 {field}（{value}）：底線兩邊都要"
 # 一條規則一行。超過這個長度的多半是把解說寫進了常駐層，而常駐層的每一個位元組
 # 都是每場都付的固定成本。
+# 這是 2026-09-09（013ec77）AI 自訂的長度，不是 owner 定的，也不是在抓錯誤結果，所以依
+# CORE-25 只提醒（card_lint 判 WARN）：超長的規則照樣生成、照樣載入，不必為了過檢查而刪字。
+# 常駐層總量另有 owner 設定的 core_cap_bytes 管。拿掉條件：owner 核准一個長度上限（屆時改回
+# FAIL 並記來源），或常駐層改成不按位元組計成本。
 RULE_TEXT_MAX_BYTES = 400
 RULE_TEXT_TOO_LONG_REASON = "{field} 是 {size} bytes，超過上限 {limit}（解說住卡片正文與解說層）"
 RULE_TEXT_MULTILINE_REASON = "{field} 必須是單行：生成塊一條規則一行"

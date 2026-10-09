@@ -617,7 +617,8 @@ def _rule_findings(fields, front_lines):
     text = fields.get(memspec.RULE_TEXT_FIELD, "")
     size = len(text.encode("utf-8"))
     if size > memspec.RULE_TEXT_MAX_BYTES:
-        yield (FAIL, "rule-text", memspec.RULE_TEXT_TOO_LONG_REASON.format(
+        # AI-set length, so a reminder only (CORE-25); see memspec.RULE_TEXT_MAX_BYTES.
+        yield (WARN, "rule-text", memspec.RULE_TEXT_TOO_LONG_REASON.format(
             field=memspec.RULE_TEXT_FIELD, size=size, limit=memspec.RULE_TEXT_MAX_BYTES))
     if "\n" in text:
         yield (FAIL, "field-shape", memspec.RULE_TEXT_MULTILINE_REASON.format(
@@ -1623,12 +1624,13 @@ def _selftest():
             ))
             rules, card = _findings_of(report, "rule-bad.md")
             checks.append((
-                "rule FAIL：layer 值域外、order 非整數、text 超上限、approved_at 非 ISO、"
-                "owner-explicit 缺 owner_quote",
+                # text 超長 2026-10-10 起改 WARN：400 bytes 是 AI 自訂長度（CORE-25），需求變了。
+                "rule FAIL：layer 值域外、order 非整數、approved_at 非 ISO、owner-explicit 缺 "
+                "owner_quote；text 超上限只 WARN",
                 card is not None
                 and card["type"] == memspec.CARD_TYPE_RULE
                 and rules == {
-                    (FAIL, "layer"), (FAIL, "field-shape"), (FAIL, "rule-text"),
+                    (FAIL, "layer"), (FAIL, "field-shape"), (WARN, "rule-text"),
                     (FAIL, "date"), (FAIL, "required"),
                 }
                 and str(memspec.RULE_TEXT_MAX_BYTES) in _reason_of(report, "rule-bad.md", "rule-text")
