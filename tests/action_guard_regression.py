@@ -60,6 +60,11 @@ class ActionGuardRegression(unittest.TestCase):
         self.addCleanup(environment.stop)
 
     def write_card(self, filename, **fields):
+        # These tests pin what a guard matches, so a guard card here declares on_hit: block.
+        # The default since owner 2026-10-03 (CORE-25) is a note; pretool_advisory_regression
+        # pins that default.
+        if "guard_tool" in fields:
+            fields.setdefault("on_hit", "block")
         (self.vault / filename).write_text(card(**fields), encoding="utf-8")
         # Discovery is cached against the manifest; a fresh card must be re-read.
         cache = pretool._guard_cache(self.vault)
@@ -103,6 +108,20 @@ class ActionGuardRegression(unittest.TestCase):
 
     def denial(self, value):
         return (value or {}).get("hookSpecificOutput", {}).get("permissionDecisionReason")
+
+    def advice(self, value):
+        """The context of a call that went through; None when the call was denied."""
+        output = (value or {}).get("hookSpecificOutput", {})
+        if "permissionDecision" in output:
+            return None
+        return output.get("additionalContext", "")
+
+    def notes(self):
+        """(card, tool) of every guard hit that was logged as advice instead of a denial."""
+        path = self.vault / memspec.GATE_LOG_FILENAME
+        rows = ([json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
+                 if line.strip()] if path.is_file() else [])
+        return [(row.get("card"), row.get("tool")) for row in rows if row.get("kind") == "action_note"]
 
     def test_all_fragments_present_denies_and_names_the_card(self):
         self.heredoc_card()
@@ -209,9 +228,10 @@ class ActionGuardRegression(unittest.TestCase):
         # The gate reads top-level fields only, so a card nested under some other key
         # must not look armed -- card_lint is what tells the author, not a surprise
         # denial. `metadata:` is the one parent read as top level, and its own tests
-        # are in tests/metadata_nested_regression.py.
+        # are in tests/metadata_nested_regression.py. on_hit: block sits at the top level,
+        # so only the nesting can keep this card from denying.
         (self.vault / "scar-nested.md").write_text(
-            "---\nname: 巢狀守衛\ndescription: 欄位被包進下一層\nextra:\n"
+            "---\nname: 巢狀守衛\ndescription: 欄位被包進下一層\non_hit: block\nextra:\n"
             '  guard_tool: Bash\n  guard_all_of:\n    - "<<"\n    - "\\\\"\n---\nbody\n',
             encoding="utf-8",
         )
@@ -271,12 +291,16 @@ class ActionGuardRegression(unittest.TestCase):
             description="說明",
             forbidden=["內部代號DDD"],
         )
-        blocked = self.call("Write", {"file_path": str(self.root / "note.md"),
-                                      "content": "內部代號DDD"})
-        self.assertIsNotNone(self.denial(blocked))
-        fixture = self.call("Write", {"file_path": str(self.root / "tests" / "case.py"),
-                                      "content": 'assert blocks("內部代號DDD")'})
-        self.assertIsNone(self.denial(fixture))
+        # 寫入一律放行、只提醒（owner 2026-10-03；CORE-25），所以兩邊的分別是有沒有提醒。
+        noted = self.advice(self.call("Write", {"file_path": str(self.root / "note.md"),
+                                                "content": "內部代號DDD"}))
+        self.assertIsNotNone(noted)
+        self.assertIn("既有裁定提醒（本次寫入放行）", noted)
+        self.assertIn("內部代號DDD", noted)
+        fixture = self.advice(self.call("Write", {"file_path": str(self.root / "tests" / "case.py"),
+                                                  "content": 'assert blocks("內部代號DDD")'}))
+        self.assertIsNotNone(fixture)
+        self.assertNotIn("既有裁定提醒", fixture)
 
     def test_a_speech_only_ruling_does_not_judge_file_content(self):
         # 2026-09-19：白話規則（管的是對 owner 丟機器名稱）擋下了一則純英文的提交訊息。
@@ -291,6 +315,7 @@ class ActionGuardRegression(unittest.TestCase):
         value = self.call("Write", {"file_path": str(self.root / "note.md"),
                                     "content": "commit message mentioning 內部代號CCC"})
         self.assertIsNone(self.denial(value))
+        self.assertNotIn("既有裁定提醒", self.advice(value))
 
     def test_an_expired_guard_card_stops_guarding(self):
         self.write_card(
@@ -393,17 +418,23 @@ class ActionGuardRegression(unittest.TestCase):
             guard_advice="先開新分頁再帶它的 tabId",
         )
 
-    def test_an_mcp_navigate_without_a_tab_id_is_denied(self):
+    # 少 tabId 的 navigate 即使卡片寫 on_hit: block 也只提醒（pretool_advisory_regression A04）：
+    # 帳本認得自己的閒置分頁就自動補上。導到別的 session 的分頁或在跑的 Colab VM 才擋，
+    # 那由 control_lifecycle 判，不在這張卡。
+    TAB_ADVICE = "Epitype [導頁要指定分頁]：提醒：先開新分頁再帶它的 tabId"
+
+    def test_an_mcp_navigate_without_a_tab_id_is_advised_not_denied(self):
         self.tab_card()
-        reason = self.denial(self.call(self.CHROME_NAVIGATE, {"url": "https://example.com"}))
-        self.assertIsNotNone(reason)
-        self.assertIn("tabId", reason)
-        self.assertIn("導頁要指定分頁", reason)
+        context = self.advice(self.call(self.CHROME_NAVIGATE, {"url": "https://example.com"}))
+        self.assertIsNotNone(context)
+        self.assertIn(self.TAB_ADVICE, context)
+        self.assertEqual(self.notes(), [("導頁要指定分頁", self.CHROME_NAVIGATE)])
 
     def test_an_mcp_navigate_carrying_a_numeric_tab_id_passes(self):
         self.tab_card()
         self.assertIsNone(self.denial(self.call(
             self.CHROME_NAVIGATE, {"url": "https://example.com", "tabId": 1693812473})))
+        self.assertEqual(self.notes(), [])
 
     def test_an_exact_mcp_card_leaves_other_tools_of_the_same_server_alone(self):
         self.tab_card()
@@ -418,10 +449,14 @@ class ActionGuardRegression(unittest.TestCase):
 
     def test_a_server_wildcard_guards_every_tool_of_that_server_only(self):
         self.tab_card("mcp__claude-in-chrome__*")
-        self.assertIsNotNone(self.denial(self.call(self.CHROME_NAVIGATE, {"url": "https://x"})))
+        # navigate 少 tabId 只提醒（A04）；同一張卡管到的其他工具照卡片的 on_hit: block 擋。
+        context = self.advice(self.call(self.CHROME_NAVIGATE, {"url": "https://x"}))
+        self.assertIsNotNone(context)
+        self.assertIn(self.TAB_ADVICE, context)
         self.assertIsNotNone(self.denial(self.call("mcp__claude-in-chrome__computer", {"action": "screenshot"})))
         self.assertIsNone(self.denial(self.call("mcp__claude-in-chrome-evil__navigate", {"url": "https://x"})))
         self.assertIsNone(self.denial(self.call("Bash", {"command": "git status"})))
+        self.assertEqual(self.notes(), [("導頁要指定分頁", self.CHROME_NAVIGATE)])
 
     def test_a_wildcard_outside_the_tool_part_matches_nothing(self):
         # 裸 * 或 mcp__* 會讓一張卡擋下所有工具；只認整個 tool 段的萬用字元。
@@ -429,22 +464,23 @@ class ActionGuardRegression(unittest.TestCase):
             self.tab_card(pattern)
             self.assertIsNone(self.denial(self.call(self.CHROME_NAVIGATE, {"url": "https://x"})), pattern)
             self.assertIsNone(self.denial(self.call("Bash", {"command": "ls"})), pattern)
+        self.assertEqual(self.notes(), [])
 
     CHROME_BATCH = "mcp__claude-in-chrome__browser_batch"
 
     def batch(self, *steps):
         return {"actions": [{"name": name, "input": step_input} for name, step_input in steps]}
 
-    def test_a_navigate_without_a_tab_id_inside_a_batch_is_denied(self):
+    def test_a_navigate_without_a_tab_id_inside_a_batch_is_advised(self):
         # 包進 browser_batch 的 navigate 由宿主照單獨呼叫執行，守衛不能因為被包起來就看不到。
         self.tab_card()
-        reason = self.denial(self.call(self.CHROME_BATCH, self.batch(
+        context = self.advice(self.call(self.CHROME_BATCH, self.batch(
             ("computer", {"action": "screenshot", "tabId": 7}),
             ("navigate", {"url": "https://colab.research.google.com"}),
         )))
-        self.assertIsNotNone(reason)
-        self.assertIn("tabId", reason)
-        self.assertIn(self.CHROME_NAVIGATE, reason)
+        self.assertIsNotNone(context)
+        self.assertIn(self.TAB_ADVICE, context)
+        self.assertEqual(self.notes(), [("導頁要指定分頁", self.CHROME_NAVIGATE)])
 
     def test_a_batch_whose_navigate_carries_a_tab_id_passes(self):
         self.tab_card()
@@ -452,6 +488,7 @@ class ActionGuardRegression(unittest.TestCase):
             ("navigate", {"url": "https://x", "tabId": 1693812473}),
             ("computer", {"action": "screenshot"}),
         ))))
+        self.assertEqual(self.notes(), [])
 
     def test_a_built_in_browser_batch_is_not_judged_by_a_chrome_card(self):
         self.tab_card()
@@ -464,10 +501,14 @@ class ActionGuardRegression(unittest.TestCase):
         for actions in ("navigate", ["navigate"], [{"input": {"url": "https://x"}}],
                         [{"name": "mcp__claude-in-chrome__navigate", "input": {"url": "x"}}]):
             self.assertIsNone(self.denial(self.call(self.CHROME_BATCH, {"actions": actions})), actions)
+        self.assertEqual(self.notes(), [])
 
     def test_a_step_without_input_counts_as_missing_the_field(self):
         self.tab_card()
-        self.assertIsNotNone(self.denial(self.call(self.CHROME_BATCH, {"actions": [{"name": "navigate"}]})))
+        context = self.advice(self.call(self.CHROME_BATCH, {"actions": [{"name": "navigate"}]}))
+        self.assertIsNotNone(context)
+        self.assertIn(self.TAB_ADVICE, context)
+        self.assertEqual(self.notes(), [("導頁要指定分頁", self.CHROME_NAVIGATE)])
 
     def test_fragments_and_required_fields_declared_together_must_both_hold(self):
         self.dispatch_card(guard_all_of=['"deploy"'])
@@ -534,6 +575,9 @@ class ReadWaste(unittest.TestCase):
             time.monotonic(), [],
         )
 
+    def context(self, value):
+        return (value or {}).get("hookSpecificOutput", {}).get("additionalContext", "")
+
     def denial(self, value):
         return (value or {}).get("hookSpecificOutput", {}).get("permissionDecisionReason")
 
@@ -542,38 +586,48 @@ class ReadWaste(unittest.TestCase):
         self.assertIsNone(self.denial(self.read()))
         second = self.read()
         self.assertIsNone(self.denial(second))
+        self.assertNotIn("讀取提醒", self.context(second))
 
-    def test_the_third_identical_read_is_denied(self):
+    def test_the_third_identical_read_is_noted_not_denied(self):
+        # 讀取只提醒（owner 2026-10-03；CORE-25）：挑戰、驗收或明示重讀都是正當的再讀。
         for _ in range(2):
             self.read()
-        reason = self.denial(self.read())
-        self.assertIsNotNone(reason)
-        self.assertIn("省 token", reason)
+        value = self.read()
+        self.assertIsNone(self.denial(value))
+        self.assertIn("讀取提醒", self.context(value))
+        self.assertIn("第 3 次", self.context(value))
 
     def test_a_changed_file_is_a_different_read(self):
         for _ in range(3):
             self.read()
         self.target.write_text("改過了", encoding="utf-8")
         os.utime(self.target, (time.time() + 5, time.time() + 5))
-        self.assertIsNone(self.denial(self.read()))
+        changed = self.read()
+        self.assertIsNone(self.denial(changed))
+        self.assertNotIn("讀取提醒", self.context(changed))
 
     def test_a_different_slice_is_a_different_read(self):
         for _ in range(3):
             self.read()
-        self.assertIsNone(self.denial(self.read(offset=200, limit=50)))
+        other = self.read(offset=200, limit=50)
+        self.assertIsNone(self.denial(other))
+        self.assertNotIn("讀取提醒", self.context(other))
 
-    def test_a_large_file_read_whole_is_denied_but_a_slice_passes(self):
+    def test_a_large_file_read_whole_is_noted_but_a_slice_is_not(self):
         big = self.root / "big.md"
         big.write_text("x" * (memspec.READ_WASTE_BIG_FILE_BYTES + 10), encoding="utf-8")
         whole = pretool._handle(
             {"tool_name": "Read", "tool_input": {"file_path": str(big)}, "session_id": "waste-big"},
             time.monotonic(), [])
-        self.assertIsNotNone(self.denial(whole))
+        self.assertIsNone(self.denial(whole))
+        self.assertIn("讀取提醒", self.context(whole))
+        self.assertIn("bytes", self.context(whole))
         sliced = pretool._handle(
             {"tool_name": "Read", "tool_input": {"file_path": str(big), "offset": 1, "limit": 40},
              "session_id": "waste-big"},
             time.monotonic(), [])
         self.assertIsNone(self.denial(sliced))
+        self.assertNotIn("讀取提醒", self.context(sliced))
 
     def test_a_page_range_counts_as_a_bounded_read(self):
         # 2026-09-19：這道閘上線半小時就誤擋了一次帶頁碼範圍的 PDF 讀取。
@@ -584,6 +638,7 @@ class ReadWaste(unittest.TestCase):
              "session_id": "waste-pdf"},
             time.monotonic(), [])
         self.assertIsNone(self.denial(value))
+        self.assertNotIn("讀取提醒", self.context(value))
 
     def test_other_tools_are_untouched(self):
         value = pretool._handle(
@@ -696,6 +751,16 @@ class RequireWhenThen(unittest.TestCase):
         environment.start()
         self.addCleanup(environment.stop)
 
+    def noted(self, session=None):
+        """(card, rule) the Stop gate noted for the last judged turn; Stop never blocks
+        (owner 2026-10-03; CORE-25), so a hit is a stop_note row, not a block."""
+        session = self.session if session is None else session
+        path = self.vault / memspec.GATE_LOG_FILENAME
+        rows = ([json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
+                 if line.strip()] if path.is_file() else [])
+        return [(row.get("decision"), row.get("rule")) for row in rows
+                if row.get("kind") == memspec.STOP_NOTE_LOG_KIND and row.get("session_id") == session]
+
     def block(self, message):
         import stop_gate
 
@@ -703,8 +768,9 @@ class RequireWhenThen(unittest.TestCase):
                                lambda session: self.root / "markers" / str(session))
         markers.start()
         self.addCleanup(markers.stop)
+        self.session = "req-" + str(id(message))
         return stop_gate._handle(
-            {"session_id": "req-" + str(id(message)), "stop_hook_active": False,
+            {"session_id": self.session, "stop_hook_active": False,
              "last_assistant_message": message},
             time.monotonic(), [],
         )
@@ -718,8 +784,9 @@ class RequireWhenThen(unittest.TestCase):
         self.addCleanup(markers.stop)
         transcript = self.root / f"turn-{len(rows)}-{abs(hash(final))}.jsonl"
         transcript.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows), encoding="utf-8")
+        self.session = "turn-" + transcript.stem
         return stop_gate._handle(
-            {"session_id": "turn-" + transcript.stem, "stop_hook_active": False,
+            {"session_id": self.session, "stop_hook_active": False,
              "last_assistant_message": final, "transcript_path": str(transcript)},
             time.monotonic(), [],
         )
@@ -738,18 +805,21 @@ class RequireWhenThen(unittest.TestCase):
         # 2026-09-17: the false claim sat before a tool call; the gate read only the
         # turn's last message, so no card could ever reach it.
         rows = [self.PROMPT, self.said("全部通過了", tool=True), self.TOOL_RESULT, self.said("接著看下一步")]
-        value = self.block_turn(rows, "接著看下一步")
-        self.assertEqual((value or {}).get("decision"), "block")
-        self.assertIsNone(self.block("接著看下一步"))  # 只看最後一則的話，這個回合永遠過
+        self.assertIsNone(self.block_turn(rows, "接著看下一步"))
+        self.assertEqual(self.noted(), [("completion-carries-evidence", "require")])
+        self.assertIsNone(self.block("接著看下一步"))
+        self.assertEqual(self.noted(), [])  # 只看最後一則的話，這個回合永遠過
 
     def test_evidence_anywhere_in_the_turn_satisfies_the_requirement(self):
         rows = [self.PROMPT, self.said("跑了全套測試", tool=True), self.TOOL_RESULT, self.said("全部通過了")]
         self.assertIsNone(self.block_turn(rows, "全部通過了"))
+        self.assertEqual(self.noted(), [])
 
     def test_an_earlier_turn_does_not_count(self):
         rows = [self.PROMPT, self.said("全部通過了"), {"type": "user", "message": {"content": "新問題"}},
                 self.said("好")]
         self.assertIsNone(self.block_turn(rows, "好"))
+        self.assertEqual(self.noted(), [])
 
     def test_the_gate_and_the_nightly_replay_record_the_same_turn_digest(self):
         from epitype import compliance
@@ -757,7 +827,8 @@ class RequireWhenThen(unittest.TestCase):
         rows = [self.PROMPT, self.said("全部通過了", tool=True), self.TOOL_RESULT, self.said("接著看下一步")]
         for row in rows:
             row["sessionId"], row["timestamp"] = "digest-session", "2026-09-17T01:00:00+00:00"
-        self.assertEqual((self.block_turn(rows, "接著看下一步") or {}).get("decision"), "block")
+        self.assertIsNone(self.block_turn(rows, "接著看下一步"))
+        self.assertEqual(self.noted(), [("completion-carries-evidence", "require")])
         transcript = sorted(self.root.glob("turn-*.jsonl"))[-1]
         logged = [json.loads(line) for line in (self.vault / memspec.GATE_LOG_FILENAME).read_text(
             encoding="utf-8").splitlines() if line.strip()]
@@ -778,7 +849,8 @@ class RequireWhenThen(unittest.TestCase):
              "transcript_path": str(self.root / "no-such.jsonl")},
             time.monotonic(), [],
         )
-        self.assertEqual((value or {}).get("decision"), "block")
+        self.assertIsNone(value)
+        self.assertEqual(self.noted("turn-missing"), [("completion-carries-evidence", "require")])
 
     def test_a_behaviour_card_arms_without_carrying_a_ruling_of_its_own(self):
         # card_lint tells a behaviour card's author to add `forbidden` or
@@ -790,9 +862,8 @@ class RequireWhenThen(unittest.TestCase):
             "forbidden:\n  - 這句話不准說\n---\nbody\n",
             encoding="utf-8",
         )
-        value = self.block("我還是要講這句話不准說。")
-        self.assertIsNotNone(value)
-        self.assertIn("行為卡沒有裁定鍵", value.get("reason", ""))
+        self.assertIsNone(self.block("我還是要講這句話不准說。"))
+        self.assertEqual(self.noted(), [("行為卡沒有裁定鍵", "forbidden")])
 
     def test_a_pattern_that_cannot_compile_still_matches_itself_literally(self):
         # Self-repair: the author wrote a phrase that happens to contain a bracket.
@@ -802,9 +873,8 @@ class RequireWhenThen(unittest.TestCase):
             "forbidden:\n  - 階段一)\n---\nbody\n",
             encoding="utf-8",
         )
-        value = self.block("這批是階段一)，先這樣。")
-        self.assertIsNotNone(value)
-        self.assertIn("逐字比對", value.get("reason", ""))
+        self.assertIsNone(self.block("這批是階段一)，先這樣。"))
+        self.assertEqual(self.noted(), [("逐字比對", "forbidden")])
 
     def test_a_truncated_pattern_is_not_guessed_at(self):
         # Half a pattern is half an intention. Completing it would be choosing the
@@ -816,6 +886,7 @@ class RequireWhenThen(unittest.TestCase):
             encoding="utf-8",
         )
         self.assertIsNone(self.block("這次走甲案，不走乙案。"))
+        self.assertEqual(self.noted(), [])
 
     def test_a_retired_behaviour_card_stops_speaking(self):
         (self.vault / "feedback-retired.md").write_text(
@@ -824,6 +895,7 @@ class RequireWhenThen(unittest.TestCase):
             encoding="utf-8",
         )
         self.assertIsNone(self.block("這裡出現退役禁語。"))
+        self.assertEqual(self.noted(), [])
 
     def test_an_expired_card_stops_speaking_although_the_file_never_changed(self):
         # 時限型的規則（試行一週、某日之前先不要做）必須自己停下來。體檢早就把過期的卡
@@ -835,14 +907,16 @@ class RequireWhenThen(unittest.TestCase):
             encoding="utf-8",
         )
         self.assertIsNone(self.block("這裡出現試行期禁語。"))
+        self.assertEqual(self.noted(), [])
 
-    def test_a_card_still_inside_its_window_keeps_blocking(self):
+    def test_a_card_still_inside_its_window_keeps_speaking(self):
         (self.vault / "feedback-live-trial.md").write_text(
             "---\nname: 還在期限內\ndescription: 說明\nvalid_until: 2099-01-01\n"
             "forbidden:\n  - 期限內禁語\n---\nbody\n",
             encoding="utf-8",
         )
-        self.assertIsNotNone(self.block("這裡出現期限內禁語。"))
+        self.assertIsNone(self.block("這裡出現期限內禁語。"))
+        self.assertEqual(self.noted(), [("還在期限內", "forbidden")])
 
     def test_a_broken_expiry_date_does_not_quietly_switch_a_rule_off(self):
         # 寫錯的日期不該把規則關掉：那種錯由體檢喊，不是由閘默默放行。
@@ -851,7 +925,8 @@ class RequireWhenThen(unittest.TestCase):
             "forbidden:\n  - 壞日期禁語\n---\nbody\n",
             encoding="utf-8",
         )
-        self.assertIsNotNone(self.block("這裡出現壞日期禁語。"))
+        self.assertIsNone(self.block("這裡出現壞日期禁語。"))
+        self.assertEqual(self.noted(), [("日期寫壞", "forbidden")])
 
     def test_evidence_inside_a_quotation_still_counts_as_evidence(self):
         # 2026-09-19：「owner 原話要附引號原文」的證據就是引號本身。證據也走引號外比對
@@ -871,15 +946,18 @@ class RequireWhenThen(unittest.TestCase):
         # Keep the original allowance assertion with an actual human source.
         owner = {"type": "user", "message": {"content": "設定規則，session預設可以遠端遙控"}}
         self.assertIsNone(self.block_turn([owner, self.said(long_report)], long_report))
-        self.assertIsNotNone(self.block("這是你的原話，我照做了。"))
+        self.assertEqual(self.noted(), [])
+        self.assertIsNone(self.block("這是你的原話，我照做了。"))
+        self.assertEqual(self.noted(), [("原話要附引文", "require")])
 
-    def test_a_speech_only_ruling_still_blocks_what_i_say(self):
+    def test_a_speech_only_ruling_still_judges_what_i_say(self):
         (self.vault / "decision-speech.md").write_text(
             "---\nname: 只管說話\ndescription: 說明\napplies_to: speech\n"
             "forbidden:\n  - 內部代號AAA\n---\nbody\n",
             encoding="utf-8",
         )
-        self.assertIsNotNone(self.block("這裡出現內部代號AAA。"))
+        self.assertIsNone(self.block("這裡出現內部代號AAA。"))
+        self.assertEqual(self.noted(), [("只管說話", "forbidden")])
 
     def test_a_write_only_ruling_does_not_judge_what_i_say(self):
         # 管寫檔內容的裁定講的是檔案裡不該有什麼，不是我不該說什麼。
@@ -889,25 +967,30 @@ class RequireWhenThen(unittest.TestCase):
             encoding="utf-8",
         )
         self.assertIsNone(self.block("這裡出現內部代號BBB。"))
+        self.assertEqual(self.noted(), [])
 
-    def test_a_completion_claim_without_evidence_is_blocked(self):
-        value = self.block("這批已完成，可以進下一步。")
-        self.assertIsNotNone(value)
-        reason = value.get("reason", "")
-        self.assertIn("「已完成」還缺必要說明", reason)
-        self.assertIn("實測", reason)
-        self.assertIn("只補缺少的內容，不用重貼前文", reason)
-        self.assertNotIn("completion-carries-evidence", reason)
-        self.assertNotIn("owner", reason)
+    def test_a_completion_claim_without_evidence_is_noted(self):
+        # 回合照常結束，下一則提示帶一則提醒。提醒只記卡片與檢查名稱、不帶舊的改寫指令；
+        # 舊理由的「不用重貼前文」由「這一則不用重送」接手。
+        self.assertIsNone(self.block("這批已完成，可以進下一步。"))
+        self.assertEqual(self.noted(), [("completion-carries-evidence", "require")])
+        notes = common.take_notes(common.load_config(time.monotonic()), self.session)
+        self.assertEqual(len(notes), 1, notes)
+        self.assertIn("completion-carries-evidence", notes[0])
+        self.assertIn("這一則不用重送", notes[0])
+        self.assertNotIn("owner", notes[0])
 
     def test_the_same_claim_with_evidence_passes(self):
         self.assertIsNone(self.block("這批已完成：實測 8/8，卡片體檢 FAIL 0。"))
+        self.assertEqual(self.noted(), [])
 
     def test_a_turn_that_never_triggers_is_untouched(self):
         self.assertIsNone(self.block("我先讀了設定檔，還沒有動任何東西。"))
+        self.assertEqual(self.noted(), [])
 
     def test_a_claim_inside_a_quotation_is_a_citation_not_a_claim(self):
         self.assertIsNone(self.block("規則擋的是「這批已完成」這種沒有證據的講法。"))
+        self.assertEqual(self.noted(), [])
 
 
 class FieldCombination(unittest.TestCase):
@@ -940,6 +1023,9 @@ class FieldCombination(unittest.TestCase):
             "guard_tool": "Task",
             "guard_when": ["subagent_type=scout|Explore", "model=opus|claude-opus-5"],
             "guard_advice": "偵察改指 haiku 或 sonnet",
+            # These tests pin the field-pair match, so the card declares on_hit: block.
+            # The default since owner 2026-10-03 (CORE-25) is a note.
+            "on_hit": "block",
         }
         fields.update(overrides)
         (self.vault / "scar-mismatch.md").write_text(card(**fields), encoding="utf-8")
