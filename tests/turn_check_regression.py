@@ -373,7 +373,8 @@ class OwnerLanguage(unittest.TestCase):
                 transcript = root / f"{host}.jsonl"
                 transcript.write_text("\n".join(json.dumps(row, ensure_ascii=False)
                                                 for row in lines) + "\n", encoding="utf-8")
-                for event_name, message, blocked in (
+                # Stop never blocks: a finding is one stop_note row for the session.
+                for event_name, message, noted in (
                         ("Stop", ENGLISH_REPLY, True),
                         ("Stop", CHINESE_REPLY, False),
                         (memspec.SUBAGENT_STOP_EVENT, ENGLISH_REPLY, False)):
@@ -387,8 +388,16 @@ class OwnerLanguage(unittest.TestCase):
                         clock=memspec.HOOK_CLOCK_FROZEN)
                     self.assertEqual(result.returncode, 0, result.stderr)
                     verdict = json.loads(result.stdout) if result.stdout.strip() else {}
-                    self.assertEqual(verdict.get("decision") == "block", blocked,
-                                     f"{host} {event_name}: {verdict}")
+                    self.assertNotEqual(verdict.get("decision"), "block", f"{host} {event_name}")
+                    log = vault / memspec.GATE_LOG_FILENAME
+                    rows = ([json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()
+                             if line.strip()] if log.is_file() else [])
+                    mine = [(row.get("decision"), row.get("rule")) for row in rows
+                            if row.get("kind") == memspec.STOP_NOTE_LOG_KIND
+                            and row.get("session_id") == event["session_id"]]
+                    self.assertEqual(bool(mine), noted, f"{host} {event_name}: {mine}")
+                    if noted:
+                        self.assertEqual(mine, [("owner-language", "turn_check")])
 
 
 class TheOpenedRecord(unittest.TestCase):

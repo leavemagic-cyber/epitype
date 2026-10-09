@@ -6,7 +6,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import action_guard_regression as fixtures
 import stop_gate
-from epitype import tool_sequence
+from epitype import memspec, tool_sequence
 
 
 class ToolSequenceRegression(unittest.TestCase):
@@ -27,22 +27,34 @@ class ToolSequenceRegression(unittest.TestCase):
         return {'session_id': 'seq-' + host + '-' + self.root.name, 'transcript_path': str(path),
                 'last_assistant_message': '完成了', **extra}
 
-    def test_three_order_cards_both_hosts_true_allow_and_block(self):
+    def noted(self, event):
+        """Run the Stop gate, which never blocks, and return the (card, rule) pairs it noted."""
+        log = self.vault / memspec.GATE_LOG_FILENAME
+        def rows():
+            return ([json.loads(line) for line in log.read_text(encoding='utf-8').splitlines() if line.strip()]
+                    if log.is_file() else [])
+        before = len(rows())
+        self.assertIsNone(stop_gate._handle(event, time.monotonic(), []))
+        return [(row.get('decision'), row.get('rule')) for row in rows()[before:]
+                if row.get('kind') == memspec.STOP_NOTE_LOG_KIND]
+
+    def test_three_order_cards_both_hosts_true_allow_and_note(self):
         for number, (before, after) in enumerate((('inspect', 'mutate'), ('backup', 'replace'), ('test', 'commit'))):
             self.write_card(f'seq-{number}.md', name=f'seq-{number}',
                             require_tool_before=[f'Bash::{before} => Bash::{after}'], audience='root')
         for host in ('Claude', 'Codex'):
-            for before, after in (('inspect', 'mutate'), ('backup', 'replace'), ('test', 'commit')):
-                result = stop_gate._handle(self.event(host, [after]), time.monotonic(), [])
-                self.assertIsNotNone(result, (host, after))
-                result = stop_gate._handle(self.event(host, [before, after]), time.monotonic(), [])
-                self.assertIsNone(result, (host, before))
+            for number, (before, after) in enumerate((('inspect', 'mutate'), ('backup', 'replace'), ('test', 'commit'))):
+                self.assertEqual(self.noted(self.event(host, [after])),
+                                 [(f'seq-{number}', 'tool_sequence')], (host, after))
+                self.assertEqual(self.noted(self.event(host, [before, after])), [], (host, before))
 
     def test_pair_and_audience(self):
         self.write_card('pair.md', name='pair', pair_tools=['Bash::open => Bash::close'], audience='root')
-        self.assertIsNotNone(stop_gate._handle(self.event('Claude', ['open']), time.monotonic(), []))
-        self.assertIsNone(stop_gate._handle(self.event('Claude', ['open', 'close']), time.monotonic(), []))
-        self.assertIsNone(stop_gate._handle(self.event('Claude', ['open'], agent_id='sub'), time.monotonic(), []))
+        self.assertEqual(self.noted(self.event('Claude', ['open'])), [('pair', 'tool_sequence')])
+        self.assertEqual(self.noted(self.event('Claude', ['open', 'close'])), [])
+        # Its own session: the same card and message are otherwise noted once per session.
+        self.assertEqual(self.noted(self.event('Claude', ['open'], agent_id='sub',
+                                               session_id='seq-sub-' + self.root.name)), [])
         self.assertFalse(tool_sequence.applies('sub', {}))
 
     def test_same_call_is_not_sequence_and_malformed_rejected(self):

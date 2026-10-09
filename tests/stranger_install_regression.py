@@ -89,10 +89,12 @@ class AStrangerInstall(unittest.TestCase):
             "session_id": "stranger-1",
             "cwd": str(self.project),
         })
+        # 預設的卡只提醒（owner 2026-10-03）：放行，但卡上的建議送到代理面前。
         payload = blocked.stdout.decode("utf-8", "replace").strip()
-        self.assertTrue(payload, "裝好之後第一次踩到自己的卡，應該要被擋下來")
-        decision = json.loads(payload)["hookSpecificOutput"]["permissionDecision"]
-        self.assertEqual(decision, "deny")
+        self.assertTrue(payload, "裝好之後第一次踩到自己的卡，應該要收到那張卡的提醒")
+        output = json.loads(payload)["hookSpecificOutput"]
+        self.assertNotIn("permissionDecision", output)
+        self.assertIn("改用安全的那一種寫法", output.get("additionalContext", ""))
 
         allowed = self.hook("pretooluse_gate.py", {
             "tool_name": "Bash",

@@ -170,7 +170,7 @@ class FinishedAgentsClosed(unittest.TestCase):
                             '"name":"spawn_agent", broken\n', encoding="utf-8")
         self.assertIsNone(self.gap(broken))
 
-    def test_installed_stop_path_blocks_once_card_is_armed(self):
+    def test_installed_stop_path_notes_once_card_is_armed(self):
         vault = self.root / "vault"
         vault.mkdir()
         (vault / "close-agents.md").write_text(
@@ -185,7 +185,9 @@ class FinishedAgentsClosed(unittest.TestCase):
                           wait("2", {"agent-a": {"completed": "x"}}),
                           close("3", "agent-a")), False),
         )
-        for path, blocked in cases:
+        # Stop never blocks: a finding is one stop_note row for the session. The
+        # agent names in the finding are checked in-process by the gap() tests above.
+        for path, noted in cases:
             event = {"session_id": f"agents-{uuid.uuid4().hex}", "hook_event_name": "Stop",
                      "stop_hook_active": False, "last_assistant_message": "完成。",
                      "transcript_path": str(path)}
@@ -195,9 +197,15 @@ class FinishedAgentsClosed(unittest.TestCase):
                 clock=memspec.HOOK_CLOCK_FROZEN)
             self.assertEqual(result.returncode, 0, result.stderr)
             value = json.loads(result.stdout) if result.stdout.strip() else {}
-            self.assertEqual(value.get("decision") == "block", blocked, result.stdout)
-            if blocked:
-                self.assertIn("agent-a", value["reason"])
+            self.assertNotEqual(value.get("decision"), "block", result.stdout)
+            log = vault / memspec.GATE_LOG_FILENAME
+            rows = ([json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()
+                     if line.strip()] if log.is_file() else [])
+            mine = [(row.get("decision"), row.get("rule")) for row in rows
+                    if row.get("kind") == memspec.STOP_NOTE_LOG_KIND
+                    and row.get("session_id") == event["session_id"]]
+            self.assertEqual(mine, [("close-finished-agents", "turn_check")]
+                             if noted else [])
 
 
 if __name__ == "__main__":

@@ -8,7 +8,7 @@ sys.path.insert(0,str(Path(__file__).resolve().parent))
 import action_guard_regression as fixtures
 import pretooluse_gate as pretool
 import stop_gate
-from epitype import action_receipts
+from epitype import action_receipts, memspec
 
 
 class Integration(unittest.TestCase):
@@ -18,6 +18,15 @@ class Integration(unittest.TestCase):
     def invoke(self,event):
         with patch.object(pretool,'read_event',return_value=event), patch.object(pretool,'_handle',return_value=None), patch.object(pretool,'_best_effort_record'):
             self.assertEqual(pretool.main(),0)
+
+    def noted(self,event):
+        """Run the Stop gate, which never blocks, and return the (card, rule) pairs it noted."""
+        log=self.vault/memspec.GATE_LOG_FILENAME
+        def rows():
+            return [json.loads(line) for line in log.read_text(encoding='utf-8').splitlines() if line.strip()] if log.is_file() else []
+        before=len(rows())
+        self.assertIsNone(stop_gate._handle(event,time.monotonic(),[]))
+        return [(row.get('decision'),row.get('rule')) for row in rows()[before:] if row.get('kind')==memspec.STOP_NOTE_LOG_KIND]
 
     def test_actual_inner_receipt_and_stop_both_hosts(self):
         self.write_card('read.md',name='read-first',require_tool_before=['@file.read => @file.change'],audience='root')
@@ -40,14 +49,15 @@ class Integration(unittest.TestCase):
                     event={**meta,'tool_use_id':identity,'tool_name':name,'tool_input':{'file_path':str(file)},'hook_event_name':'PreToolUse'}
                     self.invoke(event)
                     self.invoke({**event,'hook_event_name':'PostToolUse','tool_response':{'exit_code':0}})
-                result=stop_gate._handle({**meta,'last_assistant_message':'done'},time.monotonic(),[])
-                self.assertEqual(result is None,allowed,(host,allowed,result))
+                # Stop never blocks: a missing read is one stop_note row, a read is none.
+                self.assertEqual(self.noted({**meta,'last_assistant_message':'done'}),
+                                 [] if allowed else [('read-first','tool_sequence')],(host,allowed))
                 # Historical violations do not permanently block a fresh owner turn.
                 if host=='Claude': rows.append({'type':'user','message':{'content':'continue'}})
                 else:
                     rows.append({'type':'response_item','payload':{'type':'message','role':'user','content':[{'type':'input_text','text':'continue'}]}});meta['turn_id']='turn-2'
                 path.write_text('\n'.join(json.dumps(r) for r in rows),encoding='utf-8')
-                self.assertIsNone(stop_gate._handle({**meta,'last_assistant_message':'next'},time.monotonic(),[]))
+                self.assertEqual(self.noted({**meta,'last_assistant_message':'next'}),[],(host,allowed))
 
     def test_screenshot_fast_path_and_missing_result_are_explicit(self):
         with patch.object(pretool,'read_event',return_value={'hook_event_name':'PostToolUse','tool_name':'screenshot'}),patch.object(pretool,'load_config') as config:
@@ -68,8 +78,14 @@ class Integration(unittest.TestCase):
         self.assertIsNone(pretool._handle(event,time.monotonic(),defects))
         self.assertTrue(any('UNVERIFIED' in d for d in defects))
         action_receipts.initialize({**event,'source':'startup'},action_receipts.database_path(self.config))
-        denied=pretool._handle(event,time.monotonic(),[])
-        self.assertEqual(denied['hookSpecificOutput']['permissionDecision'],'deny')
+        # The order card is advisory: allowed, with the check note and an action_note row.
+        noted=pretool._handle(event,time.monotonic(),[])
+        self.assertNotIn('permissionDecision',noted['hookSpecificOutput'])
+        self.assertIn('查核提醒',noted['hookSpecificOutput']['additionalContext'])
+        log=self.vault/memspec.GATE_LOG_FILENAME
+        self.assertTrue(any(row.get('kind')=='action_note' and row.get('rule')=='tool_sequence'
+                            and row.get('card')=='read-first' and row.get('session_id')==event['session_id']
+                            for row in map(json.loads,log.read_text(encoding='utf-8').splitlines())))
         read={**event,'tool_use_id':'read','tool_name':'Read'}
         action_receipts.begin(read,action_receipts.database_path(self.config))
         action_receipts.finish({**read,'tool_response':{}},action_receipts.database_path(self.config))
