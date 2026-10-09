@@ -561,6 +561,9 @@ DECISION_PREFIX = "⚖ 裁定："
 NOTICE_MARKER_DIRECTORY = "epitype_notices"
 # 2026-09-03 對抗審查 #4：marker 只建不收會在 temp 無限累積；超過這個年齡就清掉。
 NOTICE_MARKER_TTL_SECONDS = 24 * 3600
+# 同場提醒去重的「目標」：先取結構化的路徑／分頁／網址欄位，再取指令；都沒有就用整份輸入。
+NOTICE_TARGET_FIELDS = ("file_path", "notebook_path", "path", "filePath", "file_paths", "paths",
+                        "url", "tabId", "command")
 
 # 2026-09-02 事故：7/22 寫進計畫卡的「未辦（owner 自行）」掛到 9/2，每輪盤點都被
 # 重新端出來；待辦有入口沒出口。規則：待辦標記行必須帶可跑的 verify: 或已收尾，

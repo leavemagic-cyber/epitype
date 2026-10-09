@@ -2250,6 +2250,21 @@ def _finish_advice(claims, emitted):
     claims.clear()
 
 
+def _notice_target(event):
+    """What this call acts on, for the same-session notice dedupe.
+
+    A finding repeated on another file or another call target is new information;
+    keying the dedupe on the words alone hid it from the second target."""
+    tool = str(event.get("tool_name") or "")
+    fields = event.get("tool_input")
+    fields = fields if isinstance(fields, dict) else {}
+    for name in memspec.NOTICE_TARGET_FIELDS:
+        value = fields.get(name)
+        if value not in (None, "", [], ()):
+            return tool + "\0" + name + "=" + json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+    return tool + "\0" + json.dumps(fields, ensure_ascii=False, sort_keys=True, default=str)
+
+
 def _allow_context(event, notices=(), config=None, started_at=None, meter_claims=None, advisories=(), advice_claims=None):
     """Context for a call the gate lets through: the write gate's own advice and
     the rulings whose `forbidden` pattern could not be compiled, each named once
@@ -2265,17 +2280,19 @@ def _allow_context(event, notices=(), config=None, started_at=None, meter_claims
     `meter_claims` is None for in-process callers, which get no meter line."""
     lines = []
     session_id = event.get("session_id")
+    target = _notice_target(event)
     for notice in list(dict.fromkeys(notices))[: memspec.GATE_DEFECT_MAX_LINES]:
-        if _notice_marker(session_id, notice):
+        if _notice_marker(session_id, notice + "\0" + target):
             lines.append(notice)
     shown = 0
     for path, card, excerpt in advisories:
         if shown == 2:
             break
         line = memspec.ACTION_GUARD_ADVISORY_LINE.format(card=card, excerpt=excerpt)
+        marker = "tool-advice:" + str(path.resolve()) + "\0" + target
         if (payload_fits("PreToolUse", "\n".join([*lines, line]),
                          config[memspec.CONFIG_BUDGET_BYTES_FIELD])
-                and _notice_marker(session_id, "tool-advice:" + str(path.resolve()))):
+                and _notice_marker(session_id, marker)):
             lines.append(line)
             shown += 1
             try:
@@ -2285,7 +2302,7 @@ def _allow_context(event, notices=(), config=None, started_at=None, meter_claims
                         if advice_claims is None:
                             rule_context.record(vault, session_id, path.relative_to(vault))
                         else:
-                            advice_claims.append((session_id, "tool-advice:" + str(path.resolve()), path, vault))
+                            advice_claims.append((session_id, marker, path, vault))
                         break
             except (OSError, ValueError):
                 pass

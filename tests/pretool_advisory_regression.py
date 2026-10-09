@@ -207,6 +207,28 @@ class AdvisoryRegression(unittest.TestCase):
                 self.config, time.monotonic(), [], [])))
         print("AFTER advisory: implicit new guard; explicit VERIFIED block remains deny")
 
+    def test_same_finding_on_another_target_is_shown_again(self):
+        # The same-session dedupe hides a repeat on the same target only.
+        session = "dedupe-" + str(time.monotonic_ns())
+        card = self.vault / "fixture.md"
+        card.write_text("fixture", encoding="utf-8")
+
+        def context(target, advisories=()):
+            event = {"session_id": session, "tool_name": "Write",
+                     "tool_input": {"file_path": str(target), "content": "x"}}
+            value = gate._allow_context(event, () if advisories else ["同一句提醒"],
+                                        self.config, advisories=advisories)
+            return (value or {}).get("hookSpecificOutput", {}).get("additionalContext", "")
+
+        first, second = self.root / "first.md", self.root / "second.md"
+        self.assertIn("同一句提醒", context(first))
+        self.assertNotIn("同一句提醒", context(first))
+        self.assertIn("同一句提醒", context(second))
+        advice = [(card, "fixture", "提醒：bounded fixture")]
+        self.assertIn("bounded fixture", context(first, advice))
+        self.assertNotIn("bounded fixture", context(first, advice))
+        self.assertIn("bounded fixture", context(second, advice))
+
     def test_a14_encoding_is_repaired_and_parser_finishes(self):
         target = self.root / "fixture.ps1"
         guard = self.guard()._replace(write_check=memspec.WRITE_CHECK_PS51_UTF8_BOM)
