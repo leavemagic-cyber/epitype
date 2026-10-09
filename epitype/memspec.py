@@ -1668,25 +1668,6 @@ TURN_OWNERSHIP_TEXT_PATTERN = (
     r"我自己(?:驗|跑|讀|查|核)|我實跑|我實查|本回合讀了|我讀了|我跑了|我核對"
     r"|未驗證的轉述|沒有驗過|未經我驗|我沒有驗"
 )
-# 被擋下來的那一段，owner 其實已經看到了——宿主是先把字送出去、才跑回合閘。所以「擋下
-# 再重寫」對他來說是同一段話出現兩次。2026-09-20 owner 當場問「為什麼回復要重複兩次一模
-# 一樣文字？根本性處理」。
-#
-# 根本處理不是少擋一點（那是把規則關掉），是改掉重送的方式：被擋之後只講改掉的部分，
-# 不整段重貼。這件事機器看得見——把被擋那一段留著，跟重寫的那一段比對重疊度。
-BLOCKED_ECHO_STATE_DIRECTORY = "blocked"
-BLOCKED_ECHO_MAX_CHARS = 8000
-BLOCKED_ECHO_SHINGLE = 12
-BLOCKED_ECHO_MIN_SHINGLES = 4
-BLOCKED_ECHO_MAX_OVERLAP = 0.6
-# 2026-09-20 改：這件事原本也是用「再擋一次」處理，但觸發的時候重複的那一段 owner 早就
-# 看到了，再擋只是第三輪。真正能避免重貼的時機是第一次擋下的那一刻，所以那句話改放進
-# 每一則擋下理由的尾巴；真的重貼了只記帳、下一則提醒，不再擋。
-BLOCKED_ECHO_DECISION = "blocked-echo"
-BLOCKED_ECHO_REASON = (
-    "被擋之後那一段跟原本的有 {overlap:.0%} 一樣，owner 等於同一段話看了兩次。"
-    "下次被擋只補缺的那部分。"
-)
 STOP_GATE_REWRITE_HINT = "只補缺少的內容，不用重貼前文。"
 # 宿主是「先把我的話顯示給 owner、再跑回合閘」。所以擋下一則回覆收不回任何一個字，只會
 # 逼出第二輪。第二輪對「缺了東西」的規則有用（補上證據、補上查證）；對只管用詞與篇幅的
@@ -3784,7 +3765,6 @@ _EN = {
     "TURN_LANGUAGE_UNKNOWN_DEFECT": '⚠ Epitype Stop gate: ruling {decision} has turn_check_target "{target}", which is not recognised (known: {known}); this check is off for now.',
     "TURN_LENGTH_REASON": '📌 this turn is {chars} characters, over the {limit} limit from "{decision}", and the owner did not ask for the full version this time. Put the detail in a file; keep the reply to the conclusion, the numbers and the file links.{advice}',
     "TURN_CITED_UNREAD_REASON": '📌 this turn said "{claim}", but no tool call in this session ever opened {path}. Per "{decision}": read it, or change the claim to say it was not read.{advice}',
-    "BLOCKED_ECHO_REASON": "the message after the block was {overlap:.0%} the same as the first one, so the owner read the same text twice. Next time you are blocked, add only the part that was missing.",
     "STOP_GATE_REWRITE_HINT": "Add only the missing content; do not repeat the previous text.",
     "STOP_NOTE_FORBIDDEN": 'do not say "{fragment}" ({decision})',
     "STOP_NOTE_MATCHED_TEXT": "Matched text: {fragment}",

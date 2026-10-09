@@ -74,19 +74,14 @@ class RepeatingABlockedTurn(unittest.TestCase):
             {"session_id": session, "stop_hook_active": True,
              "last_assistant_message": message}, __import__("time").monotonic(), [])
 
-    def remember(self, session="echo-1", message=BLOCKED):
-        stop_gate._remember_blocked(self.loaded, session, message)
-
     def notes(self, session="echo-1"):
         return common.take_notes(self.loaded, session)
 
     def test_a_repasted_retry_is_neither_blocked_nor_asked_to_shrink(self):
-        self.remember()
         self.assertIsNone(self.retry(BLOCKED), "重複的那一段已經在 owner 眼前，再擋只是第三輪")
-        self.assertFalse(any("同一段話看了兩次" in note for note in self.notes()))
+        self.assertEqual(self.notes(), [])
 
     def test_a_retry_is_not_judged_again(self):
-        self.remember()
         defects = []
         self.assertIsNone(stop_gate._handle(
             {"session_id": "echo-1", "stop_hook_active": True, "last_assistant_message": BLOCKED},
@@ -94,27 +89,7 @@ class RepeatingABlockedTurn(unittest.TestCase):
         log = self.vault / memspec.GATE_LOG_FILENAME
         rows = ([json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
                 if log.is_file() else [])
-        self.assertEqual([row for row in rows if row.get("decision") == memspec.BLOCKED_ECHO_DECISION], [])
-
-    def test_a_small_edit_of_the_paste_is_not_judged_either(self):
-        self.remember()
-        self.assertIsNone(self.retry(BLOCKED.replace("68/68", "68 分之 68")))
-        self.assertEqual(self.notes(), [])
-
-    def test_saying_only_what_changed_leaves_no_note(self):
-        self.remember()
-        self.assertIsNone(self.retry("更正一句：測試是 68/68，不是 67/67。"))
-        self.assertEqual(self.notes(), [])
-
-    def test_without_a_previous_block_nothing_is_judged(self):
-        self.assertIsNone(self.retry(BLOCKED, session="echo-fresh"))
-        self.assertEqual(self.notes("echo-fresh"), [])
-
-    def test_a_short_previous_block_is_not_enough_to_judge_on(self):
-        # 一句「好的。」重疊度永遠很高，拿它當判準會亂記。
-        self.remember(message="好。")
-        self.retry("好。")
-        self.assertEqual(self.notes(), [])
+        self.assertEqual([row for row in rows if row.get("kind") == memspec.STOP_NOTE_LOG_KIND], [])
 
     def test_the_first_note_already_says_not_to_resend(self):
         # 能避免重貼的時機只有第一次命中的那一刻；回合不擋，提醒本身就說這一則不用重送。

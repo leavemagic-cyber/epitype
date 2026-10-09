@@ -1144,49 +1144,6 @@ def _turn_context(transcript_path):
     return _Turn(texts, prompt, dispatch, calls_after, tuple(reversed(turn_tools)), identities)
 
 
-def _shingles(text):
-    """一段文字的重疊比對單位。用固定長度切片，不用 difflib——它要 O(n²)，而這在熱路徑。"""
-    body = _WHITESPACE_REGEX.sub("", str(text or ""))[: memspec.BLOCKED_ECHO_MAX_CHARS]
-    size = memspec.BLOCKED_ECHO_SHINGLE
-    return {body[index:index + size] for index in range(0, max(0, len(body) - size + 1))}
-
-
-def _echo_state_path(config, session_id):
-    session = "".join(char for char in str(session_id or "") if char.isalnum() or char in "-_")
-    if not session:
-        return None
-    return (Path(governance_vault(config, for_write=True)) / memspec.FTS_INDEX_DIRECTORY
-            / memspec.BLOCKED_ECHO_STATE_DIRECTORY / (session + ".txt"))
-
-
-def _remember_blocked(config, session_id, message):
-    """把被擋的那一段留下來，下一次好比對。壞了就算了——這是紀錄，不是關卡。"""
-    path = _echo_state_path(config, session_id)
-    if path is None:
-        return
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(str(message)[: memspec.BLOCKED_ECHO_MAX_CHARS], encoding="utf-8")
-    except OSError:
-        pass
-
-
-def _echo_overlap(config, session_id, message):
-    """這一段跟上次被擋那一段有多像（0–1）；沒有上一段就回 0。"""
-    path = _echo_state_path(config, session_id)
-    if path is None:
-        return 0.0
-    try:
-        previous = path.read_text(encoding="utf-8")
-    except OSError:
-        return 0.0
-    before = _shingles(previous)
-    now = _shingles(message)
-    if len(before) < memspec.BLOCKED_ECHO_MIN_SHINGLES or not now:
-        return 0.0
-    return len(before & now) / len(before)
-
-
 def _handle(event, started_at, defects):
     message = event.get("last_assistant_message")
     if event.get("stop_hook_active"):
