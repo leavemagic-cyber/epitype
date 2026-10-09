@@ -1,4 +1,8 @@
-"""Old/source audit literals are data; proposed new instructions remain checked."""
+"""Old/source audit literals are data; proposed new instructions remain checked.
+
+Since owner 2026-10-03 (6f6fce1; CORE-25) a forbidden-text finding on a write is a
+note and the write goes through, and the Stop gate leaves a short note instead of
+blocking. "Checked" is therefore the note, not a denial."""
 import sys
 sys.dont_write_bytecode = True
 from pathlib import Path
@@ -12,6 +16,8 @@ import pretooluse_gate as pretool
 import stop_gate as stop
 from epitype import rule_pipeline
 
+WRITE_NOTE = '既有裁定提醒（本次寫入放行）'
+
 
 class AuditLiterals(unittest.TestCase):
     setUp = fixtures.SourceConsumers.setUp
@@ -21,7 +27,7 @@ class AuditLiterals(unittest.TestCase):
         for host, tool in (('claude', 'Write'), ('codex', 'apply_patch')):
             self.card(host=host)
             target = self.root / 'audit_candidate.py'
-            for index, (text, deny) in enumerate((
+            for index, (text, noted) in enumerate((
                 ("patch = {'old_literal': 'badold', 'new_literal': 'corrected'}\n", False),
                 ("patch = {'exact_quote': 'badold', 'author': 'original'}\n", False),
                 ("patch = {'old_literal': 'badold', 'new_literal': 'badold'}\n", True),
@@ -41,8 +47,10 @@ class AuditLiterals(unittest.TestCase):
                     out = pretool._handle({'session_id': host + '-audit-' + str(index),
                         'cwd': str(self.root), 'tool_name': tool, 'tool_input': tool_input},
                         time.monotonic(), [])
-                    decision = (out or {}).get('hookSpecificOutput', {}).get('permissionDecision')
-                    self.assertEqual(decision == 'deny', deny)
+                    output = (out or {}).get('hookSpecificOutput', {})
+                    self.assertNotIn('permissionDecision', output)
+                    self.assertEqual(WRITE_NOTE in output.get('additionalContext', ''), noted,
+                                     output.get('additionalContext', ''))
 
     def test_unicode_offsets_and_exact_scope(self):
         self.assertTrue(pretool._audit_literal_only('舊錯誤', "patch={'old_literal':'前文舊錯誤後文'}"))
@@ -74,7 +82,9 @@ class AuditLiterals(unittest.TestCase):
                     'last_assistant_message': 'badold'}, time.monotonic(), [])
             self.assertIsNone(out)
             self.assertTrue(captured)
-            self.assertIn(self.document['quote'], captured[-1][-1])
+            # The Stop note names the card and the check only; it no longer quotes the
+            # rule or the matched text (b3ae5d3), so the card is identified by its key.
+            self.assertIn(self.document['key'] + ' 的 forbidden', captured[-1][-1])
             self.assertNotIn('別說', captured[-1][-1])
 
 
