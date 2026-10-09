@@ -710,6 +710,9 @@ def _selftest():
 
     checks = []
     marker_directory = None
+    # The decision fixtures below carry no verified original source, so they are recalled
+    # as lookup hints, never as rulings (6f6fce1); they keep their pinned seat, key and date.
+    lookup = "- 查找線索（來源未核；非授權或新增禁令） | "
     try:
         with tempfile.TemporaryDirectory(prefix="epitype-recall-") as temp_dir:
             root = Path(temp_dir).resolve()
@@ -870,7 +873,8 @@ def _selftest():
                     supersession_result.returncode == 0
                     and len(injected_cards) == 1
                     # An active decision is pinned by its key, not its card name.
-                    and injected_cards[0].startswith("- " + memspec.DECISION_PREFIX + "hook-read-contract")
+                    and injected_cards[0].startswith(lookup + "hook-read-contract")
+                    and memspec.DECISION_PREFIX not in supersession_context
                     and f"V1/{current_decision.name}" in supersession_context
                     and "Retired Hook Decision" not in supersession_context
                     and old_decision.name not in supersession_context,
@@ -1588,7 +1592,7 @@ def _selftest():
             decision_context = decision_value.get("hookSpecificOutput", {}).get("additionalContext", "")
             decision_lines = [line for line in decision_context.splitlines() if line.startswith("- ")]
             decision_pinned = [
-                line for line in decision_lines if line.startswith("- " + memspec.DECISION_PREFIX)
+                line for line in decision_lines if line.startswith(lookup + "rule-")
             ]
             checks.append(
                 (
@@ -1596,7 +1600,8 @@ def _selftest():
                     "not the owner's raw quote",
                     decision_result.returncode == 0
                     and bool(decision_pinned)
-                    and decision_lines[0].startswith("- " + memspec.DECISION_PREFIX)
+                    and decision_lines[0].startswith(lookup + "rule-")
+                    and memspec.DECISION_PREFIX not in decision_context
                     and any("（2026-08-1" in line and "decisionneedle 摘要" in line for line in decision_pinned)
                     and not any("只有 6s 是標準合約" in line for line in decision_pinned),
                 )
@@ -1655,8 +1660,7 @@ def _selftest():
                     "a decision card living under rulings/ is still pinned; the raw quote beside it is not",
                     promoted_result.returncode == 0
                     and len(promoted_lines) == 1
-                    and promoted_lines[0].startswith("- " + memspec.DECISION_PREFIX)
-                    and "promoted-key（2026-09-07）" in promoted_lines[0]
+                    and promoted_lines[0].startswith(lookup + "promoted-key（2026-09-07）")
                     and "promotedneedle 由 owner 裁定" in promoted_lines[0]
                     and "rawquote" not in promoted_context,
                 )

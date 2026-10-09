@@ -724,6 +724,8 @@ class ControlLifecycleRegression(unittest.TestCase):
         self.assertEqual(count("resources", "stale"), 2)
         at(start + 8 * day, "fresh", "b", listing,
            "Wall time: 0.01 seconds\nOutput: " + json.dumps([{"id": "new"}]))
+        # The stale session's tab is closed and its controller belongs to a session whose
+        # record is gone, so nothing of it is left.
         for table in ("calls", "events", "resources", "session_state", "alerts"):
             self.assertEqual(count(table, "stale"), 0, table)
         self.assertEqual(count("calls", "fresh"), 1)
@@ -738,6 +740,41 @@ class ControlLifecycleRegression(unittest.TestCase):
             self.assertEqual(
                 db.execute("SELECT value FROM meta WHERE key='last_cleanup'").fetchone()[0], last)
         self.assertEqual(last, start + 8 * day)
+
+    def test_prune_drops_an_ended_sessions_controller_but_keeps_open_tabs(self):
+        # 6f6fce1 kept every open row past retention, so each session that used computer use
+        # left its REPL controller row (and session state) in the ledger forever.
+        day = 24 * 3600
+        start = 1_000_000.0
+
+        def at(moment, session, call_id, code, output):
+            with mock.patch.object(lifecycle, "_now", return_value=moment):
+                lifecycle.observe(post(session, call_id, "mcp__cua_repl__js",
+                                       {"code": code}, mcp(output)), self.path)
+
+        def rows(session):
+            with closing(sqlite3.connect(self.path)) as db:
+                return sorted(db.execute("SELECT kind,resource_id,status FROM resources "
+                                         "WHERE session=?", (session,)).fetchall())
+
+        def states(session):
+            with closing(sqlite3.connect(self.path)) as db:
+                return db.execute("SELECT count(*) FROM session_state WHERE session=?",
+                                  (session,)).fetchone()[0]
+
+        create = 'await cua.createBrowserTab("iab", "about:blank");'
+        at(start, "ended", "1", "await cua.screenshot();", "Wall time: 0.01 seconds")
+        at(start, "holder", "1", create, "Browser tab: kept-tab")
+        at(start + day, "live", "1", create, "Browser tab: live-tab")
+        self.assertEqual(rows("ended"), [("cua-controller", "repl", "open")])
+        at(start + 8 * day, "live", "2", "await cua.screenshot();", "Wall time: 0.01 seconds")
+        self.assertEqual(rows("ended"), [])
+        self.assertEqual(states("ended"), 0)
+        # An open tab is never dropped by the prune, even when its session's record is gone.
+        self.assertEqual(rows("holder"), [("cua-tab:iab", "kept-tab", "open")])
+        # A live session keeps its controller and its open tab.
+        self.assertEqual(rows("live"), [("cua-controller", "repl", "open"),
+                                        ("cua-tab:iab", "live-tab", "open")])
 
     def test_doctor_post_tool_use_probe_reaches_the_ledger(self):
         # 健康檢查若用未追蹤的工具當探針，觀察器一開頭就回去，PASS 什麼也證明不了。

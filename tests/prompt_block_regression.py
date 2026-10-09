@@ -163,18 +163,36 @@ class PromptBlockRegression(unittest.TestCase):
             base = {"session_id": f"prompt-{host}-{uuid.uuid4().hex}", "hook_event_name": "Stop",
                     "stop_hook_active": False,
                     "transcript_path": str(self.root / f"{host}.jsonl")}
-            for content, blocked in (("檔案在 C:/tmp/prompt.txt。", True),
-                                     ("````text\n你是審查者。\n````", False)):
+            # Stop findings are advisory since b3ae5d3 (owner 2026-10-03): the installed path
+            # never blocks, and a hit shows up as a note row naming this card's check.
+            for content, noted in (("檔案在 C:/tmp/prompt.txt。", True),
+                                   ("````text\n你是審查者。\n````", False)):
                 event = dict(base, last_assistant_message=content)
+                before = self.notes(vault, base["session_id"])
                 result = run_synthetic(
                     Path(stop_gate.__file__), event, config,
                     environment={"HOME": str(self.root), "USERPROFILE": str(self.root)},
                     clock=memspec.HOOK_CLOCK_FROZEN)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 verdict = json.loads(result.stdout) if result.stdout.strip() else {}
-                self.assertEqual(verdict.get("decision") == "block", blocked,
-                                 f"{host}: {verdict}")
+                self.assertNotEqual(verdict.get("decision"), "block", f"{host}: {verdict}")
+                added = self.notes(vault, base["session_id"])[len(before):]
+                self.assertEqual(
+                    [(row["decision"], row["rule"]) for row in added],
+                    [("prompt-in-chat", memspec.TURN_CHECK_FIELD)] if noted else [],
+                    f"{host}: {content!r}")
+
+    @staticmethod
+    def notes(vault, session_id):
+        path = vault / memspec.GATE_LOG_FILENAME
+        if not path.is_file():
+            return []
+        rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+        return [row for row in rows if row.get("kind") == memspec.STOP_NOTE_LOG_KIND
+                and row.get("session_id") == session_id]
 
 
 if __name__ == "__main__":
+    if "--selftest" in sys.argv:
+        sys.argv.remove("--selftest")
     unittest.main()

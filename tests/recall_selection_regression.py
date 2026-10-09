@@ -18,6 +18,17 @@ import _hook_common as common
 import recall_hook as recall
 
 
+# A card without a verified original source is recalled as a lookup hint, never as a
+# ruling (6f6fce1, docs/RULE_PROVENANCE.md). These fixtures are such legacy cards; an
+# active decision among them keeps its pinned seat and is told apart by its key and date.
+LOOKUP = "- 查找線索（來源未核；非授權或新增禁令） | "
+
+
+def _decision_line(line, key):
+    return line.startswith(LOOKUP + key + memspec.RECALL_DECIDED_AT_SUFFIX.format(
+        decided_at="2026-09-07"))
+
+
 class RecallSelectionRegression(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="epitype-selection-")
@@ -92,8 +103,11 @@ class RecallSelectionRegression(unittest.TestCase):
         memsearch.build_index(self.vaults[1])
         first, second = self.lines(self.invoke()), self.lines(self.invoke())
         self.assertEqual((len(first), len(second)), (8, 6))
-        self.assertTrue(all(line.startswith("- " + memspec.DECISION_PREFIX) for line in first[:4]))
-        self.assertFalse(any(line.startswith("- " + memspec.DECISION_PREFIX) for line in second))
+        self.assertTrue(all(any(_decision_line(line, f"decision-{number}") for number in range(4))
+                            for line in first[:4]), first)
+        self.assertFalse(any(_decision_line(line, "decision-") or "/decision-" in line
+                             for line in second), second)
+        self.assertFalse(any(memspec.DECISION_PREFIX in line for line in first + second))
         self.assertEqual(self.invoke(), "")  # procedure already sent this session (owner 2026-09-09)
 
     def test_card_is_not_resent_when_the_alias_numbering_changes(self):
@@ -302,7 +316,9 @@ class RecallSelectionRegression(unittest.TestCase):
         for vault in self.vaults:
             memsearch.build_index(vault)
         lines = self.lines(self.invoke(prompt="selectneedle detailneedle"))
-        self.assertTrue(lines[0].startswith("- " + memspec.DECISION_PREFIX))
+        self.assertTrue(_decision_line(lines[0], "policy"), lines)
+        self.assertTrue(any("V2/answer.md" in line for line in lines[1:]), lines)
+        self.assertFalse(any(memspec.DECISION_PREFIX in line for line in lines))
 
     def test_whole_short_card_fills_space_after_oversized_ordinary_hit(self):
         self.card(self.vaults[0], "long", "packneedle " + "長" * 100)
@@ -312,18 +328,22 @@ class RecallSelectionRegression(unittest.TestCase):
         hits.sort(key=lambda hit: hit["card_path"] != "long.md")
         with patch.object(recall.memsearch, "recall_index", return_value={"results": hits}), \
              patch.object(recall, "scoped_vaults", return_value=[self.vaults[0]]):
-            # Measure only the fixed legend/header; keep a whole small card, not the long one.
+            # Budget for the header, the long card's pointer and the whole small card. An
+            # oversized hit is delivered as an explicit pointer, never as a cut half line
+            # (6f6fce1, docs/RULE_PROVENANCE.md); the small card still gets the space after it.
             full = self.invoke(session="")
             header = full.split("\n- ", 1)[0]
-            budget = len(header.encode("utf-8")) + 145
+            short_line = next(line for line in self.lines(full) if line.endswith("V1/short.md"))
+            pointer = LOOKUP + "V1/long.md"
+            budget = len("\n".join([header, pointer, short_line]).encode("utf-8"))
             common.write_config(self.config, [self.vaults[0]], budget=budget)
             packed = self.invoke()
-            self.assertIn("V1/short.md", packed)
-            self.assertNotIn("V1/long.md", packed)
+            self.assertEqual(self.lines(packed), [pointer, short_line])
+            self.assertNotIn("長", packed)
             self.assertLessEqual(len(packed.encode("utf-8")), budget)
             common.write_config(self.config, [self.vaults[0]])
             retried = self.invoke()
-            self.assertIn("V1/long.md", retried)
+            self.assertIn("長" * 100 + " | V1/long.md", retried)
             self.assertNotIn("V1/short.md", retried)
 
     def test_oversized_pinned_policy_is_not_bypassed_by_small_ordinary_card(self):
@@ -332,9 +352,15 @@ class RecallSelectionRegression(unittest.TestCase):
         self.card(self.vaults[0], "short", "packneedle")
         memsearch.build_index(self.vaults[0])
         common.write_config(self.config, [self.vaults[0]], budget=700)
-        self.assertEqual(self.invoke(prompt="packneedle"), "")
+        packed = self.invoke(prompt="packneedle")
+        # Over budget the pinned seat becomes an explicit pointer that still comes first;
+        # no cut half ruling, and the small card never takes its place.
+        lines = self.lines(packed)
+        self.assertEqual(lines[0], LOOKUP + "V1/policy.md")
+        self.assertNotIn("長", packed)
+        self.assertNotIn(memspec.DECISION_PREFIX, packed)
         common.write_config(self.config, [self.vaults[0]])
-        self.assertIn("V1/policy.md", self.invoke(prompt="packneedle"))
+        self.assertIn("長" * 500 + " | V1/policy.md", self.invoke(prompt="packneedle"))
 
     def test_merge_keeps_each_vaults_order_even_when_coverage_varies(self):
         groups = [[(1, "a"), (3, "b")], [], [(2, "c"), (0, "d")]]

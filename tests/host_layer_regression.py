@@ -161,7 +161,11 @@ class HostFieldLint(_TempVault):
         host, _ = self._host_findings("host_claude_deny:\n  - rm -rf /\n", stem="deny-shape")
         self.assertEqual(len(host), 1)
         self.assertIn("rm -rf /", host[0][1])
-        host, _ = self._host_findings("host_claude_deny: []\n", stem="deny-empty")
+        # An explicit [] withdraws a native deny list (6a03ec0); a declared field with no
+        # list at all is still malformed.
+        host, _ = self._host_findings("host_claude_deny: []\n", stem="deny-withdrawn")
+        self.assertEqual(host, [])
+        host, _ = self._host_findings("host_claude_deny:\n", stem="deny-empty")
         self.assertEqual(len(host), 1)
 
     def test_codex_rule_tokens_fail_on_quotes_and_empty_alternatives(self):
