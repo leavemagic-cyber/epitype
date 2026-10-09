@@ -45,8 +45,9 @@ STATUS_MATCH = "match"
 STATUS_DRIFT = "drift"
 STATUS_UNREADABLE = "unreadable"
 
-# 拒絕（超上限、缺核准、漂移）是 1；工具自己壞掉是 2。呼叫端要分得出「產品說不行」
+# 成功是 0；拒絕（缺核准、漂移、讀不到）是 1；工具自己壞掉是 2。呼叫端要分得出「產品說不行」
 # 與「產品跑不起來」。
+EXIT_OK = 0
 EXIT_REFUSED = 1
 EXIT_ERROR = 2
 
@@ -1041,7 +1042,7 @@ def main(argv=None, output=sys.stdout):
         _print(result, output)
     if result["status"] in (STATUS_OVER_CAP, STATUS_UNAPPROVED, STATUS_DRIFT, STATUS_UNREADABLE):
         return EXIT_REFUSED
-    return 0
+    return EXIT_OK
 
 
 if __name__ == "__main__":
