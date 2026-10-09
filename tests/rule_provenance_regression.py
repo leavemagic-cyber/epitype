@@ -359,6 +359,79 @@ class ProvenanceTests(unittest.TestCase):
         self.assertEqual(self.path.stat().st_size, stamp.st_size)
         self.assertEqual(self.verdict(cache=cache).status, provenance.INVALID)
 
+    def deep_owner_source(self, filler_rows=40, filler_bytes=50_000):
+        """Owner row after about 2 MB of assistant text, so a 1 MB budget cannot scan to it."""
+        self.rows = [self.rows[0]] + [
+            {"type": "response_item", "payload": {"type": "message", "id": f"filler-{index}",
+             "role": "assistant", "content": [{"type": "output_text", "text": "x" * filler_bytes}]}}
+            for index in range(filler_rows)] + [self.rows[2]]
+        self.raw = [(json.dumps(row, ensure_ascii=False) + "\n").encode() for row in self.rows]
+        self.path.write_bytes(b"".join(self.raw))
+        self.document["sources"] = [self.source(len(self.rows) - 1)]
+        config = self.root / "epitype-home" / "config.json"
+        environment = patch.dict(os.environ, {memspec.EPITYPE_CONFIG_ENV: str(config)})
+        environment.start()
+        self.addCleanup(environment.stop)
+        return config.parent / memspec.PROVENANCE_ORIGIN_CACHE_FILENAME
+
+    def test_completed_first_authorship_is_reused_under_a_small_budget(self):
+        cache = self.deep_owner_source()
+        small = 1024 * 1024
+        result = self.verdict(max_bytes=small)
+        self.assertEqual(result.status, provenance.UNVERIFIED)
+        self.assertIn("earliest authorship UNVERIFIED", " ".join(result.issues))
+        missing = "這一句不在原始紀錄裡。"
+        self.assertEqual(provenance.first_authorship(self.path, [missing])[missing]["status"],
+                         provenance.UNVERIFIED)
+        self.assertFalse(cache.exists(), "budget-exhausted and not-found scans must not be stored")
+
+        self.assertEqual(self.verdict().status, provenance.VERIFIED)
+        stored = json.loads(cache.read_text(encoding="utf-8"))["entries"]
+        self.assertEqual(len(stored), 1)
+        self.assertNotIn(self.quote, cache.read_text(encoding="utf-8"))
+        entry = next(iter(stored.values()))
+        owner_offset = sum(len(row) for row in self.raw[:-1])
+        self.assertEqual((entry["byte_offset"], entry["line"], entry["prefix_bytes"]),
+                         (owner_offset, len(self.raw), owner_offset + len(self.raw[-1])))
+
+        self.assertEqual(self.verdict(max_bytes=small).status, provenance.VERIFIED)
+        origin = provenance.first_authorship(self.path, [self.quote], max_bytes=1)[self.quote]
+        self.assertEqual((origin["status"], origin["role"], origin["human_authored"], origin["line"],
+                          origin["message_id"], origin["record_sha256"]),
+                         (provenance.VERIFIED, "U", True, len(self.raw), "owner-1",
+                          hashlib.sha256(self.raw[-1]).hexdigest()))
+        self.assertEqual(provenance.first_authorship(self.path, [self.quote], seconds=0)[self.quote],
+                         {"status": provenance.UNVERIFIED, "reason": "read-budget-exhausted"})
+        with self.path.open("ab") as stream:
+            stream.write(self.raw[-1])
+        self.assertEqual(self.verdict(max_bytes=small).status, provenance.VERIFIED,
+                         "appending later records cannot move the first occurrence")
+
+    def test_reused_origin_cannot_outlive_an_earlier_assistant_occurrence(self):
+        cache = self.deep_owner_source()
+        small = 1024 * 1024
+        self.assertEqual(self.verdict().status, provenance.VERIFIED)
+        stamp = self.path.stat()
+        echo = self.quote + "x" * (50_000 - len(self.quote.encode()))
+        self.path.write_bytes(self.path.read_bytes().replace(
+            ('"' + "x" * 50_000 + '"').encode(), json.dumps(echo, ensure_ascii=False).encode(), 1))
+        os.utime(self.path, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+        self.assertEqual(self.path.stat().st_size, stamp.st_size)
+        # The stored owner origin no longer matches the prefix; the rescan reaches the echo.
+        result = self.verdict(max_bytes=small)
+        self.assertEqual(result.status, provenance.INVALID)
+        self.assertIn("first occurred in assistant/quoted text", " ".join(result.issues))
+        origin = provenance.first_authorship(self.path, [self.quote], max_bytes=1)[self.quote]
+        self.assertEqual((origin["status"], origin["role"], origin["human_authored"], origin["line"]),
+                         (provenance.VERIFIED, "A", False, 2))
+
+        data = json.loads(cache.read_text(encoding="utf-8"))
+        for entry in data["entries"].values():
+            entry["code"] = "0" * 64
+        cache.write_text(json.dumps(data), encoding="utf-8")
+        self.assertEqual(provenance.first_authorship(self.path, [self.quote], max_bytes=1)[self.quote]["status"],
+                         provenance.UNVERIFIED, "an entry from other matching code is not reused")
+
     def test_zip_exact_member_and_direct_line_locator(self):
         document = copy.deepcopy(self.document)
         del document["sources"][0]["byte_offset"]

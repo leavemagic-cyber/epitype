@@ -71,6 +71,13 @@ COMPACT_MAP_MAX_LINE_BYTES = 2 * 1024 * 1024
 COMPACT_MAP_USER_MAX_CHARS = 200
 COMPACT_MAP_ASSISTANT_MAX_CHARS = 300
 
+# 一句話在一份原始紀錄裡最早出現在哪，查完整一次就記在設定檔旁：下次只重讀那一列與當時
+# 讀過的前段比雜湊，不再從頭解析。前段被改、那一列對不上、判定程式改了，都當沒記過重查；
+# 沒查到與預算用完的結果一律不記，否則「查不到」會被當成查過。
+PROVENANCE_ORIGIN_CACHE_FILENAME = "provenance_origins.json"
+# 超過就丟最舊的；被丟的只是下次要重查一次。
+PROVENANCE_ORIGIN_CACHE_MAX_ENTRIES = 4096
+
 # Personal transcript scar proposals share one bilingual correction-pattern
 # table. Consumers cluster by the stable key and never write matches to a vault.
 SCAR_CORRECTION_PATTERNS = (

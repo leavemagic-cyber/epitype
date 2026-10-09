@@ -6,6 +6,7 @@ Legacy cards remain readable, but missing evidence is never upgraded to proof.
 """
 from dataclasses import dataclass, field
 from datetime import datetime
+import functools
 import hashlib
 import json
 from pathlib import Path
@@ -350,6 +351,121 @@ def _verify_stable_prefix(path, origin, budget):
         raise OSError('source changed during attribution scan')
 
 
+@functools.lru_cache(maxsize=1)
+def _origin_code():
+    """Identity of the code that decides a first occurrence; None disables reuse."""
+    import inspect
+    from . import transcript
+    try:
+        digest = hashlib.sha256(inspect.getsource(first_authorship).encode('utf-8'))
+        digest.update(Path(transcript.__file__).read_bytes())
+    except (OSError, TypeError):
+        return None
+    digest.update(str(memspec.COMPACT_MAP_MAX_LINE_BYTES).encode('ascii'))
+    return digest.hexdigest()
+
+
+def _origin_cache_file():
+    return memspec.config_path().parent / memspec.PROVENANCE_ORIGIN_CACHE_FILENAME
+
+
+def _origin_key(path, quote):
+    return hashlib.sha256(quote.encode('utf-8')).hexdigest() + ' ' + str(path)
+
+
+def _origin_entries():
+    try:
+        data = json.loads(_origin_cache_file().read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return {}
+    entries = data.get('entries') if isinstance(data, dict) and data.get('version') == 1 else None
+    return entries if isinstance(entries, dict) else {}
+
+
+def _cached_origins(path, quotes, deadline):
+    """Reuse completed scans: reread the cited row and the examined prefix, skip parsing.
+
+    The reread length comes from the entry, not from an open-ended scan, so only
+    the deadline bounds it. Any mismatch is a miss and the caller rescans from
+    byte zero. Role and owner authorship are recomputed from the current row.
+    """
+    code = _origin_code()
+    entries = _origin_entries() if code else {}
+    hits = {}
+    for quote in quotes:
+        entry = entries.get(_origin_key(path, quote))
+        if not (isinstance(entry, dict) and entry.get('code') == code
+                and _integer(entry.get('line'), 1)
+                and all(_integer(entry.get(key)) for key in ('byte_offset', 'prefix_bytes'))
+                and all(isinstance(entry.get(key), str) and _HASH.match(entry[key])
+                        for key in ('record_sha256', 'prefix_sha256'))):
+            continue
+        reader = _ReadBudget(deadline, memspec.COMPACT_MAP_MAX_LINE_BYTES + 1)
+        with path.open('rb') as stream:
+            stream.seek(entry['byte_offset'])
+            raw = reader.read(stream, memspec.COMPACT_MAP_MAX_LINE_BYTES + 1, line=True)
+        if (hashlib.sha256(raw).hexdigest() != entry['record_sha256']
+                or entry['byte_offset'] + len(raw) > entry['prefix_bytes']):
+            continue
+        try:
+            row = json.loads(raw.decode('utf-8-sig'))
+        except (ValueError, UnicodeError):
+            continue
+        record = source_record(row)
+        if not record or record[0] != entry.get('role') or quote not in record[1]:
+            continue
+        role, body = record
+        payload = row.get('payload', {})
+        hits[quote] = {
+            'role': role, 'human_authored': role in ('U', 'Q') and _human_quote(body, quote),
+            'line': entry['line'], 'byte_offset': entry['byte_offset'],
+            'message_id': row.get('uuid') or row.get('id') or (
+                payload.get('id') if isinstance(payload, dict) else None),
+            'record_sha256': entry['record_sha256'],
+            'prefix_bytes': entry['prefix_bytes'], 'prefix_sha256': entry['prefix_sha256'],
+        }
+    if not hits:
+        return hits
+    # One pass over the longest prefix checks each shorter prefix at its boundary.
+    verified, digest, position = {}, hashlib.sha256(), 0
+    reader = _ReadBudget(deadline, max(origin['prefix_bytes'] for origin in hits.values()))
+    with path.open('rb') as stream:
+        for quote, origin in sorted(hits.items(), key=lambda item: item[1]['prefix_bytes']):
+            while position < origin['prefix_bytes']:
+                chunk = reader.read(stream, min(origin['prefix_bytes'] - position, 1024 * 1024))
+                if not chunk:
+                    return verified
+                digest.update(chunk)
+                position += len(chunk)
+            if digest.copy().hexdigest() == origin['prefix_sha256']:
+                verified[quote] = origin
+    return verified
+
+
+def _remember_origins(path, origins):
+    """Store first occurrences proven by a complete scan and a reread prefix."""
+    code = _origin_code()
+    if not code or not origins:
+        return
+    entries = _origin_entries()
+    fresh = {_origin_key(path, quote): {'code': code, **{key: origin[key] for key in (
+        'role', 'line', 'byte_offset', 'record_sha256', 'prefix_bytes', 'prefix_sha256')}}
+        for quote, origin in origins.items()}
+    if all(entries.get(key) == value for key, value in fresh.items()):
+        return
+    kept = {key: value for key, value in entries.items()
+            if key not in fresh and isinstance(value, dict) and value.get('code') == code}
+    kept.update(fresh)
+    kept = dict(list(kept.items())[-memspec.PROVENANCE_ORIGIN_CACHE_MAX_ENTRIES:])
+    from .host_sync import atomic_write
+    try:
+        atomic_write(_origin_cache_file(), json.dumps(
+            {'version': 1, 'entries': kept}, ensure_ascii=False).encode('utf-8'))
+    except OSError:
+        # Reuse is only a shortcut: an unwritten entry costs the next run a full scan.
+        pass
+
+
 def first_authorship(path, quotes, *, seconds=2.0, max_bytes=None, _budget=None, member=None):
     """Find first literal occurrences in original messages, never summaries.
 
@@ -357,6 +473,8 @@ def first_authorship(path, quotes, *, seconds=2.0, max_bytes=None, _budget=None,
     rather than a fixed file-size ceiling. Reread its examined complete prefix
     before returning evidence. Appends cannot alter earliest authorship; edits
     to that prefix invalidate it. Unresolved quotes are never positive evidence.
+    A completed scan is remembered per quote; later calls reread that row and
+    prefix instead of parsing; any mismatch rescans. Misses are never stored.
     """
     pending = set(quotes)
     found = {}
@@ -367,6 +485,11 @@ def first_authorship(path, quotes, *, seconds=2.0, max_bytes=None, _budget=None,
         if path.suffix.casefold() not in ('.jsonl', '.zip'):
             raise ValueError('original JSONL required')
         before = path.stat()
+        if path.suffix.casefold() == '.jsonl':
+            for quote, origin in _cached_origins(path.resolve(), pending, budget.deadline).items():
+                found[quote] = origin
+                pending.remove(quote)
+        scanned = {}
         from contextlib import ExitStack
         with ExitStack() as resources:
             if path.suffix.casefold() == '.zip':
@@ -412,6 +535,8 @@ def first_authorship(path, quotes, *, seconds=2.0, max_bytes=None, _budget=None,
                                     payload.get('id') if isinstance(payload, dict) else None),
                                 'record_sha256': hashlib.sha256(raw).hexdigest(),
                             }
+                            scanned[quote] = {'prefix_bytes': offset + len(raw),
+                                              'prefix_sha256': digest.copy().hexdigest()}
                             pending.remove(quote)
                 offset += len(raw)
                 budget.check()
@@ -422,8 +547,10 @@ def first_authorship(path, quotes, *, seconds=2.0, max_bytes=None, _budget=None,
         else:
             prefix = {'prefix_bytes': offset, 'prefix_sha256': digest.hexdigest()}
             _verify_stable_prefix(path, prefix, budget)
-            for origin in found.values():
-                origin.update(prefix)
+            for quote in scanned:
+                found[quote].update(prefix)
+            _remember_origins(path.resolve(), {
+                quote: {**found[quote], **own} for quote, own in scanned.items()})
     except (OSError, ValueError, TypeError, UnicodeError, zipfile.BadZipFile) as exc:
         # No positive result survives an invalid or rewritten examined prefix.
         reason = ('read-budget-exhausted' if isinstance(exc, _ReadBudgetExhausted)
