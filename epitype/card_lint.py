@@ -873,6 +873,24 @@ def _apply_git_dates(vault, raw_cards, budget):
         ]
 
 
+RULE_PROVENANCE_APPROVAL_FIELDS = (
+    memspec.DECIDED_BY_FIELD, memspec.RULE_APPROVED_BY_FIELD, memspec.RULE_APPROVED_AT_FIELD)
+
+
+def _provenance_approval(source):
+    """Verified provenance `approval` {by, at}, or None. Unverified sources prove nothing."""
+    if source is None or not source.verified or not isinstance(source.document, dict):
+        return None
+    approval = source.document.get("approval")
+    if not isinstance(approval, dict):
+        return None
+    by = approval.get("by")
+    at = approval.get("at")
+    if not (isinstance(by, str) and by.strip() and isinstance(at, str) and memspec.is_iso_date(at.strip())):
+        return None
+    return approval
+
+
 def _check_card(path, relative, today, known_cards=None, source_path=None):
     """(型別, findings, 推得的日期, 執行層)。findings 是 (level, rule, reason) 的清單；
     執行層是 `_enforce_layer` 的結果，None＝不在分層統計範圍。
@@ -908,6 +926,7 @@ def _check_card(path, relative, today, known_cards=None, source_path=None):
     except ImportError:
         sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
         from epitype import rule_pipeline, rule_provenance
+    source = None
     if rule_provenance.FIELD in fields:
         source = rule_provenance.validate(fields, source_path or path)
         if not source.verified:
@@ -919,6 +938,7 @@ def _check_card(path, relative, today, known_cards=None, source_path=None):
             issues += rule_pipeline.supersession_issues(fields, source_path or path, card_text=text)
             if issues:
                 findings.append((FAIL, "rule-source", "規則來源 INVALID：" + "; ".join(issues)))
+                source = None
     derived = None
     if problem:
         level = FAIL if memspec.CARD_LINT_DUPLICATE_FIELD_REASON in problem else WARN
@@ -960,7 +980,11 @@ def _check_card(path, relative, today, known_cards=None, source_path=None):
         fields, counts, _superseded_targets(front_lines), known_cards)
     findings.extend(_host_field_findings(front_lines))
     tier, enforce = _enforce_findings(fields, counts, front_lines)
-    findings.extend(enforce)
+    # A superseded/closed/retired card enforces nothing and is outside the enforce
+    # tiers (_enforce_layer); judging its stale declaration is the same noise the
+    # example check already skips for these statuses.
+    if fields.get(memspec.DECISION_STATUS_FIELD, "").strip() not in memspec.STOP_GATE_SILENT_STATUSES:
+        findings.extend(enforce)
     layer = _enforce_layer(fields, card_type, relative, tier)
     # 行為糾正卡沒有任何一層時，「沒武裝」那一條已經在講同一件事；規則卡原本不被問，
     # 這一條補的就是那個缺口。先 WARN 並列清單，逐張分類，不一次判掉。
@@ -978,8 +1002,18 @@ def _check_card(path, relative, today, known_cards=None, source_path=None):
             findings.append((
                 WARN, "deprecated-field", memspec.DEPRECATED_FIELD_REASON.format(field=field)
             ))
+    approval = _provenance_approval(source) if card_type == memspec.CARD_TYPE_RULE else None
+    rule_layer = fields.get(memspec.RULE_LAYER_FIELD, "").strip()
     for field in memspec.CARD_REQUIRED_FIELDS[card_type]:
         if not _has_value(field, fields, nested, counts):
+            # core_gen takes the approval credential from verified provenance when the
+            # flat fields are absent; both readers must accept the same credential.
+            if approval and field in RULE_PROVENANCE_APPROVAL_FIELDS:
+                continue
+            # order only sorts the generated core block; other layers never reach it.
+            if (card_type == memspec.CARD_TYPE_RULE and field == memspec.RULE_ORDER_FIELD
+                    and rule_layer not in memspec.RULE_GENERATED_LAYERS):
+                continue
             findings.append((FAIL, "required",
                              memspec.CARD_LINT_MISSING_REQUIRED_REASON.format(fields=field)))
     for field in memspec.CARD_OPTIONAL_FIELDS[card_type]:
