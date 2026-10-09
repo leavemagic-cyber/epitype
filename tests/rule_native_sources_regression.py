@@ -256,6 +256,53 @@ class NativeSourceConsumers(unittest.TestCase):
         self.assertEqual(self.call()[0], (0, 0))
         self.assertEqual(self.snapshot(), before)
 
+    def test_one_invalid_card_is_skipped_while_the_rest_of_the_vault_is_written(self):
+        second = self.vault / 'second-card.md'
+        depth = 'host_claude_env:\n  CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: "{}"\n'
+        self.card()
+        self.card(path=second, native=depth.format(2))
+        self.install()
+        owned_before = json.loads(host_native.state_path(self.home).read_text(encoding='utf-8'))
+        config_before, rules_before = self.config.read_bytes(), self.rules.read_bytes()
+        self.equal_stat_replace(self.source, b'adopt native', b'adapt native')
+        self.card(path=second, native=depth.format(3))
+
+        checked, report = self.call(host_native.check)
+        self.assertGreater(checked[1], 0, report)
+        skipped = [line for line in report.splitlines() if 'ordinary-name.md' in line]
+        self.assertEqual(len([line for line in skipped if '只略過這張卡' in line]), 1, report)
+        self.assertIn('CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH', report)
+
+        applied, report = self.call()
+        self.assertEqual(applied[0], 1, report)
+        self.assertGreater(applied[1], 0, report)
+        settings = json.loads(self.settings.read_text(encoding='utf-8'))
+        self.assertEqual(settings['env']['CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH'], '3')
+        # 略過的那張卡上次寫的值與它的所有權紀錄都原樣留著，不被當成過期收回。
+        self.assertEqual(settings['env']['CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS'], '4')
+        self.assertIn('Bash(git clean:*)', settings['permissions']['deny'])
+        self.assertEqual(settings['env']['USER_VALUE'], 'keep')
+        self.assertEqual(self.config.read_bytes(), config_before)
+        self.assertEqual(self.rules.read_bytes(), rules_before)
+        self.assertIn(str(self.rules), report)
+        owned_after = json.loads(host_native.state_path(self.home).read_text(encoding='utf-8'))
+        retained = 0
+        for path, record in owned_before['targets'].items():
+            if not isinstance(record, dict):
+                continue
+            for section in (host_native.SECTION_ENV, host_native.SECTION_DENY, host_native.SECTION_CONFIG):
+                for key, entry in (record.get(section) or {}).items():
+                    if isinstance(entry, dict) and entry.get('card') == 'ordinary-name.md':
+                        after = owned_after['targets'][path][section][key]
+                        self.assertEqual(after, entry, (path, section, key))
+                        retained += 1
+        self.assertGreaterEqual(retained, 3)
+
+        # 卡修好之後一切照舊：沒有衝突、沒有遺失的所有權，再同步一次什麼都不用改。
+        self.equal_stat_replace(self.source, b'adapt native', b'adopt native')
+        applied, report = self.call()
+        self.assertEqual(applied, (0, 0), report)
+
     def test_same_stat_source_tamper_refuses_and_retains_all_owned_settings(self):
         self.card()
         self.install()

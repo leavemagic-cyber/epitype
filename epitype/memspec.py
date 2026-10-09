@@ -3360,8 +3360,14 @@ HOST_NATIVE_CONFLICT_REASON = (
 HOST_NATIVE_CARD_CONFLICT_REASON = (
     "{key}：卡片 {first} 要 {first_value}，卡片 {second} 要 {second_value}；同一個鍵只能有一個正本"
 )
-HOST_NATIVE_CARD_INVALID_REASON = "{card}：{problem}（這個庫的宿主原生設定整批不寫，先修卡片）"
+HOST_NATIVE_CARD_INVALID_REASON = (
+    "{card}：{problem}（只略過這張卡：它上次寫進設定的值原樣保留，其餘卡照寫；先修卡片）")
+HOST_NATIVE_CARD_SKIPPED_UNREADABLE_REASON = (
+    "{card} 讀不動（{error}）；只略過這張卡：它上次寫進設定的值原樣保留，其餘卡照寫")
 HOST_NATIVE_CARD_UNREADABLE_REASON = "{card} 讀不動（{error}），這個庫的宿主原生設定整批不寫"
+HOST_NATIVE_HELD_KEY_NOTE = "{key} 上次由這次略過的卡 {held} 寫入，原樣保留；{card} 要的值等那張卡修好再比"
+HOST_NATIVE_RULES_HELD_REASON = (
+    "{path} 含這次略過的卡（{cards}）上次寫的規則；這個檔整份重建會把它們拿掉，這次整份不寫")
 HOST_NATIVE_RULES_DRIFT_REASON = "規則檔與卡片不一致（卡片要 {count} 條）"
 HOST_NATIVE_RULES_STALE_REASON = "卡片已經沒有 {field}，規則檔還在"
 HOST_NATIVE_RULES_FOREIGN_REASON = "{path} 已存在但不是 Epitype 寫的（沒有生成標頭）；不覆寫，請改名或移走"

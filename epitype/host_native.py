@@ -191,13 +191,21 @@ def _provenance_declares_native(fields):
         'host_sync', 'host_native', 'host_settings', 'native_settings') for action in actions)
 
 
-def collect(vaults, *, event=None, diagnostics=None, seconds=5.0, owned_cards=()):
+def collect(vaults, *, event=None, diagnostics=None, seconds=5.0, owned_cards=(), held=None):
     """({section: ...}, [問題])——這些庫裡還在生效的卡要求宿主做什麼。
 
-    一張卡的欄位寫壞、兩張卡對同一個鍵要不同的值，這個庫的宿主原生設定就整批不寫：
-    寫一半會讓那張壞卡原本生效的規則在設定裡被悄悄拿掉，而那正是它要擋的東西。"""
+    兩張卡對同一個鍵要不同的值、庫讀不完或驗證逾時，這個庫的宿主原生設定就整批不寫。
+    給了 `held`（dict）時，單張卡讀不動或驗不過只記進 held[卡片參照] 而不進問題清單：
+    呼叫端略過這張卡、保留它上次寫進設定的值，其餘照寫。不保留的話，那張壞卡原本生效
+    的規則會在設定裡被悄悄拿掉，而那正是它要擋的東西。"""
     desired = {SECTION_ENV: {}, SECTION_DENY: {}, SECTION_CONFIG: {}, SECTION_RULES: []}
     problems = []
+
+    def card_problem(relative, reason):
+        if held is None:
+            problems.append(reason)
+        else:
+            held.setdefault(_held_reference(relative), reason)
     diagnostics = diagnostics if diagnostics is not None else []
     deadline = time.monotonic() + seconds
     from epitype import rule_legacy, rule_pipeline, rule_context
@@ -234,7 +242,7 @@ def collect(vaults, *, event=None, diagnostics=None, seconds=5.0, owned_cards=()
                 text = path.read_text(encoding="utf-8-sig")
             except (OSError, UnicodeError) as exc:
                 # An unreadable ordinary-named card may own existing native keys.
-                problems.append(memspec.HOST_NATIVE_CARD_UNREADABLE_REASON.format(
+                card_problem(relative, memspec.HOST_NATIVE_CARD_SKIPPED_UNREADABLE_REASON.format(
                     card=relative, error=type(exc).__name__))
                 continue
             front, closing = memspec.split_frontmatter(text)
@@ -260,22 +268,22 @@ def collect(vaults, *, event=None, diagnostics=None, seconds=5.0, owned_cards=()
                         if identity and native_paths is not None and integrity is None:
                             raise ValueError('owned native source has no frozen identity or verified retirement')
                         if integrity is not None and not integrity.allowed:
-                            problems.append(memspec.HOST_NATIVE_CARD_INVALID_REASON.format(
+                            card_problem(relative, memspec.HOST_NATIVE_CARD_INVALID_REASON.format(
                                 card=relative, problem='; '.join(integrity.issues)))
                 except (ValueError, OSError, UnicodeError) as exc:
-                    problems.append(memspec.HOST_NATIVE_CARD_INVALID_REASON.format(
+                    card_problem(relative, memspec.HOST_NATIVE_CARD_INVALID_REASON.format(
                         card=relative, problem=str(exc)))
                 continue
             fields, problem = memspec.frontmatter_text(text)
             if closing is None or problem:
-                problems.append(memspec.HOST_NATIVE_CARD_INVALID_REASON.format(
+                card_problem(relative, memspec.HOST_NATIVE_CARD_INVALID_REASON.format(
                     card=relative, problem=problem or 'unclosed native card frontmatter'))
                 continue
             try:
                 projected = rule_pipeline.projection(fields, path, card_text=text,
                                                      allow_unavailable_sources=True)
             except (ValueError, OSError, UnicodeError) as exc:
-                problems.append(memspec.HOST_NATIVE_CARD_INVALID_REASON.format(
+                card_problem(relative, memspec.HOST_NATIVE_CARD_INVALID_REASON.format(
                     card=relative, problem=str(exc)))
                 continue
             if timed_out():
@@ -287,8 +295,9 @@ def collect(vaults, *, event=None, diagnostics=None, seconds=5.0, owned_cards=()
                 continue
             values, invalid = memspec.host_native_values(front)
             if invalid:
-                problems.extend(memspec.HOST_NATIVE_CARD_INVALID_REASON.format(
-                    card=relative, problem=problem) for problem in invalid)
+                for item in invalid:
+                    card_problem(relative, memspec.HOST_NATIVE_CARD_INVALID_REASON.format(
+                        card=relative, problem=item))
                 continue
             scope = projected['document'].get('scope')
             # Empty, fully bound declarations withdraw owned native settings.
@@ -298,7 +307,7 @@ def collect(vaults, *, event=None, diagnostics=None, seconds=5.0, owned_cards=()
                 if applicable == 'OUTSIDE':
                     continue
                 if applicable == 'ADVISORY':
-                    problems.append(memspec.HOST_NATIVE_CARD_INVALID_REASON.format(
+                    card_problem(relative, memspec.HOST_NATIVE_CARD_INVALID_REASON.format(
                         card=relative, problem='UNVERIFIED rule scope: ' + reason))
                     continue
             if projected['provenance']['status'] != 'VERIFIED':
@@ -327,6 +336,24 @@ def collect(vaults, *, event=None, diagnostics=None, seconds=5.0, owned_cards=()
                                else ' is ambiguous across its target vault group'))
     timed_out()
     return desired, problems
+
+
+def _held_reference(relative):
+    try:
+        return _card_reference(relative)
+    except ValueError:
+        return relative.casefold() if os.name == 'nt' else relative
+
+
+def _held_by(previous, held):
+    """上次寫這個鍵的卡在這次被略過：鍵與它的狀態紀錄都原樣保留。"""
+    if not held or not isinstance(previous, dict):
+        return None
+    card = previous.get("card")
+    try:
+        return card if _card_reference(card) in held else None
+    except ValueError:
+        return None
 
 
 def _shown(value):
@@ -432,21 +459,23 @@ def _lookup(parsed, dotted):
     return node.get(parts[-1]), parts[-1] in node, True
 
 
-def plan(target, desired, record):
-    """這個設定檔要改什麼。record 是狀態表裡這個檔上次的紀錄（沒有就是 {}）。"""
+def plan(target, desired, record, held=frozenset()):
+    """這個設定檔要改什麼。record 是狀態表裡這個檔上次的紀錄（沒有就是 {}）。
+
+    `held` 是這次略過的卡：它們上次寫的鍵不改、不收回，狀態紀錄照舊留著。"""
     try:
         raw, text, _bom = _read(target.path)
     except (OSError, UnicodeError) as exc:
         return Plan(target, [], [memspec.HOST_NATIVE_UNREADABLE_REASON.format(
             error=f"{type(exc).__name__}: {exc}")], True, [], None)
     if target.kind == KIND_CODEX_RULES:
-        return _plan_rules(target, desired, record, raw, text)
+        return _plan_rules(target, desired, record, raw, text, held)
     try:
         parsed = _parse(target.kind, text)
     except (ValueError, UnicodeError, tomllib.TOMLDecodeError) as exc:
         return Plan(target, [], [memspec.HOST_NATIVE_UNREADABLE_REASON.format(
             error=f"{type(exc).__name__}: {exc}")], True, [], raw)
-    entries, problems = [], []
+    entries, problems, kept = [], [], []
     sections = ((SECTION_ENV, "env."), (SECTION_DENY, None)) if target.kind == KIND_CLAUDE else (
         (SECTION_CONFIG, ""),)
     for section, prefix in sections:
@@ -461,16 +490,26 @@ def plan(target, desired, record):
                 continue
             listed = listed or []
             for rule, card in desired[SECTION_DENY].items():
+                holder = _held_by(remembered.get(rule), held)
+                if holder:
+                    kept.append((f"permissions.deny[{rule}]", holder, card))
+                    continue
                 present = rule in listed
                 entries.append(Entry(section, rule, True, present, card,
                                      _status(True, present, remembered.get(rule), present)))
             for rule, previous in remembered.items():
+                if _held_by(previous, held):
+                    continue
                 if rule not in desired[SECTION_DENY]:
                     entries.append(Entry(section, rule, None, rule in listed, previous.get("card"),
                                          _stale(dict(previous, value=True), True, rule in listed)))
             continue
         wanted = desired[SECTION_ENV if section == SECTION_ENV else SECTION_CONFIG]
         for key, (value, card) in wanted.items():
+            holder = _held_by(remembered.get(key), held)
+            if holder:
+                kept.append(((prefix or "") + key, holder, card))
+                continue
             have, present, shape_ok = _lookup(parsed, prefix + key)
             if not shape_ok:
                 problems.append(memspec.HOST_NATIVE_SHAPE_REASON.format(
@@ -479,7 +518,7 @@ def plan(target, desired, record):
             entries.append(Entry(section, key, value, have, card,
                                  _status(value, have, remembered.get(key), present)))
         for key, previous in remembered.items():
-            if key in wanted:
+            if key in wanted or _held_by(previous, held):
                 continue
             have, present, _shape = _lookup(parsed, prefix + key)
             entries.append(Entry(section, key, previous.get("value"), have, previous.get("card"),
@@ -492,6 +531,8 @@ def plan(target, desired, record):
     notes = [memspec.HOST_NATIVE_DISOWNED_NOTE.format(key=_entry_name(target, entry),
                                                        have=_shown(entry.have))
              for entry in entries if entry.status == DISOWN]
+    notes.extend(memspec.HOST_NATIVE_HELD_KEY_NOTE.format(key=key, held=holder, card=card)
+                 for key, holder, card in kept)
     return Plan(target, entries, problems, False, notes, raw)
 
 
@@ -516,7 +557,13 @@ def _rule_display(pattern):
     return " ".join("|".join(choices) for choices in pattern)
 
 
-def _plan_rules(target, desired, record, raw, text):
+def _plan_rules(target, desired, record, raw, text, held=frozenset()):
+    # 規則檔每次整份重建；略過的卡上次寫的規則只記了顯示字串，重建不回原樣式。
+    holders = sorted({card for card in (record.get(SECTION_RULES) or {}).values()
+                      if _held_by({"card": card}, held)})
+    if holders:
+        return Plan(target, [], [memspec.HOST_NATIVE_RULES_HELD_REASON.format(
+            path=target.path, cards="、".join(holders))], True, [], raw)
     wanted = rules_text(desired)
     ours = text.startswith(memspec.HOST_NATIVE_RULES_HEADER.splitlines()[0])
     if raw is not None and not ours:
@@ -586,14 +633,17 @@ def _plans(vaults, hosts=None, home=None):
         group = target_group(target)
         first = group not in collected
         if first:
-            diagnostics = []
+            diagnostics, held = [], {}
             desired, problems = collect(target.vaults, event={
                 'cwd': str(target.root) if target.root is not None else None,
-                'tool_name': 'host_sync'}, diagnostics=diagnostics, owned_cards=group_cards[group])
-            collected[group] = desired, problems, diagnostics
-        desired, problems, diagnostics = collected[group]
+                'tool_name': 'host_sync'}, diagnostics=diagnostics, owned_cards=group_cards[group],
+                held=held)
+            collected[group] = desired, problems, diagnostics, held
+        desired, problems, diagnostics, held = collected[group]
+        # 略過的卡只在這個庫的第一個目標講一次。
+        skipped = [held[card] for card in sorted(held)] if first else []
         if problems and not first:
-            continue  # 同一個庫的卡片問題只講一次；它的每一個目標都整批不寫
+            continue  # 同一個庫的整批問題只講一次；它的每一個目標都整批不寫
         record = state.get(_key(target.path)) or {}
         if record and record['kind'] != target.kind:
             plans.append(Plan(target, [], ['UNVERIFIED ownership state: target kind does not match its actual interface'], False, [], None))
@@ -605,12 +655,15 @@ def _plans(vaults, hosts=None, home=None):
         else:
             wanted = desired[SECTION_RULES]
         if problems:
-            plans.append(Plan(target, [], list(problems), False, list(diagnostics), None))
+            plans.append(Plan(target, [], [*problems, *skipped], False, list(diagnostics), None))
             continue
         if not wanted and not record:
+            if skipped:
+                plans.append(Plan(target, [], skipped, False, list(diagnostics), None))
             continue
-        planned = plan(target, desired, record)
-        plans.append(planned._replace(notes=[*planned.notes, *(diagnostics if first else [])]))
+        planned = plan(target, desired, record, frozenset(held))
+        plans.append(planned._replace(problems=[*skipped, *planned.problems],
+                                      notes=[*planned.notes, *(diagnostics if first else [])]))
     return plans, state
 
 
