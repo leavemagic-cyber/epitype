@@ -1704,11 +1704,12 @@ STOP_NOTE_FORBIDDEN = "別說「{fragment}」（{decision}）"
 STOP_NOTE_POLICY = "{advice} ({decision})"
 STOP_NOTE_MATCHED_TEXT = "對照文字：{fragment}"
 # 回合閘不擋：命中只留這一行給下一則提問，整行不超過 STOP_NOTE_MAX_CHARS。只有卡名與檢查名
-# 的提醒說不出下一則該照什麼做，所以附上卡片建議、owner 原話（不是 owner 明示的卡改用卡片說明）
+# 的提醒說不出下一則該照什麼做，所以附上卡片建議、原話（不是 owner 明示的卡改用卡片說明）
 # 與命中片段各一段，超長就按比例截短；舊的「請改寫」阻擋理由不送回模型。
 STOP_NOTE_NOTICE = "Epitype 提醒：回覆命中 {decision} 的 {rule} 檢查{details}。這一則不用重送。"
 STOP_NOTE_ADVICE_PART = "；建議：{text}"
-STOP_NOTE_OWNER_QUOTE_PART = "；owner 原話：「{text}」"
+# 不寫「owner」：2026-09-27 owner 確認這個稱呼不出現在使用者看得到的提醒裡。
+STOP_NOTE_OWNER_QUOTE_PART = "；原話：「{text}」"
 STOP_NOTE_CARD_TEXT_PART = "；卡片說明：「{text}」"
 STOP_NOTE_MATCHED_PART = "；對照文字：「{text}」"
 STOP_NOTE_ELLIPSIS = "…"

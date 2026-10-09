@@ -172,6 +172,7 @@ class StopNoteSaysWhatToDo(unittest.TestCase):
                 memspec.STOP_NOTE_ADVICE_PART.format(text="細節寫進檔案")
                 + memspec.STOP_NOTE_OWNER_QUOTE_PART.format(text="不要整段貼回來")
                 + memspec.STOP_NOTE_MATCHED_PART.format(text="整段貼回"))))
+        self.assertNotIn("owner", note)
 
     def test_long_fields_are_clipped_to_the_budget_and_none_is_dropped(self):
         key = "feedback_reasked_a_decided_item_auto_shutter_tier_with_a_long_tail"
