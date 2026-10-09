@@ -10,6 +10,8 @@ import pretooluse_gate as pretool
 import sessionstart_hook as sessionstart
 from epitype import compact_map, rule_context
 
+NOTE = '既有裁定提醒（本次寫入放行）'
+
 
 class SourceEntrypoints(unittest.TestCase):
     setUp = source_fixture.SourceConsumers.setUp
@@ -28,13 +30,16 @@ class SourceEntrypoints(unittest.TestCase):
                           + '\n+badold\n*** End Patch'})
                 event = {'session_id': host + '-project-write', 'tool_name': tool,
                          'tool_input': tool_input, 'cwd': str(self.root / 'project' / 'sub')}
-                denied = pretool._handle(event, time.monotonic(), [])
-                self.assertEqual(denied['hookSpecificOutput']['permissionDecision'], 'deny')
+                # A forbidden write is advisory: allowed, with the ruling note in context.
+                noted = pretool._handle(event, time.monotonic(), [])
+                self.assertNotIn('permissionDecision', noted['hookSpecificOutput'])
+                self.assertIn(NOTE, noted['hookSpecificOutput']['additionalContext'])
                 outside = {**event, 'session_id': host + '-outside-write',
                            'cwd': str(self.root / 'project-sibling')}
                 allowed = pretool._handle(outside, time.monotonic(), [])
-                self.assertTrue(allowed is None or
-                    allowed['hookSpecificOutput'].get('permissionDecision') != 'deny')
+                self.assertTrue(allowed is None or (
+                    allowed['hookSpecificOutput'].get('permissionDecision') != 'deny'
+                    and NOTE not in allowed['hookSpecificOutput'].get('additionalContext', '')))
                 scope['level'], scope['case'] = 'case', 'A'
                 self.card(host=host, scope=scope)
                 notices = []
@@ -44,6 +49,7 @@ class SourceEntrypoints(unittest.TestCase):
                     unknown['hookSpecificOutput'].get('permissionDecision') != 'deny')
                 self.assertIsNotNone(unknown)
                 self.assertIn('case context', unknown['hookSpecificOutput']['additionalContext'])
+                self.assertNotIn(NOTE, unknown['hookSpecificOutput']['additionalContext'])
 
     def test_real_compact_entrypoint_preserves_scope_and_reports_budget_gap(self):
         transcript = self.root / 'transcript.jsonl'

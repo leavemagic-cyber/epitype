@@ -52,6 +52,14 @@ class StopFreshnessRegression(unittest.TestCase):
     def decisions(self):
         return stop._decisions(self.vault, time.monotonic())
 
+    def noted(self, session_id):
+        """Decision keys the Stop gate noted for this session; Stop never blocks."""
+        log = self.vault / memspec.GATE_LOG_FILENAME
+        rows = ([json.loads(line) for line in log.read_text(encoding="utf-8").splitlines() if line.strip()]
+                if log.is_file() else [])
+        return [row.get("decision") for row in rows
+                if row.get("kind") == memspec.STOP_NOTE_LOG_KIND and row.get("session_id") == session_id]
+
     def replace_preserving_metadata(self, path, before, after):
         info = path.stat()
         text = path.read_text(encoding="utf-8")
@@ -63,12 +71,14 @@ class StopFreshnessRegression(unittest.TestCase):
     def test_actual_hook_stops_using_implicit_authority_with_identical_scan_signature(self):
         card = self.card()
         event = {"session_id": "before", "last_assistant_message": "aliasold 和 otherold 要不要調整？"}
-        self.assertEqual(stop._handle(event, time.monotonic(), [])["decision"], "block")
+        self.assertIsNone(stop._handle(event, time.monotonic(), []))
+        self.assertEqual(self.noted("before"), ["fixture"])
         scan = [(key, stamp, size) for key, _, stamp, size in memsearch.scan_cards(self.vault)]
         self.replace_preserving_metadata(card, "owner-explicit", "owner-implicit")
         self.assertEqual(scan, [(key, stamp, size) for key, _, stamp, size in memsearch.scan_cards(self.vault)])
         event["session_id"] = "after"
         self.assertIsNone(stop._handle(event, time.monotonic(), []))
+        self.assertEqual(self.noted("after"), [])
         self.assertEqual(self.decisions()[0].decided_by, "owner-implicit")
 
     def test_current_status_quote_date_aliases_and_forbidden_are_read(self):
@@ -181,7 +191,8 @@ class StopFreshnessRegression(unittest.TestCase):
         card.read_text(encoding="utf-8")
         self.assertEqual(stop._read_decision(card)["key"], "fixture")
         event = {"session_id": "split-body", "last_assistant_message": "aliasold 和 otherold 要不要調整？"}
-        self.assertEqual(stop._handle(event, time.monotonic(), [])["decision"], "block")
+        self.assertIsNone(stop._handle(event, time.monotonic(), []))
+        self.assertEqual(self.noted("split-body"), ["fixture"])
 
     def test_timeout_in_the_scan_loop_is_never_silent(self):
         """A timeout before a card is recognised is the least visible one.

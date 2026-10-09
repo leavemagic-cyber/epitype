@@ -1855,8 +1855,10 @@ def _envelope_review(event, tool_input, config, started_at):
             continue
         if entry.op == "delete":
             if target.suffix.casefold() == ".md":
-                deny, _advice = _review_one_target(
+                deny, advice = _review_one_target(
                     event, config, target, [], "", started_at, session_id, patch=entry)
+                # A deletion's findings are advice too; dropping them hides the removal.
+                notices.extend(advice)
                 if deny is not None:
                     return deny, []
             continue

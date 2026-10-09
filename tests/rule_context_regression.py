@@ -29,7 +29,8 @@ class RuleContextRegression(unittest.TestCase):
             self.assertIn('先查原始證據', result['hookSpecificOutput']['additionalContext'])
 
     def test_blocked_card_recorded(self):
-        self.write_card('guard.md', name='guard', description='禁止測試動作',
+        # A guard denies only when its card declares on_hit: block; the default is a note.
+        self.write_card('guard.md', name='guard', description='禁止測試動作', on_hit='block',
                         guard_tool='Bash', guard_all_of=['dangerous'], guard_advice='停下')
         result = pretool._handle({'session_id': 'blocked', 'tool_name': 'Bash',
                                 'tool_input': {'command': 'dangerous'}}, time.monotonic(), [])
