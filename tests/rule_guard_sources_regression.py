@@ -1,7 +1,8 @@
 """Fresh source, complete interpretation and scope through real tool callers.
 
-A guard denies only when its card says on_hit: block; the default since owner
-2026-10-03 (6f6fce1; CORE-25) is a note, pinned in pretool_advisory_regression.
+A guard denies only when its card says on_hit: block and its source is VERIFIED;
+the default since owner 2026-10-03 (6f6fce1; CORE-25) is a note, pinned in
+pretool_advisory_regression, and an unverified source's block is a note too.
 These tests are about the source binding, so their guard cards declare on_hit:
 block inside the bound text, and the binding stays valid."""
 import sys
@@ -127,6 +128,12 @@ class GuardSources(unittest.TestCase):
     def denial(self, value):
         return (value or {}).get('hookSpecificOutput', {}).get('permissionDecisionReason')
 
+    def advice(self, session, defects=None):
+        """The legacy guard's reminder for a fresh session; it never denies."""
+        value = self.call({**self.event(), 'session_id': session}, defects)
+        self.assertIsNone(self.denial(value))
+        return self.allowed_context(value)
+
     def allowed_context(self, value):
         output = (value or {}).get('hookSpecificOutput', {})
         self.assertNotIn('permissionDecision', output)
@@ -240,31 +247,34 @@ class GuardSources(unittest.TestCase):
         self.assertTrue(any('INVALID' in item for item in defects))
 
     def test_legacy_unconfigured_is_compatible_and_explicitly_unverified(self):
+        # An unverified source's on_hit: block only reminds (CORE-08/CORE-25).
         self.legacy()
         defects = []
-        reason = self.denial(self.call(defects=defects))
-        self.assertIn('來源未驗證', reason)
-        self.assertIn('作者：UNVERIFIED', reason)
+        context = self.advice('legacy-unconfigured', defects)
+        self.assertIn('legacy advice', context)
+        self.assertIn('來源未驗證', context)
+        self.assertIn('作者：UNVERIFIED', context)
+        self.assertIn(memspec.ACTION_GUARD_UNVERIFIED_BLOCK_NOTE, context)
         self.assertTrue(any('UNVERIFIED' in item for item in defects))
 
     def test_frozen_legacy_fresh_meaning_rejects_tamper(self):
         self.legacy()
         self.baseline()
-        self.assertIsNotNone(self.denial(self.call()))
+        self.assertIn('legacy advice', self.advice('frozen-before'))
         self.replace_same_stat(self.card_path, b'Synthetic body.', b'Synthetic evil.')
         defects = []
-        self.assertIsNone(self.denial(self.call(defects=defects)))
+        self.assertNotIn('legacy advice', self.advice('frozen-after', defects))
         self.assertTrue(any('INVALID' in item for item in defects))
 
     def test_frozen_legacy_valid_json_tamper_is_not_cached(self):
         self.legacy()
         self.baseline()
-        self.assertIsNotNone(self.denial(self.call()))
+        self.assertIn('legacy advice', self.advice('pin-before'))
         raw = self.baseline_path.read_bytes()
         digest = next(iter(json.loads(raw)['entries'].values())).encode()
         self.replace_same_stat(self.baseline_path, digest, b'0' * 64)
         defects = []
-        self.assertIsNone(self.denial(self.call(defects=defects)))
+        self.assertNotIn('legacy advice', self.advice('pin-after', defects))
         self.assertTrue(any('pin' in item for item in defects))
 
     def test_new_legacy_card_not_automatically_enrolled(self):
@@ -284,9 +294,9 @@ class GuardSources(unittest.TestCase):
         value['guards']['guard.md'].update({'tool': 'different-tool',
             'substrings': ['different-marker'], 'advice': 'forged legacy authority'})
         cache.write_text(json.dumps(value), encoding='utf-8')
-        reason = self.denial(self.call())
-        self.assertIn('legacy advice', reason)
-        self.assertNotIn('forged legacy authority', reason)
+        context = self.advice('cache-after')
+        self.assertIn('legacy advice', context)
+        self.assertNotIn('forged legacy authority', context)
 
     def test_invalid_successor_is_diagnosed_instead_of_retiring_guard_silently(self):
         self.card(fields={'guard_tool': 'Bash', 'guard_all_of': ['guard-hit-marker'],

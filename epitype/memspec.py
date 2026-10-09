@@ -1195,6 +1195,7 @@ ACTION_GUARD_REASON = "🛑 傷疤卡（{card}）：這次 {tool} 同時含有 {
 # 沒寫 on_hit: block 的卡只提醒：呼叫放行，代理看到的是這一行，不是拒絕理由。
 ACTION_GUARD_ADVISORY_LINE = "Epitype [{card}]：{excerpt}"
 ACTION_GUARD_NOTE = "提醒：{advice}"
+ACTION_GUARD_UNVERIFIED_BLOCK_NOTE = "這張卡寫 on_hit: block，但來源未驗證（不是已驗證的 owner 核准），所以只提醒、不擋。"
 # 另一類危害不是「呼叫裡出現了什麼字」，而是「呼叫少了什麼」。派工不指名模型就是這種：
 # 空欄位會沿用主線那個貴模型去做機械工作，而字面比對永遠看不到一個不存在的欄位。所以
 # 守衛卡也能宣告「這個工具的呼叫必須帶哪些欄位」——機制只問欄位在不在，該帶什麼、為何
@@ -3763,6 +3764,8 @@ _EN = {
     "WRITE_GATE_CARD_ADVICE": "🧾 card suggestion ({card_type}): {path} {problems}",
     "ACTION_GUARD_REASON": "🛑 Scar card ({card}): this {tool} call contains all of {fragments} — {advice}",
     "ACTION_GUARD_ADVISORY_LINE": "Epitype [{card}]: {excerpt}",
+    "ACTION_GUARD_UNVERIFIED_BLOCK_NOTE": ("This card says on_hit: block, but its source is unverified "
+                                           "(no verified owner approval), so it only reminds and does not block."),
     "ACTION_GUARD_NOTE": "Note: {advice}",
     "ACTION_GUARD_REQUIRES_REASON": "🛑 Scar card ({card}): this {tool} call does not carry {fields} — {advice}",
     "ACTION_GUARD_WHEN_REASON": "🛑 Scar card ({card}): {pairs} on this {tool} call is a combination that must not go together — {advice}",

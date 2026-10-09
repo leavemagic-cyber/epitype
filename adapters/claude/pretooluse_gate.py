@@ -1099,8 +1099,15 @@ def _guards(vault, started_at, defects, cap=None, deadline=None, *, event=None, 
                 continue
             if event is None:
                 continue
+            on_hit = entry.get("on_hit", "note")
+            advice = entry.get("advice", "")
             if entry.get("source_status") != "VERIFIED":
                 defects.append(f"[{card_path}] guard source UNVERIFIED: " + "; ".join(entry.get("source_issues") or ["legacy source not verified"]))
+                # CORE-08/CORE-25: only an owner-verified source may deny; an
+                # unverified card's on_hit: block is shown as a reminder.
+                if on_hit == "block":
+                    on_hit = "note"
+                    advice = "\n".join(filter(None, (advice, memspec.ACTION_GUARD_UNVERIFIED_BLOCK_NOTE)))
             scope = entry.get("source_scope")
             if scope is not None:
                 state, reason = rule_context.applicability(scope, event)
@@ -1117,7 +1124,7 @@ def _guards(vault, started_at, defects, cap=None, deadline=None, *, event=None, 
                     entry.get("card", card_path),
                     entry.get("tool", ""),
                     tuple(item for item in (entry.get("substrings") or ()) if isinstance(item, str)),
-                    entry.get("advice", ""),
+                    advice,
                     vault / card_path,
                     tuple(item for item in (entry.get("requires") or ()) if isinstance(item, str)),
                     tuple(
@@ -1137,7 +1144,7 @@ def _guards(vault, started_at, defects, cap=None, deadline=None, *, event=None, 
                     entry.get("advise_text", ""),
                     tuple(entry.get("sequence") or ()),
                     entry.get("audience", ""),
-                    entry.get("on_hit", "note"),
+                    on_hit,
                 )
             )
     return found
