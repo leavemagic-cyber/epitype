@@ -208,6 +208,20 @@ class StopNoteSaysWhatToDo(unittest.TestCase):
         self.assertIn("forbidden-text", notes[0])
 
 
+class DocumentedStopBehaviour(unittest.TestCase):
+    """FAILURE_MODES §10 is what an operator reads to learn what Stop does; it must not
+    describe the veto that was removed on 2026-10-03."""
+
+    def test_section_10_describes_the_note_not_a_block(self):
+        text = (Path(__file__).resolve().parents[1] / "docs" / "FAILURE_MODES.md").read_text(
+            encoding="utf-8")
+        section = text.split("\n## 10. ", 1)[1].split("\n## 11. ", 1)[0]
+        self.assertIn("never blocks", section)
+        self.assertIn(memspec.STOP_NOTE_LOG_KIND, section)
+        for stale in ('"decision": "block"', memspec.STOP_GATE_LOG_KIND, "blocks the turn"):
+            self.assertNotIn(stale, section)
+
+
 if __name__ == "__main__":
     if "--selftest" in sys.argv:
         sys.argv.remove("--selftest")
