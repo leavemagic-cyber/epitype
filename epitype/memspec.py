@@ -1780,7 +1780,7 @@ HOST_SYNC_PROJECT_REGIONS = {
 HOST_SYNC_INDEX_FILENAME = "MEMORY.md"
 HOST_SYNC_BACKUP_SUFFIX = ".epitype-bak"
 # 宿主檔每一場都整份載入，所以這兩塊是每一場的固定成本。專案索引超過時改寫成指向
-# MEMORY.md 的短指標（拒寫會留下舊索引，作廢的規則照樣每場載入）；其他塊超過就拒絕寫。
+# MEMORY.md 的短指標，其他塊整塊照寫；兩者都只提醒。拒寫會留下舊區塊，作廢的規則照樣每場載入。
 HOST_SYNC_REGION_CAP_BYTES = 24576
 # 宿主對「每場都載入的那個檔」有自己的上限，超過的部分是**安靜**被丟掉的——代理看起來
 # 讀了整份，實際上後半段從來沒到它面前。我們只守自己那兩塊沒有用：使用者自己的內容加上

@@ -292,7 +292,7 @@ def _plan(host, label, key, path, wanted_of, home=None, over_cap=None):
     `host` 是真正的宿主（決定規則視圖與載入上限），`label` 是輸出裡的名字，`key` 是狀態
     表的鍵（專案檔用絕對路徑，見 Plan）。`wanted_of` 晚一步才叫：檔案讀不動時要先報那一
     件，不是先報組不出內容——先講的那一句會被當成原因。`over_cap` 是{區名: 替代內容}：
-    該塊超過每場固定成本上限時改寫替代內容並提醒，沒有替代的塊照舊拒寫。
+    該塊超過每場固定成本上限時改寫替代內容並提醒，沒有替代的塊整塊照寫並提醒。
     """
     try:
         _raw_bytes, raw, _newline = read_host(path)
@@ -322,11 +322,11 @@ def _plan(host, label, key, path, wanted_of, home=None, over_cap=None):
             text = over_cap[name]
             size = len(text.encode("utf-8"))
         if size > memspec.HOST_SYNC_REGION_CAP_BYTES:
-            problems.append(
+            # 這個上限只是每場成本提醒：拒寫會留下舊區塊，作廢的規則照樣每場載入。
+            notices.append(
                 f"{name} 有 {size} 位元組，超過每場固定成本上限 "
-                f"{memspec.HOST_SYNC_REGION_CAP_BYTES}；先讓內容瘦身再同步"
+                f"{memspec.HOST_SYNC_REGION_CAP_BYTES}；仍整塊寫入，請考慮瘦身"
             )
-            continue
         if name == memspec.HOST_SYNC_RULES_REGION and rules_cap is not None and size > rules_cap:
             notices.append(
                 f"{name} 有 {size} 位元組，超過設定的 {memspec.CONFIG_CORE_CAP_BYTES_FIELD} "
@@ -1021,19 +1021,38 @@ def _selftest():
                 and "REFUSE" in report.getvalue(),
             ))
 
-            # 超過每場固定成本上限：拒絕寫，說清楚是哪一塊。
+            # 超過每場固定成本上限：只提醒（講出大小與上限），整塊照寫，不留舊區塊。
             big = root / "big-vault"
             big.mkdir()
+            big_index = "x" * (memspec.HOST_SYNC_REGION_CAP_BYTES + 10)
             (big / memspec.HOST_SYNC_INDEX_FILENAME).write_text(
-                "# 入口\n\n" + ("x" * (memspec.HOST_SYNC_REGION_CAP_BYTES + 10)),
+                "# 入口\n\n" + big_index, encoding="utf-8")
+            big_home = root / "big-home"
+            (big_home / ".codex").mkdir(parents=True)
+            big_host = host_path("codex", big_home)
+            big_host.write_text(
+                "\n".join([*memspec.HOST_SYNC_MARKERS[memspec.HOST_SYNC_INDEX_REGION][:1],
+                           "- [舊索引](stale.md)",
+                           *memspec.HOST_SYNC_MARKERS[memspec.HOST_SYNC_INDEX_REGION][1:]]) + "\n",
                 encoding="utf-8")
-            report = io.StringIO()
+            size_line = (f"{memspec.HOST_SYNC_INDEX_REGION} 有 {len(big_index.encode('utf-8'))} 位元組，"
+                         f"超過每場固定成本上限 {memspec.HOST_SYNC_REGION_CAP_BYTES}")
             selftest_config.write_text(json.dumps({"vaults": [str(big)]}), encoding="utf-8")
-            code = check([big], hosts=["codex"], home=home, output=report)
+            checked_report, applied_report = io.StringIO(), io.StringIO()
+            checked = check([big], hosts=["codex"], home=big_home, output=checked_report)
+            applied = apply([big], hosts=["codex"], home=big_home, output=applied_report)
             selftest_config.write_text(json.dumps({"vaults": [str(vault)]}), encoding="utf-8")
+            written = big_host.read_text(encoding="utf-8")
             checks.append((
-                "區塊超過上限就拒絕，並指名是哪一塊",
-                code == EXIT_REFUSED and "index" in report.getvalue(),
+                "區塊超過上限只提醒並指名大小與上限，整塊照寫、舊區塊不留",
+                checked == EXIT_DRIFT
+                and applied == EXIT_OK
+                and "REFUSE" not in checked_report.getvalue() + applied_report.getvalue()
+                and all(any(line.startswith("NOTE") and size_line in line
+                            for line in report.getvalue().splitlines())
+                        for report in (checked_report, applied_report))
+                and big_index in written
+                and "stale.md" not in written,
             ))
 
             # 第二輪審查：寫得進去就要拿得回來，而且拿回來只能動我們的區塊。
@@ -1188,7 +1207,7 @@ def _selftest():
                 and merged.count(begin) == 1 and "序言" in merged,
             ))
 
-            # 6. 一塊超過上限不該連累另一塊。
+            # 6. 一塊超過上限不該連累另一塊；超過的那塊本身也照寫，只提醒。
             report = io.StringIO()
             fresh("cap", "使用者序言\n")
             selftest_config.write_text(json.dumps({"vaults": [str(big)]}), encoding="utf-8")
@@ -1196,8 +1215,9 @@ def _selftest():
             selftest_config.write_text(json.dumps({"vaults": [str(vault)]}), encoding="utf-8")
             capped = (home / ".claude" / "CLAUDE.md").read_text(encoding="utf-8")
             checks.append((
-                "索引超過上限時，規則塊照樣寫得進去",
-                "REFUSE" in report.getvalue() and begin in capped
+                "索引超過上限時只提醒，規則塊與索引塊都寫得進去",
+                "REFUSE" not in report.getvalue() and size_line in report.getvalue()
+                and begin in capped and big_index in capped
                 and "使用者序言" in capped,
             ))
 
