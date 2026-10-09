@@ -315,6 +315,61 @@ class DefaultLanguageOutputIsPinned(_HookCase):
         self.assertEqual(result.returncode, 0, result.stderr)
 
 
+# 寫檔與讀檔提醒的標籤原本寫死在閘門裡；改成常數後繁中逐字不變。
+ZH_NOTE_LABELS = {
+    "WRITE_NOTE_ENCODING_LABEL": "編碼提醒（本次寫入放行）：",
+    "WRITE_NOTE_ATTRIBUTION_LABEL": "歸屬查核提醒（本次寫入放行）：",
+    "WRITE_NOTE_OWNER_RULINGS_LABEL": "裁定生成段提醒（本次寫入放行）：",
+    "WRITE_NOTE_FORBIDDEN_LABEL": "既有裁定提醒（本次寫入放行）：",
+    "WRITE_NOTE_RECURRENCE_LABEL": "事件紀錄提醒（本次寫入放行）：",
+    "WRITE_NOTE_CARD_LABEL": "卡片待補資料（本次寫入放行）：",
+    "WRITE_NOTE_BOM_TOO_LARGE": ("{name} 含非 ASCII 字元卻沒有 UTF-8 BOM，"
+                                 "PowerShell 5.1 會讀錯；內容太大，閘門無法代為補上，請自行在檔頭加 BOM。"),
+    "READ_WASTE_LARGE_NOTICE": ("讀取提醒：{path} 共 {size} bytes；"
+                                "內容量較大時分段讀完必要內容並保存已讀範圍，完整判斷仍須覆蓋全文。"),
+    "READ_WASTE_RANGE_COUNT_NOTICE": ("讀取提醒：{path} 同範圍第 {count} 次讀取；"
+                                      "挑戰、驗收或明示重讀需要時照常讀取。"),
+}
+
+
+class NoteLabelsFollowTheLanguage(_HookCase):
+    def constants(self, language):
+        result = subprocess.run(
+            [sys.executable, "-c", "import json; from epitype import memspec; print(json.dumps("
+             "{name: getattr(memspec, name) for name in " + repr(sorted(ZH_NOTE_LABELS)) + "}))"],
+            capture_output=True, text=True, encoding="utf-8",
+            env=self.environment(language), cwd=str(ROOT))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def test_chinese_labels_are_byte_identical(self):
+        self.assertEqual(self.constants(None), ZH_NOTE_LABELS)
+
+    def test_every_label_has_an_english_version(self):
+        english = self.constants(memspec.LANGUAGE_EN)
+        for name in ZH_NOTE_LABELS:
+            with self.subTest(name=name):
+                self.assertIn(name, memspec._EN)
+                self.assertIsNone(CJK.search(english[name]), english[name])
+
+    def big_read(self, language):
+        target = self.root / "big.txt"
+        target.write_text("x" * memspec.READ_WASTE_BIG_FILE_BYTES, encoding="ascii")
+        value = self.run_hook(PRETOOLUSE, {
+            "tool_name": "Read", "tool_input": {"file_path": str(target)},
+            "session_id": "lang-read-" + str(language), "cwd": str(self.root),
+        }, self.environment(language))
+        return value["hookSpecificOutput"]["additionalContext"], target
+
+    def test_the_read_note_reaches_the_hook_output_in_each_language(self):
+        context, target = self.big_read(None)
+        self.assertIn(ZH_NOTE_LABELS["READ_WASTE_LARGE_NOTICE"].format(
+            path=target, size=memspec.READ_WASTE_BIG_FILE_BYTES), context)
+        context, _target = self.big_read(memspec.LANGUAGE_EN)
+        self.assertIn("Read note: ", context)
+        self.assertIsNone(CJK.search(context), context)
+
+
 class InstallerWritesTheFieldOnlyOnce(unittest.TestCase):
     """全新安裝寫一行；既有設定檔一個位元組都不碰。"""
 

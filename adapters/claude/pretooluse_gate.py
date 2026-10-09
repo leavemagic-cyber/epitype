@@ -1688,7 +1688,7 @@ def _write_check_review(event, config, target, prospective, patch, started_at, *
                       "target": str(target)}, event.get("session_id")),
         started_at,
     )
-    return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": "編碼提醒（本次寫入放行）：" + reason}}
+    return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": memspec.WRITE_NOTE_ENCODING_LABEL + reason}}
 
 
 def _review_one_target(event, config, target, additions, prospective, started_at, session_id,
@@ -1719,7 +1719,7 @@ for exact source validation; writing a draft is not publishing verified authorit
                     card_metadata=bool(config) and _vault_card_path(target, resolve_vaults(config, event)) is not None,
                     notices=notices)
                 if reason:
-                    notices.append("歸屬查核提醒（本次寫入放行）：" + reason)
+                    notices.append(memspec.WRITE_NOTE_ATTRIBUTION_LABEL + reason)
                 if event.get("stop_hook_active") or expired(started_at):
                     return None, notices
                 reason = (owner_rules.violation(before, after, resolve_vaults(config, event))
@@ -1728,7 +1728,7 @@ for exact source validation; writing a draft is not publishing verified authorit
                     _best_effort_audit(append_gate_log, governance_vault(config),
                         with_session({"kind": "write_note", "rule": "owner_rulings",
                                       "target": str(target)}, session_id), started_at)
-                    notices.append("裁定生成段提醒（本次寫入放行）：" + reason)
+                    notices.append(memspec.WRITE_NOTE_OWNER_RULINGS_LABEL + reason)
         except (OSError, UnicodeError, ValueError) as exc:
             # Failure to reconstruct the old file does not exempt new claims.
             # Ordinary undecidable text retains the existing write-gate contract.
@@ -1738,7 +1738,7 @@ for exact source validation; writing a draft is not publishing verified authorit
                 base=target.parent, seconds=max(0.0, min(2.0-(time.monotonic()-started_at), remaining_seconds(started_at))),
                 hard_deadline=True, notices=notices)
             if reason:
-                notices.append("歸屬查核提醒（本次寫入放行）：" + reason)
+                notices.append(memspec.WRITE_NOTE_ATTRIBUTION_LABEL + reason)
             if (owner_rules.BEGIN in str(prospective or "")
                     or owner_rules.BEGIN in locals().get("before", "")):
                 notices.append(f"交接裁定段無法驗證：{type(exc).__name__}；本次寫入放行，待同步正本。")
@@ -1776,7 +1776,7 @@ for exact source validation; writing a draft is not publishing verified authorit
             started_at,
             session_id,
         )
-        notices.append("既有裁定提醒（本次寫入放行）：" + reason[: memspec.WRITE_GATE_REASON_MAX_CHARS])
+        notices.append(memspec.WRITE_NOTE_FORBIDDEN_LABEL + reason[: memspec.WRITE_GATE_REASON_MAX_CHARS])
 
     if expired(started_at):
         return None, notices
@@ -1791,7 +1791,7 @@ for exact source validation; writing a draft is not publishing verified authorit
     except Exception:
         recurrence = None
     if recurrence is not None:
-        notices.append("事件紀錄提醒（本次寫入放行）：" + recurrence["hookSpecificOutput"]["permissionDecisionReason"])
+        notices.append(memspec.WRITE_NOTE_RECURRENCE_LABEL + recurrence["hookSpecificOutput"]["permissionDecisionReason"])
 
     if prospective is None or expired(started_at):
         return None, notices
@@ -1813,7 +1813,7 @@ for exact source validation; writing a draft is not publishing verified authorit
         started_at,
         session_id,
     )
-    notices.append("卡片待補資料（本次寫入放行）：" + reason)
+    notices.append(memspec.WRITE_NOTE_CARD_LABEL + reason)
     return None, notices
 
 
@@ -2350,8 +2350,7 @@ def _waste_review(event, tool_name, tool_input, config, started_at):
     bounds = [tool_input.get(field) for field in memspec.READ_WASTE_BOUND_FIELDS]
     bounded = any(str(value or "").strip() for value in bounds)
     if info.st_size >= memspec.READ_WASTE_BIG_FILE_BYTES and not bounded:
-        return None, (f"讀取提醒：{raw} 共 {info.st_size} bytes；"
-                      "內容量較大時分段讀完必要內容並保存已讀範圍，完整判斷仍須覆蓋全文。")
+        return None, memspec.READ_WASTE_LARGE_NOTICE.format(path=raw, size=info.st_size)
 
     # 「同一段」的身分要含全部的範圍欄位，不能只有 offset／limit。2026-09-20 Codex
     # 審查抓到：同一份 PDF 連續讀 1-3、4-6、7-9 頁，第三次會被擋，理由還錯稱這一段
@@ -2385,8 +2384,7 @@ def _waste_review(event, tool_name, tool_input, config, started_at):
         pass
 
     if count > 1 + memspec.READ_WASTE_FREE_REPEATS:
-        return None, (f"讀取提醒：{raw} 同範圍第 {count} 次讀取；"
-                      "挑戰、驗收或明示重讀需要時照常讀取。")
+        return None, memspec.READ_WASTE_RANGE_COUNT_NOTICE.format(path=raw, count=count)
     if count > 1:
         return None, memspec.READ_WASTE_REPEAT_NOTICE.format(count=count, path=raw)
     return None, None
@@ -2576,9 +2574,8 @@ def _handle(event, started_at, defects=None, meter_claims=None, advice_claims=No
             for name, notice in repairs:
                 notices[:] = [line for line in notices if line != notice]
                 notices.append(f"未能為 {name} 自動補 BOM：補上後的輸入超過 hook 輸出上限。")
-                value = append_context(value, "PreToolUse", (
-                    f"編碼提醒（本次寫入放行）：{name} 含非 ASCII 字元卻沒有 UTF-8 BOM，"
-                    "PowerShell 5.1 會讀錯；內容太大，閘門無法代為補上，請自行在檔頭加 BOM。"))
+                value = append_context(value, "PreToolUse", memspec.WRITE_NOTE_ENCODING_LABEL
+                                       + memspec.WRITE_NOTE_BOM_TOO_LARGE.format(name=name))
     return value
 
 
@@ -2900,9 +2897,9 @@ def _selftest():
             # 寫檔的三條檢查（既有裁定 forbidden、卡片契約、再犯敘述）只提醒：放行（不帶
             # permissionDecision），提醒行帶各自的標籤。放行的對照組要看標籤沒出現，
             # 否則「不判」與「判了但只提醒」分不出來。
-            forbidden_note = "既有裁定提醒（本次寫入放行）"
-            card_note = "卡片待補資料（本次寫入放行）"
-            recurrence_note = "事件紀錄提醒（本次寫入放行）"
+            forbidden_note = memspec.WRITE_NOTE_FORBIDDEN_LABEL
+            card_note = memspec.WRITE_NOTE_CARD_LABEL
+            recurrence_note = memspec.WRITE_NOTE_RECURRENCE_LABEL
 
             def noted(out, label, *fragments):
                 context = out.get("additionalContext", "")

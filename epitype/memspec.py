@@ -1250,6 +1250,19 @@ READ_WASTE_FREE_REPEATS = 1
 READ_WASTE_BOUND_FIELDS = ("offset", "limit", "pages", "page", "cell", "cells", "range")
 READ_WASTE_STATE_MAX_ENTRIES = 400
 READ_WASTE_REPEAT_NOTICE = "ℹ 這一場已經讀過這一段、而且內容沒變（第 {count} 次）：{path}"
+READ_WASTE_LARGE_NOTICE = ("讀取提醒：{path} 共 {size} bytes；"
+                           "內容量較大時分段讀完必要內容並保存已讀範圍，完整判斷仍須覆蓋全文。")
+READ_WASTE_RANGE_COUNT_NOTICE = ("讀取提醒：{path} 同範圍第 {count} 次讀取；"
+                                 "挑戰、驗收或明示重讀需要時照常讀取。")
+# 寫檔放行時各條提醒的標籤：放行的呼叫只能靠標籤分辨是哪一條在說話。
+WRITE_NOTE_ENCODING_LABEL = "編碼提醒（本次寫入放行）："
+WRITE_NOTE_ATTRIBUTION_LABEL = "歸屬查核提醒（本次寫入放行）："
+WRITE_NOTE_OWNER_RULINGS_LABEL = "裁定生成段提醒（本次寫入放行）："
+WRITE_NOTE_FORBIDDEN_LABEL = "既有裁定提醒（本次寫入放行）："
+WRITE_NOTE_RECURRENCE_LABEL = "事件紀錄提醒（本次寫入放行）："
+WRITE_NOTE_CARD_LABEL = "卡片待補資料（本次寫入放行）："
+WRITE_NOTE_BOM_TOO_LARGE = ("{name} 含非 ASCII 字元卻沒有 UTF-8 BOM，"
+                            "PowerShell 5.1 會讀錯；內容太大，閘門無法代為補上，請自行在檔頭加 BOM。")
 READ_WASTE_REPEAT_REASON = (
     "🛑 省 token：這一場已經讀過這一段第 {count} 次，而且檔案沒有變過（{path}）。"
     "手上那份就是最新的；真的需要重讀就先說明為什麼（例如壓縮後內容不在了），"
@@ -3754,6 +3767,20 @@ _EN = {
     "ACTION_GUARD_REQUIRES_REASON": "🛑 Scar card ({card}): this {tool} call does not carry {fields} — {advice}",
     "ACTION_GUARD_WHEN_REASON": "🛑 Scar card ({card}): {pairs} on this {tool} call is a combination that must not go together — {advice}",
     "READ_WASTE_REPEAT_NOTICE": "ℹ this session has already read this same range and it has not changed (time {count}): {path}",
+    "READ_WASTE_LARGE_NOTICE": ("Read note: {path} is {size} bytes; for large content, read the needed parts "
+                                "in sections and keep track of the ranges read. A complete judgement still "
+                                "has to cover the whole file."),
+    "READ_WASTE_RANGE_COUNT_NOTICE": ("Read note: {path} same range read for the {count}th time; read again "
+                                      "whenever a challenge, a verification or an explicit re-read needs it."),
+    "WRITE_NOTE_ENCODING_LABEL": "Encoding note (this write proceeds): ",
+    "WRITE_NOTE_ATTRIBUTION_LABEL": "Attribution note (this write proceeds): ",
+    "WRITE_NOTE_OWNER_RULINGS_LABEL": "Generated rulings section note (this write proceeds): ",
+    "WRITE_NOTE_FORBIDDEN_LABEL": "Existing ruling note (this write proceeds): ",
+    "WRITE_NOTE_RECURRENCE_LABEL": "Incident record note (this write proceeds): ",
+    "WRITE_NOTE_CARD_LABEL": "Card data to fill in (this write proceeds): ",
+    "WRITE_NOTE_BOM_TOO_LARGE": ("{name} has non-ASCII characters but no UTF-8 BOM, so PowerShell 5.1 "
+                                 "will misread it; the content is too large for the gate to add one, "
+                                 "so add the BOM at the top of the file yourself."),
     "READ_WASTE_REPEAT_REASON": "🛑 Save tokens: this session has already read this range {count} times and the file has not changed ({path}). The copy you have is the current one; if you really need it again, say why first (for example it was lost in a compaction), or read a different range, or search for the place instead.",
     "READ_WASTE_BIG_FILE_REASON": "🛑 Save tokens: {path} is {size} bytes, and most of a whole-file read is never used. Search for the place first, or pass offset/limit and read only the part you need.",
     "GUARD_REPEAT_NOTICE": "⚠ this guard blocked {count} time(s) in the last day ({card}): {advice}",
