@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / 'adapters' / 'claude')]
-from epitype import capture, compact_map, rule_provenance as provenance
+from epitype import capture, compact_map, memspec, rule_provenance as provenance
 import _hook_common as common
 import pretooluse_gate as pretool
 import stop_gate as stop
@@ -119,6 +119,36 @@ class OwnerAttributionRegression(unittest.TestCase):
         notes = common.take_notes(common.load_config(time.monotonic()), session)
         return attribution_finding(output.get('additionalContext', '').splitlines() + notes
                                    + [line for item in defects for line in str(item).splitlines()])
+
+    def test_the_check_gets_the_host_budget_not_an_ai_sub_budget(self):
+        with patch.object(common, '_hook_clock', return_value=memspec.HOOK_CLOCK_FROZEN):
+            self.assertEqual(common.attribution_seconds(time.monotonic()),
+                             memspec.HOOK_TIMEOUT_SECONDS - memspec.ATTRIBUTION_RESERVE_SECONDS)
+        with patch.object(common, '_hook_clock', return_value=memspec.HOOK_CLOCK_EXPIRED):
+            self.assertEqual(common.attribution_seconds(time.monotonic()), 0.0)
+        import inspect
+        self.assertIsNone(inspect.signature(provenance.claim_violation).parameters['seconds'].default)
+        seen = []
+        with patch.object(provenance, '_bounded_claim',
+                          side_effect=lambda text, path, options, started, notices:
+                          seen.append(options['seconds'])):
+            provenance.claim_violation(f'owner 原話：「{OWNER_WORDS}」', self.path, hard_deadline=True)
+        self.assertEqual(seen, [None])
+
+    def test_a_timeout_says_it_did_not_finish(self):
+        reason = provenance.claim_violation(f'owner 原話：「{OWNER_WORDS}」', self.path,
+                                            seconds=0, hard_deadline=True)
+        self.assertTrue(reason.startswith(memspec.ATTRIBUTION_UNFINISHED), reason)
+        self.assertIn('沒判完', reason)
+        self.assertIn('不是判定', reason)
+
+    def test_stop_checks_cards_before_attribution(self):
+        order = []
+        event = {**self.event, 'session_id': 'order', 'last_assistant_message': '一般回覆。'}
+        with patch.object(stop, '_verdict', side_effect=lambda *a, **k: order.append('cards')), \
+                patch.object(stop, '_source_notice', side_effect=lambda *a, **k: order.append('attribution')):
+            stop._handle(event, time.monotonic(), [])
+        self.assertEqual(order, ['cards', 'attribution'])
 
     def test_findings_reach_the_model_context(self):
         """A dispatch finding rides in the call's additionalContext and a Stop finding in
@@ -601,7 +631,9 @@ class OwnerAttributionRegression(unittest.TestCase):
         start = time.monotonic()
         self.assertIsNone(provenance.claim_violation(old+f'owner 原話：「{OWNER_WORDS}」',
             self.path, previous=old, hard_deadline=True))
-        self.assertLess(time.monotonic()-start, 2.0)
+        # The old 2 s bound here was an AI limit, not the host's; only the verdict is
+        # asserted and the duration is recorded.
+        print('REPETITIVE_DIFF_SECONDS', round(time.monotonic()-start, 3), flush=True)
         self.assertIsNotNone(provenance.claim_violation(old+f'owner 原話：「{ASSISTANT_WORDS}」',
             self.path, previous=old, hard_deadline=True))
 
@@ -630,6 +662,9 @@ class OwnerAttributionRegression(unittest.TestCase):
                 if tool == 'Edit' else {'file_path': str(target), 'content': text})}
         output, stderr, finding = self.surface(
             event, 'stop_gate.py' if tool == 'Stop' else 'pretooluse_gate.py', arguments, clock)
+        # A check that ran out of time gave no verdict; say so instead of reading it as one.
+        if clock is None and finding and memspec.ATTRIBUTION_UNFINISHED in finding:
+            self.fail(f'attribution check did not finish within the hook budget: {(tool, arguments, text)}')
         self.assertEqual(finding is not None, flagged, (tool, arguments, text, output, stderr))
         return output, stderr
 
@@ -925,14 +960,17 @@ class OwnerAttributionRegression(unittest.TestCase):
             elapsed = time.monotonic()-began
             blocked = finding is not None
             diagnostic = json.dumps(output)+stderr
-            self.assertLess(elapsed, 3.5, diagnostic)
+            # The host registration allows 10 s (owner ruling 2026-09-05; memspec
+            # HOOK_TIMEOUT_SECONDS); past that the host kills the hook and nothing arrives.
+            self.assertLess(elapsed, 10.0, diagnostic)
             if blocked:
                 self.assertIn('UNVERIFIED', diagnostic)
                 self.assertTrue('deadline' in diagnostic or 'read-budget-exhausted' in diagnostic, diagnostic)
             else:
                 self.assertNotIn('UNVERIFIED', diagnostic)
             row = dict(mode=mode, host='codex' if arguments else 'claude',
-                       bytes=self.path.stat().st_size, admission_seconds=2,
+                       bytes=self.path.stat().st_size,
+                       admission_seconds=memspec.HOOK_TIMEOUT_SECONDS - memspec.ATTRIBUTION_RESERVE_SECONDS,
                        seconds=round(elapsed, 3), status='UNVERIFIED' if blocked else 'VERIFIED')
             print('LOAD_MEASUREMENT '+json.dumps(row), flush=True)
             return row

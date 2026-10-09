@@ -1103,8 +1103,7 @@ def _deadline_result(text, *, previous=None, card_metadata=False, notices=None, 
                 unit.text.lstrip().startswith('#') and not _labelled_quotations(unit.text)
                 and not _RESTRICTION.search(unit.text))) for unit in units)
         if marker or known:
-            return ('[owner-attribution] admission deadline exhausted; authority UNVERIFIED'
-                    + (' (worker reaped)' if reaped else ''))
+            return memspec.ATTRIBUTION_UNFINISHED + (' (worker reaped)' if reaped else '')
         if any(unit.role == 'uncertain' and _has_claim_surface(unit.text) for unit in units):
             _unverified_notice(notices, 'text role could not be determined within admission budget')
     except _ReadBudgetExhausted:
@@ -1115,8 +1114,9 @@ def _deadline_result(text, *, previous=None, card_metadata=False, notices=None, 
 def _bounded_claim(text, transcript_path, options, started, notices):
     """The hook's CPU/IO deadline is enforced by an owned, reaped subprocess."""
     import subprocess
-    remaining = options['seconds'] - (time.monotonic() - started)
-    if remaining <= 0:
+    remaining = (None if options['seconds'] is None
+                 else options['seconds'] - (time.monotonic() - started))
+    if remaining is not None and remaining <= 0:
         return _deadline_result(text, previous=options['previous'],
             card_metadata=options['card_metadata'], notices=notices)
     packet = {'text': text, 'transcript_path': str(transcript_path) if transcript_path else None,
@@ -1143,7 +1143,7 @@ def _bounded_claim(text, transcript_path, options, started, notices):
 
 
 def claim_violation(text, transcript_path=None, *, previous=None, require_citations=False,
-                    base=None, seconds=2.0, card_metadata=False, hard_deadline=False, notices=None):
+                    base=None, seconds=None, card_metadata=False, hard_deadline=False, notices=None):
     """Return a blocking reason for new authority/restriction claims, else None.
 
     Owner quotations are checked automatically on every surface. Source markers
@@ -1151,6 +1151,8 @@ def claim_violation(text, transcript_path=None, *, previous=None, require_citati
     owner authority and operative cancellation require provenance. Hook callers
     use hard_deadline to contain all CPU work in a bounded worker; ordinary text
     without any claim surface returns immediately without source IO.
+
+    seconds=None sets no time limit; a hook passes what its host timeout leaves.
     """
     if not isinstance(text, str):
         return None
@@ -1162,7 +1164,7 @@ def claim_violation(text, transcript_path=None, *, previous=None, require_citati
         return _bounded_claim(text, transcript_path, dict(previous=previous,
             require_citations=require_citations, base=base, seconds=seconds,
             card_metadata=card_metadata), started, notices)
-    budget = _ReadBudget(started+seconds, float('inf'))
+    budget = _ReadBudget(float('inf') if seconds is None else started+seconds, float('inf'))
     base = Path(base or Path.cwd()).resolve()
     claims = []
     try:

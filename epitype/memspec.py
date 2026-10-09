@@ -1286,6 +1286,15 @@ WRITE_NOTE_RECURRENCE_LABEL = "事件紀錄提醒（本次寫入放行）："
 WRITE_NOTE_CARD_LABEL = "卡片待補資料（本次寫入放行）："
 DISPATCH_NOTE_ATTRIBUTION_LABEL = "歸屬查核提醒（本次派工放行）："
 STOP_NOTE_ATTRIBUTION = "Epitype 提醒（歸屬／來源核對）：{detail}；本回合放行，不需重送。"
+# 歸屬查核在掛鉤裡可用的時間＝掛鉤剩餘時間（HOOK_TIMEOUT_SECONDS，宿主登記 10 秒）減這段保留。
+# 理由：查核之後掛鉤還要跑剩下的檢查並印出結果，超過宿主時限整個掛鉤會被砍、什麼都送不到。
+# 2026-10-03 加的 2 秒子預算是 AI 自訂的限制，在忙的機器上讓查核大量「沒判完」，已移除。
+# 拿掉條件：查核改成每個掛鉤的最後一步，或宿主不再限時。
+ATTRIBUTION_RESERVE_SECONDS = 1.0
+# 時間用完時的結果不是判定：講清楚「沒判完」並提醒自己核對出處。保留 deadline exhausted 與
+# UNVERIFIED 兩個詞，既有呼叫端與測試靠它們辨認逾時。
+ATTRIBUTION_UNFINISHED = ("[owner-attribution] 沒判完：時間用完（admission deadline exhausted），"
+                          "來源 UNVERIFIED；這不是判定，請自行核對原話出處。")
 WRITE_NOTE_BOM_TOO_LARGE = ("{name} 含非 ASCII 字元卻沒有 UTF-8 BOM，"
                             "PowerShell 5.1 會讀錯；內容太大，閘門無法代為補上，請自行在檔頭加 BOM。")
 READ_WASTE_REPEAT_REASON = (
@@ -3818,6 +3827,8 @@ _EN = {
     "WRITE_NOTE_CARD_LABEL": "Card data to fill in (this write proceeds): ",
     "DISPATCH_NOTE_ATTRIBUTION_LABEL": "Attribution note (this dispatch proceeds): ",
     "STOP_NOTE_ATTRIBUTION": "Epitype note (attribution/source check): {detail}; this turn proceeds, no need to resend.",
+    "ATTRIBUTION_UNFINISHED": ("[owner-attribution] not finished: admission deadline exhausted; authority UNVERIFIED. "
+                               "This is not a verdict; check where the quotation came from."),
     "WRITE_NOTE_BOM_TOO_LARGE": ("{name} has non-ASCII characters but no UTF-8 BOM, so PowerShell 5.1 "
                                  "will misread it; the content is too large for the gate to add one, "
                                  "so add the BOM at the top of the file yourself."),

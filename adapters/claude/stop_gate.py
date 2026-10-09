@@ -36,6 +36,7 @@ from _hook_common import (
     recall_marker_directory,
     hook_clock_frozen,
     remaining_seconds,
+    attribution_seconds,
     run_synthetic,
     sequence_fields,
     with_session,
@@ -1159,13 +1160,16 @@ def _handle(event, started_at, defects):
     if message.strip() not in memspec.join_turn_text(texts):
         texts.append(message)
     message = memspec.join_turn_text(texts)
-    _source_notice(event, message, started_at, defects)
     config = load_config(started_at)
     if config is None:
         # load_config 只在期限已過時回 None（其他壞法都丟例外）。放行照舊，但要講出來。
         defects.append(memspec.STOP_GATE_EXPIRED_BEFORE_CHECK_DEFECT)
+        _source_notice(event, message, started_at, defects)
         return None
-    return _verdict(event, message, config, started_at, defects, turn)
+    # 卡片檢查先跑：歸屬查核可以用掉掛鉤剩下的全部時間，不能把卡片檢查擠掉。
+    verdict = _verdict(event, message, config, started_at, defects, turn)
+    _source_notice(event, message, started_at, defects)
+    return verdict
 
 
 def _is_subagent_stop(event):
@@ -1182,7 +1186,7 @@ def _source_notice(event, message, started_at, defects):
     notices = []
     try:
         reason = rule_provenance.claim_violation(message, event.get("transcript_path"),
-            seconds=max(0.0, min(2.0-(time.monotonic()-started_at), remaining_seconds(started_at))),
+            seconds=attribution_seconds(started_at),
             hard_deadline=True, notices=notices)
     except Exception as exc:
         reason = "UNVERIFIED: " + type(exc).__name__

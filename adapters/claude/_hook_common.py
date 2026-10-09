@@ -133,6 +133,12 @@ def remaining_seconds(started_at):
     return memspec.HOOK_TIMEOUT_SECONDS - (time.monotonic() - started_at)
 
 
+def attribution_seconds(started_at):
+    """Time the owner-attribution check may use: what the hook has left, minus the
+    reserve the rest of the hook needs to finish and print."""
+    return max(0.0, remaining_seconds(started_at) - memspec.ATTRIBUTION_RESERVE_SECONDS)
+
+
 def expired(started_at):
     return remaining_seconds(started_at) <= 0
 

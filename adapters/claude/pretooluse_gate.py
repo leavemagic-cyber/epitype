@@ -43,6 +43,7 @@ from _hook_common import (
     payload_fits,
     read_event,
     remaining_seconds,
+    attribution_seconds,
     recall_marker_directory,
     release_meter,
     scoped_vaults as resolve_vaults,
@@ -1722,7 +1723,7 @@ for exact source validation; writing a draft is not publishing verified authorit
                     after if after is not None else "\n".join(additions),
                     event.get("transcript_path"), previous=before if after is not None else None,
                     require_citations=True, base=target.parent,
-                    seconds=max(0.0, min(2.0-(time.monotonic()-started_at), remaining_seconds(started_at))), hard_deadline=True,
+                    seconds=attribution_seconds(started_at), hard_deadline=True,
                     card_metadata=bool(config) and _vault_card_path(target, resolve_vaults(config, event)) is not None,
                     notices=notices)
                 if reason:
@@ -1742,7 +1743,7 @@ for exact source validation; writing a draft is not publishing verified authorit
             candidate = prospective if isinstance(prospective, str) else "\n".join(additions)
             reason = rule_provenance.claim_violation(
                 candidate, event.get("transcript_path"), require_citations=True,
-                base=target.parent, seconds=max(0.0, min(2.0-(time.monotonic()-started_at), remaining_seconds(started_at))),
+                base=target.parent, seconds=attribution_seconds(started_at),
                 hard_deadline=True, notices=notices)
             if reason:
                 notices.append(memspec.WRITE_NOTE_ATTRIBUTION_LABEL + reason)
@@ -2429,7 +2430,7 @@ def _handle_review(event, started_at, defects=None, meter_claims=None, advice_cl
                 found = []
                 reason = rule_provenance.claim_violation(
                     dispatch.get(key), event.get("transcript_path"), require_citations=True,
-                    base=event.get("cwd"), seconds=max(0.0, min(2.0-(time.monotonic()-started_at), remaining_seconds(started_at))),
+                    base=event.get("cwd"), seconds=attribution_seconds(started_at),
                     hard_deadline=True, notices=found)
                 dispatch_notes.extend(memspec.DISPATCH_NOTE_ATTRIBUTION_LABEL + line
                                       for line in (*found, *filter(None, (reason,))))
