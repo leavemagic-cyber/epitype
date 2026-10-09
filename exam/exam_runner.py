@@ -188,9 +188,11 @@ def _run_hook(script, vault, root, event):
 
 
 def _run_gate(vault, root, event):
-    """The write gate's verdict for one synthetic tool call.
+    """The write gate's verdict for one synthetic tool call: deny, note or allow.
 
-    The gate blocks one (session, rule, file, content) exactly once and marks it in
+    A write finding is advisory: the call is allowed and the finding rides in
+    additionalContext, graded as "note" with that context as its text.
+    The gate notes one (session, rule, file, content) exactly once and marks it in
     the shared temp marker directory, so a corpus replayed twice would see the
     second run allowed. Each question therefore runs under its own session id, and
     the markers it wrote are dropped again either way."""
@@ -204,14 +206,19 @@ def _run_gate(vault, root, event):
     if not stdout.strip():
         return "allow", ""
     output = json.loads(stdout).get("hookSpecificOutput", {})
-    return (
-        output.get("permissionDecision", "allow"),
-        output.get("permissionDecisionReason", ""),
-    )
+    if "permissionDecision" in output:
+        return output["permissionDecision"], output.get("permissionDecisionReason", "")
+    context = output.get("additionalContext", "")
+    return ("note" if context else "allow"), context
 
 
 def _run_stop(vault, root, question_input):
-    """The turn-end gate's verdict for one synthetic assistant turn.
+    """The turn-end gate's verdict for one synthetic assistant turn: block, note or allow.
+
+    The Stop gate never emits a block for a finding; it appends a stop_note row to
+    the governance ledger and lets the turn end. Each question has its own vault, so
+    every stop_note row there came from this turn; the rows' decision keys and rules
+    are the note's text.
 
     A named session id is made run-unique: the gate blocks one
     (session, decision, message) once and marks it in the shared temp marker
@@ -240,24 +247,27 @@ def _run_stop(vault, root, question_input):
     finally:
         if marked:
             clear_recall_markers(marked)
-    if not stdout.strip():
-        return "allow", ""
-    value = json.loads(stdout)
-    return value.get("decision", "allow"), value.get("reason", "")
+    value = json.loads(stdout) if stdout.strip() else {}
+    if value.get("decision") == "block":
+        return "block", value.get("reason", "")
+    ledger = vault / memspec.GATE_LOG_FILENAME
+    rows = [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines()
+            if line.strip()] if ledger.is_file() else []
+    noted = [f"{row.get('decision')} {row.get('rule')}" for row in rows
+             if row.get("kind") == memspec.STOP_NOTE_LOG_KIND]
+    if noted:
+        return "note", "; ".join(noted)
+    return "allow", ""
 
 
 def _judge_stop(vault, root, question_input, expect):
     expected_decision = expect.get("decision")
     expected_reason = expect.get("reason_contains")
-    if expected_decision not in ("allow", "block"):
-        raise ValueError("stop expect.decision must be allow or block")
+    if expected_decision not in ("allow", "block", "note"):
+        raise ValueError("stop expect.decision must be allow, block or note")
     if expected_reason is not None and not isinstance(expected_reason, str):
         raise ValueError("stop expect.reason_contains must be text")
     decision, reason = _run_stop(vault, root, question_input)
-    # Anything that is not a block lets the turn end, so it is graded as allow:
-    # the gate answers with silence far more often than with a payload.
-    if decision != "block":
-        decision = "allow"
     if decision != expected_decision or (
         expected_reason is not None and expected_reason not in reason
     ):
@@ -269,8 +279,8 @@ def _judge_gate(vault, root, question_input, expect):
     decision, advice = _run_gate(vault, root, question_input)
     expected_decision = expect.get("decision")
     expected_advice = expect.get("advice_contains")
-    if expected_decision not in ("allow", "deny"):
-        raise ValueError("gate expect.decision must be allow or deny")
+    if expected_decision not in ("allow", "deny", "note"):
+        raise ValueError("gate expect.decision must be allow, deny or note")
     if expected_advice is not None and not isinstance(expected_advice, str):
         raise ValueError("gate expect.advice_contains must be text")
     if decision != expected_decision or (
@@ -508,13 +518,44 @@ def _selftest():
                 mutate(corpus["questions"][0])
             return run_corpus(corpus)[0]
 
-        checks.append(("a real turn-end block is graded PASS", graded("stop-zh-block") is None))
+        checks.append(("a real turn-end finding is graded PASS as a note", graded("stop-zh-note") is None))
         checks.append(
             (
-                "a turn the gate lets end cannot be sold as a block",
-                graded(
-                    "stop-zh-allow",
-                    lambda question: question["expect"].update({"decision": "block"}),
+                "a real turn-end finding cannot be sold as a block or as silence",
+                all(
+                    graded(
+                        "stop-zh-note",
+                        lambda question, decision=decision: question["expect"].update(
+                            {"decision": decision}
+                        ),
+                    )
+                    is not None
+                    for decision in ("block", "allow")
+                ),
+            )
+        )
+        checks.append(
+            (
+                "a turn the gate lets end cannot be sold as a block or a note",
+                all(
+                    graded(
+                        "stop-zh-allow",
+                        lambda question, decision=decision: question["expect"].update(
+                            {"decision": decision}
+                        ),
+                    )
+                    is not None
+                    for decision in ("block", "note")
+                ),
+            )
+        )
+        checks.append(
+            (
+                "a write finding is graded as a note, never as a deny",
+                graded("gate-en-note") is None
+                and graded(
+                    "gate-en-note",
+                    lambda question: question["expect"].update({"decision": "deny"}),
                 )
                 is not None,
             )
@@ -647,7 +688,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 12
+    total = 14
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

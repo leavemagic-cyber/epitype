@@ -63,7 +63,7 @@
       }
     },
     {
-      "id": "gate-en-deny",
+      "id": "gate-en-note",
       "category": "gate",
       "setup": {
         "vault_cards": [
@@ -81,12 +81,12 @@
         }
       },
       "expect": {
-        "decision": "deny",
+        "decision": "note",
         "advice_contains": "preview channel"
       }
     },
     {
-      "id": "gate-zh-deny",
+      "id": "gate-zh-note",
       "category": "gate",
       "setup": {
         "vault_cards": [
@@ -104,7 +104,7 @@
         }
       },
       "expect": {
-        "decision": "deny",
+        "decision": "note",
         "advice_contains": "跑第二次"
       }
     },
@@ -281,7 +281,7 @@
       }
     },
     {
-      "id": "stop-zh-block",
+      "id": "stop-zh-note",
       "category": "stop",
       "setup": {
         "vault_cards": [
@@ -296,8 +296,8 @@
         "stop_hook_active": false
       },
       "expect": {
-        "decision": "block",
-        "reason_contains": "合成練習：兩份設定必須一致"
+        "decision": "note",
+        "reason_contains": "synthetic-mirror forbidden"
       }
     },
     {
@@ -389,10 +389,11 @@
       "input": "pinboardmarker 的現行做法是什麼？",
       "expect": {
         "pinned_contains": [
-          "⚖ 裁定：synthetic-pinboard（2026-07-01）",
+          "查找線索（來源未核；非授權或新增禁令） | synthetic-pinboard（2026-07-01）",
           "合成練習的置頂示例"
         ],
         "pinned_excludes": [
+          "⚖ 裁定",
           "pinboard-quote",
           "合成置頂卡要帶原話"
         ]

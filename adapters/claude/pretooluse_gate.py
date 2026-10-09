@@ -2874,6 +2874,22 @@ def _selftest():
                 value = json.loads(result.stdout) if result.stdout.strip() else {}
                 return result, value.get("hookSpecificOutput", {})
 
+            # 寫檔的三條檢查（既有裁定 forbidden、卡片契約、再犯敘述）只提醒：放行（不帶
+            # permissionDecision），提醒行帶各自的標籤。放行的對照組要看標籤沒出現，
+            # 否則「不判」與「判了但只提醒」分不出來。
+            forbidden_note = "既有裁定提醒（本次寫入放行）"
+            card_note = "卡片待補資料（本次寫入放行）"
+            recurrence_note = "事件紀錄提醒（本次寫入放行）"
+
+            def noted(out, label, *fragments):
+                context = out.get("additionalContext", "")
+                return ("permissionDecision" not in out and label in context
+                        and all(fragment in context for fragment in fragments))
+
+            def quiet(out, label):
+                return (out.get("permissionDecision") != "deny"
+                        and label not in out.get("additionalContext", ""))
+
             forbidden_write, forbidden_out = write_call(
                 "Write",
                 {
@@ -2881,14 +2897,11 @@ def _selftest():
                     "content": "我打算讓虛擬盤用兩套參數各自最佳化。",
                 },
             )
-            forbidden_reason = forbidden_out.get("permissionDecisionReason", "")
             checks.append((
-                "Write 的內容命中現行裁定的 forbidden 就擋，理由帶裁定鍵、日期、裁定說明與命中片段",
+                "Write 的內容命中現行裁定的 forbidden 就提醒並放行，提醒帶裁定鍵、日期、裁定說明與命中片段",
                 forbidden_write.returncode == 0
-                and forbidden_out.get("permissionDecision") == "deny"
-                and "virtual-mirrors-live，2026-08-13" in forbidden_reason
-                and "虛擬盤與實盤參數一致" in forbidden_reason
-                and "兩套參數" in forbidden_reason,
+                and noted(forbidden_out, forbidden_note, "virtual-mirrors-live，2026-08-13",
+                          "虛擬盤與實盤參數一致", "兩套參數"),
             ))
             write_log = write_vault / memspec.GATE_LOG_FILENAME
             write_rows = [
@@ -2897,9 +2910,9 @@ def _selftest():
                 if line.strip()
             ] if write_log.is_file() else []
             checks.append((
-                "擋下的寫入以 write_block 入帳，只記規則、裁定鍵與檔名，不記內容",
+                "命中的寫入以 write_note 入帳，只記規則、裁定鍵與檔名，不記內容",
                 any(
-                    row.get("kind") == memspec.WRITE_GATE_LOG_KIND
+                    row.get("kind") == "write_note"
                     and row.get("rule") == memspec.WRITE_GATE_FORBIDDEN_RULE
                     and row.get("decision") == "virtual-mirrors-live"
                     and row.get("filename") == "plan.txt"
@@ -2929,9 +2942,8 @@ def _selftest():
                 },
             )
             checks.append((
-                "Edit 的 new_string 與 MultiEdit 其中一項命中 forbidden 都擋",
-                edit_out.get("permissionDecision") == "deny"
-                and multi_out.get("permissionDecision") == "deny",
+                "Edit 的 new_string 與 MultiEdit 其中一項命中 forbidden 都提醒",
+                noted(edit_out, forbidden_note) and noted(multi_out, forbidden_note),
             ))
             _stale_result, stale_out = write_call(
                 "Edit",
@@ -2974,8 +2986,8 @@ def _selftest():
                 },
             )
             checks.append((
-                "改的就是定義那條 forbidden 的決策卡：命中自己的禁詞不擋",
-                _own_result.returncode == 0 and own_out.get("permissionDecision") != "deny",
+                "改的就是定義那條 forbidden 的決策卡：命中自己的禁詞不提醒",
+                _own_result.returncode == 0 and quiet(own_out, forbidden_note),
             ))
 
             _other_result, other_out = write_call(
@@ -2998,9 +3010,8 @@ def _selftest():
                 },
             )
             checks.append((
-                "豁免只認那張卡：別的決策卡與一般檔案寫同一句仍然擋",
-                other_out.get("permissionDecision") == "deny"
-                and plain_out.get("permissionDecision") == "deny",
+                "豁免只認那張卡：別的決策卡與一般檔案寫同一句仍然提醒",
+                noted(other_out, forbidden_note) and noted(plain_out, forbidden_note),
             ))
 
             # 2026-09-06 對抗審：宣告同一個 decision_key 就能讓任何檔案繞過規則 A。
@@ -3014,8 +3025,8 @@ def _selftest():
                 },
             )
             checks.append((
-                "vault 外的檔案自稱同一個 decision_key 不算在改那張卡，照擋",
-                forged_out.get("permissionDecision") == "deny",
+                "vault 外的檔案自稱同一個 decision_key 不算在改那張卡，照樣提醒",
+                noted(forged_out, forbidden_note),
             ))
 
             _block_result, block_out = write_call(
@@ -3034,7 +3045,7 @@ def _selftest():
             )
             checks.append((
                 "禁詞落在寫入內容自己的 forbidden 區塊裡＝正在改規則，放行",
-                _block_result.returncode == 0 and block_out.get("permissionDecision") != "deny",
+                _block_result.returncode == 0 and quiet(block_out, forbidden_note),
             ))
 
             _outside_result, outside_out = write_call(
@@ -3057,10 +3068,10 @@ def _selftest():
                     f"{memspec.DECISION_KEY_FIELD}: k-new\n---\nbody\n",
                 },
             )
-            card_reason = card_out.get("permissionDecisionReason", "")
+            card_reason = card_out.get("additionalContext", "")
             checks.append((
-                "寫進 vault 的決策卡缺必填欄位就擋，理由列出缺哪些欄位並附可照抄的一行範例",
-                card_out.get("permissionDecision") == "deny"
+                "寫進 vault 的決策卡缺必填欄位就提醒並放行，提醒列出缺哪些欄位並附可照抄的一行範例",
+                noted(card_out, card_note)
                 and all(
                     field in card_reason
                     for field in (
@@ -3129,8 +3140,8 @@ def _selftest():
             _first_result, first_out = write_call("Write", repeat_input, session=repeat_session)
             second_result, second_out = write_call("Write", repeat_input, session=repeat_session)
             checks.append((
-                "同 session 同規則同檔案同內容只擋一次，AI 修不動時不會無限卡死",
-                first_out.get("permissionDecision") == "deny"
+                "同 session 同規則同檔案同內容只提醒一次，第二次安靜放行",
+                noted(first_out, forbidden_note)
                 and second_result.returncode == 0
                 and not second_out,
             ))
@@ -3144,9 +3155,9 @@ def _selftest():
                 extra={"transcript_path": os.fspath(root / "codex-synthetic.jsonl")},
             )
             checks.append((
-                "Codex 形狀的檔案寫入工具走同一道閘",
+                "Codex 形狀的檔案寫入工具走同一道檢查（同樣提醒）",
                 _codex_result.returncode == 0
-                and codex_out.get("permissionDecision") == "deny",
+                and noted(codex_out, forbidden_note),
             ))
 
             oversized_content = "兩套參數" + "填充" * 70000
@@ -3200,7 +3211,7 @@ def _selftest():
             checks.append((
                 "forbidden 落在寫入內容的引號字串字面值內是引用／驗證腳本，不擋",
                 quoted_write_result.returncode == 0
-                and "permissionDecision" not in quoted_write_out,
+                and quiet(quoted_write_out, forbidden_note),
             ))
 
             bare_write_result, bare_write_out = write_call(
@@ -3211,9 +3222,9 @@ def _selftest():
                 },
             )
             checks.append((
-                "同一份內容除了引號內的引用還有裸禁詞，裸的那份照擋",
+                "同一份內容除了引號內的引用還有裸禁詞，裸的那份照樣提醒",
                 bare_write_result.returncode == 0
-                and bare_write_out.get("permissionDecision") == "deny",
+                and noted(bare_write_out, forbidden_note),
             ))
 
             # 規則再犯（2026-09-25 titan）：往已存在的行為卡追加事故敘述、卻沒動任何武裝欄位，擋；
@@ -3252,24 +3263,19 @@ def _selftest():
             run_card = write_vault / "feedback-run-button.md"
             run_card.write_text(recurrence_card("feedback-run-button"), encoding="utf-8")
             recurrence_denied, recurrence_out = append_incident(run_card)
-            recurrence_reason = recurrence_out.get("permissionDecisionReason", "")
             checks.append((
-                "往擋不住的 feedback 卡追加「再犯（日期）…」就擋，理由寫出三種處理與事故經過不進卡",
+                "往擋不住的 feedback 卡追加「再犯（日期）…」就提醒並放行，提醒寫出三種處理與事故經過不進卡",
                 recurrence_denied.returncode == 0
-                and recurrence_out.get("permissionDecision") == "deny"
-                and "feedback-run-button.md" in recurrence_reason
-                and memspec.FORBIDDEN_FIELD in recurrence_reason
-                and memspec.UNENFORCEABLE_FIELD in recurrence_reason
-                and "修 Epitype 本身" in recurrence_reason
-                and "不寫進卡片" in recurrence_reason
-                and "台指期休市" in recurrence_reason
+                and noted(recurrence_out, recurrence_note, "feedback-run-button.md",
+                          memspec.FORBIDDEN_FIELD, memspec.UNENFORCEABLE_FIELD,
+                          "修 Epitype 本身", "不寫進卡片", "台指期休市")
                 and recurrence_body in run_card.read_text(encoding="utf-8")
                 and recurrence_line not in run_card.read_text(encoding="utf-8"),
             ))
             checks.append((
-                "再犯擋下以 write_block 入帳，只記規則與卡名，不記內容",
+                "再犯提醒以 write_note 入帳，只記規則與卡名，不記內容",
                 any(
-                    row.get("kind") == memspec.WRITE_GATE_LOG_KIND
+                    row.get("kind") == "write_note"
                     and row.get("rule") == memspec.RECURRENCE_GATE_RULE
                     and row.get("card_path") == "feedback-run-button.md"
                     and "台指期" not in json.dumps(row, ensure_ascii=False)
@@ -3298,7 +3304,7 @@ def _selftest():
             checks.append((
                 "同一段追加但同時新增 forbidden（正在武裝）就放行，並以 write_allow 入帳",
                 armed_result.returncode == 0
-                and armed_out.get("permissionDecision") != "deny"
+                and quiet(armed_out, recurrence_note)
                 and any(
                     row.get("kind") == memspec.RECURRENCE_GATE_ALLOW_LOG_KIND
                     and row.get("card_path") == "feedback-armed.md"
@@ -3322,9 +3328,9 @@ def _selftest():
             checks.append((
                 "新建的卡含「再犯」、以及 project 卡追加再犯敘述，都放行",
                 fresh_result.returncode == 0
-                and fresh_out.get("permissionDecision") != "deny"
+                and quiet(fresh_out, recurrence_note)
                 and project_result.returncode == 0
-                and project_out.get("permissionDecision") != "deny",
+                and quiet(project_out, recurrence_note),
             ))
 
             envelope_card = write_vault / "feedback-codex.md"
@@ -3342,11 +3348,9 @@ def _selftest():
             ))
             envelope_result, envelope_out = write_call("Bash", {"command": envelope_command})
             checks.append((
-                "Codex 形狀（exec 夾 patch 封套）往同一種卡追加再犯敘述，同樣擋",
+                "Codex 形狀（exec 夾 patch 封套）往同一種卡追加再犯敘述，同樣提醒",
                 envelope_result.returncode == 0
-                and envelope_out.get("permissionDecision") == "deny"
-                and "feedback-codex.md" in envelope_out.get("permissionDecisionReason", "")
-                and "不寫進卡片" in envelope_out.get("permissionDecisionReason", ""),
+                and noted(envelope_out, recurrence_note, "feedback-codex.md", "不寫進卡片"),
             ))
 
             ordinary = []
@@ -3370,7 +3374,7 @@ def _selftest():
             checks.append((
                 "「免得以後再犯」「永遠別再犯」「防再犯」「不要再犯」是一般用語，不是事故敘述，放行",
                 all(
-                    result.returncode == 0 and out.get("permissionDecision") != "deny"
+                    result.returncode == 0 and quiet(out, recurrence_note)
                     for result, out in ordinary
                 ),
             ))
@@ -3390,7 +3394,7 @@ def _selftest():
             checks.append((
                 "條件句（「再犯時先補 forbidden」「如果…又犯，就」「if this recurs」，日期緊貼標記但後接「時／的話」亦同）是規則正文，放行",
                 all(
-                    result.returncode == 0 and out.get("permissionDecision") != "deny"
+                    result.returncode == 0 and quiet(out, recurrence_note)
                     for result, out in conditional
                 ),
             ))
@@ -3406,10 +3410,10 @@ def _selftest():
                     recurrence_card(f"feedback-headline-{index}"), encoding="utf-8")
                 headline.append(append_incident(headline_card, text))
             checks.append((
-                "沒有日期但以再犯標記開頭的粗體或標題行照擋；標記不在開頭的粗體不擋",
-                headline[0][1].get("permissionDecision") == "deny"
-                and headline[1][1].get("permissionDecision") == "deny"
-                and headline[2][1].get("permissionDecision") != "deny",
+                "沒有日期但以再犯標記開頭的粗體或標題行照樣提醒；標記不在開頭的粗體不提醒",
+                noted(headline[0][1], recurrence_note)
+                and noted(headline[1][1], recurrence_note)
+                and quiet(headline[2][1], recurrence_note),
             ))
 
             # 同一段內容走 Write（整份覆寫既有卡）、Edit、Codex 補丁三條路，結論必須一致。
@@ -3448,11 +3452,10 @@ def _selftest():
 
             unarmed_paths = three_paths(False)
             checks.append((
-                "已有 forbidden 的卡正文追加內縮再犯行：Write 整份覆寫、Edit、補丁三條路都擋",
+                "已有 forbidden 的卡正文追加內縮再犯行：Write 整份覆寫、Edit、補丁三條路都提醒",
                 all(
                     result.returncode == 0
-                    and out.get("permissionDecision") == "deny"
-                    and "不寫進卡片" in out.get("permissionDecisionReason", "")
+                    and noted(out, recurrence_note, "不寫進卡片")
                     for result, out in unarmed_paths
                 ),
             ))
@@ -3460,7 +3463,7 @@ def _selftest():
             checks.append((
                 "同一段內容但在既有 forbidden 底下多補一項：三條路都放行",
                 all(
-                    result.returncode == 0 and out.get("permissionDecision") != "deny"
+                    result.returncode == 0 and quiet(out, recurrence_note)
                     for result, out in armed_paths
                 ),
             ))
@@ -3470,8 +3473,8 @@ def _selftest():
             _dated_result, dated_out = append_incident(
                 dated_card, "2026-09-25 又犯就表示閘門失效。")
             checks.append((
-                "日期緊貼標記、後面單獨接「就」不算條件句：「2026-09-25 又犯就表示閘門失效。」照擋",
-                dated_out.get("permissionDecision") == "deny",
+                "日期緊貼標記、後面單獨接「就」不算條件句：「2026-09-25 又犯就表示閘門失效。」照樣提醒",
+                noted(dated_out, recurrence_note),
             ))
 
             def patch_command(card_path, *hunk_lines):
@@ -3530,9 +3533,9 @@ def _selftest():
             _eof_hit, eof_hit_out = write_call("Bash", {"command": patch_command(
                 eof_card, "@@", " tail line", "+" + recurrence_line, "*** End of File")})
             checks.append((
-                "End of File 段落只比檔尾：上下文在前面的行就是套不上而放行，落在檔尾才照判而擋",
-                eof_miss_out.get("permissionDecision") != "deny"
-                and eof_hit_out.get("permissionDecision") == "deny",
+                "End of File 段落只比檔尾：上下文在前面的行就是套不上而不判，落在檔尾才照判而提醒",
+                quiet(eof_miss_out, recurrence_note)
+                and noted(eof_hit_out, recurrence_note),
             ))
 
             bom_card = write_vault / "feedback-bom.md"
@@ -3540,8 +3543,8 @@ def _selftest():
                 "﻿".encode("utf-8") + recurrence_card("feedback-bom").encode("utf-8"))
             _bom_result, bom_out = append_incident(bom_card)
             checks.append((
-                "帶 BOM 的既有卡追加再犯敘述照擋",
-                bom_out.get("permissionDecision") == "deny",
+                "帶 BOM 的既有卡追加再犯敘述照樣提醒",
+                noted(bom_out, recurrence_note),
             ))
 
             crlf_card = write_vault / "feedback-crlf.md"
@@ -3555,9 +3558,9 @@ def _selftest():
                 patch_envelope.END_MARKER, "EOF"))
             _crlf_patch, crlf_patch_out = write_call("Bash", {"command": crlf_command})
             checks.append((
-                "CRLF 的既有卡追加再犯敘述，Edit 與補丁都擋",
-                crlf_edit_out.get("permissionDecision") == "deny"
-                and crlf_patch_out.get("permissionDecision") == "deny",
+                "CRLF 的既有卡追加再犯敘述，Edit 與補丁都提醒",
+                noted(crlf_edit_out, recurrence_note)
+                and noted(crlf_patch_out, recurrence_note),
             ))
 
             quoted_card = write_vault / "feedback-quoted.md"
@@ -3580,9 +3583,9 @@ def _selftest():
                 },
             )
             checks.append((
-                "欄位值加引號的卡照樣判成 feedback：追加就擋，同時補上 flow 形式的 forbidden 就放行",
-                quoted_deny_out.get("permissionDecision") == "deny"
-                and quoted_arm_out.get("permissionDecision") != "deny",
+                "欄位值加引號的卡照樣判成 feedback：追加就提醒，同時補上 flow 形式的 forbidden 就不提醒",
+                noted(quoted_deny_out, recurrence_note)
+                and quiet(quoted_arm_out, recurrence_note),
             ))
 
             exempt_card = write_vault / "feedback-exempt.md"
@@ -3614,10 +3617,10 @@ def _selftest():
             _first_result, first_repeat = append_incident(repeat_card, session=repeat_session)
             second_result, second_repeat = append_incident(repeat_card, session=repeat_session)
             checks.append((
-                "同一場同一份內容第二次送來照既有寫檔閘的逃生口放行，但以 repeat 入帳看得見",
-                first_repeat.get("permissionDecision") == "deny"
+                "同一場同一份內容第二次送來不再提醒，但以 repeat 入帳看得見",
+                noted(first_repeat, recurrence_note)
                 and second_result.returncode == 0
-                and second_repeat.get("permissionDecision") != "deny"
+                and quiet(second_repeat, recurrence_note)
                 and any(
                     row.get("card_path") == "feedback-repeat.md"
                     and row.get("outcome") == memspec.RECURRENCE_GATE_OUTCOME_REPEAT
