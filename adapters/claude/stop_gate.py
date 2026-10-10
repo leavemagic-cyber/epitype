@@ -222,8 +222,14 @@ def _read_decision(path):
     return ruling
 
 
-def _decision_from_ruling(vault, card_path, ruling, *, fresh=False, event=None, defects=None):
-    """一份裁定資料變成閘門用的結構；不該生效的回 None。"""
+def _decision_from_ruling(vault, card_path, ruling, *, fresh=False, event=None, defects=None,
+                          advisory=None, unadopted=None):
+    """一份裁定資料變成閘門用的結構；不該生效的回 None。
+
+    advisory: a list makes an ADVISORY-scope ruling come back there as (decision,
+    reference) instead of a defect line, so a caller can say the reference only when
+    that ruling's own check matches; it is never enforced. unadopted: a list that
+    takes the "source not adopted" lines instead of defects."""
     if not isinstance(ruling, dict) or not ruling.get(_KEY):
         return None
     path = Path(vault) / card_path
@@ -231,24 +237,29 @@ def _decision_from_ruling(vault, card_path, ruling, *, fresh=False, event=None, 
         # An old cache can omit or mislabel provenance. When its file is present,
         # use the current card regardless of the cached authorship declaration.
         if ruling.get('source_status') == 'VERIFIED' or path.is_file():
-            ruling = _checked_read(path, defects)
+            ruling = _checked_read(path, defects if unadopted is None else unadopted)
             if ruling is None:
                 return None
+    reference = None
     if ruling.get('source_status') == 'VERIFIED':
         scope = ruling.get('source_scope')
         if not isinstance(scope, dict) or rule_pipeline.expired({'scope': scope}):
             return None
         state, reason = rule_context.applicability(scope, event)
         if state != 'APPLICABLE':
-            if state == 'ADVISORY' and defects is not None:
-                defects.append(f"[{ruling[_KEY]}] 限定參考：{reason}；適用範圍："
-                               + rule_provenance.serialize(scope))
-            return None
+            if state != 'ADVISORY':
+                return None
+            reference = (f"[{ruling[_KEY]}] 限定參考：{reason}；適用範圍："
+                         + rule_provenance.serialize(scope))
+            if advisory is None:
+                if defects is not None:
+                    defects.append(reference)
+                return None
     if memspec.card_expired(ruling.get(_EXPIRES)):
         # 過期的卡不再擋人。時限型的規則（試行一週、某日之前不要做某事）本來就該
         # 自己停下來，靠人記得去拔掉的話，它會一直擋到有人被擋為止。
         return None
-    return _Decision(
+    decision = _Decision(
         _one_line(ruling.get(_KEY)),
         _one_line(ruling.get(_DECIDED_AT)),
         _one_line(ruling.get(_QUOTE))[: memspec.STOP_GATE_QUOTE_MAX_CHARS],
@@ -278,6 +289,10 @@ def _decision_from_ruling(vault, card_path, ruling, *, fresh=False, event=None, 
         source_kind=ruling.get('source_kind', 'legacy-unverified'),
         source_original_quote=ruling.get('source_original_quote', ''),
     )
+    if reference is not None:
+        advisory.append((decision, reference))
+        return None
+    return decision
 
 
 def _checked_read(path, defects=None):
@@ -340,7 +355,7 @@ def _write_cache(cache_path, manifest, rulings, cursor=""):
         pass
 
 
-def _decisions(vault, started_at, defects=None, *, event=None):
+def _decisions(vault, started_at, defects=None, *, event=None, advisory=None, unadopted=None):
     """Cache discovery only; every returned authority comes from this turn's bytes.
 
     Refresh at most one cap of discovery cards and one cap of known decisions.
@@ -397,7 +412,7 @@ def _decisions(vault, started_at, defects=None, *, event=None):
                 skipped=len(scanning) - position, vault=vault.name))
             break
         try:
-            rulings[card_path] = _checked_read(paths[card_path], defects)
+            rulings[card_path] = _checked_read(paths[card_path], defects if unadopted is None else unadopted)
         except Exception:
             rulings[card_path] = None
         refreshed.add(card_path)
@@ -425,7 +440,7 @@ def _decisions(vault, started_at, defects=None, *, event=None):
         # 能從這裡省——2026-09-19 試過信清單，那份測試當場擋下來。
         if card_path not in refreshed:
             try:
-                rulings[card_path] = _checked_read(paths[card_path], defects)
+                rulings[card_path] = _checked_read(paths[card_path], defects if unadopted is None else unadopted)
             except Exception:
                 rulings[card_path] = None
             verified[card_path] = manifest[card_path]
@@ -438,7 +453,8 @@ def _decisions(vault, started_at, defects=None, *, event=None):
                 checked=index, total=len(candidates), vault=vault.name))
             break
         decision = _decision_from_ruling(vault, card_path, ruling,
-                                         fresh=True, event=event, defects=defects)
+                                         fresh=True, event=event, defects=defects,
+                                         advisory=advisory, unadopted=unadopted)
         if decision is not None:
             found.append(decision)
     if verified != old_manifest or rulings != cached or cursor != old_cursor:

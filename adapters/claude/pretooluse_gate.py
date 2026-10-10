@@ -359,7 +359,21 @@ def _forbidden_write(event, config, target, additions, prospective, started_at, 
     for vault in stop_gate._vaults(config, event):
         if expired(started_at):
             return None
-        for decision in stop_gate._decisions(vault, started_at, notices, event=event):
+        # An ADVISORY-scope ruling's reference and a "source not adopted" line are said
+        # only where they concern this write -- the reference when that ruling's own
+        # pattern matches, the not-adopted line when the write targets that card --
+        # or every unrelated Edit/Write carries them.
+        advisory, unadopted = [], []
+        decisions = stop_gate._decisions(vault, started_at, notices, event=event,
+                                         advisory=advisory, unadopted=unadopted)
+        notices.extend(line for line in unadopted if f"[{target.name}]" in line)
+        for decision, reference in advisory:
+            if decision.applies_to == memspec.APPLIES_TO_SPEECH:
+                continue
+            if any(stop_gate._forbidden_fragment(decision, text, []) is not None
+                   for text in additions):
+                notices.append(reference)
+        for decision in decisions:
             # 管「說出口的話」的裁定不套在寫檔上：白話規則擋的是對 owner 丟機器名稱，
             # 而同一個字寫進程式碼註解或英文提交訊息是正當的。
             if decision.applies_to == memspec.APPLIES_TO_SPEECH:

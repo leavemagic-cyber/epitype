@@ -87,6 +87,30 @@ class AuditLiterals(unittest.TestCase):
             self.assertIn(self.document['key'] + ' 的 forbidden', captured[-1][-1])
             self.assertNotIn('別說', captured[-1][-1])
 
+    def test_write_says_advisory_and_unadopted_lines_only_where_they_concern_it(self):
+        def write(target, text):
+            notices = []
+            found = pretool._forbidden_write({'session_id': 'scoped-write', 'cwd': str(self.root)},
+                {'vaults': [self.vault]}, target, [text], text, time.monotonic(), notices)
+            return found, notices
+        artifact = self.root / 'artifact.md'
+        self.card(scope={'level': 'case', 'project': str(self.root), 'case': 'A', 'actions': ['*'],
+                         'conditions': [], 'expiry': 'unspecified', 'exceptions': []}, kind='ai-derived')
+        found, notices = write(artifact, 'unrelated text')
+        self.assertIsNone(found)
+        self.assertFalse(any('限定參考' in note for note in notices), notices)
+        found, notices = write(artifact, 'badold')
+        self.assertIsNone(found)
+        self.assertTrue(any('限定參考' in note and 'case context' in note for note in notices), notices)
+        self.card()
+        self.target.write_text(self.target.read_text(encoding='utf-8') + '未綁定的新增正文。\n',
+                               encoding='utf-8')
+        found, notices = write(artifact, 'unrelated text')
+        self.assertIsNone(found)
+        self.assertFalse(any('來源裁定未採用' in note for note in notices), notices)
+        found, notices = write(self.target, 'unrelated text')
+        self.assertTrue(any(f'[{self.target.name}] 來源裁定未採用' in note for note in notices), notices)
+
 
 if __name__ == '__main__':
     if '--selftest' in sys.argv:
