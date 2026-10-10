@@ -63,6 +63,7 @@ SELFTESTS = (
     Path("tests") / "rule_writer_sources_regression.py",
     Path("tests") / "selftest_environment_regression.py",
     Path("tests") / "shared_index_scope_regression.py",
+    Path("tests") / "cap_consolidation_regression.py",
     Path("tests") / "recall_regression.py",
     Path("tests") / "governance_regression.py",
     Path("tests") / "recall_selection_regression.py",

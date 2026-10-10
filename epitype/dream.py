@@ -101,7 +101,7 @@ MIXED_SKIP_FRESH_SPLIT = "fresh_split"
 MIXED_SKIP_RECORD_TYPE = "record_type"
 MIXED_SKIPPED_NOTE = "已審過略過 {count} 張"
 CAP_UNSET_NOTE = "{field} 未設定，這一項跳過"
-CAP_COMMAND = "人工判斷超上限的檔案要精簡還是提高上限；夢不改檔"
+CAP_COMMAND = "依第 11 節排序清單擬精簡稿，經 Claude 與 Codex 核對意義不變，再給 owner 前後對照表核准；核准後走規則管線重新綁定；夢不改規則卡、不提高上限"
 # 同一批 core_files 順路多問一句：這個檔跟規則卡重組出來的生成塊還一不一致。
 # 只列候選——夢不重生成核心塊，那是本機作業（`epitype core-gen`）。
 CAP_DRIFT_KIND = "generated-block-drift"
@@ -967,7 +967,7 @@ def _positive_int(value):
 
 
 def _section_caps(vaults, today, since_date, config):
-    """上限＝檢討值＋兩成（owner 2026-09-09）。夢只查有沒有超過，超過只列候選。
+    """上限＝檢討值＋兩成（owner 2026-09-09）。超量產出整理材料，不改卡或上限。
 
     三個鍵都選填，而且缺鍵一律寫一行「未設定」而不是套內建門檻：一個產品猜出來的
     上限被寫成「超上限」，讀的人會以為那是 owner 的判斷。
@@ -975,6 +975,12 @@ def _section_caps(vaults, today, since_date, config):
     notes = []
     entries = []
     errors = []
+    try:
+        from . import cap_consolidation, core_gen, host_sync
+    except ImportError:
+        import cap_consolidation
+        import core_gen
+        import host_sync
     index_cap = _positive_int(config.get(memspec.CONFIG_INDEX_CAP_BYTES_FIELD))
     shared_index_cap = _positive_int(config.get(memspec.CONFIG_SHARED_INDEX_CAP_BYTES_FIELD))
     if index_cap is None:
@@ -985,11 +991,15 @@ def _section_caps(vaults, today, since_date, config):
             path = Path(vault) / memspec.MEMORY_INDEX_FILENAME
             try:
                 size = path.stat().st_size
-            except OSError:
+                text = path.read_bytes().decode("utf-8") if size > index_cap else None
+            except (OSError, UnicodeError) as exc:
+                errors.append(f"{path}: {type(exc).__name__}: {exc}")
                 continue
             if size > index_cap:
                 entries.append({
                     "path": str(path), "bytes": size, "cap": index_cap, "over": size - index_cap,
+                    "kind": "index-file", "reduce_bytes": size - index_cap,
+                    "items": cap_consolidation.ranked_index(text, path),
                 })
     if shared_index_cap is not None:
         try:
@@ -1008,6 +1018,10 @@ def _section_caps(vaults, today, since_date, config):
                 if size > shared_index_cap:
                     entries.append({"path": str(path), "bytes": size,
                                     "cap": shared_index_cap, "over": size - shared_index_cap,
+                                    "reduce_bytes": size - shared_index_cap,
+                                    "hosts": list(memspec.RULE_HOSTS),
+                                    "items": cap_consolidation.ranked_index(index, path,
+                                                                          path.read_text(encoding="utf-8")),
                                     "kind": "shared-index-payload"})
         except (OSError, ValueError) as exc:
             errors.append("shared-index: " + type(exc).__name__)
@@ -1023,15 +1037,32 @@ def _section_caps(vaults, today, since_date, config):
     elif core_cap is None:
         notes.append(CAP_UNSET_NOTE.format(field=memspec.CONFIG_CORE_CAP_BYTES_FIELD))
     else:
+        rules = None
         for path in named:
             try:
-                size = _core_file_loaded_bytes(path)
+                text = path.read_text(encoding="utf-8").replace("\r\n", "\n")
+                loads = core_gen.host_loads(text)
+                size = max(loads.values())
             except (OSError, UnicodeError, ValueError) as exc:
                 errors.append(f"{path}: {type(exc).__name__}: {exc}")
                 continue
             if size > core_cap:
+                if rules is None:
+                    rules, rule_errors = core_gen.collect_rules(host_sync.contract_vaults(vaults))
+                    errors.extend(rule_errors)
+                hosts = []
+                for host, loaded in loads.items():
+                    if loaded <= core_cap:
+                        continue
+                    ranked = cap_consolidation.ranked_rules(text, host, rules)
+                    hosts.append({"host": host, "bytes": loaded, "cap": core_cap,
+                                  "reduce_bytes": loaded - core_cap, "rules": ranked,
+                                  "unmapped_rules": sum(r["card_path"] is None for r in ranked),
+                                  "overhead_bytes": loaded - sum(r["bytes"] for r in ranked)})
                 entries.append({
                     "path": str(path), "bytes": size, "cap": core_cap, "over": size - core_cap,
+                    "kind": "core-rules", "reduce_bytes": size - core_cap,
+                    "host_loads": loads, "hosts": hosts,
                 })
     entries.sort(key=lambda item: -item["over"])
     drift = _core_drift(vaults, named)
@@ -2295,7 +2326,7 @@ def _next_steps(sections, shaping=()):
         steps.append(f"拆卡候選 {mixed['mixed_cards']} 張（一張卡＝一個記憶或規則）→ 人工判斷要不要拆")
     caps = counts(11)
     if caps.get("over_cap", 0) > 0:
-        steps.append(f"超上限候選 {caps['over_cap']} 個檔案 → 人工判斷精簡或提高上限；夢不改檔")
+        steps.append(f"超上限 {caps['over_cap']} 個項目 → {CAP_COMMAND}")
     if caps.get("unset_keys", 0) > 0:
         steps.append(f"上限檢查有 {caps['unset_keys']} 項未設定（config 缺鍵），這幾項這次沒查")
     if caps.get("drift", 0) > 0:
@@ -2414,6 +2445,9 @@ def _render_section(lines, section):
     if examples:
         lines.append(f"examples (前 {len(examples)} 筆):")
         for item in examples:
+            if section["id"] == 11 and item.get("over", 0) > 0:
+                _render_cap_material(lines, item)
+                continue
             lines.append(f"- {item}")
     reverted = section.get("reverted") or []
     if reverted:
@@ -2457,6 +2491,25 @@ def _render_section(lines, section):
     if note:
         lines.append(f"備註：{note}")
     lines.append("")
+
+
+def _render_cap_material(lines, item):
+    lines.append(f"- {item['path']}：{item['bytes']} bytes，上限 {item['cap']} bytes，"
+                 f"至少需縮減 {item['reduce_bytes']} bytes。")
+    if item.get("kind") == "core-rules":
+        for host in item["hosts"]:
+            lines.append(f"  - 宿主 {host['host']} 實際載入 {host['bytes']} bytes，上限 {host['cap']} bytes，"
+                         f"至少需縮減 {host['reduce_bytes']} bytes；條文依載入長度降冪排列（含條文格式與換行）。")
+            lines.append(f"    標題等非條文內容 {host['overhead_bytes']} bytes；"
+                         f"無法對應現行卡片的條文 {host['unmapped_rules']} 條。")
+            for rule in host["rules"]:
+                lines.append(f"    - {rule['bytes']} bytes｜{rule['card_path'] or '卡片未對應（可能有漂移）'}｜{rule['text']}")
+    else:
+        if item.get("hosts"):
+            lines.append("  - 載入宿主：" + "、".join(item["hosts"]))
+        lines.append("  - 索引條目依長度降冪排列（含量測本文換行；行號對應來源檔）：")
+        for entry in item["items"]:
+            lines.append(f"    - {entry['bytes']} bytes｜{entry['path']}:{entry['line']}｜{entry['text']}")
 
 
 def _render_markdown(report):
@@ -4147,6 +4200,14 @@ def _write_run_state(path, report, out_path, elapsed, started_epoch=None):
         if isinstance(previous, dict)
         else None,
     }
+    try:
+        from . import cap_consolidation
+    except ImportError:
+        import cap_consolidation
+    cap_section = next((s for s in report["sections"] if s["id"] == 11), {})
+    cap_summary = cap_consolidation.summary(cap_section.get("examples") or [])
+    if cap_summary:
+        value[cap_consolidation.STATE_FIELD] = cap_summary
     path.parent.mkdir(parents=True, exist_ok=True)
     # 先寫旁邊再換名：截斷式寫入被砍在中間（機器休眠、程序被 kill）會留下半個 JSON，
     # 而開場那一行與「距上次多久」只讀這一份，讀不動就當夢從沒跑過。

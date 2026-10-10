@@ -201,7 +201,7 @@ def _dream_running(governance):
     return (time.time() - started) < memspec.DREAM_LOCK_STALE_SECONDS
 
 
-def _dream_notice(governance, source, settings):
+def _dream_notice(governance, source, settings, deliveries=None):
     """夢的一行只在有人要做事時出現：夢報錯、夢列了待審候選、夢到期卻沒跑。
     乾淨跑完的那一場什麼都不說（owner 2026-09-09：沒必要就拿掉）。
     壓縮續場不印——那不是新的一場。"""
@@ -210,12 +210,12 @@ def _dream_notice(governance, source, settings):
     if isinstance(source, str) and source == "compact":
         return None
     state = _dream_state(governance)
-    return _dream_finished_notice(governance, state) or _dream_overdue_notice(
+    return _dream_finished_notice(governance, state, deliveries) or _dream_overdue_notice(
         governance, state, settings
     )
 
 
-def _dream_finished_notice(governance, state):
+def _dream_finished_notice(governance, state, deliveries=None):
     """夢跑完後的下一場印一行，只印一次；乾淨的那一場只記已通知、不印。"""
     completed = state.get(memspec.DREAM_STATE_COMPLETED_FIELD)
     if not isinstance(completed, str) or not completed:
@@ -228,22 +228,32 @@ def _dream_finished_notice(governance, state):
     for field in memspec.DREAM_HEADLINE_FIELDS:
         value = headline.get(field)
         numbers[field] = value if isinstance(value, int) and not isinstance(value, bool) else 0
-    # 標記失敗就不印：印不掉的通知會每一場重複，而重複的開場行比漏一行更糟。
-    if not _dream_mark_notified(governance, state, completed):
-        return None
     when = state.get(memspec.DREAM_STATE_DATE_FIELD)
     when = when if isinstance(when, str) and when else completed[:10]
     pack = state.get(memspec.DREAM_STATE_PACK_FIELD)
     pack = pack if isinstance(pack, str) and pack else "-"
+    from epitype import cap_consolidation
+    caps = state.get(cap_consolidation.STATE_FIELD)
+    # 整理材料與其他節的失敗可以同時存在；仍把已量到的超量與下一步交給下一場。
+    if isinstance(caps, list) and caps:
+        notice = cap_consolidation.notice(caps, pack)
+        if (state.get(memspec.DREAM_STATE_COMPLETE_FIELD) is not True
+                or state.get(memspec.DREAM_STATE_ERRORS_FIELD)):
+            notice += "；夢另有未完整檢查，詳見報告"
     # 舊格式沒有完整性證據；保留通知，但不能把未知或部分結果宣告成乾淨。
-    if (state.get(memspec.DREAM_STATE_COMPLETE_FIELD) is not True
+    elif (state.get(memspec.DREAM_STATE_COMPLETE_FIELD) is not True
             or state.get(memspec.DREAM_STATE_ERRORS_FIELD)):
-        return memspec.DREAM_NOTICE_INCOMPLETE_LINE.format(date=when, pack=pack)
-    if not any(numbers.values()):
+        notice = memspec.DREAM_NOTICE_INCOMPLETE_LINE.format(date=when, pack=pack)
+    elif not any(numbers.values()):
+        notice = None
+    else:
+        notice = memspec.DREAM_NOTICE_LINE.format(date=when, pack=pack, **numbers)
+    # 有限開場輸出若裁掉這一行，不能當作已送達；保留給下一場。
+    if notice and deliveries is not None:
+        deliveries.append((notice, governance, state, completed))
+    elif not _dream_mark_notified(governance, state, completed):
         return None
-    return memspec.DREAM_NOTICE_LINE.format(
-        date=when, pack=pack, **numbers
-    )
+    return notice
 
 
 def _dream_overdue_notice(governance, state, settings):
@@ -475,9 +485,11 @@ def _handle(event, started_at, deliveries=None, trace=None):
         _startup_segments(pieces, vaults, resolved, governance, started_at, event=event)
 
     # 夢的一行跟其他一行摘要放在一起：它是狀態，不是規則。
+    notice_deliveries = []
     if _soft_remaining(started_at) > 0:
         try:
-            notice = _dream_notice(governance_vault(config, for_write=True), source, dream)
+            notice = _dream_notice(governance_vault(config, for_write=True), source, dream,
+                                   deliveries=notice_deliveries)
         except Exception:
             notice = None
         if notice:
@@ -490,6 +502,9 @@ def _handle(event, started_at, deliveries=None, trace=None):
         trace["outcome"] = "budget-expired"
         return None
     context = bounded_context("SessionStart", pieces, budget)
+    for notice, destination, state, completed in notice_deliveries:
+        if context and notice in context.splitlines():
+            _dream_mark_notified(destination, state, completed)
     if context and handoff and deliveries is not None and handoff[0] in context.splitlines():
         deliveries.append(handoff[1:])
     sent = context.splitlines() if context else []

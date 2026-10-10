@@ -327,10 +327,18 @@ def _plan(host, label, key, path, wanted_of, home=None, over_cap=None):
                 f"{name} 有 {size} 位元組，超過每場固定成本上限 "
                 f"{memspec.HOST_SYNC_REGION_CAP_BYTES}；仍整塊寫入，請考慮瘦身"
             )
-        if name == memspec.HOST_SYNC_RULES_REGION and rules_cap is not None and size > rules_cap:
+        # render 在規則與 END 標記之間保留一個換行；與 core_gen.host_loads 的量法一致。
+        rules_size = len((text.rstrip("\n") + "\n").encode("utf-8")) if text else 0
+        if name == memspec.HOST_SYNC_RULES_REGION and rules_cap is not None and rules_size > rules_cap:
+            try:
+                from . import cap_consolidation
+            except ImportError:
+                import cap_consolidation
             notices.append(
-                f"{name} 有 {size} 位元組，超過設定的 {memspec.CONFIG_CORE_CAP_BYTES_FIELD} "
-                f"{rules_cap}；已保留完整新規則，容量僅提醒"
+                f"常駐規則實際載入 {rules_size} bytes，上限 {rules_cap} bytes"
+                f"（{memspec.CONFIG_CORE_CAP_BYTES_FIELD}），超過 {rules_size - rules_cap} bytes；"
+                f"已保留完整新規則。整理材料：{cap_consolidation.material_path(configured)}；"
+                f"若夢報告尚未更新，先跑 python epitype/dream.py --scheduled；{cap_consolidation.NEXT_STEP}"
             )
         if (key is None and name == memspec.HOST_SYNC_INDEX_REGION
                 and shared_index_cap is not None and size > shared_index_cap):
