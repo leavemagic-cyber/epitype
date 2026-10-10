@@ -10,7 +10,9 @@ except ImportError:
     import memspec
 
 STATE_FIELD = "cap_consolidation"
-NEXT_STEP = "需要擬精簡稿，經 Claude 與 Codex 核對意義不變，再給 owner 前後對照表核准；核准後走規則管線重新綁定"
+# Owner 2026-09-09 (decision-memory-governance-final-design-20260909): contract and rule
+# text changes are settled between Claude and Codex, not shown to the owner word by word.
+NEXT_STEP = "擬精簡稿 → Claude 與 Codex 核對意義不變 → 走規則管線寫入並重新綁定 → 寫入後告知 owner 改了什麼與前後 bytes；不先送 owner 逐字核准（owner 2026-09-09 裁定）"
 
 
 def material_path(config):

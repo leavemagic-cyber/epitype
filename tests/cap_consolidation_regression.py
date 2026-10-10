@@ -125,7 +125,8 @@ class CapConsolidation(unittest.TestCase):
         self.assertIn(f"至少需縮減 {self.loads['codex'] - self.loads['claude']} bytes", markdown)
         self.assertIn(str(self.vault / "codex.md"), markdown)
         self.assertIn("索引條目依長度降冪排列", markdown)
-        self.assertIn("前後對照表核准", markdown)
+        self.assertIn(cap.NEXT_STEP, markdown)
+        self.assertNotIn("前後對照表核准", markdown)
         self.assertNotIn("提高上限；夢不改檔", markdown)
         state = json.loads(self.state_path.read_text(encoding="utf-8"))
         self.assertEqual(state[cap.STATE_FIELD], cap.summary(section["examples"]))
@@ -182,6 +183,18 @@ class CapConsolidation(unittest.TestCase):
         self.assertIn(cap.NEXT_STEP, plan.notices[0])
         self.assertIn("--scheduled", plan.notices[0])
 
+    def test_next_step_has_no_owner_approval_gate(self):
+        # Owner 2026-09-09: 「5.不要給我逐字看，你跟CODEX討論」. The owner is told
+        # afterwards; nothing waits on an owner approval of the wording.
+        steps = ["擬精簡稿", "Claude 與 Codex 核對意義不變", "規則管線寫入",
+                 "寫入後告知 owner 改了什麼與前後 bytes"]
+        positions = [cap.NEXT_STEP.find(step) for step in steps]
+        self.assertNotIn(-1, positions, cap.NEXT_STEP)
+        self.assertEqual(positions, sorted(positions))
+        for gate in ("前後對照表", "核准後", "給 owner"):
+            self.assertNotIn(gate, cap.NEXT_STEP)
+        self.assertIn(cap.NEXT_STEP, dream.CAP_COMMAND)
+
     def test_under_or_exact_cap_has_no_material_or_notice(self):
         self.config["core_cap_bytes"] = max(self.loads.values())
         self.config["shared_index_cap_bytes"] = len(host_sync.index_text([self.vault]).encode("utf-8"))
@@ -196,7 +209,7 @@ class CapConsolidation(unittest.TestCase):
         self.assertNotIn(cap.STATE_FIELD, state)
         notice = start._dream_notice(self.vault, "startup", self.config["dream"])
         self.assertNotIn("整理材料：", notice or "")
-        self.assertNotIn("前後對照表核准", "\n".join(report["next_steps"]))
+        self.assertNotIn(cap.NEXT_STEP, "\n".join(report["next_steps"]))
         plan = host_sync._plan("codex", "codex", None, self.root / "AGENTS.md",
                                lambda: {"rules": core_gen.host_view(self.core_text, "codex")}, self.home)
         self.assertFalse(plan.notices)
