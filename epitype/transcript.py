@@ -124,14 +124,19 @@ def _unflagged(item):
 
 
 def ask_tool_uses(item):
-    """{tool_use id: input} for host question prompts this assistant record raised."""
+    """{tool_use id: {input, sessionId, uuid}} for host question prompts this assistant record raised.
+
+    The prompt's session and record uuid travel with it: an answer binds to the
+    prompt only through sessionId and sourceToolAssistantUUID, never by its text.
+    """
     if not _unflagged(item) or item.get("type") != "assistant":
         return {}
     message = item.get("message")
     content = message.get("content") if isinstance(message, dict) else None
     if not isinstance(content, list):
         return {}
-    return {block["id"]: block["input"] if isinstance(block.get("input"), dict) else {}
+    return {block["id"]: {"input": block.get("input"), "sessionId": item.get("sessionId"),
+                          "uuid": item.get("uuid")}
             for block in content
             if isinstance(block, dict) and block.get("type") == "tool_use"
             and block.get("name") == ASK_TOOL and isinstance(block.get("id"), str) and block["id"]}
@@ -149,19 +154,66 @@ def tool_result_ids(item):
             if isinstance(block, dict) and block.get("type") == "tool_result"]
 
 
-def _ask_answer(item, asked):
-    """(S selected / U typed, text) for an answer to a matched AskUserQuestion.
+def _label_covers(answer, labels):
+    """Distinct label sequences whose ", " join is exactly `answer`; stops after two."""
+    covers = []
 
-    The match is by tool_use id against prompts the caller saw earlier in the
-    same transcript; text that merely looks like an answer proves nothing.
+    def walk(start, used):
+        if len(covers) > 1:
+            return
+        for label in labels:
+            if label in used or not answer.startswith(label, start):
+                continue
+            end = start + len(label)
+            if end == len(answer):
+                covers.append(used + (label,))
+            elif answer.startswith(", ", end):
+                walk(end + 2, used + (label,))
+
+    walk(0, ())
+    return covers
+
+
+def _question_options(question):
+    """{label: description} for one well-formed question, else None."""
+    options = question.get("options")
+    if not isinstance(options, list) or not isinstance(question.get("multiSelect", False), bool):
+        return None
+    found = {}
+    for option in options:
+        if not isinstance(option, dict):
+            return None
+        label, description = option.get("label"), option.get("description", "")
+        if (not isinstance(label, str) or not label.strip() or label in found
+                or not isinstance(description, str)):
+            return None
+        found[label] = description
+    return found
+
+
+def _ask_answer(item, asked):
+    """(S selected / U typed, text) for an answer to a matched AskUserQuestion, else None.
+
+    The answer binds to a prompt the caller saw earlier in the same transcript by
+    tool_use id, session and the prompt record's uuid; text that merely looks
+    like an answer proves nothing. Option text was written by the AI, so S text
+    is only the picked labels and their descriptions, never the question, and an
+    answer that names an option it cannot be rebuilt from is no source at all.
     """
     ids = tool_result_ids(item)
-    if len(ids) != 1 or not isinstance(asked, dict) or ids[0] not in asked:
+    if len(ids) != 1 or not isinstance(ids[0], str) or not isinstance(asked, dict):
         return None
-    blocks = item["message"]["content"]
-    if any(isinstance(block, dict) and block.get("is_error") for block in blocks):
+    prompt = asked.get(ids[0])
+    if not isinstance(prompt, dict):
         return None
-    questions = asked[ids[0]].get("questions")
+    session, uuid = item.get("sessionId"), item.get("sourceToolAssistantUUID")
+    if (not isinstance(session, str) or not session or session != prompt.get("sessionId")
+            or not isinstance(uuid, str) or not uuid or uuid != prompt.get("uuid")):
+        return None
+    if any(isinstance(block, dict) and block.get("is_error") for block in item["message"]["content"]):
+        return None
+    tool_input = prompt.get("input")
+    questions = tool_input.get("questions") if isinstance(tool_input, dict) else None
     result = item.get("toolUseResult")
     answers = result.get("answers") if isinstance(result, dict) else None
     if not isinstance(questions, list) or not isinstance(answers, dict):
@@ -169,18 +221,28 @@ def _ask_answer(item, asked):
     selected, typed = [], []
     for question in questions:
         if not isinstance(question, dict) or not isinstance(question.get("question"), str):
+            return None
+        options = _question_options(question)
+        if options is None:
+            return None
+        if question["question"] not in answers:
             continue
-        answer = answers.get(question["question"])
-        if not isinstance(answer, str) or not answer.strip():
+        answer = answers[question["question"]]
+        if not isinstance(answer, str):
+            return None
+        if not answer.strip():
             continue
-        options = {option["label"]: option.get("description") or ""
-                   for option in question.get("options") or ()
-                   if isinstance(option, dict) and isinstance(option.get("label"), str)}
-        picks = ([answer] if answer in options else
-                 [part.strip() for part in answer.split(",")] if question.get("multiSelect") else [])
-        if picks and all(pick in options for pick in picks):
-            selected.append("\n".join([question["question"],
-                                       *(f"{pick}\n{options[pick]}".rstrip() for pick in picks)]))
+        if question.get("multiSelect", False):
+            covers = _label_covers(answer, list(options))
+            picks = covers[0] if len(covers) == 1 else None
+        else:
+            picks = (answer,) if answer in options else None
+        if picks:
+            selected.append("\n".join(f"{pick}\n{options[pick]}".rstrip() for pick in picks))
+        elif any(label in answer for label in options):
+            # Names an AI-written option but is not exactly those options: whose words
+            # each part is cannot be told, so the record proves nothing.
+            return None
         else:
             typed.append(answer)
     if typed and not selected:

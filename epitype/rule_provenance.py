@@ -184,7 +184,7 @@ def _session(header, item):
 
 
 def _asked_prefix(stream, source, raw, budget):
-    """{id: input} of the AskUserQuestion prompts this cited tool result answers,
+    """ask_tool_uses entries of the AskUserQuestion prompts this cited tool result answers,
     found in the same original file before the cited row; {} for any other row."""
     try:
         wanted = {value for value in tool_result_ids(json.loads(raw.decode("utf-8-sig")))

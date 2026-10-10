@@ -549,15 +549,15 @@ class AskUserQuestionSources(unittest.TestCase):
         asked = transcript.ask_tool_uses(self.rows[0])
         role, text = transcript.source_record(self.rows[1], asked)
         self.assertEqual(role, transcript.OWNER_SELECTED)
-        self.assertIn(self.LABEL, text)
-        self.assertIn(self.QUESTION, text)
+        self.assertEqual(text, f"{self.LABEL}\n{self.DESCRIPTION}")
+        self.assertNotIn(self.QUESTION, text)
         self.assertIsNone(transcript.source_record(self.rows[1]))
         result = self.verdict(self.document("ai-derived", self.LABEL,
-                                            self.source(1, "S"), self.QUESTION))
+                                            self.source(1, "S"), self.DESCRIPTION))
         self.assertEqual(result.status, provenance.VERIFIED, result.issues)
         # The declared role must be the one the record proves.
         wrong = self.verdict(self.document("ai-derived", self.LABEL,
-                                           self.source(1, "U"), self.QUESTION))
+                                           self.source(1, "U"), self.DESCRIPTION))
         self.assertEqual(wrong.status, provenance.INVALID)
 
     def test_unmatched_tool_result_with_identical_text_is_rejected(self):
@@ -570,14 +570,14 @@ class AskUserQuestionSources(unittest.TestCase):
         self.assertEqual(set(asked), {"toolu_ask"})
         self.assertIsNone(transcript.source_record(self.rows[2], asked))
         result = self.verdict(self.document("ai-derived", self.LABEL,
-                                            self.source(2, "S"), self.QUESTION))
+                                            self.source(2, "S"), self.LABEL))
         self.assertEqual(result.status, provenance.INVALID)
         origin = provenance.first_authorship(self.path, [self.LABEL])[self.LABEL]
         self.assertEqual(origin["status"], provenance.UNVERIFIED)
         # A result that precedes its prompt is not an answer to it either.
         self.write(self.answer("toolu_ask", self.LABEL), self.prompt("toolu_ask"))
         result = self.verdict(self.document("ai-derived", self.LABEL,
-                                            self.source(0, "S"), self.QUESTION))
+                                            self.source(0, "S"), self.LABEL))
         self.assertEqual(result.status, provenance.INVALID)
 
     def test_typed_other_answer_is_owner_typed(self):
@@ -598,10 +598,117 @@ class AskUserQuestionSources(unittest.TestCase):
         self.assertEqual((origin["status"], origin["role"], origin["human_authored"]),
                          (provenance.VERIFIED, "S", False))
         result = self.verdict(self.document("owner-directive", self.LABEL,
-                                            self.source(1, "S"), self.QUESTION))
+                                            self.source(1, "S"), self.LABEL))
         self.assertEqual(result.status, provenance.INVALID)
         self.assertTrue(any("owner-selected" in issue for issue in result.issues), result.issues)
 
+
+    def ask(self, tool_id, questions, **answer_fields):
+        """A prompt carrying `questions` and its answer row; answer_fields override the answer."""
+        prompt = self.prompt(tool_id)
+        prompt["message"]["content"][0]["input"] = {"questions": questions}
+        answer = self.answer(tool_id, "")
+        answer["toolUseResult"]["answers"] = answer_fields.pop("answers")
+        answer.update(answer_fields)
+        return prompt, answer
+
+    def questions(self):
+        return self.prompt("x")["message"]["content"][0]["input"]["questions"]
+
+    def record(self, prompt, answer):
+        from epitype import transcript
+        return transcript.source_record(answer, transcript.ask_tool_uses(prompt))
+
+    def test_answer_quote_must_come_from_the_selected_option(self):
+        rejected = self.ask("toolu_ask", self.questions(), answers={self.QUESTION: "先不要"})
+        self.write(*rejected)
+        self.assertEqual(self.record(*rejected), ("S", "先不要\n維持現狀。"))
+        # The question is AI wording; it neither approves nor bounds the scope.
+        from_question = self.verdict(self.document("ai-derived", "常駐規則精簡",
+                                                   self.source(1, "S"), "常駐規則精簡"))
+        self.assertNotEqual(from_question.status, provenance.VERIFIED)
+        for issue in ("quotation does not occur in original human-authored directive text",
+                      "scope basis must quote a verified original human source"):
+            self.assertIn(issue, from_question.issues)
+        # An option the owner did not pick says nothing about the owner's choice.
+        unselected = self.verdict(self.document("ai-derived", self.LABEL,
+                                                self.source(1, "S"), self.DESCRIPTION))
+        self.assertNotEqual(unselected.status, provenance.VERIFIED)
+        self.assertIn("quotation does not occur in original human-authored directive text",
+                      unselected.issues)
+        self.write(self.prompt("toolu_ask"), self.answer("toolu_ask", self.LABEL))
+        selected = self.verdict(self.document("ai-derived", self.LABEL,
+                                              self.source(1, "S"), self.DESCRIPTION))
+        self.assertEqual(selected.status, provenance.VERIFIED, selected.issues)
+
+    def test_multiselect_labels_with_commas_are_rebuilt_from_whole_labels(self):
+        options = [{"label": "Project A, local only", "description": "只在本機"},
+                   {"label": "Project B", "description": "全域"}]
+        question = {"question": "要套用到哪些專案？", "header": "範圍", "multiSelect": True,
+                    "options": options}
+        both = self.ask("toolu_ask", [question],
+                        answers={"要套用到哪些專案？": "Project A, local only, Project B"})
+        self.write(*both)
+        self.assertEqual(self.record(*both),
+                         ("S", "Project A, local only\n只在本機\nProject B\n全域"))
+        directive = self.verdict(self.document("owner-directive", "Project A, local only",
+                                               self.source(1, "U"), "Project A, local only"))
+        self.assertEqual(directive.status, provenance.INVALID)
+        origin = provenance.first_authorship(
+            self.path, ["Project A, local only"])["Project A, local only"]
+        self.assertFalse(origin.get("human_authored"), origin)
+        # A label next to typed text, or a split that two label sets both explain,
+        # cannot be attributed: the record proves nothing rather than owner words.
+        ambiguous = [{"label": "A, B", "description": ""}, {"label": "A", "description": ""},
+                     {"label": "B", "description": ""}]
+        for answer, labels in (("Project B, my own words", options), ("A, B", ambiguous)):
+            rows = self.ask("toolu_ask", [dict(question, options=labels)],
+                            answers={"要套用到哪些專案？": answer})
+            self.assertIsNone(self.record(*rows), answer)
+        single = self.ask("toolu_ask", self.questions(),
+                          answers={self.QUESTION: self.LABEL + "，但只限 A 案"})
+        self.assertIsNone(self.record(*single))
+        self.write(*single)
+        origin = provenance.first_authorship(self.path, ["但只限 A 案"])["但只限 A 案"]
+        self.assertNotEqual(origin["status"], provenance.VERIFIED)
+
+    def test_answer_binds_to_its_prompt_by_session_and_uuid(self):
+        for fields in ({"sessionId": "another-session"},
+                       {"sourceToolAssistantUUID": "assistant-other"},
+                       {"sourceToolAssistantUUID": None}, {"sessionId": None}):
+            with self.subTest(fields=fields):
+                rows = self.ask("toolu_ask", self.questions(),
+                                answers={self.QUESTION: self.TYPED}, **fields)
+                self.assertIsNone(self.record(*rows))
+                self.write(*rows)
+                origin = provenance.first_authorship(self.path, [self.TYPED])[self.TYPED]
+                self.assertEqual(origin["status"], provenance.UNVERIFIED)
+                result = self.verdict(self.document("owner-directive", self.TYPED,
+                                                    self.source(1, "U"), self.TYPED))
+                self.assertEqual(result.status, provenance.INVALID)
+
+    def test_malformed_prompt_or_answer_is_no_source(self):
+        good = self.questions()[0]
+        typed = {self.QUESTION: self.TYPED}
+        cases = [
+            ([dict(good, options="核准")], typed),
+            ([dict(good, options=[{"label": 7, "description": "x"}])], typed),
+            ([dict(good, options=[{"label": "核准", "description": ["x"]}])], typed),
+            ([dict(good, multiSelect="yes")], typed),
+            ([good, "not a question"], typed),
+            ([good], {self.QUESTION: ["核准"]}),
+            ("not a list", typed),
+        ]
+        for questions, answers in cases:
+            with self.subTest(questions=questions, answers=answers):
+                self.assertIsNone(self.record(*self.ask("toolu_ask", questions, answers=answers)))
+        prompt, answer = self.ask("toolu_ask", [good], answers=typed)
+        self.assertEqual(self.record(prompt, answer), ("U", self.TYPED))
+        answer["message"]["content"][0]["tool_use_id"] = ["toolu_ask"]
+        self.assertIsNone(self.record(prompt, answer))
+        answer["message"]["content"][0]["tool_use_id"] = "toolu_ask"
+        prompt["message"]["content"][0]["input"] = "not a dict"
+        self.assertIsNone(self.record(prompt, answer))
 
 if __name__ == "__main__":
     if "--selftest" in sys.argv:
