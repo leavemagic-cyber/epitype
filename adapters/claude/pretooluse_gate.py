@@ -709,7 +709,9 @@ def _recurrence_review(card, target, additions, prospective, patch, started_at, 
     return _deny_value(reason[: memspec.WRITE_GATE_REASON_MAX_CHARS])
 
 
-_Guard = namedtuple("_Guard", "card tool substrings advice path requires unless when write_check advise_tool advise_fragments advise_text sequence audience on_hit", defaults=((), "", "note"))
+# scope_reference/source_note are said only when this guard's own conditions match
+# the call; emitting them at discovery put every card's reference into every call.
+_Guard = namedtuple("_Guard", "card tool substrings advice path requires unless when write_check advise_tool advise_fragments advise_text sequence audience on_hit scope_reference source_note", defaults=((), "", "note", (), ""))
 
 
 def _read_guard(path):
@@ -983,13 +985,16 @@ _WARM_CAP = 1 << 30
 _GUARD_CACHE_VERSION = 8
 
 
-def _guards(vault, started_at, defects, cap=None, deadline=None, *, event=None, advisories=None):
+def _guards(vault, started_at, defects, cap=None, deadline=None, *, event=None, advisories=None,
+            match_first=False):
     """Every usable guard in one vault, discovered through a manifest cache.
 
     The cache locates candidates; it never supplies executable evidence. Every
     known positive is read in full on each call, including its original source.
     Changed and rotating negative candidates have a separate discovery budget.
-    A warm call without an actual event only discovers guards, never enforces."""
+    A warm call without an actual event only discovers guards, never enforces.
+    match_first=True returns ADVISORY-scope guards too, carrying their reference,
+    and defers every per-card note to the caller's own trigger match."""
     from epitype import cardscan, rule_context
 
     def timed_out():
@@ -1102,24 +1107,30 @@ def _guards(vault, started_at, defects, cap=None, deadline=None, *, event=None, 
                 continue
             on_hit = entry.get("on_hit", "note")
             advice = entry.get("advice", "")
+            source_note = ""
             if entry.get("source_status") != "VERIFIED":
-                defects.append(f"[{card_path}] guard source UNVERIFIED: " + "; ".join(entry.get("source_issues") or ["legacy source not verified"]))
+                source_note = f"[{card_path}] guard source UNVERIFIED: " + "; ".join(entry.get("source_issues") or ["legacy source not verified"])
+                if not match_first:
+                    defects.append(source_note)
                 # CORE-08/CORE-25: only an owner-verified source may deny; an
                 # unverified card's on_hit: block is shown as a reminder.
                 if on_hit == "block":
                     on_hit = "note"
                     advice = "\n".join(filter(None, (advice, memspec.ACTION_GUARD_UNVERIFIED_BLOCK_NOTE)))
             scope = entry.get("source_scope")
+            scope_reference = ()
             if scope is not None:
                 state, reason = rule_context.applicability(scope, event)
                 if state == "OUTSIDE":
                     continue
                 if state == "ADVISORY":
                     reference = "限定參考（本場範圍未確認）：" + entry.get("source_render", "")
-                    defects.append(f"[{card_path}] guard scope ADVISORY: {reason}\n{reference}")
-                    if advisories is not None:
-                        advisories.append((paths[card_path], entry.get("card", card_path), reference))
-                    continue
+                    if not match_first:
+                        defects.append(f"[{card_path}] guard scope ADVISORY: {reason}\n{reference}")
+                        if advisories is not None:
+                            advisories.append((paths[card_path], entry.get("card", card_path), reference))
+                        continue
+                    scope_reference = (f"[{card_path}] guard scope ADVISORY: {reason}\n{reference}", reference)
             found.append(
                 _Guard(
                     entry.get("card", card_path),
@@ -1146,9 +1157,27 @@ def _guards(vault, started_at, defects, cap=None, deadline=None, *, event=None, 
                     tuple(entry.get("sequence") or ()),
                     entry.get("audience", ""),
                     on_hit,
+                    scope_reference,
+                    source_note,
                 )
             )
     return found
+
+
+def _guard_matched(guard, defects, advisories):
+    """Say a guard's deferred notes once its own trigger matched this call.
+
+    True when the guard is only an ADVISORY-scope reference: the caller then stops,
+    because a reference is shown but never enforced."""
+    if guard.source_note:
+        defects.append(guard.source_note)
+    if not guard.scope_reference:
+        return False
+    line, reference = guard.scope_reference
+    defects.append(line)
+    if advisories is not None:
+        advisories.append((guard.path, guard.card, reference))
+    return True
 
 
 def _action_text(tool_input):
@@ -1196,13 +1225,16 @@ def _guard_review(event, tool_name, tool_input, config, started_at, defects, adv
         # 實跑：一條 6 次命中、6 次全擋下、0 漏擋的規則被關了 14 天）。那個函式現在
         # 永遠回空集合，而為了拿一個空集合，每一次工具呼叫都要多載 8.3 ms 的模組。
         demoted = frozenset()
-        for guard in _guards(vault, started_at, defects, event=event, advisories=advisories):
+        for guard in _guards(vault, started_at, defects, event=event, advisories=advisories,
+                             match_first=True):
             if guard.sequence:
                 from epitype import action_receipts, action_sequence, tool_sequence
                 if not tool_sequence.applies(guard.audience,event): continue
                 actions=action_receipts.projected(event)
                 mutations={item.partition('=>')[2].strip()[1:] for item in guard.sequence}
                 if any(action.kind in mutations for action in actions):
+                    if _guard_matched(guard, defects, advisories):
+                        continue
                     facts=action_receipts.read(event,action_receipts.database_path(config_path()))
                     start=max((max(f.started,f.finished) for f in facts),default=0)+1
                     # This is a proposed operation, not persisted execution evidence.
@@ -1234,10 +1266,13 @@ def _guard_review(event, tool_name, tool_input, config, started_at, defects, adv
                         if advisories is not None and guard.advice:
                             advisories.append((guard.path,guard.card,f'未驗證：{unknown.reason}。{guard.advice}'))
                 continue
-            if (advisories is not None and guard.advise_text
+            if (guard.advise_text
                     and memspec.action_guard_tool_matches(guard.advise_tool, folded_tool)
                     and all(fragment in haystack for fragment in guard.advise_fragments)):
-                advisories.append((guard.path, guard.card, guard.advise_text))
+                if _guard_matched(guard, defects, advisories):
+                    continue
+                if advisories is not None:
+                    advisories.append((guard.path, guard.card, guard.advise_text))
             if not guard.tool:
                 continue
             if not memspec.action_guard_tool_matches(guard.tool, folded_tool) or guard.card in demoted:
@@ -1261,6 +1296,8 @@ def _guard_review(event, tool_name, tool_input, config, started_at, defects, adv
                 name for name in guard.requires if not str(fields.get(name, "") or "").strip()
             ]
             if guard.requires and not missing:
+                continue
+            if _guard_matched(guard, defects, advisories):
                 continue
             if missing:
                 reason = memspec.ACTION_GUARD_REQUIRES_REASON.format(
@@ -1637,7 +1674,8 @@ def _write_check_review(event, config, target, prospective, patch, started_at, *
             diagnostics.append("write-check source UNVERIFIED: verification budget exhausted before vault read")
             return None
         rules.extend(
-            (vault, guard) for guard in _guards(vault, started_at, diagnostics, event=event)
+            (vault, guard) for guard in _guards(vault, started_at, diagnostics, event=event,
+                                                match_first=True)
             if guard.write_check == memspec.WRITE_CHECK_PS51_UTF8_BOM
         )
     if not rules:
@@ -1688,7 +1726,10 @@ def _write_check_review(event, config, target, prospective, patch, started_at, *
         safe = existing_bom
     if safe:
         return None
-    vault, guard = rules[0]
+    enforcing = [(vault, guard) for vault, guard in rules if not guard.scope_reference]
+    vault, guard = (enforcing or rules)[0]
+    if _guard_matched(guard, diagnostics, None):
+        return None  # ADVISORY scope: its reference is now in diagnostics, nothing enforced
     reason = memspec.WRITE_CHECK_REASON.format(card=guard.card, path=target) + "\n" + guard.advice
     _best_effort_audit(
         append_gate_log, vault,

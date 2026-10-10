@@ -383,6 +383,46 @@ class GuardSources(unittest.TestCase):
         rendered = json.dumps(result, ensure_ascii=False)
         self.assertTrue('ADVISORY' in rendered or any('ADVISORY' in item for item in defects))
 
+    def hook(self, session, tool, tool_input):
+        """Run the real PreToolUse adapter; return (additionalContext, stderr)."""
+        import subprocess
+        event = {'hook_event_name': 'PreToolUse', 'session_id': session, 'tool_name': tool,
+                 'tool_input': tool_input, 'cwd': str(self.root)}
+        result = subprocess.run(
+            [sys.executable, str(ROOT / 'adapters' / 'claude' / 'pretooluse_gate.py')],
+            input=json.dumps(event), capture_output=True, text=True, encoding='utf-8',
+            errors='replace', env=dict(os.environ), cwd=ROOT, timeout=60, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        value = json.loads(result.stdout) if result.stdout.strip() else {}
+        output = value.get('hookSpecificOutput', {})
+        self.assertNotIn('permissionDecision', output)
+        return output.get('additionalContext', ''), result.stderr
+
+    def test_advisory_scope_reference_only_when_the_guard_itself_matches(self):
+        # An ADVISORY-scope card used to inject its reference into every tool call.
+        self.card(scope=self.scope(conditions=['special context']))
+        for session, tool, tool_input in (
+                ('advisory-read', 'Read', {'file_path': str(self.card_path)}),
+                ('advisory-other-bash', 'Bash', {'command': 'git status'})):
+            with self.subTest(tool=tool):
+                context, stderr = self.hook(session, tool, tool_input)
+                self.assertNotIn('限定參考', context)
+                self.assertNotIn(self.document['quote'], context)
+                self.assertNotIn('ADVISORY', stderr)
+        context, stderr = self.hook('advisory-hit', 'Bash', {'command': 'guard-hit-marker'})
+        self.assertIn('限定參考（本場範圍未確認）', context)
+        self.assertIn(self.document['quote'], context)
+        self.assertIn('guard scope ADVISORY', stderr)
+
+    def test_unverified_source_note_only_when_the_guard_itself_matches(self):
+        self.legacy()
+        context, stderr = self.hook('legacy-miss', 'Bash', {'command': 'git status'})
+        self.assertNotIn('legacy advice', context)
+        self.assertNotIn('guard source UNVERIFIED', stderr)
+        context, stderr = self.hook('legacy-hit', 'Bash', {'command': 'guard-hit-marker'})
+        self.assertIn('legacy advice', context)
+        self.assertIn('guard source UNVERIFIED', stderr)
+
 
 if __name__ == '__main__':
     if '--selftest' in sys.argv:

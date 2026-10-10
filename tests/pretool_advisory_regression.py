@@ -184,7 +184,7 @@ class AdvisoryRegression(unittest.TestCase):
         entry = gate._read_guard(path)
         self.assertEqual(entry["source_status"], "VERIFIED")
         self.assertEqual(entry["on_hit"], "note")
-        self.assertEqual(gate._Guard(*self.guard()[:-1]).on_hit, "note")
+        self.assertEqual(gate._Guard(*self.guard()[:gate._Guard._fields.index("on_hit")]).on_hit, "note")
         with mock.patch.object(rule_context, "applicability", return_value=("MATCH", "fixture scope")):
             if old:
                 self.before_block("new guard without on_hit", lambda: old._guard_review(
