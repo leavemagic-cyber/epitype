@@ -481,6 +481,128 @@ class ProvenanceTests(unittest.TestCase):
         self.assertEqual(provenance.validate(fields).status, provenance.VERIFIED)
 
 
+class AskUserQuestionSources(unittest.TestCase):
+    """The owner's answer in the host question prompt, matched by tool_use id."""
+    QUESTION = "常駐規則精簡要照這版進行嗎？"
+    LABEL = "核准，照這版執行"
+    DESCRIPTION = "走規則管線重新簽章並同步。"
+    TYPED = "先改成只在 A 案試行，下週再擴大"
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.path = self.root / "claude.jsonl"
+        self.sid = "synthetic-ask-session"
+
+    def prompt(self, tool_id, name="AskUserQuestion"):
+        return {"type": "assistant", "sessionId": self.sid, "uuid": "assistant-" + tool_id,
+                "message": {"role": "assistant", "content": [{"type": "tool_use", "id": tool_id,
+                    "name": name, "input": {"questions": [{"question": self.QUESTION,
+                    "header": "精簡", "multiSelect": False, "options": [
+                        {"label": self.LABEL, "description": self.DESCRIPTION},
+                        {"label": "先不要", "description": "維持現狀。"}]}]}}]}}
+
+    def answer(self, tool_id, answer):
+        # The exact shape Claude Code records for an AskUserQuestion answer.
+        text = (f'Your questions have been answered: "{self.QUESTION}"="{answer}". '
+                "You can now continue with these answers in mind.")
+        return {"type": "user", "sessionId": self.sid, "uuid": "answer-" + tool_id,
+                "sourceToolAssistantUUID": "assistant-" + tool_id,
+                "message": {"role": "user", "content": [
+                    {"type": "tool_result", "content": text, "tool_use_id": tool_id}]},
+                "toolUseResult": {"questions": [], "answers": {self.QUESTION: answer}}}
+
+    def write(self, *rows):
+        self.rows = list(rows)
+        self.raw = [(json.dumps(row, ensure_ascii=False) + "\n").encode() for row in rows]
+        self.path.write_bytes(b"".join(self.raw))
+
+    def source(self, index, role):
+        return {"path": str(self.path), "byte_offset": sum(len(row) for row in self.raw[:index]),
+                "line": index + 1, "record_sha256": hashlib.sha256(self.raw[index]).hexdigest(),
+                "session_id": self.sid, "message_id": self.rows[index]["uuid"], "role": role}
+
+    def document(self, kind, quote, source, basis_quote):
+        owner = kind == "owner-directive"
+        document = {"version": 1, "key": "synthetic-ask-rule", "kind": kind,
+            "author": "owner" if owner else "synthetic-ai", "quote": quote,
+            "text": quote if owner else "常駐規則精簡依核准版執行，不得另加審核關卡。",
+            "sources": [source], "scope": {"level": "global", "project": None, "case": None,
+            "actions": ["精簡常駐規則"], "conditions": [], "expiry": "unspecified", "exceptions": []},
+            "scope_basis": {"source": 0, "quote": basis_quote, "reviewed_by": "synthetic-reviewer",
+            "reviewed_at": "2026-10-10", "rationale": "The owner chose this option in the prompt."},
+            "supersedes": []}
+        if not owner:
+            document["approval"] = {"by": "owner", "source": 0, "quote": quote,
+                "text_sha256": hashlib.sha256(document["text"].encode("utf-8")).hexdigest()}
+        return document
+
+    def verdict(self, document):
+        return provenance.validate({"rule_provenance": provenance.serialize(document),
+                                    "decision_key": document["key"], "text": document["text"]},
+                                   self.root / "rule.md")
+
+    def test_matched_answer_is_owner_selected_and_approves(self):
+        from epitype import transcript
+        self.write(self.prompt("toolu_ask"), self.answer("toolu_ask", self.LABEL))
+        asked = transcript.ask_tool_uses(self.rows[0])
+        role, text = transcript.source_record(self.rows[1], asked)
+        self.assertEqual(role, transcript.OWNER_SELECTED)
+        self.assertIn(self.LABEL, text)
+        self.assertIn(self.QUESTION, text)
+        self.assertIsNone(transcript.source_record(self.rows[1]))
+        result = self.verdict(self.document("ai-derived", self.LABEL,
+                                            self.source(1, "S"), self.QUESTION))
+        self.assertEqual(result.status, provenance.VERIFIED, result.issues)
+        # The declared role must be the one the record proves.
+        wrong = self.verdict(self.document("ai-derived", self.LABEL,
+                                           self.source(1, "U"), self.QUESTION))
+        self.assertEqual(wrong.status, provenance.INVALID)
+
+    def test_unmatched_tool_result_with_identical_text_is_rejected(self):
+        from epitype import transcript
+        # A different tool's output carrying the same host wording and answers.
+        self.write(self.prompt("toolu_ask"), self.prompt("toolu_other", name="Bash"),
+                   self.answer("toolu_other", self.LABEL))
+        asked = transcript.ask_tool_uses(self.rows[0])
+        asked.update(transcript.ask_tool_uses(self.rows[1]))
+        self.assertEqual(set(asked), {"toolu_ask"})
+        self.assertIsNone(transcript.source_record(self.rows[2], asked))
+        result = self.verdict(self.document("ai-derived", self.LABEL,
+                                            self.source(2, "S"), self.QUESTION))
+        self.assertEqual(result.status, provenance.INVALID)
+        origin = provenance.first_authorship(self.path, [self.LABEL])[self.LABEL]
+        self.assertEqual(origin["status"], provenance.UNVERIFIED)
+        # A result that precedes its prompt is not an answer to it either.
+        self.write(self.answer("toolu_ask", self.LABEL), self.prompt("toolu_ask"))
+        result = self.verdict(self.document("ai-derived", self.LABEL,
+                                            self.source(0, "S"), self.QUESTION))
+        self.assertEqual(result.status, provenance.INVALID)
+
+    def test_typed_other_answer_is_owner_typed(self):
+        from epitype import transcript
+        self.write(self.prompt("toolu_ask"), self.answer("toolu_ask", self.TYPED))
+        record = transcript.source_record(self.rows[1], transcript.ask_tool_uses(self.rows[0]))
+        self.assertEqual(record, ("U", self.TYPED))
+        origin = provenance.first_authorship(self.path, [self.TYPED])[self.TYPED]
+        self.assertEqual((origin["status"], origin["role"], origin["human_authored"]),
+                         (provenance.VERIFIED, "U", True))
+        result = self.verdict(self.document("owner-directive", self.TYPED,
+                                            self.source(1, "U"), self.TYPED))
+        self.assertEqual(result.status, provenance.VERIFIED, result.issues)
+
+    def test_selected_label_is_not_a_verbatim_owner_quote(self):
+        self.write(self.prompt("toolu_ask"), self.answer("toolu_ask", self.LABEL))
+        origin = provenance.first_authorship(self.path, [self.LABEL])[self.LABEL]
+        self.assertEqual((origin["status"], origin["role"], origin["human_authored"]),
+                         (provenance.VERIFIED, "S", False))
+        result = self.verdict(self.document("owner-directive", self.LABEL,
+                                            self.source(1, "S"), self.QUESTION))
+        self.assertEqual(result.status, provenance.INVALID)
+        self.assertTrue(any("owner-selected" in issue for issue in result.issues), result.issues)
+
+
 if __name__ == "__main__":
     if "--selftest" in sys.argv:
         sys.argv.remove("--selftest")

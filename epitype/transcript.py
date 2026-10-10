@@ -112,11 +112,93 @@ def turn_parts(item):
     return (ASSISTANT, texts, tools)
 
 
-def source_record(item):
-    """(U host-user / Q human queue / A assistant, text), or None for non-source rows.
+ASK_TOOL = "AskUserQuestion"
+# The owner picked an option in the host's question prompt. The option text was
+# written by the AI, so it proves the owner's decision, never the owner's words.
+OWNER_SELECTED = "S"
+
+
+def _unflagged(item):
+    return isinstance(item, dict) and not any(
+        item.get(flag) for flag in ("isSidechain", "isMeta", "isCompactSummary"))
+
+
+def ask_tool_uses(item):
+    """{tool_use id: input} for host question prompts this assistant record raised."""
+    if not _unflagged(item) or item.get("type") != "assistant":
+        return {}
+    message = item.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    if not isinstance(content, list):
+        return {}
+    return {block["id"]: block["input"] if isinstance(block.get("input"), dict) else {}
+            for block in content
+            if isinstance(block, dict) and block.get("type") == "tool_use"
+            and block.get("name") == ASK_TOOL and isinstance(block.get("id"), str) and block["id"]}
+
+
+def tool_result_ids(item):
+    """tool_use ids answered by this Claude user record's tool_result blocks."""
+    if not isinstance(item, dict) or item.get("type") != "user":
+        return []
+    message = item.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    if not isinstance(content, list):
+        return []
+    return [block.get("tool_use_id") for block in content
+            if isinstance(block, dict) and block.get("type") == "tool_result"]
+
+
+def _ask_answer(item, asked):
+    """(S selected / U typed, text) for an answer to a matched AskUserQuestion.
+
+    The match is by tool_use id against prompts the caller saw earlier in the
+    same transcript; text that merely looks like an answer proves nothing.
+    """
+    ids = tool_result_ids(item)
+    if len(ids) != 1 or not isinstance(asked, dict) or ids[0] not in asked:
+        return None
+    blocks = item["message"]["content"]
+    if any(isinstance(block, dict) and block.get("is_error") for block in blocks):
+        return None
+    questions = asked[ids[0]].get("questions")
+    result = item.get("toolUseResult")
+    answers = result.get("answers") if isinstance(result, dict) else None
+    if not isinstance(questions, list) or not isinstance(answers, dict):
+        return None
+    selected, typed = [], []
+    for question in questions:
+        if not isinstance(question, dict) or not isinstance(question.get("question"), str):
+            continue
+        answer = answers.get(question["question"])
+        if not isinstance(answer, str) or not answer.strip():
+            continue
+        options = {option["label"]: option.get("description") or ""
+                   for option in question.get("options") or ()
+                   if isinstance(option, dict) and isinstance(option.get("label"), str)}
+        picks = ([answer] if answer in options else
+                 [part.strip() for part in answer.split(",")] if question.get("multiSelect") else [])
+        if picks and all(pick in options for pick in picks):
+            selected.append("\n".join([question["question"],
+                                       *(f"{pick}\n{options[pick]}".rstrip() for pick in picks)]))
+        else:
+            typed.append(answer)
+    if typed and not selected:
+        return ("U", "\n".join(typed))
+    if selected:
+        # A typed answer beside AI-written options cannot be told apart from them
+        # inside one record, so the whole record stays owner-selected.
+        return (OWNER_SELECTED, "\n\n".join(selected + typed))
+    return None
+
+
+def source_record(item, asked=None):
+    """(U host-user / Q human queue / S owner-selected / A assistant, text), or None.
 
     Only message records are consumed on Codex, not their duplicate event stream.
     Quoted content remains a quotation; structural provenance grants no action.
+    A tool result is a source only as the owner's answer to an AskUserQuestion
+    whose tool_use id is in `asked` (see ask_tool_uses); every other is None.
     """
     if not isinstance(item, dict) or any(item.get(flag) for flag in
                                        ("isSidechain", "isMeta", "isCompactSummary")):
@@ -144,6 +226,6 @@ def source_record(item):
         content = message.get("content") if isinstance(message, dict) else None
         if kind == "user" and isinstance(content, list) and any(
                 isinstance(block, dict) and block.get("type") == "tool_result" for block in content):
-            return None
+            return _ask_answer(item, asked)
         role, text = ("U" if kind == "user" else "A"), message_text(message)
     return (role, text) if isinstance(text, str) and text.strip() else None

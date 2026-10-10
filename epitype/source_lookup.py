@@ -8,10 +8,10 @@ import sys
 import time
 
 try:
-    from .transcript import source_record
+    from .transcript import OWNER_SELECTED, ask_tool_uses, source_record
     from .memspec import COMPACT_MAP_MAX_LINE_BYTES
 except ImportError:
-    from transcript import source_record
+    from transcript import OWNER_SELECTED, ask_tool_uses, source_record
     from memspec import COMPACT_MAP_MAX_LINE_BYTES
 
 MAX_BYTES = 64 * 1024 * 1024
@@ -42,12 +42,19 @@ def lookup(path, *, query="", role="all", line=None, offset=0, limit=5,
     matched = scanned = invalid = omitted = 0
     position = offset
     deadline = time.monotonic() + seconds
+    asked = {}  # AskUserQuestion prompts seen so far; only their answers are sources
     for number, raw in enumerate(rows, 1):
         if time.monotonic() >= deadline or line is not None and number >= line + limit:
             break
         start, position = position, position + len(raw)
         scanned += 1
         if line is not None and number < line:
+            # A prompt before the requested line still identifies a later answer.
+            if b'"AskUserQuestion"' in raw and len(raw) <= COMPACT_MAP_MAX_LINE_BYTES:
+                try:
+                    asked.update(ask_tool_uses(json.loads(raw.decode("utf-8-sig"))))
+                except (UnicodeError, ValueError):
+                    pass
             continue
         if len(raw) > COMPACT_MAP_MAX_LINE_BYTES:
             invalid += 1
@@ -57,12 +64,13 @@ def lookup(path, *, query="", role="all", line=None, offset=0, limit=5,
         except (UnicodeError, ValueError):
             invalid += 1
             continue
-        source = source_record(item)
+        asked.update(ask_tool_uses(item))
+        source = source_record(item, asked)
         if source is None:
             omitted += 1
             continue
         kind, text = source
-        if role == "user" and kind not in ("U", "Q") or role == "assistant" and kind != "A":
+        if role == "user" and kind not in ("U", "Q", OWNER_SELECTED) or role == "assistant" and kind != "A":
             continue
         if query.casefold() not in text.casefold():
             continue

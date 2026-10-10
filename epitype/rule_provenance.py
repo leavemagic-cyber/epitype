@@ -17,7 +17,7 @@ import zipfile
 from . import memspec
 from .capture import owner_replies
 from .source_lookup import MAX_BYTES
-from .transcript import source_record
+from .transcript import OWNER_SELECTED, ask_tool_uses, source_record, tool_result_ids
 
 FIELD = "rule_provenance"
 VERSION = 1
@@ -183,6 +183,36 @@ def _session(header, item):
     return None
 
 
+def _asked_prefix(stream, source, raw, budget):
+    """{id: input} of the AskUserQuestion prompts this cited tool result answers,
+    found in the same original file before the cited row; {} for any other row."""
+    try:
+        wanted = {value for value in tool_result_ids(json.loads(raw.decode("utf-8-sig")))
+                  if isinstance(value, str) and value}
+    except (ValueError, UnicodeError):
+        return {}
+    if not wanted:
+        return {}
+    stream.seek(0)
+    offset, line = source.get("byte_offset"), source.get("line")
+    position = number = 0
+    found = {}
+    while (position < offset) if offset is not None else (number < line - 1):
+        row = budget.read(stream, memspec.COMPACT_MAP_MAX_LINE_BYTES + 1, line=True)
+        if not row or len(row) > memspec.COMPACT_MAP_MAX_LINE_BYTES:
+            raise ValueError("source prefix unavailable or exceeds row budget")
+        position += len(row)
+        number += 1
+        if not any(value.encode("utf-8") in row for value in wanted):
+            continue
+        try:
+            item = json.loads(row.decode("utf-8-sig"))
+        except (ValueError, UnicodeError):
+            continue
+        found.update((key, value) for key, value in ask_tool_uses(item).items() if key in wanted)
+    return found
+
+
 def _original(source, base, cache, budget, *, stable_prefix=None):
     budget.check()
     path_value = source.get("archive") or source.get("path")
@@ -211,10 +241,12 @@ def _original(source, base, cache, budget, *, stable_prefix=None):
             with archive.open(matches[0]) as stream:
                 header = budget.read(stream, 256 * 1024)
                 raw = _read_row(stream, source, budget)
+                asked = _asked_prefix(stream, source, raw, budget)
     else:
         with path.open("rb") as stream:
             header = budget.read(stream, 256 * 1024)
             raw = _read_row(stream, source, budget)
+            asked = _asked_prefix(stream, source, raw, budget)
     after = path.stat()
     if (after.st_size, after.st_mtime_ns) != fingerprint[1:]:
         if stable_prefix is None or archived:
@@ -224,11 +256,11 @@ def _original(source, base, cache, budget, *, stable_prefix=None):
     if digest != source.get("record_sha256"):
         raise ValueError("record hash does not match original source")
     item = json.loads(raw.decode("utf-8-sig"))
-    record = source_record(item)
+    record = source_record(item, asked)
     if record is None:
         raise ValueError("source is meta, summary, tool output or delegated record")
     message = item.get("message", {})
-    if isinstance(message, dict) and isinstance(message.get("content"), list) and any(
+    if not asked and isinstance(message, dict) and isinstance(message.get("content"), list) and any(
             isinstance(block, dict) and block.get("type") == "tool_result"
             for block in message["content"]):
         raise ValueError("tool result user envelope is not a human source")
@@ -502,6 +534,7 @@ def first_authorship(path, quotes, *, seconds=2.0, max_bytes=None, _budget=None,
                 stream = resources.enter_context(path.open('rb'))
             number = 0
             offset = 0
+            asked = {}
             digest = hashlib.sha256()
             snapshot_size = (archive.getinfo(member).file_size
                              if path.suffix.casefold() == '.zip' else before.st_size)
@@ -522,7 +555,8 @@ def first_authorship(path, quotes, *, seconds=2.0, max_bytes=None, _budget=None,
                         break
                     raise
                 digest.update(raw)
-                record = source_record(row)
+                asked.update(ask_tool_uses(row))
+                record = source_record(row, asked)
                 if record:
                     role, body = record
                     for quote in tuple(pending):
@@ -1339,7 +1373,7 @@ def validate(fields, card_path=None, cache=None, *, seconds=5.0, max_bytes=MAX_B
     for source in sources:
         if (not isinstance(source, dict) or not _HASH.fullmatch(str(source.get("record_sha256", "")))
                 or not isinstance(source.get("session_id"), str) or not source.get("session_id")
-                or source.get("role") not in ("U", "Q", "A")):
+                or source.get("role") not in ("U", "Q", "A", OWNER_SELECTED)):
             result.issues.append("source requires hash, session_id and original role")
             continue
         try:
@@ -1361,6 +1395,7 @@ def validate(fields, card_path=None, cache=None, *, seconds=5.0, max_bytes=MAX_B
         result.status = UNVERIFIED if result.source_unavailable else INVALID
         return result
     owner_sources = []
+    selected_sources = []
     for index, (role, text, _hash) in enumerate(original):
         try:
             budget.check()
@@ -1368,7 +1403,12 @@ def validate(fields, card_path=None, cache=None, *, seconds=5.0, max_bytes=MAX_B
             return _budget_unverified(result)
         if role in ("U", "Q") and _human_quote(text, document["quote"]):
             owner_sources.append(index)
-    if not owner_sources:
+        elif role == OWNER_SELECTED and document["quote"] in text:
+            selected_sources.append(index)
+    if not owner_sources and owner and selected_sources:
+        result.issues.append("owner-selected option text was written by the AI; "
+                             "an owner-directive needs the owner's own words")
+    elif not owner_sources and not selected_sources:
         result.issues.append("quotation does not occur in original human-authored directive text")
     if owner:
         for index in owner_sources:
@@ -1388,7 +1428,7 @@ def validate(fields, card_path=None, cache=None, *, seconds=5.0, max_bytes=MAX_B
         index = approval.get('source') if isinstance(approval, dict) else None
         explicitly_approved = (
             isinstance(approval, dict) and approval.get('by') == 'owner'
-            and _integer(index) and index in owner_sources
+            and _integer(index) and (index in owner_sources or index in selected_sources)
             and approval.get('quote') == document['quote']
             and approval.get('text_sha256') == hashlib.sha256(document['text'].encode('utf-8')).hexdigest()
             and document.get('scope_basis', {}).get('source') == index
@@ -1416,8 +1456,11 @@ def validate(fields, card_path=None, cache=None, *, seconds=5.0, max_bytes=MAX_B
     else:
         index = basis["source"]
         if (not _integer(index) or index >= len(original) or not isinstance(basis["quote"], str)
-                or not basis["quote"].strip() or original[index][0] not in ("U", "Q")
-                or not _human_quote(original[index][1], basis["quote"])):
+                or not basis["quote"].strip()
+                or not (original[index][0] in ("U", "Q")
+                        and _human_quote(original[index][1], basis["quote"])
+                        or original[index][0] == OWNER_SELECTED
+                        and basis["quote"] in original[index][1])):
             result.issues.append("scope basis must quote a verified original human source")
         if (not isinstance(basis["reviewed_by"], str) or not basis["reviewed_by"].strip()
                 or not _iso(basis["reviewed_at"]) or not isinstance(basis["rationale"], str)
