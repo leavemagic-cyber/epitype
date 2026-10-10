@@ -55,6 +55,33 @@ class LookupTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             source.lookup(self.path, offset=1)
 
+    def test_offset_window_finds_the_prompt_above_it(self):
+        question, label = "要照這版進行嗎？", "核准，照這版執行"
+        prompt = {"type": "assistant", "sessionId": "s", "uuid": "assistant-1", "message": {
+            "role": "assistant", "content": [{"type": "tool_use", "id": "toolu_1",
+            "name": "AskUserQuestion", "input": {"questions": [{"question": question,
+            "multiSelect": False, "options": [{"label": label, "description": "同步"}]}]}}]}}
+        answer = {"type": "user", "sessionId": "s", "uuid": "answer-1",
+                  "sourceToolAssistantUUID": "assistant-1", "message": {"role": "user", "content": [
+                      {"type": "tool_result", "tool_use_id": "toolu_1",
+                       "content": f'"{question}"="{label}"'}]},
+                  "toolUseResult": {"answers": {question: label}}}
+        raw = [(json.dumps(row, ensure_ascii=False) + "\n").encode()
+               for row in (prompt, self.rows[3], answer)]
+        self.path.write_bytes(b"".join(raw))
+        by_line = source.lookup(self.path, line=3, limit=1)["records"]
+        offset = len(raw[0]) + len(raw[1])
+        windowed = source.lookup(self.path, offset=offset, line=1, limit=1)
+        self.assertEqual("complete", windowed["ask_prompt_prefix"])
+        self.assertEqual([("S", f"{label}\n同步")], [(r["role"], r["text"]) for r in by_line])
+        self.assertEqual([{**record, "line": 3} for record in windowed["records"]], by_line)
+        # Prompts above the window that the budget cannot reach are said, not dropped silently.
+        short = source.lookup(self.path, offset=offset, line=1, limit=1, max_bytes=len(raw[2]))
+        self.assertEqual(([], "incomplete"), (short["records"], short["ask_prompt_prefix"]))
+        self.assertIn("could not all be read", short["scope"])
+        self.assertEqual("not_needed", source.lookup(self.path, offset=len(raw[0]),
+                                                     line=1, limit=1, max_bytes=len(raw[1]))["ask_prompt_prefix"])
+
     def test_partial_scan_cannot_report_complete_absence(self):
         result = source.lookup(self.path, query="variants", max_bytes=len(self.raw[0]) + 10)
         self.assertEqual([], result["records"])
