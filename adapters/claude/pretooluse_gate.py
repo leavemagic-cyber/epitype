@@ -1169,7 +1169,8 @@ def _guard_matched(guard, defects, advisories):
 
     True when the guard is only an ADVISORY-scope reference: the caller then stops,
     because a reference is shown but never enforced."""
-    if guard.source_note:
+    # One guard can match through its advise and its tool trigger in the same call.
+    if guard.source_note and guard.source_note not in defects:
         defects.append(guard.source_note)
     if not guard.scope_reference:
         return False

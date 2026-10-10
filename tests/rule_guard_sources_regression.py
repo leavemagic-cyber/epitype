@@ -424,6 +424,16 @@ class GuardSources(unittest.TestCase):
         self.assertIn('guard source UNVERIFIED', stderr)
 
 
+    def test_source_note_is_said_once_when_advise_and_tool_both_match(self):
+        guard = gate._Guard(card='c', tool='Bash', substrings=(), advice='', path='p',
+                            requires=(), unless=(), when=(), write_check='', advise_tool='Bash',
+                            advise_fragments=(), advise_text='t', sequence=(),
+                            source_note='[c] guard source UNVERIFIED: x')
+        defects = []
+        self.assertFalse(gate._guard_matched(guard, defects, None))
+        self.assertFalse(gate._guard_matched(guard, defects, None))
+        self.assertEqual(defects, ['[c] guard source UNVERIFIED: x'])
+
 if __name__ == '__main__':
     if '--selftest' in sys.argv:
         sys.argv.remove('--selftest')
