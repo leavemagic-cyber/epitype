@@ -321,6 +321,14 @@ def _owner_text(text):
     return "\n\n".join(_owner_text_parts(text))
 
 
+# A selected option that leads with, or is, a refusal records a decision but never
+# approves rule text. Codex review round 2 (2026-10-10) reproduced refusal options
+# ("不同意", "Do not approve ...") verifying as approval.
+REJECTION_OPTION = re.compile(
+    r'\s*(?:不同意|不核准|不要|否|拒絕|維持現狀|no\b|reject|do not (?:approve|agree)'
+    r'|(?:keep|retain) the existing)', re.IGNORECASE)
+
+
 def _selected_unit(text, quote):
     """True when quote is one whole selected label or description of an S record.
 
@@ -1445,11 +1453,12 @@ def validate(fields, card_path=None, cache=None, *, seconds=5.0, max_bytes=MAX_B
         index = approval.get('source') if isinstance(approval, dict) else None
         explicitly_approved = (
             isinstance(approval, dict) and approval.get('by') == 'owner'
-            # Only the owner's own words approve exact rule text. An option is AI wording
-            # whose meaning, a refusal included, no match can read, and rule text is
-            # agreed between Claude and Codex (owner 2026-09-09, decision 5). S still
-            # serves as a cited source and as scope_basis.
-            and _integer(index) and index in owner_sources
+            # The owner's pick of an affirmative option is approval; a pick whose
+            # options include a refusal is a decision source and scope_basis only.
+            # Lines are tested per record: S text does not mark label from description.
+            and _integer(index) and (index in owner_sources or index in selected_sources
+                and not any(REJECTION_OPTION.match(line)
+                            for line in original[index][1].splitlines()))
             and approval.get('quote') == document['quote']
             and approval.get('text_sha256') == hashlib.sha256(document['text'].encode('utf-8')).hexdigest()
             and document.get('scope_basis', {}).get('source') == index
