@@ -49,6 +49,7 @@ SELFTESTS = (
     Path("tests") / "rule_provenance_regression.py",
     Path("tests") / "rule_pipeline_regression.py",
     Path("tests") / "card_lint_provenance_fields_regression.py",
+    Path("tests") / "rule_text_advisory_regression.py",
     Path("tests") / "rule_source_consumers_regression.py",
     Path("tests") / "rule_source_entrypoints_regression.py",
     Path("tests") / "rule_final_caller_regression.py",

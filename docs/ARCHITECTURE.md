@@ -133,7 +133,7 @@ A `rule` card carries the sentence and its provenance:
 | `layer` | `floor`, `resident`, `situational`, or `recall` — where the sentence is read |
 | `section` | Free-text grouping inside the resident layer (e.g. `evidence`) |
 | `order` | Integer sort key inside a layer |
-| `text` | The **approved sentence**, one line, any language, at most `RULE_TEXT_MAX_BYTES` |
+| `text` | The **approved sentence**, one line, any language; exceeding `RULE_TEXT_MAX_BYTES` yields a cost WARN, not a FAIL |
 | `decided_by` | Same domain as a decision card; `owner-explicit` also requires `owner_quote` |
 | `approved_by` / `approved_at` | Who approved this exact wording, and when |
 | `aliases` | At least one, so the card is reachable by search |
