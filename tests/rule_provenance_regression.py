@@ -494,6 +494,12 @@ class AskUserQuestionSources(unittest.TestCase):
         self.root = Path(temporary.name)
         self.path = self.root / "claude.jsonl"
         self.sid = "synthetic-ask-session"
+        # first_authorship remembers completed scans beside the config; keep it here.
+        self.cache = self.root / "epitype-home" / memspec.PROVENANCE_ORIGIN_CACHE_FILENAME
+        environment = patch.dict(os.environ, {
+            memspec.EPITYPE_CONFIG_ENV: str(self.cache.parent / "config.json")})
+        environment.start()
+        self.addCleanup(environment.stop)
 
     def prompt(self, tool_id, name="AskUserQuestion"):
         return {"type": "assistant", "sessionId": self.sid, "uuid": "assistant-" + tool_id,
@@ -709,6 +715,22 @@ class AskUserQuestionSources(unittest.TestCase):
         answer["message"]["content"][0]["tool_use_id"] = "toolu_ask"
         prompt["message"]["content"][0]["input"] = "not a dict"
         self.assertIsNone(self.record(prompt, answer))
+
+    def test_cached_answer_origin_is_reused_with_its_prompt(self):
+        self.write(self.prompt("toolu_ask"), self.answer("toolu_ask", self.LABEL))
+        first = provenance.first_authorship(self.path, [self.LABEL])[self.LABEL]
+        self.assertEqual((first["status"], first["role"], first["line"]),
+                         (provenance.VERIFIED, "S", 2))
+        stored = json.loads(self.cache.read_text(encoding="utf-8"))["entries"]
+        self.assertEqual([entry["role"] for entry in stored.values()], ["S"])
+        # One readable byte cannot rescan the file: only the cache can answer this.
+        again = provenance.first_authorship(self.path, [self.LABEL], max_bytes=1)[self.LABEL]
+        self.assertEqual((again["status"], again["role"], again["line"], again["human_authored"]),
+                         (provenance.VERIFIED, "S", 2, False))
+        # The prompt is part of the cached prefix: changing it is a miss, not a hit.
+        self.write(self.prompt("toolu_ask", name="Bash"), self.answer("toolu_ask", self.LABEL))
+        changed = provenance.first_authorship(self.path, [self.LABEL], max_bytes=1)[self.LABEL]
+        self.assertEqual(changed["status"], provenance.UNVERIFIED)
 
 if __name__ == "__main__":
     if "--selftest" in sys.argv:

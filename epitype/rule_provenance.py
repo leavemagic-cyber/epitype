@@ -436,14 +436,22 @@ def _cached_origins(path, quotes, deadline):
         with path.open('rb') as stream:
             stream.seek(entry['byte_offset'])
             raw = reader.read(stream, memspec.COMPACT_MAP_MAX_LINE_BYTES + 1, line=True)
-        if (hashlib.sha256(raw).hexdigest() != entry['record_sha256']
-                or entry['byte_offset'] + len(raw) > entry['prefix_bytes']):
-            continue
+            if (hashlib.sha256(raw).hexdigest() != entry['record_sha256']
+                    or entry['byte_offset'] + len(raw) > entry['prefix_bytes']):
+                continue
+            # An Ask answer is a source only beside its prompt; that prompt lies in
+            # the prefix the hash check below covers, so rebuild it from there.
+            try:
+                asked = _asked_prefix(stream, {'byte_offset': entry['byte_offset']}, raw,
+                                      _ReadBudget(deadline, entry['byte_offset']
+                                                  + memspec.COMPACT_MAP_MAX_LINE_BYTES + 1))
+            except ValueError:
+                continue
         try:
             row = json.loads(raw.decode('utf-8-sig'))
         except (ValueError, UnicodeError):
             continue
-        record = source_record(row)
+        record = source_record(row, asked)
         if not record or record[0] != entry.get('role') or quote not in record[1]:
             continue
         role, body = record
