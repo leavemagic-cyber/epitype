@@ -81,6 +81,28 @@ class LookupTests(unittest.TestCase):
         self.assertIn("could not all be read", short["scope"])
         self.assertEqual("not_needed", source.lookup(self.path, offset=len(raw[0]),
                                                      line=1, limit=1, max_bytes=len(raw[1]))["ask_prompt_prefix"])
+        # An unrelated tool result never starts the prefix read, and a prefix read that
+        # runs out of time keeps the ordinary messages already read.
+        bash = {"type": "user", "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "toolu_bash", "content": "ok"}]},
+            "toolUseResult": {"stdout": "ok"}}
+        rows = [prompt, self.rows[0], bash, answer]
+        raw = [(json.dumps(row, ensure_ascii=False) + "\n").encode() for row in rows]
+        self.path.write_bytes(b"".join(raw))
+        clock, prefix_read = [0.0], source._prompts_before
+
+        def slow_prefix(*args):
+            clock[0] = 100.0
+            return prefix_read(*args)
+
+        with patch.object(source.time, "monotonic", lambda: clock[0]), \
+                patch.object(source, "_prompts_before", slow_prefix):
+            plain = source.lookup(self.path, offset=len(raw[0]), line=1, limit=1)
+            self.assertEqual(("not_needed", ["U"]), (plain["ask_prompt_prefix"],
+                                                     [r["role"] for r in plain["records"]]))
+            late = source.lookup(self.path, offset=len(raw[0]))
+        self.assertEqual("incomplete", late["ask_prompt_prefix"])
+        self.assertEqual(["Layout: provisionally compact"], [r["text"] for r in late["records"]])
 
     def test_partial_scan_cannot_report_complete_absence(self):
         result = source.lookup(self.path, query="variants", max_bytes=len(self.raw[0]) + 10)

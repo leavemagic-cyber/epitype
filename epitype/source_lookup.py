@@ -8,10 +8,10 @@ import sys
 import time
 
 try:
-    from .transcript import OWNER_SELECTED, ask_tool_uses, source_record
+    from .transcript import OWNER_SELECTED, ask_tool_uses, source_record, tool_result_ids
     from .memspec import COMPACT_MAP_MAX_LINE_BYTES
 except ImportError:
-    from transcript import OWNER_SELECTED, ask_tool_uses, source_record
+    from transcript import OWNER_SELECTED, ask_tool_uses, source_record, tool_result_ids
     from memspec import COMPACT_MAP_MAX_LINE_BYTES
 
 MAX_BYTES = 64 * 1024 * 1024
@@ -65,12 +65,9 @@ def lookup(path, *, query="", role="all", line=None, offset=0, limit=5,
         rows = data.splitlines(keepends=True)
         if offset + len(data) < before.st_size and rows and not rows[-1].endswith(b"\n"):
             rows.pop()  # never parse a byte-capped partial row as complete evidence
-        deadline = time.monotonic() + seconds
-        # AskUserQuestion prompts seen so far; only their answers are sources.
-        asked, prefix = {}, "not_needed"
-        if offset and any(b'"tool_result"' in raw for raw in rows):
-            asked, complete = _prompts_before(stream, offset, max_bytes, deadline)
-            prefix = "complete" if complete else "incomplete"
+    deadline = time.monotonic() + seconds
+    # AskUserQuestion prompts seen so far; only their answers are sources.
+    asked, prefix = {}, "not_needed"
     matches = deque(maxlen=limit)
     matched = scanned = invalid = omitted = 0
     position = offset
@@ -96,6 +93,15 @@ def lookup(path, *, query="", role="all", line=None, offset=0, limit=5,
             invalid += 1
             continue
         asked.update(ask_tool_uses(item))
+        result = item.get("toolUseResult")
+        if (offset and prefix == "not_needed" and isinstance(result, dict) and "answers" in result
+                and any(isinstance(key, str) and key not in asked for key in tool_result_ids(item))):
+            # Only an Ask answer whose prompt lies above the window needs the prefix;
+            # rows already read stay in the result when it cannot be finished.
+            with path.open("rb") as stream:
+                found, complete = _prompts_before(stream, offset, max_bytes, deadline)
+            asked.update(found)
+            prefix = "complete" if complete else "incomplete"
         source = source_record(item, asked)
         if source is None:
             omitted += 1
