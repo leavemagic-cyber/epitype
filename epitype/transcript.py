@@ -114,7 +114,8 @@ def turn_parts(item):
 
 ASK_TOOL = "AskUserQuestion"
 # The owner picked an option in the host's question prompt. The option text was
-# written by the AI, so it proves the owner's decision, never the owner's words.
+# written by the AI, so it proves the owner's decision, never the owner's words,
+# and never approves exact rule text (see rule_provenance.validate).
 OWNER_SELECTED = "S"
 
 

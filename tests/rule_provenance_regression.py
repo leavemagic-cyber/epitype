@@ -487,6 +487,7 @@ class AskUserQuestionSources(unittest.TestCase):
     LABEL = "核准，照這版執行"
     DESCRIPTION = "走規則管線重新簽章並同步。"
     TYPED = "先改成只在 A 案試行，下週再擴大"
+    PLAIN = "常駐規則精簡依核准版執行。"  # no restriction, so no approval is required
 
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
@@ -529,11 +530,11 @@ class AskUserQuestionSources(unittest.TestCase):
                 "line": index + 1, "record_sha256": hashlib.sha256(self.raw[index]).hexdigest(),
                 "session_id": self.sid, "message_id": self.rows[index]["uuid"], "role": role}
 
-    def document(self, kind, quote, source, basis_quote):
+    def document(self, kind, quote, source, basis_quote, text=None):
         owner = kind == "owner-directive"
         document = {"version": 1, "key": "synthetic-ask-rule", "kind": kind,
             "author": "owner" if owner else "synthetic-ai", "quote": quote,
-            "text": quote if owner else "常駐規則精簡依核准版執行，不得另加審核關卡。",
+            "text": quote if owner else text or "常駐規則精簡依核准版執行，不得另加審核關卡。",
             "sources": [source], "scope": {"level": "global", "project": None, "case": None,
             "actions": ["精簡常駐規則"], "conditions": [], "expiry": "unspecified", "exceptions": []},
             "scope_basis": {"source": 0, "quote": basis_quote, "reviewed_by": "synthetic-reviewer",
@@ -549,7 +550,7 @@ class AskUserQuestionSources(unittest.TestCase):
                                     "decision_key": document["key"], "text": document["text"]},
                                    self.root / "rule.md")
 
-    def test_matched_answer_is_owner_selected_and_approves(self):
+    def test_matched_answer_is_owner_selected_and_bounds_scope_but_never_approves(self):
         from epitype import transcript
         self.write(self.prompt("toolu_ask"), self.answer("toolu_ask", self.LABEL))
         asked = transcript.ask_tool_uses(self.rows[0])
@@ -558,8 +559,14 @@ class AskUserQuestionSources(unittest.TestCase):
         self.assertEqual(text, f"{self.LABEL}\n{self.DESCRIPTION}")
         self.assertNotIn(self.QUESTION, text)
         self.assertIsNone(transcript.source_record(self.rows[1]))
+        # An option is AI wording: it never approves restriction text.
         result = self.verdict(self.document("ai-derived", self.LABEL,
                                             self.source(1, "S"), self.DESCRIPTION))
+        self.assertNotEqual(result.status, provenance.VERIFIED)
+        self.assertIn("AI restriction requires restriction_evidence for the exact interpretation",
+                      result.issues)
+        result = self.verdict(self.document("ai-derived", self.LABEL, self.source(1, "S"),
+                                            self.DESCRIPTION, text=self.PLAIN))
         self.assertEqual(result.status, provenance.VERIFIED, result.issues)
         # The declared role must be the one the record proves.
         wrong = self.verdict(self.document("ai-derived", self.LABEL,
@@ -643,9 +650,29 @@ class AskUserQuestionSources(unittest.TestCase):
         self.assertIn("quotation does not occur in original human-authored directive text",
                       unselected.issues)
         self.write(self.prompt("toolu_ask"), self.answer("toolu_ask", self.LABEL))
-        selected = self.verdict(self.document("ai-derived", self.LABEL,
-                                              self.source(1, "S"), self.DESCRIPTION))
+        selected = self.verdict(self.document("ai-derived", self.LABEL, self.source(1, "S"),
+                                              self.LABEL, text=self.PLAIN))
         self.assertEqual(selected.status, provenance.VERIFIED, selected.issues)
+        # Only a whole label or description bounds scope; a part can drop a negation.
+        part = self.verdict(self.document("ai-derived", self.LABEL, self.source(1, "S"),
+                                          "規則管線重新簽章", text=self.PLAIN))
+        self.assertIn("scope basis must quote a verified original human source", part.issues)
+
+    def test_refusal_options_never_verify_as_approval(self):
+        for label, description, quote in (
+                ("No, retain the existing scope", "Do not approve a global rule for every project",
+                 "approve a global rule for every project"),
+                ("不核准全域規則", "維持現有範圍。", "核准全域規則"),
+                ("不同意", "維持現狀。", "不同意")):
+            with self.subTest(quote=quote):
+                question = {"question": self.QUESTION, "multiSelect": False, "options": [
+                    {"label": "Yes", "description": "Approve it."},
+                    {"label": label, "description": description}]}
+                self.write(*self.ask("toolu_ask", [question], answers={self.QUESTION: label}))
+                result = self.verdict(self.document("ai-derived", quote, self.source(1, "S"), label))
+                self.assertNotEqual(result.status, provenance.VERIFIED)
+                self.assertIn("AI restriction requires restriction_evidence for the exact "
+                              "interpretation", result.issues)
 
     def test_multiselect_labels_with_commas_are_rebuilt_from_whole_labels(self):
         options = [{"label": "Project A, local only", "description": "只在本機"},

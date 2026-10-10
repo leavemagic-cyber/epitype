@@ -321,6 +321,15 @@ def _owner_text(text):
     return "\n\n".join(_owner_text_parts(text))
 
 
+def _selected_unit(text, quote):
+    """True when quote is one whole selected label or description of an S record.
+
+    A part of an option can drop its negation ("approve X" out of "Do not
+    approve X"), so S text is never matched by substring.
+    """
+    return bool(quote.strip()) and quote.strip() in {line.strip() for line in text.splitlines()}
+
+
 def _human_quote(text, quote):
     if not quote:
         return False
@@ -1411,7 +1420,7 @@ def validate(fields, card_path=None, cache=None, *, seconds=5.0, max_bytes=MAX_B
             return _budget_unverified(result)
         if role in ("U", "Q") and _human_quote(text, document["quote"]):
             owner_sources.append(index)
-        elif role == OWNER_SELECTED and document["quote"] in text:
+        elif role == OWNER_SELECTED and _selected_unit(text, document["quote"]):
             selected_sources.append(index)
     if not owner_sources and owner and selected_sources:
         result.issues.append("owner-selected option text was written by the AI; "
@@ -1436,7 +1445,11 @@ def validate(fields, card_path=None, cache=None, *, seconds=5.0, max_bytes=MAX_B
         index = approval.get('source') if isinstance(approval, dict) else None
         explicitly_approved = (
             isinstance(approval, dict) and approval.get('by') == 'owner'
-            and _integer(index) and (index in owner_sources or index in selected_sources)
+            # Only the owner's own words approve exact rule text. An option is AI wording
+            # whose meaning, a refusal included, no match can read, and rule text is
+            # agreed between Claude and Codex (owner 2026-09-09, decision 5). S still
+            # serves as a cited source and as scope_basis.
+            and _integer(index) and index in owner_sources
             and approval.get('quote') == document['quote']
             and approval.get('text_sha256') == hashlib.sha256(document['text'].encode('utf-8')).hexdigest()
             and document.get('scope_basis', {}).get('source') == index
@@ -1468,7 +1481,7 @@ def validate(fields, card_path=None, cache=None, *, seconds=5.0, max_bytes=MAX_B
                 or not (original[index][0] in ("U", "Q")
                         and _human_quote(original[index][1], basis["quote"])
                         or original[index][0] == OWNER_SELECTED
-                        and basis["quote"] in original[index][1])):
+                        and _selected_unit(original[index][1], basis["quote"]))):
             result.issues.append("scope basis must quote a verified original human source")
         if (not isinstance(basis["reviewed_by"], str) or not basis["reviewed_by"].strip()
                 or not _iso(basis["reviewed_at"]) or not isinstance(basis["rationale"], str)
