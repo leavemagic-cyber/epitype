@@ -142,7 +142,7 @@ def supersession_issues(fields, card_path, *, card_text=None, seconds=5.0,
     if fields.get("status") != "superseded" and not (document or {}).get("supersedes"):
         return ["superseded_by requires superseded status"] if fields.get("superseded_by") else []
     root = Path(card_path).resolve()
-    deadline = time.monotonic() + seconds
+    deadline = rule_provenance.verification_deadline(seconds)
     nodes, edges, pending, examined = {}, set(), [root], set()
 
     def remaining():

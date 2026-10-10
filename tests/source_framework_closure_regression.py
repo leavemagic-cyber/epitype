@@ -9,7 +9,7 @@ import unittest
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from epitype import core_gen, host_sync, memspec, rule_pipeline
+from epitype import core_gen, host_sync, memspec, rule_pipeline, rule_provenance
 
 
 class FrameworkClosure(unittest.TestCase):
@@ -126,6 +126,10 @@ class FrameworkClosure(unittest.TestCase):
         self.card("b", status="superseded", supersedes=["a.md"], superseded_by="a.md")
         self.assertIn("cycle", " ".join(self.issues(a)))
         self.assertIn("budget", " ".join(self.issues(a, seconds=0)))
+        with rule_provenance.unbounded_verification():
+            unbounded = " ".join(self.issues(a, seconds=0))
+        self.assertIn("cycle", unbounded)
+        self.assertNotIn("budget", unbounded)
 
     def test_explicit_owner_scope_change_uses_existing_source_review(self):
         self.card("old", status="superseded", superseded_by="new.md")

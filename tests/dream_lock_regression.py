@@ -74,6 +74,14 @@ class DreamLockRegression(unittest.TestCase):
             process.terminate()
         process.join(5)
 
+    def test_dream_runs_without_the_tool_call_verification_budget(self):
+        from epitype import rule_provenance
+        seen = []
+        with patch.object(dream, '_main', lambda argv, output: seen.append(rule_provenance._UNBOUNDED) or 0):
+            self.assertEqual(dream.main(['--scheduled'], output=io.StringIO()), 0)
+        self.assertEqual(seen, [True])
+        self.assertFalse(rule_provenance._UNBOUNDED)
+
     def test_two_stale_readers_never_become_two_owners(self):
         self.stale()
         barrier = threading.Barrier(2)

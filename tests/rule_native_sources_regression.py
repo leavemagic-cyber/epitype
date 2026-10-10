@@ -13,7 +13,8 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from epitype import capture_route, host_native, host_sync, memspec, rule_legacy, rule_pipeline
+from epitype import (capture_route, host_native, host_sync, memspec, rule_legacy, rule_pipeline,
+                     rule_provenance)
 
 NATIVE_FIELDS = (
     'host_claude_env:\n  CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS: "4"\n'
@@ -569,6 +570,20 @@ class NativeSourceConsumers(unittest.TestCase):
             return collect(vaults, seconds=0.0, **kwargs)
         with patch.object(host_native, 'collect', no_budget):
             self.assert_refuses_preserving('verification budget exhausted')
+
+    def test_unbounded_verification_writes_what_the_budget_refused(self):
+        self.card()
+        self.install()
+        collect = host_native.collect
+        def no_budget(vaults, **kwargs):
+            return collect(vaults, seconds=0.0, **kwargs)
+        with patch.object(host_native, 'collect', no_budget), rule_provenance.unbounded_verification():
+            checked, report = self.call(host_native.check)
+            self.assertEqual(checked[1], 0, report)
+            applied, report = self.call()
+            self.assertEqual(applied[1], 0, report)
+        self.assertNotIn('budget exhausted', report)
+        self.assertFalse(rule_provenance._UNBOUNDED)
 
     def test_settings_read_failure_refuses_without_treating_file_as_absent(self):
         self.card()

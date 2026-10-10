@@ -4,6 +4,7 @@ VERIFIED means exact quotation, structural identity and explicit reviewed scope.
 It does not prove semantic entailment or grant permission to execute an action.
 Legacy cards remain readable, but missing evidence is never upgraded to proof.
 """
+import contextlib
 from dataclasses import dataclass, field
 from datetime import datetime
 import functools
@@ -38,6 +39,25 @@ _AMBIENT_OPEN = re.compile(
 
 class _ReadBudgetExhausted(OSError):
     pass
+
+
+# The per-check budgets keep a tool call responsive. A run nobody waits on (the
+# nightly dream) verifies to completion instead of refusing for lack of time.
+_UNBOUNDED = False
+
+
+@contextlib.contextmanager
+def unbounded_verification():
+    global _UNBOUNDED
+    previous, _UNBOUNDED = _UNBOUNDED, True
+    try:
+        yield
+    finally:
+        _UNBOUNDED = previous
+
+
+def verification_deadline(seconds):
+    return float('inf') if _UNBOUNDED else time.monotonic() + seconds
 
 
 @dataclass
@@ -1331,7 +1351,7 @@ def _iso(value):
 
 def validate(fields, card_path=None, cache=None, *, seconds=5.0, max_bytes=MAX_BYTES):
     """Read original records; no source body appears in diagnostics or to_dict()."""
-    budget = _ReadBudget(time.monotonic() + seconds, max_bytes)
+    budget = _ReadBudget(verification_deadline(seconds), max_bytes)
     try:
         document = parse(fields)
     except (ValueError, TypeError):

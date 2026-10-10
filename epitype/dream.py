@@ -3984,6 +3984,13 @@ def _selftest():
 
 
 def main(argv=None, output=sys.stdout):
+    # Dream never runs inside a tool call; its own time budget bounds the night.
+    from epitype import rule_provenance
+    with rule_provenance.unbounded_verification():
+        return _main(argv, output)
+
+
+def _main(argv, output):
     arguments = list(sys.argv[1:] if argv is None else argv)
     if arguments == ["--selftest"]:
         return _selftest()

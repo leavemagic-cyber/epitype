@@ -207,8 +207,8 @@ def collect(vaults, *, event=None, diagnostics=None, seconds=5.0, owned_cards=()
         else:
             held.setdefault(_held_reference(relative), reason)
     diagnostics = diagnostics if diagnostics is not None else []
-    deadline = time.monotonic() + seconds
-    from epitype import rule_legacy, rule_pipeline, rule_context
+    from epitype import rule_context, rule_legacy, rule_pipeline, rule_provenance
+    deadline = rule_provenance.verification_deadline(seconds)
     membership = rule_legacy.native_membership()
     if not membership.allowed:
         return desired, ['INVALID native baseline: ' + '; '.join(membership.issues)]
