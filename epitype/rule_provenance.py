@@ -440,7 +440,7 @@ def _cached_origins(path, quotes, deadline):
     """
     code = _origin_code()
     entries = _origin_entries() if code else {}
-    hits = {}
+    hits, prompts = {}, {}
     for quote in quotes:
         entry = entries.get(_origin_key(path, quote))
         if not (isinstance(entry, dict) and entry.get('code') == code
@@ -458,11 +458,16 @@ def _cached_origins(path, quotes, deadline):
                 continue
             # An Ask answer is a source only beside its prompt; that prompt lies in
             # the prefix the hash check below covers, so rebuild it from there.
-            try:
-                asked = _asked_prefix(stream, {'byte_offset': entry['byte_offset']}, raw,
-                                      _ReadBudget(deadline, entry['byte_offset']
-                                                  + memspec.COMPACT_MAP_MAX_LINE_BYTES + 1))
-            except ValueError:
+            # Quotes from one answer share its row, hence one rebuild.
+            if entry['byte_offset'] not in prompts:
+                try:
+                    prompts[entry['byte_offset']] = _asked_prefix(
+                        stream, {'byte_offset': entry['byte_offset']}, raw, _ReadBudget(
+                            deadline, entry['byte_offset'] + memspec.COMPACT_MAP_MAX_LINE_BYTES + 1))
+                except ValueError:
+                    prompts[entry['byte_offset']] = None
+            asked = prompts[entry['byte_offset']]
+            if asked is None:
                 continue
         try:
             row = json.loads(raw.decode('utf-8-sig'))
