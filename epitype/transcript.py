@@ -155,24 +155,37 @@ def tool_result_ids(item):
             if isinstance(block, dict) and block.get("type") == "tool_result"]
 
 
-def _label_covers(answer, labels):
-    """Distinct label sequences whose ", " join is exactly `answer`; stops after two."""
-    covers = []
+def _label_cover(answer, labels):
+    """The one label sequence whose ", " join is exactly `answer`, else None.
 
-    def walk(start, used):
-        if len(covers) > 1:
-            return
-        for label in labels:
-            if label in used or not answer.startswith(label, start):
+    ways[i] counts covers of answer[i:], capped at 2, only at the positions where a
+    label can start; the work is polynomial, so no search limit is needed. A cover
+    that repeats a label is not a multiSelect answer.
+    """
+    starts = [0] + [index + 2 for index in range(len(answer)) if answer.startswith(", ", index)]
+    by_first = {}
+    for label in labels:
+        by_first.setdefault(label[0], []).append(label)
+    ways, choice = {}, {}
+    for start in reversed(starts):
+        total = 0
+        for label in by_first.get(answer[start:start + 1], ()):
+            if not answer.startswith(label, start):
                 continue
             end = start + len(label)
-            if end == len(answer):
-                covers.append(used + (label,))
-            elif answer.startswith(", ", end):
-                walk(end + 2, used + (label,))
-
-    walk(0, ())
-    return covers
+            count = 1 if end == len(answer) else (
+                ways.get(end + 2, 0) if answer.startswith(", ", end) else 0)
+            if count:
+                choice[start] = label
+            total += count
+        ways[start] = min(total, 2)
+    if ways.get(0) != 1:
+        return None
+    picks, start = [], 0
+    while start <= len(answer):
+        picks.append(choice[start])
+        start += len(choice[start]) + 2
+    return tuple(picks) if len(set(picks)) == len(picks) else None
 
 
 def _question_options(question):
@@ -233,14 +246,12 @@ def _ask_answer(item, asked):
             return None
         if not answer.strip():
             continue
-        if question.get("multiSelect", False):
-            covers = _label_covers(answer, list(options))
-            picks = covers[0] if len(covers) == 1 else None
-        else:
-            picks = (answer,) if answer in options else None
+        multiple = question.get("multiSelect", False)
+        picks = _label_cover(answer, options) if multiple else (
+            (answer,) if answer in options else None)
         if picks:
             selected.append("\n".join(f"{pick}\n{options[pick]}".rstrip() for pick in picks))
-        elif any(label in answer for label in options):
+        elif multiple and any(label in answer for label in options):
             # Names an AI-written option but is not exactly those options: whose words
             # each part is cannot be told, so the record proves nothing.
             return None

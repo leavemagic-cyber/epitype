@@ -699,12 +699,35 @@ class AskUserQuestionSources(unittest.TestCase):
             rows = self.ask("toolu_ask", [dict(question, options=labels)],
                             answers={"要套用到哪些專案？": answer})
             self.assertIsNone(self.record(*rows), answer)
-        single = self.ask("toolu_ask", self.questions(),
-                          answers={self.QUESTION: self.LABEL + "，但只限 A 案"})
-        self.assertIsNone(self.record(*single))
-        self.write(*single)
+        # Single-select: only an exact label is a pick; any other answer is the owner's
+        # own Other text, even when it repeats or narrows a label.
+        yes_no = dict(question, multiSelect=False, options=[
+            {"label": "Yes", "description": ""}, {"label": "No", "description": ""}])
+        for questions, answer in (
+                ([yes_no], "Yesterday I decided to keep the existing scope"),
+                (self.questions(), self.LABEL + "，但只限 A 案")):
+            rows = self.ask("toolu_ask", questions, answers={questions[0]["question"]: answer})
+            self.assertEqual(self.record(*rows), ("U", answer))
+        self.write(*rows)
         origin = provenance.first_authorship(self.path, ["但只限 A 案"])["但只限 A 案"]
-        self.assertNotEqual(origin["status"], provenance.VERIFIED)
+        self.assertEqual((origin["status"], origin["role"]), (provenance.VERIFIED, "U"))
+
+    def test_multiselect_cover_is_decided_without_search_limits(self):
+        import time
+        many = [f"option {index:04d}" for index in range(1100)]
+        overlapping = ["a" * size for size in range(1, 48)]
+        question = {"question": "要套用到哪些專案？", "multiSelect": True}
+        for labels, answer, expected in (
+                (many, ", ".join(many), ("S", "\n".join(many))),
+                (overlapping, ", ".join(["a" * 47] * 3) + ", b", None),
+                (overlapping, "a, a", None),
+                (many, "none of these, my own words", ("U", "none of these, my own words"))):
+            rows = self.ask("toolu_ask", [dict(question, options=[
+                {"label": label, "description": ""} for label in labels])],
+                answers={"要套用到哪些專案？": answer})
+            started = time.monotonic()
+            self.assertEqual(self.record(*rows), expected, answer[:40])
+            self.assertLess(time.monotonic() - started, 5)
 
     def test_answer_binds_to_its_prompt_by_session_and_uuid(self):
         for fields in ({"sessionId": "another-session"},
