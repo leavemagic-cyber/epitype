@@ -87,6 +87,8 @@ SELFTESTS = (
     Path("tests") / "hook_input_bom_regression.py",
     Path("tests") / "action_guard_regression.py",
     Path("tests") / "shell_text_exec_regression.py",
+    Path("tests") / "background_check_regression.py",
+    Path("tests") / "ramguard_notice_regression.py",
     Path("tests") / "sessionstart_segment_budget_regression.py",
     Path("tests") / "handoff_regression.py",
     Path("tests") / "pending_lint_regression.py",

@@ -129,6 +129,30 @@ GATE_VAULT_UNREADABLE_NOTICE = "⚠ Epitype {gate}：記憶庫 {vault} 這次讀
 EPITYPE_CONFIG_ENV = "EPITYPE_CONFIG"
 CONFIG_VAULTS_FIELD = "vaults"
 CONFIG_BUDGET_BYTES_FIELD = "budget_bytes"
+# RAMGuard 撞上限告警的開場提醒（epitype/ramguard_notice.py）。選填：沒設就不讀。
+# 為什麼：owner 要求撞過上限、還沒處理的告警，任何一個新的 Claude 或 Codex 對話一開始
+# 就要知道，並主動問要不要調高上限。這是提醒，不擋任何事。
+# 解除條件：RAMGuard 不再對 AI 對話設上限，或 owner 撤銷（刪掉這個設定鍵就停）。
+CONFIG_RAMGUARD_ALERTS_FIELD = "ramguard_alerts_path"
+RAMGUARD_LIMIT_KINDS = {"ai_session_process_limit": "程序數", "ai_session_memory_limit": "記憶體"}
+# 各類告警的上限記在哪個欄位、顯示什麼單位（C:\projects\ramguard\ramguard_ai_jobs.py 的 _alert／_memory_alert）。
+RAMGUARD_LIMIT_FIELDS = {"ai_session_process_limit": ("limit", ""),
+                         "ai_session_memory_limit": ("job_commit_limit_mib", " MiB")}
+RAMGUARD_AI_NAMES = {"claude": "Claude", "codex": "Codex", "test": "測試"}
+RAMGUARD_WINDOW_DAYS = 7
+# 只讀檔尾：alerts.jsonl 會一直長（2026-10-13 已 1.3 MB），開場有 10 秒硬逾時。
+RAMGUARD_TAIL_BYTES = 256 * 1024
+RAMGUARD_ACK_FILENAME = "ramguard_ack.json"
+RAMGUARD_NOTICE_MAX_CHARS = 300
+RAMGUARD_NOTICE = (
+    "⚠ RAMGuard 最近 {days} 天有未確認的撞上限告警：{groups}。"
+    "請在這場一開始就主動告訴 owner，並問要不要調高上限；owner 回覆後在 {repo} 執行 "
+    "python -m epitype ramguard-ack。"
+)
+RAMGUARD_NOTICE_GROUP = "{ai} {what} {count} 次（最近 {latest}，上限 {limit}）"
+RAMGUARD_NOTICE_MORE = "另有 {count} 類"
+RAMGUARD_ACK_DONE = "已確認 RAMGuard 撞上限告警到 {stamp}（目前檔尾 {count} 筆）；之後的新告警會再提醒。"
+RAMGUARD_ACK_NONE = "沒有可確認的 RAMGuard 撞上限告警：{reason}。"
 # 2026-09-09 owner 裁定（U-K；FAILURE_MODES §36）：上限是設定值，不是產品猜的。三個
 # 鍵都選填——缺鍵時夢寫一行「未設定」跳過，絕不拿內建數字當成 owner 的門檻，因為
 # 「超上限」會被讀成 owner 的判斷。core_files 是絕對路徑清單（契約正本那一類檔案）。
@@ -1271,6 +1295,37 @@ SHELL_TEXT_EXEC_WHY = {
     "R2": "$( ) 或反引號裡的第一個字是文件檔，Bash 會把這個檔當腳本執行",
     "R3": "指令的第一個字（或 bash／sh／source 要跑的檔）是文件檔，Bash 會把它當腳本執行",
 }
+# Bash 逾時被宿主自動轉到背景之後，下一個工具呼叫必須是在檢查它（pretooluse_gate 的
+# _background_check_review；PostToolUse 記下、PreToolUse 擋）。為什麼：Claude Code 前景
+# Bash 超過逾時會被自動轉成背景，桌面 App 對背景命令沒有時限、CLI 結束後背景 shell 留到
+# 重開機；2026-10-12 一個自動轉背景的失控指令沒人管，開出 1,712 個程序。只看 Claude 形狀的
+# 事件：Codex 沒有自動轉背景。內部錯誤一律放行並記一行缺陷。
+# 解除條件：Claude Code 不再把逾時的前景命令轉到背景、或背景命令有時限且會自動收掉，或 owner 撤銷。
+BACKGROUND_CHECK_RULE = "background_check_pending"
+BACKGROUND_CHECK_STATE_DIRECTORY = "background_checks"
+# 宿主寫給模型看的那一行；結構化結果另有 backgroundTaskId＋timedOutAfterMs（自己要求背景
+# 執行的只有 backgroundTaskId，不算）。
+BACKGROUND_CHECK_TEXT_PATTERN = (
+    r"Command did not complete within its \S+ timeout and was moved to the background "
+    r"\(ID: ([A-Za-z0-9_-]{1,64})\)\.(?: Output is being written to: (\S.*?)(?=\.\s|\.?$))?"
+)
+BACKGROUND_CHECK_TASK_ID_FIELD = "backgroundTaskId"
+BACKGROUND_CHECK_TIMEOUT_FIELD = "timedOutAfterMs"
+# 參數帶著 ID 就算在檢查的工具（新舊名稱都收）。
+BACKGROUND_CHECK_TASK_TOOLS = frozenset(("taskoutput", "bashoutput", "taskstop", "killshell"))
+BACKGROUND_CHECK_SHELL_TOOLS = frozenset(("bash", "powershell"))
+BACKGROUND_CHECK_READ_TOOLS = frozenset(("read",))
+BACKGROUND_CHECK_MAX_PENDING = 16
+BACKGROUND_CHECK_MAX_SCAN_CHARS = 64 * 1024
+BACKGROUND_CHECK_REASON_MAX_CHARS = 400
+BACKGROUND_CHECK_PATH_MAX_CHARS = 160
+BACKGROUND_CHECK_REASON = (
+    "🛑 有一個 Bash 指令逾時，已被自動轉到背景（ID: {task}）{where}。先檢查它再做別的事："
+    "Read 它的輸出檔，或用 Bash／PowerShell 查看含這個 ID 或輸出路徑的內容，或用 TaskOutput／TaskStop "
+    "帶這個 ID；不再需要就停掉它。{more}原因：2026-10-12 一個自動轉背景的失控指令沒人管，開出 1,712 個程序。"
+)
+BACKGROUND_CHECK_WHERE = "，輸出寫在 {path}"
+BACKGROUND_CHECK_MORE = "另有 {count} 筆待檢查。"
 # 一道守衛短時間內一直擋同一件事，代表我在動手之前根本不知道它在那裡：擋下來是對的，
 # 但每一次都要先撞牆才想起來，一次一輪。2026-09-18 一天之內同一張卡擋了 20 次、跨四個
 # 視窗，而宿主的自動模式指示本來就叫人用 shell 改檔——兩邊互相打，擋的那一方只能一直贏

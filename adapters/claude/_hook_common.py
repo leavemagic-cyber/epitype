@@ -243,6 +243,10 @@ def load_config(started_at):
             memspec.HOOK_DEFAULT_BUDGET_BYTES,
         ),
         memspec.DREAM_CONFIG_FIELD: dream_settings(value),
+        # Optional; anything but a non-empty string means "not configured", never an error.
+        memspec.CONFIG_RAMGUARD_ALERTS_FIELD: (
+            ramguard if isinstance(ramguard := value.get(memspec.CONFIG_RAMGUARD_ALERTS_FIELD), str)
+            and ramguard.strip() else None),
     }
 
 

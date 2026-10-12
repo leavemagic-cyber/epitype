@@ -481,6 +481,20 @@ def _handle(event, started_at, deliveries=None, trace=None):
     # 不跑：它們在這一場開場時已經跑過，而宿主有硬逾時（Codex 10 秒、hooks.json 不能改）——
     # 2026-09-25 實測壓縮續場 3.2 s 裡三段占 2 s 以上，機器一忙就整段被砍，地圖那行跟著
     # 消失。少的是壞卡那一行與重複擋人提醒；它們下一場開場照常出現。
+    # RAMGuard 撞上限、還沒確認的告警放在新對話的第一行：預算裁切保留前段，而 owner 要每個
+    # 新對話一開始就知道、被問到（為什麼與解除條件見 memspec.CONFIG_RAMGUARD_ALERTS_FIELD）。
+    # 壓縮續場不是新對話。讀檔有界，任何錯誤都當作沒有告警；沒設定就連模組都不載入。
+    if (source != "compact" and config.get(memspec.CONFIG_RAMGUARD_ALERTS_FIELD)
+            and _soft_remaining(started_at) > 0):
+        try:
+            from epitype import ramguard_notice
+
+            ramguard_line = ramguard_notice.startup_notice(config)
+        except Exception:
+            ramguard_line = None
+        if ramguard_line:
+            pieces.append(ramguard_line)
+
     if source != "compact":
         _startup_segments(pieces, vaults, resolved, governance, started_at, event=event)
 

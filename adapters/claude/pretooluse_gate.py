@@ -37,6 +37,7 @@ from _hook_common import (
     declared_frontmatter,
     emit,
     encode_payload,
+    event_session_id,
     expired,
     governance_vault,
     load_config,
@@ -49,6 +50,7 @@ from _hook_common import (
     release_meter,
     scoped_vaults as resolve_vaults,
     run_concurrent,
+    session_component,
     run_synthetic,
     sequence_fields,
     trace_hook,
@@ -2472,14 +2474,199 @@ def _waste_review(event, tool_name, tool_input, config, started_at):
     return None, None
 
 
-def _claude_shell_event(event, tool_name):
-    """Claude Code's Bash tool runs Git Bash. Codex also arrives here as "Bash" but runs
-    PowerShell on Windows, where a backtick is the escape character, so it is excluded:
-    a Codex event carries turn_id and its transcript lives under .codex."""
-    if tool_name != "Bash" or "turn_id" in event:
+def _claude_event(event):
+    """A Claude Code event: a Codex event carries turn_id and its transcript lives under .codex."""
+    if "turn_id" in event:
         return False
     transcript = str(event.get("transcript_path") or "")
     return ".codex" not in (part.casefold() for part in re.split(r"[\\/]", transcript))
+
+
+def _claude_shell_event(event, tool_name):
+    """Claude Code's Bash tool runs Git Bash. Codex also arrives here as "Bash" but runs
+    PowerShell on Windows, where a backtick is the escape character, so it is excluded."""
+    return tool_name == "Bash" and _claude_event(event)
+
+
+_BACKGROUND_TEXT = re.compile(memspec.BACKGROUND_CHECK_TEXT_PATTERN, re.MULTILINE)
+_BACKGROUND_TASK_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
+
+def _strings_within(value, budget):
+    """Strings nested in a tool payload, in order, up to `budget` characters in total."""
+    stack = [value]
+    while stack and budget > 0:
+        item = stack.pop()
+        if isinstance(item, str):
+            yield item[:budget]
+            budget -= len(item)
+        elif isinstance(item, dict):
+            stack.extend(reversed(list(item.values())))
+        elif isinstance(item, (list, tuple)):
+            stack.extend(reversed(item))
+
+
+def _moved_to_background(event):
+    """(task id, output path or "") when the host moved this Claude Bash call to the
+    background because it ran past its timeout; None otherwise. The model sees the host's
+    text line; the structured result carries the id with timedOutAfterMs instead, while a
+    call that asked for the background carries the id alone and is not counted."""
+    if event.get("tool_name") != "Bash" or not _claude_event(event):
+        return None
+    response = event.get("tool_response")
+    for text in _strings_within(response, memspec.BACKGROUND_CHECK_MAX_SCAN_CHARS):
+        match = _BACKGROUND_TEXT.search(text)
+        if match:
+            return match.group(1), (match.group(2) or "").strip()
+    if isinstance(response, dict):
+        task = response.get(memspec.BACKGROUND_CHECK_TASK_ID_FIELD)
+        if (isinstance(task, str) and _BACKGROUND_TASK_ID.fullmatch(task)
+                and response.get(memspec.BACKGROUND_CHECK_TIMEOUT_FIELD) is not None):
+            return task, ""
+    return None
+
+
+def _background_state_path(vault, event):
+    """Pending background checks of one session (one subagent within it has its own),
+    beside the session's other state; None without a session id."""
+    session = event_session_id(event)
+    if not session:
+        return None
+    agent = event.get("agent_id") or event.get("agentId")
+    name = session_component(session)
+    if isinstance(agent, str) and agent:
+        name += "__" + session_component(agent)
+    return (Path(vault) / memspec.FTS_INDEX_DIRECTORY / memspec.BACKGROUND_CHECK_STATE_DIRECTORY
+            / (name + ".json"))
+
+
+def _load_background(path):
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return []
+    items = value.get("pending") if isinstance(value, dict) else None
+    if not isinstance(items, list):
+        raise ValueError("background check state is malformed")
+    return [item for item in items
+            if isinstance(item, dict) and isinstance(item.get("id"), str) and item["id"]]
+
+
+def _save_background(path, items):
+    if not items:
+        path.unlink(missing_ok=True)
+        return
+    staging = path.with_name("." + path.name + ".tmp-%d" % os.getpid())
+    staging.write_text(json.dumps({"pending": items}, ensure_ascii=False), encoding="utf-8")
+    os.replace(staging, path)
+
+
+def _record_background(event, started_at):
+    """PostToolUse: remember a Claude Bash call the host moved to the background.
+
+    Returns the task id when one was recorded. Raises on any failure; the caller names it."""
+    found = _moved_to_background(event)
+    if found is None or not event_session_id(event):
+        return None
+    config = load_config(started_at)
+    if config is None:
+        raise TimeoutError("hook deadline reached before the background task was recorded")
+    path = _background_state_path(governance_vault(config, for_write=True), event)
+    task, output = found
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with memspec.file_lock(path, min(0.25, remaining_seconds(started_at))) as acquired:
+        if not acquired:
+            raise OSError("background check lock unavailable")
+        try:
+            items = _load_background(path)
+        except ValueError:
+            items = []  # A malformed state is replaced by this record instead of blocking it.
+        from datetime import datetime, timezone
+        items = [item for item in items if item["id"] != task]
+        items.append({"id": task, "path": output,
+                      "recorded_at": datetime.now(timezone.utc).isoformat(timespec="seconds")})
+        _save_background(path, items[-memspec.BACKGROUND_CHECK_MAX_PENDING:])
+    return task
+
+
+def _path_key(text):
+    """Comparable form of a Windows or Git Bash path: forward slashes, casefolded, C: drive."""
+    key = str(text).strip().strip("\"'").replace("\\", "/").casefold()
+    drive = re.match(r"^/([a-z])/", key)
+    return key[1] + ":/" + key[3:] if drive else key
+
+
+def _checks_background(tool_name, tool_input, item):
+    """Whether this call looks at the pending background task `item`."""
+    if not isinstance(tool_input, dict):
+        return False
+    name = str(tool_name).casefold()
+    task = re.compile(r"(?<![A-Za-z0-9])" + re.escape(item["id"]) + r"(?![A-Za-z0-9])")
+    path = item.get("path") if isinstance(item.get("path"), str) else ""
+    if name in memspec.BACKGROUND_CHECK_READ_TOOLS:
+        raw = tool_input.get("file_path") or tool_input.get("path")
+        return isinstance(raw, str) and (bool(task.search(raw))
+                                         or bool(path) and _path_key(raw) == _path_key(path))
+    if name in memspec.BACKGROUND_CHECK_SHELL_TOOLS:
+        command = tool_input.get("command")
+        if not isinstance(command, str):
+            return False
+        command = command[: memspec.BACKGROUND_CHECK_MAX_SCAN_CHARS]
+        if task.search(command):
+            return True
+        if not path:
+            return False
+        text = command.replace("\\", "/").casefold()
+        key = _path_key(path)
+        return key in text or (key[1:3] == ":/" and "/" + key[0] + key[2:] in text)
+    if name in memspec.BACKGROUND_CHECK_TASK_TOOLS:
+        return any(task.search(text) for text in
+                   _strings_within(tool_input, memspec.BACKGROUND_CHECK_MAX_SCAN_CHARS))
+    return False
+
+
+def _background_reason(items):
+    first = items[0]
+    path = first.get("path") if isinstance(first.get("path"), str) else ""
+    limit = memspec.BACKGROUND_CHECK_PATH_MAX_CHARS
+    if len(path) > limit:
+        path = "…" + path[-(limit - 1):]
+    more = memspec.BACKGROUND_CHECK_MORE.format(count=len(items) - 1) if len(items) > 1 else ""
+    reason = memspec.BACKGROUND_CHECK_REASON.format(
+        task=first["id"], where=memspec.BACKGROUND_CHECK_WHERE.format(path=path) if path else "",
+        more=more)
+    if len(reason) > memspec.BACKGROUND_CHECK_REASON_MAX_CHARS:
+        reason = memspec.BACKGROUND_CHECK_REASON.format(task=first["id"], where="", more=more)
+    return reason[: memspec.BACKGROUND_CHECK_REASON_MAX_CHARS]
+
+
+def _background_check_review(event, tool_name, config, started_at):
+    """Deny any Claude tool call that is not a check of a Bash call the host moved to the
+    background while one is pending; a call that checks it clears it and goes ahead.
+
+    Why: Claude Code moves a foreground Bash call past its timeout to the background, the
+    desktop app gives background commands no time limit and a CLI's background shells
+    outlive it; on 2026-10-12 one such runaway command, unwatched, started 1,712 processes.
+    Removal: the host stops moving timed-out commands to the background or bounds and reaps
+    them, or the owner revokes it. Failures allow the call; the caller names the gap."""
+    if not _claude_event(event):
+        return None
+    path = _background_state_path(governance_vault(config), event)
+    if path is None or not path.is_file():
+        return None
+    with memspec.file_lock(path, min(0.25, remaining_seconds(started_at))) as acquired:
+        if not acquired:
+            raise OSError("background check lock unavailable")
+        items = _load_background(path)
+        checked = [item for item in items if _checks_background(tool_name, event.get("tool_input"), item)]
+        if checked or not items:
+            _save_background(path, [item for item in items if item not in checked])
+            return None
+    _best_effort_audit(
+        append_gate_log, governance_vault(config),
+        with_session({"kind": memspec.ACTION_GUARD_LOG_KIND, "rule": memspec.BACKGROUND_CHECK_RULE,
+                      "tool": tool_name, "task": items[0]["id"]}, event.get("session_id")), started_at)
+    return _deny_value(_background_reason(items))
 
 
 def _shell_text_review(event, tool_name, started_at, defects):
@@ -2569,6 +2756,16 @@ def _handle_review(event, started_at, defects=None, meter_claims=None, advice_cl
             defects.append(f"write admission UNVERIFIED: expired review failed ({type(exc).__name__}); "
                            "next check: inspect this exact tool call")
             return None
+    # A Bash call the host moved to the background is checked before anything else; see
+    # _background_check_review for why and when it may be removed.
+    try:
+        background_value = _background_check_review(event, tool_name, config, started_at)
+    except Exception as exc:
+        background_value = None
+        defects.append(f"background check UNVERIFIED: review failed ({type(exc).__name__}); "
+                       "next check: inspect this exact tool call")
+    if background_value is not None:
+        return background_value
     advisories = []
     try:
         guard_value = _guard_review(
@@ -4032,6 +4229,11 @@ def main():
     try:
         event = read_event(sys.stdin)
         if event.get("hook_event_name") == "PostToolUse":
+            try:
+                _record_background(event, _STARTED_AT)
+            except Exception as exc:
+                print(f"background check UNVERIFIED: recording failed ({type(exc).__name__}); "
+                      "next check: inspect this Bash result", file=sys.stderr)
             from epitype import action_receipts
             action_receipts.finish(event, action_receipts.database_path(config_path()))
             # 截圖、點擊這類每步都觸發的操控改不了帳本：在讀設定、開 SQLite 之前就回去，

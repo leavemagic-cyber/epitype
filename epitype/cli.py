@@ -28,6 +28,7 @@ _COMMANDS = {
     "harvest": ("epitype.harvest", "main", ()),
     "capture-route": ("epitype.capture_route", "main", ()),
     "dream": ("epitype.dream", "main", ()),
+    "ramguard-ack": ("epitype.ramguard_notice", "main", ()),
     "aliases": ("epitype.alias_batch", "main", ()),
     "starter": ("epitype.starter", "main", ()),
     "install": ("install.graft", "main", ("install",)),
