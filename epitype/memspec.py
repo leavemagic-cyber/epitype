@@ -1243,6 +1243,34 @@ ACTION_GUARD_WHEN_ALTERNATIVE = "|"
 ACTION_GUARD_WHEN_REASON = (
     "🛑 傷疤卡（{card}）：這次 {tool} 的 {pairs} 是不該配在一起的組合——{advice}"
 )
+# Bash 把文字當指令執行（epitype/shell_text_exec.py）。2026-10-12 一條指令的雙引號裡夾著
+# Markdown 反引號路徑，Git Bash 把 .md 當腳本跑、文件裡的反引號再去執行別的檔，約 1,712
+# 個 bash.exe、提交記憶體 44.6 GiB，全機卡死三小時。這道檢查不靠卡片、不讀設定檔。
+# 解除條件：Claude Code 的 Bash 工具不再經 POSIX shell 執行指令，或 owner 撤銷。
+SHELL_TEXT_EXEC_RULE = "shell_text_exec"
+# 這些副檔名的檔不是程式：出現在指令字或 $( )／反引號的第一個字，就是把文件當腳本跑。
+SHELL_TEXT_EXEC_DOC_SUFFIXES = (
+    ".md", ".markdown", ".txt", ".rst", ".adoc", ".json", ".jsonl", ".yml", ".yaml",
+    ".toml", ".ini", ".cfg", ".conf", ".csv", ".tsv", ".xml", ".html", ".htm", ".plist",
+    ".log", ".lock", ".dart", ".swift", ".kt", ".java", ".pdf", ".png", ".jpg", ".jpeg",
+    ".gif",
+)
+# 掃描上限：指令長度沿用寫入閘的單檔上限；步數是逐字迴圈的總圈數（巢狀的反引號本文會再
+# 掃一次），深度是 $( )、${ }、引號的巢狀層數。超過任一個就放行並記一行缺陷，不因長度擋人。
+SHELL_TEXT_EXEC_STEP_BUDGET = 4 * WRITE_GATE_MAX_CONTENT_BYTES
+SHELL_TEXT_EXEC_MAX_DEPTH = 64
+SHELL_TEXT_EXEC_SNIPPET_MAX_CHARS = 80
+SHELL_TEXT_EXEC_REASON = (
+    "🛑 這條 Bash 指令會讓 Bash 把文字當成指令執行（2026-10-12 全機卡死事故就是這樣起的）。"
+    "出問題的片段：{snippet}——{why}。"
+    "要放一段文字：改用 Write／Edit 工具寫檔，或另寫一支 .py 檔再執行；要留在指令裡就用單引號包住，"
+    "或把反引號寫成 \\`。真的要執行指令取結果，請用 $(...)，不要用反引號。"
+)
+SHELL_TEXT_EXEC_WHY = {
+    "R1": "反引號在雙引號裡或沒加引號時，Bash 會把兩個反引號之間的字當成指令執行",
+    "R2": "$( ) 或反引號裡的第一個字是文件檔，Bash 會把這個檔當腳本執行",
+    "R3": "指令的第一個字（或 bash／sh／source 要跑的檔）是文件檔，Bash 會把它當腳本執行",
+}
 # 一道守衛短時間內一直擋同一件事，代表我在動手之前根本不知道它在那裡：擋下來是對的，
 # 但每一次都要先撞牆才想起來，一次一輪。2026-09-18 一天之內同一張卡擋了 20 次、跨四個
 # 視窗，而宿主的自動模式指示本來就叫人用 shell 改檔——兩邊互相打，擋的那一方只能一直贏
@@ -3817,6 +3845,18 @@ _EN = {
     "ACTION_GUARD_NOTE": "Note: {advice}",
     "ACTION_GUARD_REQUIRES_REASON": "🛑 Scar card ({card}): this {tool} call does not carry {fields} — {advice}",
     "ACTION_GUARD_WHEN_REASON": "🛑 Scar card ({card}): {pairs} on this {tool} call is a combination that must not go together — {advice}",
+    "SHELL_TEXT_EXEC_REASON": (
+        "🛑 Bash would run text from this command as a command (how the 2026-10-12 whole-machine "
+        "freeze started). The part at fault: {snippet} — {why}. To carry text, write a file with "
+        "the Write/Edit tool or put the code in a .py file and run that; to keep it in the command, "
+        "wrap it in single quotes or write each backtick as \\`. If you really mean to run a "
+        "command and use its output, write $(...), not backticks."
+    ),
+    "SHELL_TEXT_EXEC_WHY": {
+        "R1": "inside double quotes or unquoted, Bash runs whatever sits between two backticks as a command",
+        "R2": "the first word inside $( ) or backticks is a document file, so Bash runs that file as a script",
+        "R3": "the command word (or the file bash/sh/source is told to run) is a document file, so Bash runs it as a script",
+    },
     "READ_WASTE_REPEAT_NOTICE": "ℹ this session has already read this same range and it has not changed (time {count}): {path}",
     "READ_WASTE_LARGE_NOTICE": ("Read note: {path} is {size} bytes; for large content, read the needed parts "
                                 "in sections and keep track of the ranges read. A complete judgement still "

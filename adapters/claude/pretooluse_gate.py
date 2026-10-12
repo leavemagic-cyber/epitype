@@ -25,6 +25,7 @@ from epitype import control_lifecycle
 from epitype import memspec
 from epitype import patch_envelope
 from epitype import rule_provenance
+from epitype import shell_text_exec
 from _hook_common import (
     isolated_temp_root,
     GATE_LOG_MAX_BYTES,
@@ -2471,6 +2472,56 @@ def _waste_review(event, tool_name, tool_input, config, started_at):
     return None, None
 
 
+def _claude_shell_event(event, tool_name):
+    """Claude Code's Bash tool runs Git Bash. Codex also arrives here as "Bash" but runs
+    PowerShell on Windows, where a backtick is the escape character, so it is excluded:
+    a Codex event carries turn_id and its transcript lives under .codex."""
+    if tool_name != "Bash" or "turn_id" in event:
+        return False
+    transcript = str(event.get("transcript_path") or "")
+    return ".codex" not in (part.casefold() for part in re.split(r"[\\/]", transcript))
+
+
+def _shell_text_review(event, tool_name, started_at, defects):
+    """Deny a Claude Bash command in which Bash would run text as a command.
+
+    Why: on 2026-10-12 Markdown backticks inside a double-quoted `python -c "..."` were
+    command-substituted; Git Bash ran the non-executable .md as a script, whose own
+    backticks ran further files (~1,712 bash.exe, 44.6 GiB committed, machine frozen
+    for three hours). Removal: Claude Code's Bash tool no longer runs commands through a
+    POSIX shell, or the owner revokes it. Scan limits allow the call and name the gap."""
+    if not _claude_shell_event(event, tool_name):
+        return None
+    payload = event.get("tool_input")
+    command = payload.get("command") if isinstance(payload, dict) else None
+    if not isinstance(command, str) or not command:
+        return None
+    try:
+        findings = shell_text_exec.find_text_exec(command)
+    except shell_text_exec.ScanLimitExceeded as exc:
+        defects.append(f"shell text check UNVERIFIED: {exc}, so this command was not checked; "
+                       "next check: inspect this exact tool call")
+        return None
+    if not findings:
+        return None
+    rule, _offset, snippet = findings[0]
+    reason = memspec.SHELL_TEXT_EXEC_REASON.format(
+        snippet=_quoted(snippet), why=memspec.SHELL_TEXT_EXEC_WHY[rule])
+    # The configuration is not loaded yet; the audit row is written only when it can be.
+    try:
+        config = load_config(started_at)
+        vault = governance_vault(config, for_write=True) if config is not None else None
+    except Exception:
+        vault = None
+    if vault is not None:
+        _best_effort_audit(
+            append_gate_log, vault,
+            with_session({"kind": memspec.ACTION_GUARD_LOG_KIND,
+                          "rule": memspec.SHELL_TEXT_EXEC_RULE, "tool": tool_name,
+                          "finding": rule}, event.get("session_id")), started_at)
+    return _deny_value(reason)
+
+
 def _handle_review(event, started_at, defects=None, meter_claims=None, advice_claims=None):
     """Review source-bound dispatches, writes, then existing action guards."""
     defects = [] if defects is None else defects
@@ -2493,6 +2544,16 @@ def _handle_review(event, started_at, defects=None, meter_claims=None, advice_cl
     tool_name = event.get("tool_name")
     if not isinstance(tool_name, str) or not tool_name:
         return None
+    # Runs before the configuration is read so an unreadable or expired config cannot
+    # waive it (see _shell_text_review for why and when it may be removed).
+    try:
+        shell_value = _shell_text_review(event, tool_name, started_at, defects)
+    except Exception as exc:
+        shell_value = None
+        defects.append(f"shell text check UNVERIFIED: review failed ({type(exc).__name__}); "
+                       "next check: inspect this exact tool call")
+    if shell_value is not None:
+        return shell_value
     config = load_config(started_at)
     if config is None:
         # Configuration expiry cannot silently waive a recognized Markdown

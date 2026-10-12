@@ -2274,3 +2274,49 @@ Regression coverage uses both Codex and Claude original record formats and
 the actual host sync in isolated homes. It checks warning delivery, preserved
 user settings, missing-source successors and expired rules, mixed missing and
 invalid originals, and unchanged output after a real integrity failure.
+
+## 50. Bash ran Markdown text as commands and froze the machine (2026-10-12)
+
+### Symptom and cause
+
+A Claude Bash call wrapped a `python -c "..."` script in double quotes. The
+script inserted a Markdown paragraph that named a file between backticks, and
+Bash performed command substitution on it. Git Bash runs a file without execute
+permission as a shell script, so the `.md` file ran; the backticks inside that
+document ran further files (documents, a CI script, CI YAML, Dart tests, JSON).
+At least 17 files ran, about 1,712 `bash.exe` processes held 44.6 GiB of
+committed memory, the machine stayed frozen for three hours, and Markdown `>`
+lines created 20 stray files. No card or host rule looked at shell quoting.
+
+### Countermeasure and verification
+
+The PreToolUse gate now denies a Claude Bash command when Bash would run text
+as a command (`epitype/shell_text_exec.py`, a hand-written linear scanner):
+an unescaped backtick where Bash substitutes it (unquoted, inside double quotes,
+inside `$( )`, `$(( ))` or `${ }`, or in a here-document whose delimiter is
+unquoted); a document or data file as the first word of `$( )` or of a backtick
+section; or such a file as the command word, or as what `bash`, `sh`, `source`
+or `.` is told to run. Single quotes, `$'...'`, comments, quoted here-documents
+and `` \` `` are left alone. The check runs before the configuration is read, so an
+unreadable configuration does not waive it, and the denial says how to write
+the text instead (Write/Edit or a `.py` file, single quotes or `` \` ``; `$(...)`
+for a real substitution). Codex events (`turn_id`, `.codex` transcripts) are
+excluded: Codex runs PowerShell on Windows, where a backtick is the escape
+character. Remove the check when Claude Code's Bash tool no longer runs
+commands through a POSIX shell, or when the owner revokes it.
+
+`tests/shell_text_exec_regression.py` pins each rule, each place Bash does not
+substitute, nesting, CRLF, several here-documents on one line, the Codex and
+PowerShell exclusions, and the deny shape through the real hook entry point.
+Over 21 days of Claude transcripts (26,177 Bash commands) the scanner flagged 13
+distinct commands, every one a backtick Bash would have substituted (9 would
+have run text, 4 were unpaired and would have failed to parse) and no command
+that used backticks on purpose.
+
+### Limits
+
+Commands over the write gate's size limit, past the step budget or nested
+deeper than the depth limit are allowed with a defect line instead of denied.
+The scanner follows Bash's quoting and substitution rules only: it does not
+expand variables, follow aliases or functions, or look through `env`, `exec`,
+`xargs` or `bash -c` strings for a document run as a command.
