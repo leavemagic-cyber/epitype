@@ -19,6 +19,7 @@ class Call:
     stamp: str = ""
     actor: str = ""
     result_kind: str = ""
+    result_meta: object = None  # Claude toolUseResult of the result row, as written
 
 
 def outcome(value):
@@ -122,6 +123,7 @@ def calls(rows, cwd=''):
                 continue
             meta=row.get("toolUseResult")
             if isinstance(meta,dict): call.result_kind=str(meta.get("type") or "")
+            call.result_meta=meta
             call.success, call.finished, call.response = status, position, response
     from .tool_forwarding import normalize
     return [normalize(call) for call in ordered]

@@ -117,7 +117,7 @@ def _stamp(epoch):
 
 def _limit_text(kind, value):
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return "未記錄"
+        return memspec.RAMGUARD_LIMIT_UNKNOWN
     _field, unit = memspec.RAMGUARD_LIMIT_FIELDS[kind]
     return f"{value:g}{unit}"
 
@@ -146,7 +146,7 @@ def notice_text(alerts, repo=REPO_ROOT):
         if shown < len(parts):
             listed.append(memspec.RAMGUARD_NOTICE_MORE.format(count=len(parts) - shown))
         text = memspec.RAMGUARD_NOTICE.format(
-            days=memspec.RAMGUARD_WINDOW_DAYS, groups="；".join(listed), repo=repo)
+            days=memspec.RAMGUARD_WINDOW_DAYS, groups=memspec.RAMGUARD_NOTICE_SEPARATOR.join(listed), repo=repo)
         if len(text) <= memspec.RAMGUARD_NOTICE_MAX_CHARS:
             return text
     return text[: memspec.RAMGUARD_NOTICE_MAX_CHARS - 1] + "…"
@@ -176,19 +176,19 @@ def acknowledge(now=None, state_dir=None, output=None):
     try:
         config = json.loads(memspec.config_path().read_text(encoding="utf-8-sig"))
     except (OSError, ValueError) as exc:
-        print(memspec.RAMGUARD_ACK_NONE.format(reason=f"讀不到設定檔（{type(exc).__name__}）"), file=output)
+        print(memspec.RAMGUARD_ACK_NONE.format(reason=memspec.RAMGUARD_ACK_CONFIG_UNREADABLE.format(error=type(exc).__name__)), file=output)
         return 2
     path = alerts_path(config.get(memspec.CONFIG_RAMGUARD_ALERTS_FIELD) if isinstance(config, dict) else None)
     if path is None:
-        print(memspec.RAMGUARD_ACK_NONE.format(
-            reason=f"設定檔沒有 {memspec.CONFIG_RAMGUARD_ALERTS_FIELD}"), file=output)
+        print(memspec.RAMGUARD_ACK_NONE.format(reason=memspec.RAMGUARD_ACK_UNSET.format(
+            field=memspec.CONFIG_RAMGUARD_ALERTS_FIELD)), file=output)
         return 2
     if not path.is_file():
-        print(memspec.RAMGUARD_ACK_NONE.format(reason=f"{path} 不存在"), file=output)
+        print(memspec.RAMGUARD_ACK_NONE.format(reason=memspec.RAMGUARD_ACK_MISSING.format(path=path)), file=output)
         return 2
     alerts = parse_alerts(read_tail(path))
     if not alerts:
-        print(memspec.RAMGUARD_ACK_NONE.format(reason=f"{path} 檔尾沒有撞上限的告警"), file=output)
+        print(memspec.RAMGUARD_ACK_NONE.format(reason=memspec.RAMGUARD_ACK_EMPTY.format(path=path)), file=output)
         return 0
     target = ack_path(state_dir)
     latest = max(alert["epoch"] for alert in alerts)
