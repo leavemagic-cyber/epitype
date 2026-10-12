@@ -1332,6 +1332,8 @@ BACKGROUND_CHECK_TIMEOUT_FIELD = "timedOutAfterMs"
 BACKGROUND_CHECK_TASK_TOOLS = frozenset(("taskoutput", "bashoutput", "taskstop", "killshell"))
 BACKGROUND_CHECK_SHELL_TOOLS = frozenset(("bash", "powershell"))
 BACKGROUND_CHECK_READ_TOOLS = frozenset(("read",))
+# 盯著它的輸出也算檢查：輸入任一處含有 ID 或輸出路徑（coordinator 2026-10-13 裁定）。
+BACKGROUND_CHECK_MONITOR_TOOLS = frozenset(("monitor",))
 BACKGROUND_CHECK_MAX_SCAN_CHARS = 64 * 1024
 BACKGROUND_CHECK_REASON_MAX_CHARS = 400
 BACKGROUND_CHECK_PATH_MAX_CHARS = 160

@@ -140,6 +140,22 @@ class Detection(unittest.TestCase):
             with self.subTest(tool=name):
                 self.assertIsNone(pending(Transcript().background().call(name, arguments)))
 
+    def test_a_monitor_naming_the_id_or_the_output_path_clears_it(self):
+        self.assertIsNone(pending(Transcript().background().call(
+            "Monitor", {"command": f"until grep -q done /tmp/{TASK}.output; do sleep 5; done",
+                        "description": "wait for the suite"})))
+        log = r"D:\Temp\claude\job.log"
+        self.assertIsNone(pending(Transcript().background(output=log).call(
+            "Monitor", {"command": "until grep -q TOTAL /d/Temp/claude/job.log; do sleep 5; done"})))
+        self.assertIsNone(pending(Transcript().background(output=log).call(
+            "Monitor", {"description": "watch D:/TEMP/Claude/job.log"})))
+
+    def test_a_monitor_on_another_file_does_not_clear_it(self):
+        # 2026-10-13: a subagent watched the file its command redirected to, never the task.
+        transcript = Transcript().background().call(
+            "Monitor", {"command": "until grep -q TOTAL /d/Temp/full2.txt; do sleep 5; done"})
+        self.assertEqual(pending(transcript)["id"], TASK)
+
     def test_a_call_before_the_result_or_about_something_else_does_not_clear_it(self):
         transcript = Transcript().call("Read", {"file_path": OUTPUT}).background()
         transcript.call("Bash", {"command": f"echo x{TASK}y"}).call("TaskOutput", {"task_id": "b0000000"})
@@ -276,6 +292,11 @@ class Gate(unittest.TestCase):
                                 ("KillShell", {"shell_id": TASK})):
             with self.subTest(tool=tool):
                 self.assertCheckPasses(self.pre(tool, arguments))
+
+    def test_a_monitor_on_the_task_passes_and_one_on_another_file_is_denied(self):
+        self.assertCheckPasses(self.pre("Monitor", {"command": f"tail -f /tmp/tasks/{TASK}.output"}))
+        self.assertCheckPasses(self.pre("Monitor", {"command": f"until grep -q x '{OUTPUT}'; do sleep 5; done"}))
+        self.assertIsNotNone(self.denial(self.call(self.pre("Monitor", {"command": "tail -f /d/Temp/full2.txt"}))))
 
     def test_once_a_check_is_in_the_transcript_other_calls_pass(self):
         Transcript().background().call("TaskOutput", {"task_id": TASK}).write(self.main)

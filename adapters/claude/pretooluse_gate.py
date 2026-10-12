@@ -2637,18 +2637,21 @@ def _checks_background(tool_name, tool_input, item):
         raw = tool_input.get("file_path") or tool_input.get("path")
         return isinstance(raw, str) and (bool(task.search(raw))
                                          or bool(path) and _path_key(raw) == _path_key(path))
-    if name in memspec.BACKGROUND_CHECK_SHELL_TOOLS:
-        command = tool_input.get("command")
-        if not isinstance(command, str):
-            return False
-        command = command[: memspec.BACKGROUND_CHECK_MAX_SCAN_CHARS]
-        if task.search(command):
+    def names_it(text):
+        if task.search(text):
             return True
         if not path:
             return False
-        text = command.replace("\\", "/").casefold()
+        text = text.replace("\\", "/").casefold()
         key = _path_key(path)
         return key in text or (key[1:3] == ":/" and "/" + key[0] + key[2:] in text)
+
+    if name in memspec.BACKGROUND_CHECK_SHELL_TOOLS:
+        command = tool_input.get("command")
+        return isinstance(command, str) and names_it(command[: memspec.BACKGROUND_CHECK_MAX_SCAN_CHARS])
+    if name in memspec.BACKGROUND_CHECK_MONITOR_TOOLS:
+        return any(names_it(text) for text in
+                   _strings_within(tool_input, memspec.BACKGROUND_CHECK_MAX_SCAN_CHARS))
     if name in memspec.BACKGROUND_CHECK_TASK_TOOLS:
         return any(task.search(text) for text in
                    _strings_within(tool_input, memspec.BACKGROUND_CHECK_MAX_SCAN_CHARS))
