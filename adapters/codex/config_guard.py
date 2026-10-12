@@ -28,10 +28,8 @@ MODEL_NO_CLIFF = frozenset({"gpt-6-astra"})
 # max 1M). Owner 2026-10-12: follow that announcement. Codex compacts at 90% of the window,
 # so 450K keeps the official 50K of room for the compaction turn itself. A stale model catalog
 # still says 272K, and an older guard run may have pinned 240K/210K, so write both values.
+# Owner 2026-10-12: follow the announcement for every user; plans are unknown to us.
 MODEL_ANNOUNCED = {"gpt-6.1-sol": {"window": 500000, "auto_compact": 450000}}
-ENTERPRISE_LONG_CONTEXT_NOTE = (
-    "注意：企業版按 token 計價的合約，單次輸入超過 272K 會整筆加價（OpenAI 計價表）；"
-    "個人方案沒有這條。")
 TARGETS = (
     ("model_context_window", "window"),
     ("model_auto_compact_token_limit", "auto_compact"),
@@ -174,7 +172,7 @@ def _run_check(path, apply_changes=False, output=sys.stdout):
     if cliff is not None:
         print(f"cliff_input: {cliff['cliff_input']}", file=output)
     else:
-        print("官方公告預設 500K；" + ENTERPRISE_LONG_CONTEXT_NOTE, file=output)
+        print("依官方公告：預設 500K", file=output)
     target = cliff if cliff is not None else announced
     updates = {}
     for config_key, table_key in TARGETS:
@@ -305,7 +303,7 @@ def _selftest():
                 sol_code == 0
                 and b"model_context_window = 500000" in sol_text
                 and b"model_auto_compact_token_limit = 450000" in sol_text
-                and "272K" in sol_output.getvalue()
+                and "500K" in sol_output.getvalue()
                 and "cliff_input" not in sol_output.getvalue(),
             ))
 
