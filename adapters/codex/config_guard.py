@@ -24,6 +24,14 @@ MODEL_CLIFFS_JSON = r'''{
 }'''
 MODEL_CLIFFS = json.loads(MODEL_CLIFFS_JSON)
 MODEL_NO_CLIFF = frozenset({"gpt-6-astra"})
+# OpenAI raised the Codex default to 500K for GPT-6.1 Sol on 2026-10-11 (Codex lead's post;
+# max 1M). Owner 2026-10-12: follow that announcement. Codex compacts at 90% of the window,
+# so 450K keeps the official 50K of room for the compaction turn itself. A stale model catalog
+# still says 272K, and an older guard run may have pinned 240K/210K, so write both values.
+MODEL_ANNOUNCED = {"gpt-6.1-sol": {"window": 500000, "auto_compact": 450000}}
+ENTERPRISE_LONG_CONTEXT_NOTE = (
+    "注意：企業版按 token 計價的合約，單次輸入超過 272K 會整筆加價（OpenAI 計價表）；"
+    "個人方案沒有這條。")
 TARGETS = (
     ("model_context_window", "window"),
     ("model_auto_compact_token_limit", "auto_compact"),
@@ -155,18 +163,23 @@ def _run_check(path, apply_changes=False, output=sys.stdout):
     model = config.get("model")
     print(f"model: {_display(model)}", file=output)
     cliff = MODEL_CLIFFS.get(model) if isinstance(model, str) else None
-    if cliff is None:
+    announced = MODEL_ANNOUNCED.get(model) if isinstance(model, str) else None
+    if cliff is None and announced is None:
         if model in MODEL_NO_CLIFF:
             print("此模型在 Codex 內沒有長上下文加價門檻；設定檔未修改。", file=output)
         else:
             print("無斷崖資料；設定檔未修改。", file=output)
         return 0
 
-    print(f"cliff_input: {cliff['cliff_input']}", file=output)
+    if cliff is not None:
+        print(f"cliff_input: {cliff['cliff_input']}", file=output)
+    else:
+        print("官方公告預設 500K；" + ENTERPRISE_LONG_CONTEXT_NOTE, file=output)
+    target = cliff if cliff is not None else announced
     updates = {}
     for config_key, table_key in TARGETS:
         current = config.get(config_key)
-        recommended = cliff[table_key]
+        recommended = target[table_key]
         state = "OK" if type(current) is int and current == recommended else "CHANGE"
         print(
             f"{config_key}: current={_display(current)} recommended={recommended} {state}",
@@ -280,6 +293,22 @@ def _selftest():
                 and "CHANGE" in terra_output.getvalue(),
             ))
 
+            sol = root / "sol61.toml"
+            sol_source = (b'model = "gpt-6.1-sol"\nmodel_context_window = 240000\n'
+                          b'model_auto_compact_token_limit = 210000\n')
+            sol.write_bytes(sol_source)
+            sol_output = io.StringIO()
+            sol_code = _run_check(sol, apply_changes=True, output=sol_output)
+            sol_text = sol.read_bytes()
+            checks.append((
+                "announced 500K default replaces an old cliff pin for GPT-6.1 Sol",
+                sol_code == 0
+                and b"model_context_window = 500000" in sol_text
+                and b"model_auto_compact_token_limit = 450000" in sol_text
+                and "272K" in sol_output.getvalue()
+                and "cliff_input" not in sol_output.getvalue(),
+            ))
+
             cp950_environment = os.environ.copy()
             cp950_environment["PYTHONUTF8"] = "0"
             cp950_environment["PYTHONIOENCODING"] = "cp950"
@@ -300,7 +329,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 6
+    total = 7
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
