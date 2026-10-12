@@ -1339,7 +1339,7 @@ BACKGROUND_CHECK_REASON_MAX_CHARS = 400
 BACKGROUND_CHECK_PATH_MAX_CHARS = 160
 BACKGROUND_CHECK_REASON = (
     "🛑 有一個 Bash 指令逾時，已被自動轉到背景（ID: {task}）{where}。先檢查它再做別的事："
-    "Read 它的輸出檔，或用 Bash／PowerShell 查看含這個 ID 或輸出路徑的內容，或用 TaskOutput／TaskStop "
+    "Read 它的輸出檔，或用 Bash／PowerShell 查看含這個 ID 或輸出路徑的內容，或用 TaskOutput／TaskStop／Monitor "
     "帶這個 ID；不再需要就停掉它。原因：2026-10-12 一個自動轉背景的失控指令沒人管，開出 1,712 個程序。"
 )
 BACKGROUND_CHECK_WHERE = "，輸出寫在 {path}"
@@ -3937,7 +3937,7 @@ _EN = {
     "BACKGROUND_CHECK_REASON": (
         "🛑 A Bash command timed out and was moved to the background (ID: {task}){where}. Check it "
         "before anything else: Read its output file, run Bash/PowerShell naming this ID or the output "
-        "path, or call TaskOutput/TaskStop with this ID; stop it if no longer needed. Why: on "
+        "path, or call TaskOutput/TaskStop/Monitor with this ID; stop it if no longer needed. Why: on "
         "2026-10-12 an unwatched auto-backgrounded runaway command started 1,712 processes."
     ),
     "BACKGROUND_CHECK_WHERE": ", output at {path}",
