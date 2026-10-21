@@ -1,8 +1,14 @@
 # Changelog
 
-- Allow verified English execution cards to reference pinned provenance kept with the retained Chinese version, and generate plain core text without repeating source quotations or dates. Existing source, payload, scope, and supersession checks remain in force.
-
 ## Unreleased
+
+## v1.9.0 (2026-10-21)
+
+- Dispatch stable hook shims in the current Python process, preserving input, arguments, import paths and adapter exit codes without starting a second interpreter.
+- Preserve an explicitly earlier valid Codex compaction point when its configured context window already matches the announced window.
+- Anchor the draft-aging regression's file dates to its report date so its assertions remain valid after the calendar advances.
+
+- Allow verified English execution cards to reference pinned provenance kept with the retained Chinese version, and generate plain core text without repeating source quotations or dates. Existing source, payload, scope, and supersession checks remain in force.
 
 - Claude 的 Bash 指令若會讓 Bash 把文字當成指令執行，動手閘直接擋下並說明改法（2026-10-12 雙引號裡的 Markdown 反引號讓 Git Bash 連鎖執行文件、全機卡死三小時）：雙引號內或未加引號處、`$( )`／`$(( ))`／`${ }` 內、分隔符沒加引號的 here-document 本文裡未跳脫的反引號；`$( )` 或反引號區段第一個字是文件／資料檔；指令字是這類檔，或 bash／sh／source／. 要跑的是這類檔。單引號、`$'…'`、註解、加引號的 here-document 與 `` \` `` 不擋；Codex 事件（PowerShell）不套用。這道檢查在讀設定檔之前執行，設定讀不到也照樣有效；指令超過長度、步數或巢狀上限時放行並記一行缺陷。近 21 天 26,177 條 Bash 指令中擋下 13 條，全是 Bash 真的會替換的反引號。
 

@@ -178,6 +178,12 @@ def _run_check(path, apply_changes=False, output=sys.stdout):
     for config_key, table_key in TARGETS:
         current = config.get(config_key)
         recommended = target[table_key]
+        # Once the announced window is selected, retain an explicit earlier
+        # compaction point. Older window/limit pairs still need migration.
+        if (announced is not None and table_key == "auto_compact"
+                and config.get("model_context_window") == announced["window"]
+                and type(current) is int and 0 < current <= recommended):
+            recommended = current
         state = "OK" if type(current) is int and current == recommended else "CHANGE"
         print(
             f"{config_key}: current={_display(current)} recommended={recommended} {state}",
@@ -307,6 +313,25 @@ def _selftest():
                 and "cliff_input" not in sol_output.getvalue(),
             ))
 
+            earlier = root / "earlier.toml"
+            earlier_source = (b'model = "gpt-6.1-sol"\nmodel_context_window = 500000\n'
+                              b'model_auto_compact_token_limit = 300000\n')
+            earlier.write_bytes(earlier_source)
+            earlier_code = _run_check(earlier, apply_changes=True, output=io.StringIO())
+            checks.append((
+                "an explicit earlier compaction point survives installation",
+                earlier_code == 0 and earlier.read_bytes() == earlier_source
+                and not list(root.glob("earlier.toml.bak*")),
+            ))
+            invalid = root / "invalid-auto.toml"
+            invalid.write_bytes(earlier_source.replace(b"300000", b"0"))
+            invalid_code = _run_check(invalid, apply_changes=True, output=io.StringIO())
+            checks.append((
+                "an invalid compaction point still uses the announced default",
+                invalid_code == 0
+                and b"model_auto_compact_token_limit = 450000" in invalid.read_bytes(),
+            ))
+
             cp950_environment = os.environ.copy()
             cp950_environment["PYTHONUTF8"] = "0"
             cp950_environment["PYTHONIOENCODING"] = "cp950"
@@ -327,7 +352,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 7
+    total = 9
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

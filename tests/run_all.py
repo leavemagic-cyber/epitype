@@ -40,6 +40,7 @@ SELFTESTS = (
     Path("adapters") / "codex" / "config_guard.py",
     Path("adapters") / "codex" / "hook_trust.py",
     Path("install") / "graft.py",
+    Path("tests") / "shim_dispatch_regression.py",
     Path("install") / "scar_scan.py",
     Path("exam") / "exam_runner.py",
     Path("tests") / "capture_precision.py",
