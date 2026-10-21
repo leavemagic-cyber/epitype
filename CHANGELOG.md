@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## v1.9.2 (2026-10-21)
+
+- Recheck current card eligibility before applying a cached quiet decision, so information cards promoted to behavior rules are recalled again.
+- Include delivered advisory content in tool-notice identity, so a changed rule reaches the same target while unchanged reminders remain deduplicated.
+- Attribute nightly recall usage to the originating vault, reset ambiguous legacy statistics, and preserve quiet lists when observations are incomplete. Report the Claude-only usage coverage separately from cross-host compliance replay.
+- Document product scope, related projects and evidence limits; correct stale architecture descriptions of budget notices, source quotations and host synchronization. Clarify that injected context still consumes host tokens.
+
 ## v1.9.1 (2026-10-21)
 
 - Preserve recorded Windows and POSIX path identity during historical replay on either host; never resolve historical paths against the replay machine's filesystem.

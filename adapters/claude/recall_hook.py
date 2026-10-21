@@ -507,7 +507,8 @@ def _recall(event, started_at, config, delivery_markers=None, deliveries=None):
                     continue  # A retired/unreadable ruling is not an ordinary hit.
             if decision is None and _event_card(hit, path):
                 continue  # 原話事件檔只在 memsearch 端出（U-H）；卡片層才進喚回。
-            if decision is None and _one_line(hit.get("card_path")) in quiet:
+            if decision is None and recall_quiet.should_quiet(
+                    vault, _one_line(hit.get("card_path")), quiet):
                 continue  # 夜間判定一再端出卻從沒用到的資訊型卡；裁定永遠不靜音。
             card_name = Path(_one_line(hit.get("card_path")) or path).name
             if decision is None and card_name in shown_names:

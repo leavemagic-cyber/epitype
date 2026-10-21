@@ -18,23 +18,35 @@ if __package__ in (None, ""):
 
 from epitype import memspec
 
-CARD_LINE = re.compile(r"^- .*\| V\d+/(\S+?\.md)[ \t]*$", re.M)
+CARD_LINE = re.compile(r"^- .*\| (V\d+)/(\S+?\.md)[ \t]*$", re.M)
+VAULT_ALIAS = re.compile(r"(?:^|[ \t])(V\d+)=")
+HEALTH_VERSION = 2
 
 
 def health_path(vault):
     return Path(vault) / memspec.FTS_INDEX_DIRECTORY / memspec.RECALL_HEALTH_FILENAME
 
 
-def _rows(path, max_bytes):
+def _rows(path, max_bytes, diagnostics=None):
     try:
         with io.open(path, "rb") as stream:
-            data = stream.read(max_bytes)
-    except OSError:
+            data = stream.read(max_bytes + 1)
+    except OSError as error:
+        if diagnostics is not None:
+            diagnostics.append(f"{path}: recall usage unreadable ({type(error).__name__})")
         return
+    if len(data) > max_bytes:
+        if diagnostics is not None:
+            diagnostics.append(f"{path}: recall usage exceeds the {max_bytes}-byte scan budget")
+        return
+    reported_invalid = False
     for raw in data.decode("utf-8", "replace").splitlines():
         try:
             row = json.loads(raw)
         except ValueError:
+            if raw.strip() and diagnostics is not None and not reported_invalid:
+                diagnostics.append(f"{path}: recall usage contains an incomplete JSON record")
+                reported_invalid = True
             continue
         if isinstance(row, dict):
             yield row
@@ -52,42 +64,75 @@ def _assistant_text(row):
     return "\n".join(parts)
 
 
-def measure(transcripts, since=None, max_bytes=64 * 1024 * 1024, until=None):
+def measure(transcripts, since=None, max_bytes=64 * 1024 * 1024, until=None,
+            *, by_vault=False, diagnostics=None):
     """{卡片相對路徑: [端出的段數, 其中之後被用到的段數]}。
 
     `since`／`until`（epoch 秒，until 不含）只限制「端出」那一列的時間：長壽的對話檔每晚
     都會被重讀，不限的話同一次端出會被算好幾晚。夜間重放照精確時間切，這裡也要——按日期
     取整的話，窗口開始前同一天的端出會被算進來。`since` 給 YYYY-MM-DD 字串時照舊按日期比。
     「用到」＝同一段裡端出之後，回覆或工具呼叫提到了卡名。
+
+    `by_vault=True` keys counts by (resolved vault, relative card path), using the
+    delivered Vn legend. Nightly quieting uses this mode. The default flat mapping
+    remains a reporting compatibility API, not input for cross-vault quieting.
+    Diagnostics mark incomplete observations; callers must not infer non-use from them.
     """
     counts = {}
     for path in transcripts:
         segment = 0
         pending = {}      # (段, 卡) -> 還沒看到被用到
-        for row in _rows(path, max_bytes):
+        aliases = {}
+        reported_unresolved = False
+        for row in _rows(path, max_bytes, diagnostics):
             if row.get("type") == "system" and row.get("subtype") == "compact_boundary":
                 segment += 1
                 pending = {key: used for key, used in pending.items() if key[0] == segment}
+                aliases = {}
                 continue
             attachment = row.get("attachment") if row.get("type") == "attachment" else None
             if isinstance(attachment, dict) and attachment.get("type") == "hook_additional_context":
-                if not _delivered_within(row.get("timestamp"), since, until):
-                    continue
                 for text in attachment.get("content") or ():
                     if not isinstance(text, str):
                         continue
-                    for card in CARD_LINE.findall(text):
-                        key = (segment, card)
+                    # The legend may precede the measured window; subsequent
+                    # deliveries omit it until the vault mapping changes.
+                    if by_vault:
+                        for line in text.splitlines():
+                            if not line.startswith(memspec.RECALL_LEGEND_PREFIX):
+                                continue
+                            legend = line[len(memspec.RECALL_LEGEND_PREFIX):]
+                            matches = list(VAULT_ALIAS.finditer(legend))
+                            aliases = {
+                                match.group(1): legend[match.end():
+                                    matches[index + 1].start() if index + 1 < len(matches)
+                                    else len(legend)].strip()
+                                for index, match in enumerate(matches)
+                            }
+                    if not _delivered_within(row.get("timestamp"), since, until):
+                        continue
+                    for alias, card in CARD_LINE.findall(text):
+                        identity = card
+                        if by_vault:
+                            vault = aliases.get(alias)
+                            if not vault or not Path(vault).is_absolute():
+                                if diagnostics is not None and not reported_unresolved:
+                                    diagnostics.append(f"{path}: recall usage contains unresolved vault aliases")
+                                    reported_unresolved = True
+                                continue
+                            identity = (str(Path(vault).resolve()), card)
+                        key = (segment, identity)
                         if key in pending:
                             continue
                         pending[key] = False
-                        counts.setdefault(card, [0, 0])[0] += 1
+                        counts.setdefault(identity, [0, 0])[0] += 1
                 continue
             if row.get("type") != "assistant" or not pending:
                 continue
             said = _assistant_text(row)
             for key, used in pending.items():
-                if not used and Path(key[1]).stem in said:
+                card = key[1][1] if by_vault else key[1]
+                if not used and Path(card).stem in said:
                     pending[key] = True
                     counts[key[1]][1] += 1
     return counts
@@ -147,7 +192,8 @@ def update(vault, counts, today):
     )
     path = health_path(vault)
     path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write(path, json.dumps({"days": days, "quiet": quiet}, ensure_ascii=False).encode("utf-8"))
+    atomic_write(path, json.dumps({"version": HEALTH_VERSION, "days": days, "quiet": quiet},
+                                 ensure_ascii=False).encode("utf-8"))
     return quiet
 
 
@@ -157,7 +203,10 @@ def _load(vault):
             value = json.loads(stream.read())
     except (OSError, ValueError):
         return {}
-    if not isinstance(value, dict) or not isinstance(value.get("days"), dict):
+    # Earlier statistics combined identical relative paths from different vaults.
+    # A derived cache with ambiguous attribution cannot suppress current cards.
+    if (not isinstance(value, dict) or value.get("version") != HEALTH_VERSION
+            or not isinstance(value.get("days"), dict)):
         return {}
     days = {}
     for day, cards in value["days"].items():
@@ -175,6 +224,14 @@ def _load(vault):
 def quiet_cards(vault):
     """喚回要略過的卡。讀不到、格式不對一律回空集合：寧可多端，不可因壞檔少端。"""
     return frozenset(card for card in _load(vault).get("quiet", ()) if isinstance(card, str))
+
+
+def should_quiet(vault, card, candidates):
+    """A nightly hint cannot suppress a card that now governs behavior.
+
+    Recheck only matched candidates, not the entire quiet list on every prompt.
+    """
+    return card in candidates and _card_type(vault, card) in memspec.RECALL_QUIET_TYPES
 
 
 def _selftest():

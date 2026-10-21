@@ -252,9 +252,16 @@ class RecallSelectionRegression(unittest.TestCase):
         self.card(self.vaults[0], "noisy", "quietneedle")
         self.card(self.vaults[0], "keeper", "quietneedle")
         self.card(self.vaults[0], "ruling", "quietneedle", decision=True)
+        # Only information cards are eligible for the nightly quiet list.
+        path = self.vaults[0] / "noisy.md"
+        path.write_text(path.read_text(encoding="utf-8").replace(
+            "description: quietneedle", "description: quietneedle\nmetadata:\n  type: reference"),
+            encoding="utf-8")
         memsearch.build_index(self.vaults[0])
         health = self.vaults[0] / memspec.FTS_INDEX_DIRECTORY / memspec.RECALL_HEALTH_FILENAME
-        health.write_text(json.dumps({"days": {}, "quiet": ["noisy.md", "ruling.md"]}), encoding="utf-8")
+        from epitype import recall_quiet
+        health.write_text(json.dumps({"version": recall_quiet.HEALTH_VERSION,
+                                     "days": {}, "quiet": ["noisy.md", "ruling.md"]}), encoding="utf-8")
         delivered = self.invoke(prompt="quietneedle")
         self.assertNotIn("/noisy.md", delivered)
         self.assertIn("/keeper.md", delivered)
@@ -264,6 +271,24 @@ class RecallSelectionRegression(unittest.TestCase):
         self.populate()
         self.assertEqual(self.invoke(session=""), self.invoke(session=""))
         self.assertEqual(len(self.lines(self.invoke(session=""))), 8)
+
+    def test_quiet_reference_promoted_to_behavior_is_recalled(self):
+        from datetime import date
+        from epitype import recall_quiet
+
+        vault = self.vaults[0]
+        self.card(vault, "promoted", "promotionneedle")
+        path = vault / "promoted.md"
+        path.write_text(path.read_text(encoding="utf-8").replace(
+            "description: promotionneedle", "description: promotionneedle\nmetadata:\n  type: reference"),
+            encoding="utf-8")
+        recall_quiet.update(vault, {"promoted.md": [10, 0]}, date.today())
+        self.assertIn("promoted.md", recall_quiet.quiet_cards(vault))
+        path.write_text(path.read_text(encoding="utf-8").replace(
+            "description: promotionneedle", "description: promotionneedle\nforbidden: [unsafe]"),
+            encoding="utf-8")
+        memsearch.build_index(vault)
+        self.assertIn("/promoted.md", self.invoke(prompt="promotionneedle"))
 
     def test_stronger_query_evidence_in_later_vault_gets_first_slot(self):
         for vault in self.vaults:

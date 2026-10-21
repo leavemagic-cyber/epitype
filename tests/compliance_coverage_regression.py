@@ -140,6 +140,50 @@ class Fixture(unittest.TestCase):
         return dream._section_compliance([vault], date(2026, 9, 28), date(2026, 6, 30), {}, context)
 
 
+class QuietUsageScope(Fixture):
+    def test_nightly_counts_do_not_leak_between_same_named_cards(self):
+        from epitype import recall_quiet
+
+        first = self.claude_vault()
+        second = self.make_vault(self.home / ".claude" / "projects" / "q" / "memory")
+        for vault in (first, second):
+            (vault / "shared.md").write_text(
+                "---\nname: shared\ndescription: example\nmetadata:\n  type: reference\n---\nbody\n",
+                encoding="utf-8")
+        rows = []
+        for _ in range(memspec.RECALL_QUIET_MIN_SEGMENTS):
+            rows.extend([
+                {"type": "attachment", "timestamp": iso(CARD_EPOCH + 60), "attachment": {
+                    "type": "hook_additional_context",
+                    "content": [f"vaults: V1={first}\n- example | V1/shared.md"]}},
+                {"type": "system", "subtype": "compact_boundary"},
+            ])
+        write_jsonl(first.parent / "quiet.jsonl", rows)
+        result = dream._section_compliance(
+            [first, second], date(2026, 9, 28), date(2026, 6, 30), {},
+            {"compliance_since_stamp": CARD_EPOCH, "write_health": True})
+        self.assertEqual(result["errors"], [])
+        self.assertTrue(result["recall_usage"]["complete"])
+        self.assertEqual(recall_quiet.quiet_cards(first), frozenset({"shared.md"}))
+        self.assertEqual(recall_quiet.quiet_cards(second), frozenset())
+
+    def test_incomplete_usage_preserves_health_without_stalling_other_replay(self):
+        from epitype import recall_quiet
+
+        vault = self.claude_vault()
+        recall_quiet.update(vault, {}, date(2026, 9, 27))
+        previous = recall_quiet.health_path(vault).read_bytes()
+        write_jsonl(vault.parent / "unresolved.jsonl", [
+            {"type": "attachment", "timestamp": iso(CARD_EPOCH + 60), "attachment": {
+                "type": "hook_additional_context", "content": ["- example | V1/unknown.md"]}}])
+        result = self.section(vault, CARD_EPOCH, write_health=True)
+        self.assertEqual(result["errors"], [])
+        self.assertFalse(result["recall_usage"]["complete"])
+        self.assertTrue(result["recall_usage"]["diagnostics"])
+        self.assertIn("quiet lists unchanged", result["note"])
+        self.assertEqual(recall_quiet.health_path(vault).read_bytes(), previous)
+
+
 class CodexIsReplayed(Fixture):
     """C1：家目錄有 .codex 時，Codex 的 rollout（進行中與封存）一起重放、一起對帳。"""
 

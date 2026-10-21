@@ -45,6 +45,20 @@ class ToolAdviceRegression(unittest.TestCase):
                         advise_all_of=['never-match'], advise_text='不要送我')
         self.assertIsNone(self.call('Bash', {'command': 'echo x'}))
 
+    def test_changed_advice_is_delivered_again_for_the_same_target(self):
+        event = {'session_id': 'changed-' + self.root.name, 'tool_name': 'Bash',
+                 'tool_input': {'command': 'inspect example'}}
+        self.write_card('changed.md', name='changed', advise_tool='Bash',
+                        advise_text='previous advice')
+        first = pretool._handle(event, time.monotonic(), [])
+        self.assertIn('previous advice', first['hookSpecificOutput']['additionalContext'])
+        self.write_card('changed.md', name='changed', advise_tool='Bash',
+                        advise_text='replacement advice')
+        second = pretool._handle(event, time.monotonic(), [])
+        self.assertIn('replacement advice', (second or {}).get(
+            'hookSpecificOutput', {}).get('additionalContext', ''))
+        self.assertIsNone(pretool._handle(event, time.monotonic(), []))
+
 
     def test_dropped_output_releases_advice_for_retry(self):
         self.write_card('retry.md', name='retry', description='先查證', advise_tool='Bash')

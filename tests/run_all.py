@@ -31,6 +31,7 @@ SELFTESTS = (
     Path("epitype") / "dream.py",
     Path("epitype") / "compliance.py",
     Path("epitype") / "recall_quiet.py",
+    Path("tests") / "recall_quiet_regression.py",
     Path("epitype") / "patch_envelope.py",
     Path("adapters") / "claude" / "recall_hook.py",
     Path("adapters") / "claude" / "sessionstart_hook.py",

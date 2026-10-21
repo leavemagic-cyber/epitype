@@ -12,7 +12,9 @@ You settled a decision three days ago. Today the agent answers from the version 
 
 Epitype is the small layer I built for that. It runs on the hooks Claude Code and Codex already have, leaves your existing memory files where they are, and adds the part those files cannot do on their own: getting the right note in front of the agent at the moment it matters, and keeping the wrong one out.
 
-It is Python standard library only. No service to sign up for, no model calls of its own, nothing to pay for.
+It is Python standard library only, with no required service and no model calls of its own. Injected context still uses the host's context budget.
+
+Its focus is instruction lifecycle: bind rules to original sources and scope, keep replaced decisions out of current recall, manage supported native settings across both hosts, and retain transcript pointers after compaction. Native memory remains the underlying store. See [product scope and related work](docs/PRODUCT_SCOPE.md) for the overlap, differences and evidence limits.
 
 ## Start with templates for review
 

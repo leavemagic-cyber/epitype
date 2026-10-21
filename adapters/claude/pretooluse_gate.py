@@ -2347,7 +2347,7 @@ def _allow_context(event, notices=(), config=None, started_at=None, meter_claims
         if shown == 2:
             break
         line = memspec.ACTION_GUARD_ADVISORY_LINE.format(card=card, excerpt=excerpt)
-        marker = "tool-advice:" + str(path.resolve()) + "\0" + target
+        marker = "tool-advice:" + str(path.resolve()) + "\0" + target + "\0" + line
         if (payload_fits("PreToolUse", "\n".join([*lines, line]),
                          config[memspec.CONFIG_BUDGET_BYTES_FIELD])
                 and _notice_marker(session_id, marker)):

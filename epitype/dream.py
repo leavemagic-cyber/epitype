@@ -1996,16 +1996,23 @@ def _section_compliance(vaults, today, since_date, config, context=None):
     # A capped scan is a partial observation; it must not change the live
     # ranking or quiet list as though the full interval had been inspected.
     write_health = bool((context or {}).get("write_health")) and available == len(transcripts)
+    recall_diagnostics = []
     try:
         from epitype import recall_quiet
-        shown = recall_quiet.measure(claude_transcripts, since=since_stamp, until=until_stamp)
+        shown = recall_quiet.measure(claude_transcripts, since=since_stamp, until=until_stamp,
+                                     by_vault=True, diagnostics=recall_diagnostics)
+        if recall_diagnostics:
+            shown = None  # Partial observations cannot establish non-use.
     except Exception as exc:
         shown = None
         errors.append(f"喚回用量統計失敗 {type(exc).__name__}: {exc}")
     for vault in vaults:
         if shown is not None and write_health:
             try:
-                quieted += len(recall_quiet.update(vault, shown, today))
+                vault_identity = str(Path(vault).resolve())
+                vault_shown = {card: pair for (source, card), pair in shown.items()
+                               if source == vault_identity}
+                quieted += len(recall_quiet.update(vault, vault_shown, today))
             except Exception as exc:
                 errors.append(f"{vault}: 喚回靜音名單未更新 {type(exc).__name__}: {exc}")
         try:
@@ -2094,7 +2101,11 @@ def _section_compliance(vaults, today, since_date, config, context=None):
         "examples": examples,
         "commands": ["python -m epitype.compliance --selftest"] if missed else [],
         "errors": errors,
-        "note": _coverage_note(covered, frontier, window_reset),
+        "note": _coverage_note(covered, frontier, window_reset) + (
+            f" Recall usage incomplete ({len(recall_diagnostics)} source issues); quiet lists unchanged."
+            if recall_diagnostics else ""),
+        "recall_usage": {"hosts": ["claude"], "complete": shown is not None,
+                         "diagnostics": recall_diagnostics},
         "delivery": delivery,
         "sequences": __import__("epitype.sequence_replay", fromlist=["report"]).report(
             [rule for _vault,rule in all_rules if rule.kind=='sequence'],transcripts,

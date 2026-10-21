@@ -1,6 +1,6 @@
 # Architecture
 
-Epitype is a governance layer over native CLI memory. Native stores remain the storage authority; Epitype adds structure, retrieval timing, two content gates, auditability, and release checks. Irreversible actions are not its job: those belong to the host's own native rules (Claude `permissions.deny`, Codex `execpolicy`), which refuse the call before it runs.
+Epitype is a governance layer over native CLI memory. Native stores remain the storage authority; Epitype adds structure, retrieval timing, content checks, auditability, and release checks. Stop findings are advisory. Explicit action guards remain distinct from reminders, and host-native permissions (Claude `permissions.deny`, Codex `execpolicy`) provide the security boundary.
 
 ## The three-block memory model
 
@@ -27,7 +27,7 @@ above it, never sent ahead of it.
 
 | Level | File | Written by | Read when |
 |---|---|---|---|
-| 1 | `MEMORY.md` | Hand-written only | Every session (hosts that load it natively; echoed to hosts that do not) |
+| 1 | `MEMORY.md` | Hand-written only | Through native loading or the managed index in host instruction files; SessionStart does not echo it |
 | 2 | `_views/current.md` | `epitype views` | Browsing what is in use; the fixed entry point for the complete list of active decisions |
 | 3 | `_views/history/closed.md` | `epitype views` | Looking up what was closed or replaced |
 | 4 | `grants/` `corrections/` `rulings/` | Auto-capture, verbatim | Somebody needs the owner's exact words — reached by `memsearch`, one file at a time, because a card pointed there (failure mode 41) |
@@ -59,13 +59,12 @@ one of those directories that is itself an active decision card (`decision_key` 
 `status: active`): that is level 2 material that happens to sit in a capture
 directory, and it keeps its pinned seat.
 
-The same line holds inside a decision card. Its `owner_quote` is the owner's verbatim
-words — level-4 material kept on the card as evidence that the owner said it, and as
-one of the ways the dream links captured events to the card. What recall pins, and
-what both gates quote when they block, is the card's `description`: what was decided,
-in understood words, uncut. A quote fragment without its question ("「B」（Q7）")
-reads as nothing; the verbatim quote is one step down, in the card file itself
-(owner 2026-09-17). The quote is shown only when a card has no description.
+Legacy decision recall prefers the card's complete description, falling back to
+`owner_quote` when it is absent. Source-bound cards use the shared rule projection:
+the original quotation, AI authorship and declared scope remain distinguishable.
+An approved AI paraphrase does not become a verbatim user statement. This current
+source contract supersedes the earlier blanket quote-hiding behavior; see
+[rule provenance](RULE_PROVENANCE.md). Stop findings remain advisory.
 
 `closed` changes the reading level and nothing else — the card stays in the search
 index and is still recalled. Only `superseded` changes recall, by redirecting to the
@@ -154,17 +153,17 @@ Only the title, the note line, the headings and the list markers are the product
 words, and all of them come from language-neutral templates in `memspec`: the product
 carries no behavior-rule text of its own (failure mode 30).
 
-Two refusals, both of which write nothing at all:
+Source/approval checks and budget notices have different effects:
 
 - **No approval, no generation.** A card in a generated layer without `approved_by`
   and `approved_at` stops the whole run and is listed. A core block is the wrong place
   to discover that one sentence was never approved.
-- **Over the cap, no generation.** `--cap-bytes`, else `core_cap_bytes` from the
-  config; unset means no cap, because a cap the product guessed is not the owner's
-  threshold (failure mode 36). Over it, the ten longest cards are listed instead.
-  `epitype sync` refuses the rules block it writes into `CLAUDE.md` / `AGENTS.md` past
-  the same `core_cap_bytes`, measured on that host's own view; the agent reads those
-  files, not the generated one, so a cap only core-gen honoured would bound nothing.
+- **Over the core budget, generation continues with a notice.** `--cap-bytes`, else
+  `core_cap_bytes` from the config, sets a review threshold; unset means no threshold.
+  The result reports the excess and longest rules while writing the current block.
+  Host synchronization likewise reports the core budget rather than retaining an
+  outdated block solely because it is too large. Host loading limits, malformed
+  markers and explicitly configured shared-index limits retain their own checks.
 
 `shared_index_cap_bytes` optionally limits the normalised governance `MEMORY.md`
 payload written into either global host's index region. Nightly cap checks measure
@@ -201,9 +200,9 @@ comment-delimited zone per host; a card naming both hosts appears once in each z
 
 `core_gen.host_view(text, host)` is a pure function returning what that host actually
 loads — the shared sections plus its own zone, with the other zones and every marker
-removed. Writing that into a host file is still not the product's job; the point is
-that the generator and a downstream sync script share one definition of "what this host
-loads" instead of keeping two. That same number is what `--cap-bytes` measures — the
+removed. `host_sync` writes those views into managed host-file regions, using the
+same definition of "what this host loads" as the generator. That same number is
+what `--cap-bytes` measures — the
 largest single host load, not the size of the file, because no session ever pays for
 both zones — and the run prints every host's load. The approval pack records each
 card's `hosts`, the bytes of each zone, and each host's load.
@@ -219,9 +218,9 @@ report-only candidate — with one deliberate silence: a vault holding no rule c
 yields no comparison at all, so a machine that has not adopted rule cards yet is not
 told nightly that its core block "drifted" from an empty assembly.
 
-Writing the assembled block into a host file (`CLAUDE.md`, `AGENTS.md`) is not the
-product's job and is not in this repository: the generator writes the file it is
-pointed at, and nothing else.
+`core_gen` writes its selected output. The separate `host_sync` module owns the
+managed regions of `CLAUDE.md` and `AGENTS.md`, preserving unrelated content;
+`host_native` manages supported native settings and their ownership/withdrawal.
 
 ```powershell
 python epitype/core_gen.py --selftest
@@ -229,7 +228,7 @@ python epitype/core_gen.py --selftest
 
 ## Card types and required fields
 
-One table, read off `CARD_REQUIRED_FIELDS` in `epitype/memspec.py`. `card_lint.py` and the write gate share it, so this is exactly what a blocked write is asking for.
+One table, read off `CARD_REQUIRED_FIELDS` in `epitype/memspec.py`. `card_lint.py` and the write checks share it. Ordinary format findings are advisory; provenance integrity and explicit action boundaries have separate checks.
 
 | `type` | Required frontmatter fields |
 |---|---|
