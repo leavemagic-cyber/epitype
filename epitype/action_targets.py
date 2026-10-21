@@ -5,7 +5,7 @@ or script is executed by this parser. Current Git metadata is read for live hook
 """
 from dataclasses import dataclass
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import re
 import shlex
 
@@ -24,6 +24,15 @@ def canonical(value, cwd='', *, resolve=True):
     if not isinstance(value, str) or not value or any(part in value for part in ('$', '`', '*', '?')):
         return ''
     value = value.strip('"\'')
+    # Historical Windows paths retain their identity on a POSIX replay host.
+    if not resolve and (PureWindowsPath(value).is_absolute()
+                        or (isinstance(cwd, str) and PureWindowsPath(cwd).is_absolute()
+                            and not value.startswith('/'))):
+        import ntpath
+        return ntpath.normcase(ntpath.normpath(ntpath.join(cwd, value))).replace('\\', '/')
+    if not resolve and (value.startswith('/') or (isinstance(cwd, str) and cwd.startswith('/'))):
+        import posixpath
+        return posixpath.normpath(posixpath.join(cwd, value))
     if value == '~' or value.startswith(('~/', '~\\')):
         value = str(Path.home()) + value[1:]
     path = Path(value)

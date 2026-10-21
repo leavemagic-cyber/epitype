@@ -7,6 +7,14 @@ from epitype import action_targets as targets
 
 
 class Targets(unittest.TestCase):
+    def test_historical_paths_do_not_use_replay_host_filesystem(self):
+        from unittest.mock import patch
+        with patch.object(targets, 'Path', side_effect=AssertionError('live path lookup')):
+            self.assertEqual(targets.canonical('C:/History/Main/../Side', resolve=False), 'c:/history/side')
+            self.assertEqual(targets.canonical('a.md', 'C:/History/Main', resolve=False), 'c:/history/main/a.md')
+            self.assertEqual(targets.canonical('/history/main/../side', resolve=False), '/history/side')
+            self.assertEqual(targets.canonical('a.md', '/history/main', resolve=False), '/history/main/a.md')
+
     def setUp(self):
         temporary=tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)

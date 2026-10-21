@@ -19,7 +19,7 @@ class ShimDispatchTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="epitype-shim-dispatch-")
         self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.temporary.name).resolve()
         self.home = self.root / "home"
         self.adapter = self.root / "repo" / "adapters" / "claude" / "pretooluse_gate.py"
         self.adapter.parent.mkdir(parents=True)

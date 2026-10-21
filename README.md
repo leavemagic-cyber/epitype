@@ -14,9 +14,7 @@ Epitype is the small layer I built for that. It runs on the hooks Claude Code an
 
 It is Python standard library only. No service to sign up for, no model calls of its own, nothing to pay for.
 
-## Thirty seconds to see it work
-
-Install, then put five general rules in your vault:
+## Start with templates for review
 
 ```powershell
 pip install epitype
@@ -24,29 +22,19 @@ epitype install
 epitype starter
 ```
 
-Now ask your agent to run `git add -A`. The call is refused before git sees it:
+The five shipped templates are AI-authored examples without verified original sources.
+`epitype starter` puts them under `_drafts/starter_templates/`; installing them does
+not activate rules. Review any rule you adopt and bind it to its actual source
+before publishing it in your vault. See [rule provenance](docs/RULE_PROVENANCE.md).
 
-```text
-🛑 Scar card (Stage explicit paths, not the whole tree): this Bash call contains
-all of "git add -A" — Run git status first, then name each path you actually changed
-```
-
-Then have it end a turn with *that should fix it*. The turn comes back instead of reaching you:
-
-```text
-⚖ do not say "That should fix it"; rewrite it. (No hedged completion: should work
-now is a guess wearing the clothes of a result)
-```
-
-A turn that carries its evidence — "I ran the suite: 74/74. Pushing now." — passes untouched.
-Those five cards are ordinary Markdown in your vault: edit them, delete them, or run
-`epitype starter --remove` to drop the ones you never touched.
+Stop findings are reminders for the next prompt in the same session. They do not
+withhold a reply, request a rewrite, or start another model turn.
 
 ## Where you actually notice it
 
-You rejected an approach on Monday. On Thursday the agent proposes it again. The Stop gate holds that reply back and hands over the ruling that closed the question, with its date and who made it.
+You rejected an approach on Monday. On Thursday the agent proposes it again. Stop records the matching finding and queues a reminder with the relevant card for the next prompt in that session.
 
-A file write is about to commit a line that contradicts a settled rule. The write gate stops the content before it lands and writes one audit row, so later you can ask what was blocked, how often, and whether the rule is doing more harm than good.
+PreToolUse supplies advisory findings about writing and attribution. Explicit action guards and retained safety checks can deny a matching action; those boundaries are distinct from ordinary workflow reminders.
 
 The context gets compacted in the middle of a task. The next turn opens with the path to a recovery map written just before the compaction, so the agent can go read what was actually said instead of reconstructing it.
 
@@ -87,16 +75,16 @@ Probably not yet if you are new to CLI agents and have no accumulated rules to g
 
 ## How it works
 
-Epitype hangs off six host events and reads the same vaults your host already uses.
+Epitype reads the same vaults your host already uses, through these host events and the corresponding SubagentStop handler.
 
 | Event | What Epitype does |
 |---|---|
 | `SessionStart` | Injects only what names something to do: a card that fails its type check, the by-the-way alias task, a dream that errored or is overdue. After a compaction it also hands back the path to the map written below, so the agent can go read the original words; if the agent wrote a pre-compaction handoff that has not already been handed back unchanged, that line follows the map's, and it is the one dropped when the budget fits only one. A session with nothing to do gets nothing. Standing material is not re-sent, the memory index included, because the host loads that itself from `CLAUDE.md` / `AGENTS.md`. |
 | `UserPromptSubmit` | Pulls up to five relevant cards from each resolved vault, inside a shared output budget. Cards only. Verbatim capture files stay searchable but are never injected. Short owner statements are stored word for word, deduplicated and indexed; nothing infers what they meant. |
-| `PreToolUse` | Write gate. Checks the content a file write is about to commit against settled rulings and the card contract. It also refuses a recurrence narrated into an existing behaviour card when the same write does not arm that card (`docs/FAILURE_MODES.md` §45). A block hands back the ruling and writes an audit row. Context meter: when the context nears auto-compaction, the allowed call (and `UserPromptSubmit`) carries one line, once per compaction cycle, telling the agent to write its handoff; compaction still happens at the host's own automatic threshold, and the handoff is handed back afterwards. Claude Code: 97% of the learned auto-compaction point. Codex (recognised from the rollout rows): Codex's own count and limit (its `config.toml` and model catalog), reminding a fixed 44k tokens before the limit, because one Codex step can jump tens of thousands of tokens. An unknown threshold or limit means no line at all. |
+| `PreToolUse` | Advisory write-format, attribution, cleanup and reading-volume checks; deterministic input repairs and retained action-time safety. Explicit action-card `on_hit` settings remain separate. The context meter reminds the agent to write its handoff before the host's compaction threshold, once per cycle; an unknown threshold produces no reminder. |
 | `PreCompact` | Writes a small recovery map from the tail of the transcript before the context is compacted. On an automatic compaction it also records the usage at that moment, which is how the context meter learns the threshold. |
 | `PostToolUse` | Records browser tabs and control sessions created by the agent, plus closures confirmed by successful tool results. A later prompt or non-browser tool call reminds the agent about anything still open. It never closes the resource itself. |
-| `Stop` | Round-end decision gate. Blocks a reply that re-proposes a rejected option or re-asks a question you already ruled on. |
+| `Stop` | Records findings as `stop_note` and queues a reminder for the next prompt in the same session. Never blocks or restarts a reply. `SubagentStop` uses the same advisory path. |
 
 Injected memory is advisory. It cannot override system or developer instructions, bypass host permissions, or hand a tool any authority by itself. Hook output is capped at 10 KiB, and every hook has a ten-second deadline that fails open.
 
@@ -120,9 +108,9 @@ Decision cards carry a stable `decision_key`, a status of `active` or `supersede
 
 A scar is a rule born from an incident: the `incident` it came from, plus `advice` that names the safer route. Most cards are context read back into a turn and refuse nothing.
 
-A card can also refuse, in three narrow forms. `forbidden` patterns stop a turn from ending when the model has said something the owner ruled out. `require_when` with `require_text` stops a turn whose claim arrives without the evidence the rule asks for. `guard_tool` with `guard_all_of` denies a tool call whose own text contains every literal fragment the card names — no regex, no shell parsing, no guess about what a command means.
+A card's `forbidden` patterns identify wording the owner ruled out; `require_when` with `require_text` identifies a claim missing the required evidence. At Stop these findings are advisory. An explicit action guard using `guard_tool` with `guard_all_of` can deny a tool call whose text contains every literal fragment the card names, according to its `on_hit` setting. Literal matching does not parse shell syntax or infer intent.
 
-A fourth form is structural rather than literal. `fence_shell` (`powershell`, `bash` or `sh`) hands every fenced block tagged as a shell language (`fence_langs`, default bash, sh, shell, zsh, console, powershell, pwsh, ps1, ps, cmd, bat) to that shell's own parser — syntax only, never executed — and stops the turn when a block would fail the moment someone presses Run. `powershell` means Windows PowerShell 5.1 (`powershell.exe`), not `pwsh`. Untagged blocks are not checked; if the parser is missing, slow or broken the turn passes and the gate says so on stderr.
+`fence_shell` (`powershell`, `bash` or `sh`) checks tagged shell blocks with that shell's parser, without executing them. Syntax findings at Stop are also advisory. `powershell` means Windows PowerShell 5.1 (`powershell.exe`); untagged blocks are not checked. A missing, slow or broken parser does not block the turn.
 
 That last one was removed in 2026-09-09 and restored on 2026-09-16, after the premise behind removing it was tested and failed: Claude's Bash permission patterns match positionally and have no AND operator, so four of nine hazard classes moved to the host and five could not be expressed at all. A literal conjunction over-approximates toward denial, which is the safe direction, and it is a guardrail against a mistake someone has already carded — not a security boundary. An equivalent rewrite of the same command gets through, by design.
 
@@ -296,10 +284,9 @@ deleted and rebuilt. The gate log records rule names and timestamps — never me
 ## How it compares
 
 - **[claude-mem](https://github.com/thedotmack/claude-mem)** summarises sessions so the agent
-  remembers more. Epitype does not summarise; it keeps rulings you wrote and refuses turns that
-  contradict them.
+  remembers more. Epitype keeps source-bound rulings, checks findings and supplies reminders.
 - **[claudekit](https://github.com/carlrannaberg/claudekit)** and similar hook toolkits give you
-  building blocks to wire up. Epitype ships one opinionated layer: cards in, enforcement out.
+  building blocks to wire up. Epitype connects cards to recall, advisory checks and explicit action guards.
 - A **`CLAUDE.md` / `AGENTS.md` kit** gives the agent more text to read. Epitype generates that
   resident block from your rule cards, then checks at the end of the turn whether the rule held.
 
@@ -309,7 +296,7 @@ They compose: nothing here stops you running a memory summariser alongside it.
 
 - Hooks reach only the events and tools the host exposes. A direct file read stays outside the current-decision filter.
 - Time and output ceilings force selection. Epitype never pushes a whole vault into a prompt.
-- Epitype refuses content at the write gate and at the end of a turn, and refuses a tool call only when a scar card names every literal fragment in it. It reads no intent, and an equivalent rewrite of the same command gets through; irreversible actions are the host's to refuse. A malformed card fails open instead of taking the host with it.
+- Workflow findings and Stop checks are advisory. Explicit action guards and retained safety checks may deny a matching tool call. Epitype is not a complete security boundary; irreversible-action permissions remain the host's responsibility. Malformed cards fail open.
 - Claude Code and Codex are the tested boundary. A host upgrade still needs its own integration test.
 - The bundled tests are synthetic. They exercise behaviour and failure handling, not months in the field.
 

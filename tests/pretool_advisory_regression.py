@@ -41,7 +41,7 @@ class AdvisoryRegression(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="epitype-owner-advisory-")
         self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        self.root = Path(temporary.name).resolve()
         self.vault = self.root / "vault"
         self.vault.mkdir()
         self.config_file = self.root / "config.json"

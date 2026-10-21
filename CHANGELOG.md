@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## v1.9.1 (2026-10-21)
+
+- Preserve recorded Windows and POSIX path identity during historical replay on either host; never resolve historical paths against the replay machine's filesystem.
+- Resolve Windows temporary fixture paths before comparing adapter arguments and guard paths. Synchronize concurrent meter tests before their actual claims, and give the sample-integrity fixture an explicit lock budget while retaining the production fail-open budget.
+- Correct both READMEs: starter examples are unpublished drafts, Stop findings are advisory, and explicit action guards remain distinct from workflow reminders.
+
 ## v1.9.0 (2026-10-21)
 
 - Dispatch stable hook shims in the current Python process, preserving input, arguments, import paths and adapter exit codes without starting a second interpreter.

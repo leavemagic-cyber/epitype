@@ -831,10 +831,11 @@ def run_concurrent(script, event, config_path, count, environment=None, settle_s
     """自測用：同時起 count 個掛鉤行程，等它們載入完、卡在讀 stdin，再一起餵同一個事件——
     重現 Codex 一次並行好幾個工具呼叫。回 [(returncode, stdout, stderr)]。
 
-    環境跟 run_synthetic 一樣隔離（家目錄、夢關掉；時鐘要明傳）。settle_seconds 只是
-    「大概都載入完了」：晚到的行程會看到標記、什麼都不說，不會讓「只有一個說」變假。
+    環境跟 run_synthetic 一樣隔離（家目錄、夢關掉；時鐘要明傳）。多行程在真正算出
+    notice 後、搶標記前同步，確保測到競爭；settle_seconds 只給起始載入預留時間。
     close_stdout=True 在餵事件前關掉讀端，模擬「輸出失敗」（stdout 回空字串）。"""
     import subprocess
+    import tempfile
 
     isolated_home = os.fspath(Path(config_path).resolve().parent / "_synthetic_home")
     environment = {
@@ -860,10 +861,36 @@ def run_concurrent(script, event, config_path, count, environment=None, settle_s
         environment[memspec.HOOK_CLOCK_ENV] = token
     processes = []
     results = []
+    barrier = tempfile.TemporaryDirectory(prefix="epitype-meter-race-") if count > 1 else None
     try:
         for _ in range(count):
+            command = [sys.executable, os.fspath(script)]
+            if barrier is not None:
+                # A stdin release cannot ensure all children reach the claim together.
+                # Synchronize after each real notice calculation, before any claim.
+                wrapper = (
+                    "import os, pathlib, runpy, sys, time\n"
+                    "target, directory, count = sys.argv[1:]\n"
+                    "sys.path[:0] = [str(pathlib.Path(target).resolve().parents[2]), str(pathlib.Path(target).parent)]\n"
+                    "from epitype import context_meter\n"
+                    "original = context_meter.notice\n"
+                    "def synchronized(*args, **kwargs):\n"
+                    "    value = original(*args, **kwargs)\n"
+                    "    if value is not None:\n"
+                    "        root = pathlib.Path(directory)\n"
+                    "        (root / str(os.getpid())).write_text('ready')\n"
+                    "        deadline = time.monotonic() + 20\n"
+                    "        while len(list(root.iterdir())) < int(count):\n"
+                    "            if time.monotonic() >= deadline: raise RuntimeError('meter race barrier incomplete')\n"
+                    "            time.sleep(0.001)\n"
+                    "    return value\n"
+                    "context_meter.notice = synchronized\n"
+                    "sys.argv = [target]\n"
+                    "runpy.run_path(target, run_name='__main__')\n"
+                )
+                command = [sys.executable, "-c", wrapper, os.fspath(script), barrier.name, str(count)]
             processes.append(subprocess.Popen(
-                [sys.executable, os.fspath(script)], stdin=subprocess.PIPE,
+                command, stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=environment))
         if close_stdout:
             for process in processes:
@@ -885,6 +912,9 @@ def run_concurrent(script, event, config_path, count, environment=None, settle_s
         for process in processes:
             if process.poll() is None:
                 process.kill()
+                process.wait()
+        if barrier is not None:
+            barrier.cleanup()
         if credential is not None:
             try:
                 credential.unlink()

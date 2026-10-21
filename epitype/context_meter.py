@@ -1632,6 +1632,9 @@ def _selftest():
                 "import sys, time, pathlib\n"
                 "sys.path.insert(0, sys.argv[1])\n"
                 "from epitype import context_meter\n"
+                # Test data integrity under contention without conflating it with
+                # the production hook's deliberately short fail-open lock budget.
+                "context_meter.memspec.CONTEXT_METER_LOCK_SECONDS = 10\n"
                 "ready = pathlib.Path(sys.argv[4]) / ('ready-' + sys.argv[5])\n"
                 "go = pathlib.Path(sys.argv[4]) / 'go'\n"
                 "ready.write_text('1')\n"
