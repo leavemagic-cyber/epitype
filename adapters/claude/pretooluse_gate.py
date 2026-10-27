@@ -751,9 +751,11 @@ def _read_guard(path):
             memspec.ACTION_GUARD_TOOL_FIELD, "advise_tool", "require_tool_before", memspec.WRITE_CHECK_FIELD)):
         return None
     try:
+        # An unreadable original conversation leaves the card UNVERIFIED; the
+        # caller then demotes block to note, so it must not drop the guard here.
         projected = rule_pipeline.projection(
             fields, path, legacy_text=fields.get("guard_advice") or fields.get("description", ""),
-            card_text=card_text)
+            card_text=card_text, allow_unavailable_sources=True)
     except (ValueError, OSError, UnicodeError) as exc:
         return f"[{path.name}] guard source INVALID: {exc}"
     if projected["expired"]:
