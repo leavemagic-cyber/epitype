@@ -777,6 +777,38 @@ def _body_text(text, closing):
     ]
 
 
+_NOISE_FENCE = re.compile(r"^```.*?^```", re.M | re.S)
+_NOISE_QUOTE = re.compile(r"「[^」]*」|“[^”]*”")
+_NOISE_PATTERNS = (
+    re.compile(r"(?<![0-9A-Za-z])[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}(?![0-9A-Za-z])"),
+    re.compile(r"(?<![0-9A-Za-z])(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{7,64}(?![0-9A-Za-z])"),
+    re.compile(r"[\w-]*\.bak[_.-]?\w*\d[\w.-]*|[\w-]*\.bak_[\w.-]+"),
+    re.compile(r"AppData[\\/]+Local[\\/]+Temp[^\s`）)]*|scratchpad[\\/][^\s`）)]*", re.I),
+    re.compile(r"rollout-20\d\d-[\w-]+"),
+)
+
+
+def _body_noise_findings(card_type, fields, text, closing):
+    """Hashes, session ids, backup names and temp paths in a rule-like card body.
+
+    Recall injects these cards into later sessions, so a one-off work record costs
+    tokens every time and teaches nothing. Owner quotes and fenced examples are kept
+    out of the scan: quotes stay verbatim, and a guard example may need the literal."""
+    status = fields.get(memspec.DECISION_STATUS_FIELD, "").strip().casefold()
+    if card_type not in memspec.CARD_LINT_BODY_NOISE_TYPES or status in memspec.STOP_GATE_SILENT_STATUSES:
+        return []
+    body = "\n".join(text.lstrip("﻿").splitlines()[closing + 1:])
+    body = _NOISE_QUOTE.sub(" ", _NOISE_FENCE.sub(" ", body))
+    found = list(dict.fromkeys(
+        match.group(0) for pattern in _NOISE_PATTERNS for match in pattern.finditer(body)))
+    if not found:
+        return []
+    shown = memspec.SLASH_JOINER.join(found[:memspec.CARD_LINT_BODY_NOISE_SHOWN])
+    if len(found) > memspec.CARD_LINT_BODY_NOISE_SHOWN:
+        shown += f" 等 {len(found)} 處"
+    return [(FAIL, "body-noise", memspec.CARD_LINT_BODY_NOISE_REASON.format(fragments=shown))]
+
+
 def _iso_of(match):
     try:
         return date(int(match.group(1)), int(match.group(2)), int(match.group(3))).isoformat()
@@ -1082,6 +1114,7 @@ def _check_card(path, relative, today, known_cards=None, source_path=None):
                 memspec.CARD_LINT_NO_CHINESE_REASON,
             ))
 
+    findings.extend(_body_noise_findings(card_type, fields, text, closing))
     findings.extend(_expiry_warnings(fields, today, card_type))
     scope_value = fields.get(memspec.APPLIES_TO_FIELD, "").strip().casefold()
     if scope_value and scope_value not in memspec.APPLIES_TO_VALUES:

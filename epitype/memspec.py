@@ -710,6 +710,21 @@ GENERIC_CARD_TYPES = (
     CARD_TYPE_HABIT,
 )
 DEFAULT_CARD_TYPE = CARD_TYPE_FEEDBACK
+# owner 2026-10-28：「規則卡怎麼紀錄這些不需要的資訊？這些應該是不必要讀取啊」「想辦法根治」。
+# 專案與參考卡的工作就是記位置與編號，不在此列。
+CARD_LINT_BODY_NOISE_TYPES = (
+    CARD_TYPE_DECISION,
+    CARD_TYPE_RULE,
+    CARD_TYPE_SCAR,
+    CARD_TYPE_FEEDBACK,
+    CARD_TYPE_USER,
+    CARD_TYPE_HABIT,
+)
+CARD_LINT_BODY_NOISE_SHOWN = 4
+CARD_LINT_BODY_NOISE_REASON = (
+    "內文夾帶當次工作紀錄（{fragments}）：規則類的卡只寫規則、owner 原話、原因與做法；"
+    "提交號、對話編號、備份檔名、暫存路徑寫進提交說明或場次紀錄，要舊版用記憶庫 git 取回"
+)
 EVENT_CARD_DIRECTORIES = (
     (GRANT_DIRECTORY, CARD_TYPE_GRANT),
     (CORRECTION_DIRECTORY, CARD_TYPE_CORRECTION),
