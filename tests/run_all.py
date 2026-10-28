@@ -51,6 +51,7 @@ SELFTESTS = (
     Path("tests") / "card_lint_provenance_fields_regression.py",
     Path("tests") / "card_lint_body_noise_regression.py",
     Path("tests") / "card_lint_superseded_chain_regression.py",
+    Path("tests") / "card_lint_owner_quote_time_limit_regression.py",
     Path("tests") / "dream_vault_snapshot_regression.py",
     Path("tests") / "rule_text_advisory_regression.py",
     Path("tests") / "rule_source_consumers_regression.py",

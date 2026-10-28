@@ -729,6 +729,10 @@ CARD_LINT_SUPERSEDED_CHAIN_REASON = (
     "內文仍帶著被取代的版本（{markers}）：規則卡只保留現行版本，舊版請查記憶庫的 git 歷史；"
     "請人工判斷哪些內容已被取代"
 )
+CARD_LINT_OWNER_QUOTE_TIME_LIMIT_REASON = (
+    "owner 原話含期限或試行用語（{markers}），但未設定到期欄位；"
+    "請補上 {fields} 到期欄位或明確的移除條件"
+)
 EVENT_CARD_DIRECTORIES = (
     (GRANT_DIRECTORY, CARD_TYPE_GRANT),
     (CORRECTION_DIRECTORY, CARD_TYPE_CORRECTION),

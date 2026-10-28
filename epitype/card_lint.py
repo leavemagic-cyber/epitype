@@ -807,6 +807,53 @@ def _superseded_chain_findings(card_type, fields, text, closing):
         markers=memspec.SLASH_JOINER.join(dict.fromkeys(found))))]
 
 
+OWNER_QUOTE_TIME_LIMIT_MARKERS = (
+    "一禮拜", "一個禮拜", "一週", "一周", "這週", "幾天", "先試", "試行", "試用",
+    "暫時", "暫定", "之後再", "到時候再", "為止", "之後要通知", "後要通知",
+)
+_OWNER_ATTRIBUTION = re.compile(r"owner|使用者|原話", re.I)
+_OWNER_LINE_QUOTE = re.compile(r"「([^」\n]*)」")
+
+
+def _unfenced_lines(text):
+    """Yield prose lines, excluding backtick/tilde fences through their close or EOF."""
+    fence = None
+    for line in text.splitlines():
+        stripped = line.lstrip()
+        if fence is not None:
+            character, length = fence
+            if re.fullmatch(re.escape(character) + "{" + str(length) + r",}\s*", stripped):
+                fence = None
+            continue
+        opening = re.match(r"(`{3,}|~{3,})", stripped)
+        if opening:
+            delimiter = opening.group(0)
+            fence = delimiter[0], len(delimiter)
+            continue
+        yield line
+
+
+# Reason: 2026-10-28 owner one-week trial stayed active six weeks; remove when card writing records time limits as expiry fields itself.
+def _owner_quote_time_limit_findings(fields, text, closing):
+    status = fields.get(memspec.DECISION_STATUS_FIELD, "").strip().casefold()
+    if status not in ("", memspec.ACTIVE_DECISION_STATUS):
+        return []
+    if any(fields.get(field, "").strip() for field in memspec.CARD_EXPIRY_FIELDS):
+        return []
+    quotes = list(_unfenced_lines(fields.get(memspec.OWNER_QUOTE_FIELD, "")))
+    body = "\n".join(text.lstrip("﻿").splitlines()[closing + 1:])
+    for line in _unfenced_lines(body):
+        if _OWNER_ATTRIBUTION.search(line):
+            quotes.extend(_OWNER_LINE_QUOTE.findall(line))
+    found = [marker for marker in OWNER_QUOTE_TIME_LIMIT_MARKERS
+             if any(marker in quote for quote in quotes)]
+    if not found:
+        return []
+    return [(WARN, "owner-quote-time-limit", memspec.CARD_LINT_OWNER_QUOTE_TIME_LIMIT_REASON.format(
+        markers=memspec.SLASH_JOINER.join(found),
+        fields=memspec.SLASH_JOINER.join(memspec.CARD_EXPIRY_FIELDS)))]
+
+
 def _body_noise_findings(card_type, fields, text, closing):
     """Hashes, session ids, backup names and temp paths in a rule-like card body.
 
@@ -1131,6 +1178,7 @@ def _check_card(path, relative, today, known_cards=None, source_path=None):
 
     findings.extend(_body_noise_findings(card_type, fields, text, closing))
     findings.extend(_superseded_chain_findings(card_type, fields, text, closing))
+    findings.extend(_owner_quote_time_limit_findings(fields, text, closing))
     findings.extend(_expiry_warnings(fields, today, card_type))
     scope_value = fields.get(memspec.APPLIES_TO_FIELD, "").strip().casefold()
     if scope_value and scope_value not in memspec.APPLIES_TO_VALUES:
