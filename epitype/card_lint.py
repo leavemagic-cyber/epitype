@@ -779,6 +779,8 @@ def _body_text(text, closing):
 
 _NOISE_FENCE = re.compile(r"^```.*?^```", re.M | re.S)
 _NOISE_QUOTE = re.compile(r"「[^」]*」|“[^”]*”")
+_SUPERSEDED_MARKER = re.compile(
+    r"取代上段|取代前段|取代上一段|已作廢|作廢|已撤銷|已過時|舊版段落|沿革|superseded", re.I)
 _NOISE_PATTERNS = (
     re.compile(r"(?<![0-9A-Za-z])[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}(?![0-9A-Za-z])"),
     re.compile(r"(?<![0-9A-Za-z])(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{7,64}(?![0-9A-Za-z])"),
@@ -788,17 +790,30 @@ _NOISE_PATTERNS = (
 )
 
 
+def _live_rule_body(card_type, fields, text, closing):
+    status = fields.get(memspec.DECISION_STATUS_FIELD, "").strip().casefold()
+    if card_type not in memspec.CARD_LINT_BODY_NOISE_TYPES or status in memspec.STOP_GATE_SILENT_STATUSES:
+        return ""
+    body = "\n".join(text.lstrip("﻿").splitlines()[closing + 1:])
+    return _NOISE_QUOTE.sub(" ", _NOISE_FENCE.sub(" ", body))
+
+
+def _superseded_chain_findings(card_type, fields, text, closing):
+    body = _live_rule_body(card_type, fields, text, closing)
+    found = [match.group(0) for match in _SUPERSEDED_MARKER.finditer(body)]
+    if len(found) < 2:
+        return []
+    return [(WARN, "superseded-chain", memspec.CARD_LINT_SUPERSEDED_CHAIN_REASON.format(
+        markers=memspec.SLASH_JOINER.join(dict.fromkeys(found))))]
+
+
 def _body_noise_findings(card_type, fields, text, closing):
     """Hashes, session ids, backup names and temp paths in a rule-like card body.
 
     Recall injects these cards into later sessions, so a one-off work record costs
     tokens every time and teaches nothing. Owner quotes and fenced examples are kept
     out of the scan: quotes stay verbatim, and a guard example may need the literal."""
-    status = fields.get(memspec.DECISION_STATUS_FIELD, "").strip().casefold()
-    if card_type not in memspec.CARD_LINT_BODY_NOISE_TYPES or status in memspec.STOP_GATE_SILENT_STATUSES:
-        return []
-    body = "\n".join(text.lstrip("﻿").splitlines()[closing + 1:])
-    body = _NOISE_QUOTE.sub(" ", _NOISE_FENCE.sub(" ", body))
+    body = _live_rule_body(card_type, fields, text, closing)
     found = list(dict.fromkeys(
         match.group(0) for pattern in _NOISE_PATTERNS for match in pattern.finditer(body)))
     if not found:
@@ -1115,6 +1130,7 @@ def _check_card(path, relative, today, known_cards=None, source_path=None):
             ))
 
     findings.extend(_body_noise_findings(card_type, fields, text, closing))
+    findings.extend(_superseded_chain_findings(card_type, fields, text, closing))
     findings.extend(_expiry_warnings(fields, today, card_type))
     scope_value = fields.get(memspec.APPLIES_TO_FIELD, "").strip().casefold()
     if scope_value and scope_value not in memspec.APPLIES_TO_VALUES:

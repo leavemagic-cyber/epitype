@@ -725,6 +725,10 @@ CARD_LINT_BODY_NOISE_REASON = (
     "內文夾帶當次工作紀錄（{fragments}）：規則類的卡只寫規則、owner 原話、原因與做法；"
     "提交號、對話編號、備份檔名、暫存路徑寫進提交說明或場次紀錄，要舊版用記憶庫 git 取回"
 )
+CARD_LINT_SUPERSEDED_CHAIN_REASON = (
+    "內文仍帶著被取代的版本（{markers}）：規則卡只保留現行版本，舊版請查記憶庫的 git 歷史；"
+    "請人工判斷哪些內容已被取代"
+)
 EVENT_CARD_DIRECTORIES = (
     (GRANT_DIRECTORY, CARD_TYPE_GRANT),
     (CORRECTION_DIRECTORY, CARD_TYPE_CORRECTION),

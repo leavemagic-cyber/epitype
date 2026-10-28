@@ -10,7 +10,7 @@ import sys; sys.dont_write_bytecode = True; [getattr(stream, "reconfigure", lamb
 脫鉤的低優先權背景程序）、nightly（graft 註冊系統排程）、off。三者跑的都是同一條
 命令 `dream.py --scheduled`——庫與輸出路徑由這裡自己從 config 解出，所以換庫不必
 重註冊排程。盤點本身唯讀，寫的是 <治理 vault>/.epitype/ 的 pack／state／lock／log，
-外加兩個順路任務：重生 `_views/`，以及把 MEMORY.md 允許段以外、目錄已承載的卡片
+外加三個順路任務：先做記憶庫 git 快照、重生 `_views/`，以及把 MEMORY.md 允許段以外、目錄已承載的卡片
 連結行搬進 `_drafts/index_pruned/`（原文照搬、不刪；`--dry-run` 只印不改）。
 """
 
@@ -64,6 +64,19 @@ COMPLIANCE_STUCK_ERROR = (
     "本晚只讀了其中 {read} 份，下一晚會重算同一段"
 )
 RECENT_WINDOW_DAYS = 7
+VAULT_SNAPSHOT_STALE_SECONDS = 120
+VAULT_SNAPSHOT_TIMEOUT_SECONDS = 300
+VAULT_SNAPSHOT_HEADING = "## 記憶庫快照"
+VAULT_SNAPSHOT_LINE = "- {vault}｜{status}｜{detail}"
+VAULT_SNAPSHOT_LABELS = {
+    "committed": "已提交", "clean": "沒有變更", "busy": "另一場持鎖，今晚略過",
+    "not-git": "不是 git 記憶庫", "error": "快照失敗",
+}
+VAULT_SNAPSHOT_CLEAN = "沒有需要提交的變更"
+VAULT_SNAPSHOT_BUSY = "快照鎖未超過 120 秒"
+VAULT_SNAPSHOT_NOT_GIT = "沒有 .git 目錄"
+VAULT_SNAPSHOT_GIT_ERROR = "git {command} 失敗：{detail}"
+VAULT_SNAPSHOT_CLEANUP_ERROR = "快照鎖清理失敗：{detail}"
 DRAFT_DIRNAME = "_drafts"
 _EVENT_TYPE_BY_DIR = dict(memspec.EVENT_CARD_DIRECTORIES)  # {"grants": "grant", ...}
 
@@ -149,6 +162,94 @@ REVIEW_PACK_EXAM_UNMAPPED_NOTE = "{count} 題失敗但題目沒寫對到哪張�
 
 
 # --------------------------------------------------------------------------- helpers
+
+
+def _snapshot_vault(vault, today):
+    vault = Path(vault)
+    result = {"vault": str(vault), "status": "not-git", "detail": VAULT_SNAPSHOT_NOT_GIT}
+    lock = vault / ".git_snapshot.lock"
+    token = uuid.uuid4().hex
+    identity = None
+    stop = threading.Event()
+    heartbeat = None
+
+    def refresh():
+        # git 可跑超過接管門檻；持續更新鎖，避免 hook 把仍在工作的夢當成陳鎖。
+        while not stop.wait(VAULT_SNAPSHOT_STALE_SECONDS / 4):
+            try:
+                if lock.read_text(encoding="utf-8") != token:
+                    return
+                os.utime(lock, None)
+            except (OSError, UnicodeError):
+                return
+
+    def git(*args):
+        completed = subprocess.run(
+            ["git", "-C", str(vault), *args], capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=VAULT_SNAPSHOT_TIMEOUT_SECONDS,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if completed.returncode and not (
+                args[0] == "commit" and "nothing to commit" in completed.stdout + completed.stderr):
+            raise RuntimeError(VAULT_SNAPSHOT_GIT_ERROR.format(
+                command=args[0], detail=(completed.stderr or completed.stdout).strip()))
+        return completed
+
+    try:
+        if not (vault / ".git").is_dir():
+            return result
+        try:
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            if time.time() - lock.stat().st_mtime <= VAULT_SNAPSHOT_STALE_SECONDS:
+                result.update(status="busy", detail=VAULT_SNAPSHOT_BUSY)
+                return result
+            lock.unlink()
+            try:
+                fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            except FileExistsError:
+                result.update(status="busy", detail=VAULT_SNAPSHOT_BUSY)
+                return result
+        identity = os.fstat(fd)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(token)
+        thread = threading.Thread(target=refresh, daemon=True)
+        thread.start()
+        heartbeat = thread
+        index_lock = vault / ".git" / "index.lock"
+        if index_lock.exists() and time.time() - index_lock.stat().st_mtime > VAULT_SNAPSHOT_STALE_SECONDS:
+            index_lock.unlink()
+        pending = vault / "_GIT_PENDING"
+        lines = [line for line in git("status", "--porcelain").stdout.splitlines() if line.strip()]
+        if lines:
+            added = sum(line[:2].strip() in ("A", "??") for line in lines)
+            modified = sum(line[:2].strip() in ("M", "AM", "MM") for line in lines)
+            deleted = sum(line[:2].strip() == "D" for line in lines)
+            message = f"dream {today.isoformat()} | cards +{added} ~{modified} -{deleted} | by:dream"
+            git("add", "-A")
+            committed = git("commit", "-m", message).returncode == 0
+            result.update(status="committed" if committed else "clean",
+                          detail=message if committed else VAULT_SNAPSHOT_CLEAN)
+        else:
+            result.update(status="clean", detail=VAULT_SNAPSHOT_CLEAN)
+        pending.unlink(missing_ok=True)
+    except Exception as exc:
+        result.update(status="error", detail=f"{type(exc).__name__}: {exc}")
+    finally:
+        stop.set()
+        if heartbeat is not None:
+            heartbeat.join()
+        if identity is not None:
+            try:
+                # 只移除自己建立的鎖；接管後的新鎖不能替別人清掉。
+                current = lock.stat()
+                if (current.st_dev, current.st_ino) == (identity.st_dev, identity.st_ino):
+                    lock.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                result.update(status="error", detail=VAULT_SNAPSHOT_CLEANUP_ERROR.format(detail=exc))
+    return result
 
 
 def _bounded(vaults, fn):
@@ -2519,6 +2620,14 @@ def _render_markdown(report):
         lines.append(f"- {vault}")
     lines.append(f"事件卡老化門檻（--since）：{report['since']}")
     lines.append("")
+    snapshots = report.get("vault_snapshots") or ()
+    if snapshots:
+        lines.extend((VAULT_SNAPSHOT_HEADING, ""))
+        for item in snapshots:
+            lines.append(VAULT_SNAPSHOT_LINE.format(
+                vault=item["vault"], status=VAULT_SNAPSHOT_LABELS[item["status"]],
+                detail=item["detail"].replace("\n", "；").replace("\r", "")))
+        lines.append("")
     # 第 13、14 節（整形與下一步）在 U-K 就已經佔住那兩個號碼，所以第 15 節接在它們
     # 後面印，號碼才跟閱讀順序一致；盤點節照樣先印。
     for section in report["sections"]:
@@ -4071,6 +4180,7 @@ def _main(argv, output):
         except Exception as exc:
             early_sync = {"id": 14, "title": host_title,
                           "error": f"{type(exc).__name__}: {exc}"}
+        snapshots = [] if parsed.dry_run else [_snapshot_vault(vault, today) for vault in vaults]
         # 順路重生閱讀目錄：夜間整理已經在走每一個庫，而生成本身是「輸入指紋沒變就
         # 不寫」。失敗不影響審核包——目錄過期還有 card_lint --deep 的漏卡檢查會報。
         # 必須排在整形之前：整形的判準是「目錄已經承載這張卡」，判準本身不能是舊的。
@@ -4104,6 +4214,7 @@ def _main(argv, output):
             compliance_window_reset="；".join(window_reset),
             host_sync_result=early_sync,
         )
+        report["vault_snapshots"] = snapshots
         rendered = json.dumps(report, ensure_ascii=False, indent=1)
         content = rendered if parsed.json else _render_markdown(report)
 
