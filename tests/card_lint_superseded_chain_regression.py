@@ -65,4 +65,4 @@ class SupersededChain(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    unittest.main(argv=[argument for argument in sys.argv if argument != "--selftest"])
