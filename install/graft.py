@@ -77,15 +77,13 @@ HOOK_SPECS = {
     "SubagentStop": ("stop.py", "stop_gate.py"),
 }
 SHIM_NAMES = tuple(dict.fromkeys(shim_name for shim_name, _ in HOOK_SPECS.values()))
-# Re-pinned when the Stop shim joined the set: the template's own SHIM_NAMES tuple is
-# what lets one shim preserve another's fail-open breadcrumb, so adding stop.py there
-# changed every rendered shim's bytes. Any other drift is still a selftest failure.
+# Pin every rendered shim so installer verification detects template drift.
 SHIM_SHA256 = {
-    "sessionstart.py": "7a3463ab75febddd012bb8fd0d6b4870775ca1366616d43737cd631c22225792",
-    "recall.py": "41602ee307220427decd7158c0bbb77c2463d377039709059f8eb4cdee8f6db3",
-    "precompact.py": "d5cd5572658ef2a832a32bc6588a97e7a69711d835593ee5ef6855426a99025b",
-    "pretooluse.py": "334da4668c893cb05bdeba142adacd272d63da2fc7dde9b1590e03e9f1916d27",
-    "stop.py": "11c7eabf78e710fa8705b8eb8774de11781f0dacfe98e3f2152d85c2d0cef582",
+    "sessionstart.py": "85c9d5cc7af7b332cf6fc01c53cd592adb959b7ac25c85091849e3c6dc8ce1b9",
+    "recall.py": "4bb3eecd4b2de1e8447f1040b4add446461e50bbd7364ddadbcd61467e0fad3a",
+    "precompact.py": "db122dde2652638f530b0c57cc4445b2714d8cc6e25211a86e77e20944c56bb4",
+    "pretooluse.py": "5a29a6512a54597c7ace05de6e9b5978edce9e7ce9feef6f04dcb57e7981dcbd",
+    "stop.py": "fe6d773403d780e90a51cff866dbbc41b320f2de8dcd1e36d3684631b814cab5",
 }
 SHIM_REASON_CODES = frozenset((
     "config_missing",

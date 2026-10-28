@@ -5,7 +5,8 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
-import subprocess
+import runpy
+import traceback
 
 
 ADAPTER_FILENAME = "__EPITYPE_ADAPTER_FILENAME__"
@@ -83,6 +84,31 @@ def _trace_adapter(adapter, exit_code):
         pass
 
 
+def _run_adapter(adapter):
+    # Match direct-script imports without starting a second Python process.
+    previous_argv = sys.argv
+    previous_path = sys.path[:]
+    sys.argv = [os.fspath(adapter), *previous_argv[1:]]
+    sys.path.insert(0, os.fspath(adapter.parent))
+    try:
+        runpy.run_path(os.fspath(adapter), run_name="__main__")
+        return 0
+    except SystemExit as error:
+        if error.code is None:
+            return 0
+        if isinstance(error.code, int):
+            return error.code
+        print(error.code, file=sys.stderr)
+        return 1
+    except Exception:
+        # An adapter crash must stay nonzero, never become a shim fail-open.
+        traceback.print_exc()
+        return 1
+    finally:
+        sys.argv = previous_argv
+        sys.path[:] = previous_path
+
+
 def main():
     try:
         config_path = Path.home() / ".epitype" / "config.json"
@@ -109,12 +135,9 @@ def main():
         if not adapter.is_file():
             _record_fail_open("adapter_missing")
             return 0
-        result = subprocess.run(
-            [sys.executable, str(adapter), *sys.argv[1:]],
-            check=False,
-        )
-        _trace_adapter(adapter, result.returncode)
-        return result.returncode
+        exit_code = _run_adapter(adapter)
+        _trace_adapter(adapter, exit_code)
+        return exit_code
     except Exception:
         _record_fail_open("exception")
         return 0
