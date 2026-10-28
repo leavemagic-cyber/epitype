@@ -3270,6 +3270,7 @@ def _selftest():
                         "HOME": os.fspath(write_root),
                         "USERPROFILE": os.fspath(write_root),
                     },
+                    clock=memspec.HOOK_CLOCK_FROZEN,
                 )
                 value = json.loads(result.stdout) if result.stdout.strip() else {}
                 return result, value.get("hookSpecificOutput", {})
@@ -4060,7 +4061,8 @@ def _selftest():
             write_config(meter_config, [meter_vault])
             meter_options = json.loads(meter_config.read_text(encoding="utf-8"))
             meter_options[memspec.CONTEXT_METER_CONFIG_FIELD] = {
-                memspec.CONTEXT_METER_OVERRIDE_FIELD: 100000}
+                memspec.CONTEXT_METER_OVERRIDE_FIELD: 100000,
+                memspec.CONTEXT_METER_TRACE_UNTIL_FIELD: "9999-12-31"}
             meter_config.write_text(json.dumps(meter_options), encoding="utf-8")
             meter_transcript = root / "meter.jsonl"
             meter_transcript.write_text(json.dumps({"type": "assistant", "message": {"usage": {

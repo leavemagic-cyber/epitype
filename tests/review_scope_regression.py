@@ -110,7 +110,7 @@ def main():
         vault = _vault(root)
         drafts = vault / "_drafts" / "decisions"
         drafts.mkdir(parents=True)
-        old = datetime.now(timezone.utc) - timedelta(days=30)
+        old = datetime.combine(TODAY, datetime.min.time(), timezone.utc) - timedelta(days=30)
         for name, front in (
             ("judged.md", f"{memspec.DRAFT_TRIAGED_FIELD}: retired\n"),
             ("held.md", f"{memspec.DRAFT_TRIAGED_FIELD}: hold\n"),

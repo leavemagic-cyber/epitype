@@ -540,6 +540,15 @@ def _selftest():
 
         with ExitStack() as fixtures, tempfile.TemporaryDirectory(prefix="epitype-sessionstart-") as temp_dir:
             root = Path(temp_dir).resolve()
+            # 卡片檢查與翻譯可因啟動預算省略；行為題固定時鐘，計時題仍跑真正入口。
+            frozen_start = root / "sessionstart-frozen.py"
+            frozen_start.write_text(
+                "import runpy, sys, time\n"
+                f"sys.path.insert(0, {os.fspath(Path(__file__).resolve().parent)!r})\n"
+                "time.monotonic = lambda: 0.0\n"
+                f"runpy.run_path({os.fspath(Path(__file__).resolve())!r}, run_name='__main__')\n",
+                encoding="utf-8",
+            )
             vault = root / "vault"
             vault.mkdir()
             (vault / memspec.MEMORY_INDEX_FILENAME).write_text(
@@ -657,14 +666,14 @@ def _selftest():
             broken.write_text(broken_card.format(name="broken-card"), encoding="utf-8")
             card_config = root / "card-config.json"
             write_config(card_config, [card_vault])
-            broken_result = run_synthetic(Path(__file__), {"source": "startup"}, card_config)
+            broken_result = run_synthetic(frozen_start, {"source": "startup"}, card_config)
             broken_value = json.loads(broken_result.stdout) if broken_result.stdout.strip() else {}
             broken_context = broken_value.get("hookSpecificOutput", {}).get("additionalContext", "")
             broken.write_text(
                 "---\nname: broken-card\ndescription: 2026-09-01 乾淨卡\naliases:\n  - 乾淨\nmetadata:\n  type: feedback\n---\nbody\n",
                 encoding="utf-8",
             )
-            clean_result = run_synthetic(Path(__file__), {"source": "startup"}, card_config)
+            clean_result = run_synthetic(frozen_start, {"source": "startup"}, card_config)
             clean_value = json.loads(clean_result.stdout) if clean_result.stdout.strip() else {}
             clean_context = clean_value.get("hookSpecificOutput", {}).get("additionalContext", "")
             checks.append(
@@ -698,7 +707,7 @@ def _selftest():
             write_config(translate_config, [translate_vault])
 
             def translate_run(source="startup"):
-                done = run_synthetic(Path(__file__), {"source": source}, translate_config)
+                done = run_synthetic(frozen_start, {"source": source}, translate_config)
                 value = json.loads(done.stdout) if done.stdout.strip() else {}
                 return done, value.get("hookSpecificOutput", {}).get("additionalContext", "")
 
@@ -884,7 +893,7 @@ def _selftest():
             promise_config = root / "promise-config.json"
             write_config(promise_config, [promise_vault])
             for promise_source in ("startup", "compact"):
-                promise_result = run_synthetic(Path(__file__), {"source": promise_source}, promise_config)
+                promise_result = run_synthetic(frozen_start, {"source": promise_source}, promise_config)
                 promise_value = json.loads(promise_result.stdout) if promise_result.stdout.strip() else {}
                 promise_context = promise_value.get("hookSpecificOutput", {}).get("additionalContext", "")
                 checks.append(
@@ -1152,6 +1161,10 @@ def _selftest():
                 else:
                     raise AssertionError("no writable fixture path fits the unchanged 240-byte notice cap")
             write_config(map_config, [map_vault])
+            map_options = json.loads(map_config.read_text(encoding="utf-8"))
+            map_options[memspec.CONTEXT_METER_CONFIG_FIELD] = {
+                memspec.CONTEXT_METER_TRACE_UNTIL_FIELD: "9999-12-31"}
+            map_config.write_text(json.dumps(map_options), encoding="utf-8")
             precompact = Path(__file__).with_name("precompact_hook.py")
             precompact_event = {
                 "session_id": map_session,

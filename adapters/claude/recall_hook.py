@@ -1988,7 +1988,8 @@ def _selftest():
                 write_config(path, [meter_vault], budget=budget)
                 options = json.loads(path.read_text(encoding="utf-8"))
                 options[memspec.CONTEXT_METER_CONFIG_FIELD] = {
-                    memspec.CONTEXT_METER_OVERRIDE_FIELD: 100000}
+                    memspec.CONTEXT_METER_OVERRIDE_FIELD: 100000,
+                    memspec.CONTEXT_METER_TRACE_UNTIL_FIELD: "9999-12-31"}
                 path.write_text(json.dumps(options), encoding="utf-8")
                 return path
 
