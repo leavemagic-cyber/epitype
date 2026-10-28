@@ -41,8 +41,15 @@ class OwnerQuoteTimeLimit(unittest.TestCase):
         findings = self.findings(quote=OWNER_QUOTE)
         self.assertEqual(len(findings), 1)
         self.assertEqual(findings[0][0], card_lint.WARN)
-        for fragment in ("一禮拜", "後要通知", "移除條件", *memspec.CARD_EXPIRY_FIELDS):
+        for fragment in ("一禮拜", "後要通知", "移除條件", *memspec.CARD_EXPIRY_FIELDS,
+                         memspec.TIME_LIMIT_REVIEWED_FIELD):
             self.assertIn(fragment, findings[0][1])
+
+    def test_reviewed_marker_suppresses_warning_only_when_filled(self):
+        field = memspec.TIME_LIMIT_REVIEWED_FIELD
+        self.assertEqual(self.findings(
+            quote=OWNER_QUOTE, extra=f'{field}: "2026-10-28 仍有效：解除條件是 owner 明確取消"\n'), [])
+        self.assertEqual(len(self.findings(quote=OWNER_QUOTE, extra=f'{field}: ""\n')), 1)
 
     def test_each_honoured_expiry_suppresses_warning(self):
         self.assertEqual(set(memspec.CARD_EXPIRY_FIELDS), {"valid_until", "expires_at"})

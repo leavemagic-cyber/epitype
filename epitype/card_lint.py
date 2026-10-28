@@ -838,7 +838,8 @@ def _owner_quote_time_limit_findings(fields, text, closing):
     status = fields.get(memspec.DECISION_STATUS_FIELD, "").strip().casefold()
     if status not in ("", memspec.ACTIVE_DECISION_STATUS):
         return []
-    if any(fields.get(field, "").strip() for field in memspec.CARD_EXPIRY_FIELDS):
+    if any(fields.get(field, "").strip()
+           for field in (*memspec.CARD_EXPIRY_FIELDS, memspec.TIME_LIMIT_REVIEWED_FIELD)):
         return []
     quotes = list(_unfenced_lines(fields.get(memspec.OWNER_QUOTE_FIELD, "")))
     body = "\n".join(text.lstrip("﻿").splitlines()[closing + 1:])
@@ -851,7 +852,8 @@ def _owner_quote_time_limit_findings(fields, text, closing):
         return []
     return [(WARN, "owner-quote-time-limit", memspec.CARD_LINT_OWNER_QUOTE_TIME_LIMIT_REASON.format(
         markers=memspec.SLASH_JOINER.join(found),
-        fields=memspec.SLASH_JOINER.join(memspec.CARD_EXPIRY_FIELDS)))]
+        fields=memspec.SLASH_JOINER.join(memspec.CARD_EXPIRY_FIELDS),
+        reviewed=memspec.TIME_LIMIT_REVIEWED_FIELD))]
 
 
 def _body_noise_findings(card_type, fields, text, closing):

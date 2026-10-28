@@ -731,7 +731,7 @@ CARD_LINT_SUPERSEDED_CHAIN_REASON = (
 )
 CARD_LINT_OWNER_QUOTE_TIME_LIMIT_REASON = (
     "owner 原話含期限或試行用語（{markers}），但未設定到期欄位；"
-    "請補上 {fields} 到期欄位或明確的移除條件"
+    "請補上 {fields} 到期欄位，或查過原話後在 {reviewed} 寫下結論與移除條件"
 )
 EVENT_CARD_DIRECTORIES = (
     (GRANT_DIRECTORY, CARD_TYPE_GRANT),
@@ -887,6 +887,9 @@ METADATA_OWN_KEYS = tuple(
     field.split(".", 1)[1] for field in (METADATA_TYPE_FIELD, METADATA_MODIFIED_FIELD))
 # 到期日是作者親手寫的，過期只 WARN；協定 §3.5 允許歸檔、永遠不允許刪。
 CARD_EXPIRY_FIELDS = (GRANT_EXPIRES_FIELD, VALID_UNTIL_FIELD)
+# 期限用語只是形狀：2026-10-28 十張被點名的卡有五張其實沒有期限，「仍有效」的那張也
+# 只有移除條件、沒有日期。人審過就在這裡寫結論與移除條件，提醒不再重複。
+TIME_LIMIT_REVIEWED_FIELD = "time_limit_reviewed"
 # 通用卡的日期任一即可；沒有任何日期的卡無法判斷它講的是哪個時點的事實。
 CARD_DATE_FIELDS = (LAST_VERIFIED_AT_FIELD, METADATA_MODIFIED_FIELD)
 # 2026-09-06 owner 裁定「盡量找清楚」：欄位沒寫日期不等於這張卡沒有日期。再找三處
