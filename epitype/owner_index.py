@@ -42,7 +42,7 @@ CONTEXT_TAGS = (
 )
 CONTEXT_BLOCK = re.compile(
     r'<(' + '|'.join(CONTEXT_TAGS) + r')\b[^>]*>.*?(?:</\1(?:\s[^>]*)?>|&lt;/\1(?:\s.*?)?&gt;)'
-    r'|<image\b[^>]*>', re.DOTALL | re.IGNORECASE)
+    r'|</?image\b[^>]*>', re.DOTALL | re.IGNORECASE)
 
 
 def default_path():

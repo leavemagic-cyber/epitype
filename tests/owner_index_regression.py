@@ -139,7 +139,7 @@ class OwnerIndexTests(unittest.TestCase):
         wrapped = ('first new words\n<in-app-browser-context>ambient state</in-app-browser-context>\n'
                    '# Files mentioned by the user:\n## attached.png: /local/path\n'
                    '## My request:\nsecond new words\n<image src="attachment"/>\n'
-                   '## My request:\nthird new words')
+                   '## My request:\nthird new words</image></image>')
         self.build([message(wrapped), message('<sample>long real paste</sample>' * 1000)])
         row = self.find('first')[0]
         self.assertEqual('first new words\n\nsecond new words\n\nthird new words', row['text'])
