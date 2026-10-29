@@ -1,5 +1,8 @@
 # Owner index measurement — 2026-10-29
 
+Historical EOPT2 baseline. The extraction, duplication and prefix-checking
+results below are superseded by [the EOPT2B real-data report](OWNER_INDEX_EOPT2B_20261029.md).
+
 Measured code: `a5a58bac5e6cbeb6fe376e086f47cb9af3d82223`, on the isolated
 `opt/owner-index-20261029` worktree. Python 3.13.15, SQLite 3.50.4;
 optional `zstandard` was available. No transcript, live vault or live Epitype
