@@ -330,7 +330,7 @@ def update(path=None, roots=None, *, rebuild=False):
 
 def find(words, *, path=None, after='', roles=('U', 'Q', 'S'), limit=15):
     if after:
-        date.fromisoformat(after)
+        after = date.fromisoformat(after).isoformat()
     if limit < 1 or not roles or any(role not in ('U', 'Q', 'S') for role in roles):
         raise ValueError('use a positive limit and roles U,Q,S')
     needles = [normalize(word) for word in words if normalize(word)]

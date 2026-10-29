@@ -213,6 +213,7 @@ class OwnerIndexTests(unittest.TestCase):
         self.assertEqual(2, len(self.find('中文', limit=2)))
         self.assertEqual(1, len(self.find('中文原話', 'abc123')))
         self.assertEqual(1, len(self.find('中文', after='2026-10-02', roles=('Q',))))
+        self.assertEqual(1, len(self.find('中文', after='20261002', roles=('Q',))))
         self.assertEqual([], self.find('中文', after='2026-10-04'))
         self.assertEqual([], self.find('" OR 1=1 --'))
         with self.assertRaises(ValueError):
