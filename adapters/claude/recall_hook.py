@@ -207,6 +207,20 @@ def _merge_ordinary(groups):
             heapq.heappush(queue, (rank, -coverage, vault_index, value))
 
 
+def _recall_candidates(result):
+    ranked = result.get('results', ())
+    replacements = result.get('replacement_results', ())
+
+    def pinned(hit):
+        return _one_line(hit.get(memspec.DECISION_STATUS_FIELD)) == memspec.ACTIVE_DECISION_STATUS
+
+    # Successor hints must not consume ordinary slots before the search winner.
+    # Active decisions retain their existing successor-first priority and order.
+    return [*(hit for hit in (*replacements, *ranked) if pinned(hit)),
+            *(hit for hit in ranked if not pinned(hit)),
+            *(hit for hit in replacements if not pinned(hit))]
+
+
 _DEFAULT_RECALL_SCOPE = {"actions": ["*"], "case": None, "conditions": [],
                          "exceptions": [], "expiry": "unspecified", "level": "global", "project": None}
 
@@ -505,7 +519,7 @@ def _recall_cards(event, started_at, config, delivery_markers=None, deliveries=N
         ordinary_lines = []
         # The old wording may be absent from its replacement. Search supplies
         # live endpoints separately; they use the same caps and authority checks.
-        hits = [*result.get("replacement_results", ()), *result.get("results", ())]
+        hits = _recall_candidates(result)
         replacement_paths.update(_one_line(hit.get("path"))
                                  for hit in result.get("replacement_results", ()))
         visited_paths = set()

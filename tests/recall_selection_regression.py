@@ -372,6 +372,14 @@ class RecallSelectionRegression(unittest.TestCase):
         self.assertEqual(list(recall._merge_ordinary(groups)),
                          ["governance-first", "project-first", "governance-second", "project-second"])
 
+    def test_successor_hints_follow_ranked_ordinary_cards_and_preserve_pins(self):
+        def hit(path, active=False):
+            return {'path': path, 'status': 'active' if active else ''}
+        result = {'results': [hit('winner'), hit('ranked-pin', True), hit('runner-up')],
+                  'replacement_results': [hit('hint'), hit('successor-pin', True)]}
+        self.assertEqual([value['path'] for value in recall._recall_candidates(result)],
+                         ['successor-pin', 'ranked-pin', 'winner', 'runner-up', 'hint'])
+
     def test_budget_sweep_keeps_whole_cards_header_and_authority_prefix(self):
         header = memspec.UNTRUSTED_ADVISORY + "\nvaults: V1=synthetic"
         pinned = ["- POLICY-" + "裁定" * 15, "- POLICY-" + "規則" * 30]
