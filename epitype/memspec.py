@@ -1882,6 +1882,19 @@ STOP_NOTE_DETAIL_MIN_CHARS = 60
 STOP_NOTE_KEY_MIN_CHARS = 24
 RULE_SOURCE_LEGACY_REFERENCE = "既有記錄（來源未驗證；僅供查找）："
 RULE_SOURCE_AUTHOR_LABEL = "作者："
+CORE_GEN_SHARED_SOURCE = ("原始對話無法讀取：{count} 條來源狀態保留 UNVERIFIED；保留卡片記載內容。"
+    "U 註記代表這類來源；除另註外，卡片記載作者為 claude，適用範圍（卡片記載）為 {scope}。")
+CORE_GEN_SOURCE_DIRECTORY = "來源卡目錄：{path}；預設 rule-core-NN-english.md（NN 對應 CORE-NN）；其他已記載來源的相對路徑逐條另註。"
+CORE_GEN_CARD_AUTHOR = "卡片記載作者：{author}"
+CORE_GEN_CARD_SCOPE = "適用範圍（卡片記載）：{scope}"
+CORE_GEN_CARD_PATH = "來源卡：{path}"
+CORE_GEN_VERIFIED_SOURCE = "來源已核 VERIFIED。"
+HOST_SYNC_CARD_HELD = "卡片驗證未通過（未核實）：{card}；原因：{reason}；保留目前宿主生成區塊中的舊規則。"
+HOST_SYNC_CARD_OMITTED = "卡片驗證未通過（未核實）：{card}；原因：{reason}；目前宿主生成區塊找不到舊版本，省略此卡。"
+HOST_SYNC_HELD_SUMMARY = "有 {count} 條卡片驗證未通過；以下保留宿主原有規則，未計為核實。"
+HOST_SYNC_ENTRY_MARKERS_INVALID = "舊規則條目的 epitype-rule 標記不成對；無法可靠讀回舊版本。"
+HOST_SYNC_PARTIAL_OK = "PARTIAL {targets}：其餘卡片已同步；驗證失敗的卡片仍未核實，詳見逐卡報告。"
+HOST_SYNC_VAULT_UNREADABLE = "讀不到記憶庫：{errors}"
 STOP_NOTE_DELIVERY = "上一則回覆的提醒（已經送出的不用重寫、不用道歉，接下來照做）：{notes}"
 TURN_DISPATCH_TOOLS = frozenset({"task", "agent"})
 # 背景子代理跑完時，宿主把結果當成一則新的提問送進來；那一則裡有這個標記。
@@ -4046,6 +4059,19 @@ _EN = {
                                  "they still need cleanup and must be closed once that is possible."),
     "RULE_SOURCE_LEGACY_REFERENCE": "Source UNVERIFIED (legacy reference): ",
     "RULE_SOURCE_AUTHOR_LABEL": "Author: ",
+    "CORE_GEN_SHARED_SOURCE": ("Original conversations unavailable: {count} sources remain UNVERIFIED; retain the card records. "
+        "U marks these entries; unless annotated, their recorded author is claude and recorded scope is {scope}."),
+    "CORE_GEN_SOURCE_DIRECTORY": "Source card directory: {path}; default rule-core-NN-english.md (NN matches CORE-NN); other recorded relative card paths are annotated individually.",
+    "CORE_GEN_CARD_AUTHOR": "Recorded author: {author}",
+    "CORE_GEN_CARD_SCOPE": "Recorded scope: {scope}",
+    "CORE_GEN_CARD_PATH": "Source card: {path}",
+    "CORE_GEN_VERIFIED_SOURCE": "Source VERIFIED.",
+    "HOST_SYNC_CARD_HELD": "Card validation FAILED (not verified): {card}; reason: {reason}; retaining the rule from the current generated host block.",
+    "HOST_SYNC_CARD_OMITTED": "Card validation FAILED (not verified): {card}; reason: {reason}; no prior version found in the current generated host block; omitting this card.",
+    "HOST_SYNC_HELD_SUMMARY": "{count} cards FAILED validation; their prior host rules are retained below and are not counted as verified.",
+    "HOST_SYNC_ENTRY_MARKERS_INVALID": "The prior epitype-rule entry markers are unbalanced; the previous version cannot be recovered reliably.",
+    "HOST_SYNC_PARTIAL_OK": "PARTIAL {targets}: the other cards are synchronized; failed cards remain unverified; see the per-card report.",
+    "HOST_SYNC_VAULT_UNREADABLE": "Cannot read the vault: {errors}",
     "STOP_NOTE_DELIVERY": "Reminders from the previous reply (what was sent is sent — do not rewrite it, do not apologise, just follow them from here): {notes}",
     "TURN_UNVERIFIED_DELEGATION_REASON": '📌 this turn took a delegated result ({source}) and said "{claim}" without checking one thing first. Per "{decision}": verify one item yourself, or say plainly that this is an unverified relay — delegating the work does not delegate the responsibility.{advice}',
     "HOST_BUDGET_NOTICE": "⚠ {path} would be {size} bytes after the sync, over the {budget} limit for {host} — the overflow is dropped silently, and what is dropped may be the rules block. Shrink the file first.",

@@ -102,12 +102,15 @@ class FrameworkClosure(unittest.TestCase):
                                  "VERIFIED")
 
     def test_predecessor_payload_and_original_source_are_checked(self):
-        for invalid in ("body", "source"):
+        for invalid in ("text", "source"):
             with self.subTest(invalid=invalid):
                 old, text = self.card("old", status="superseded", superseded_by="new.md")
                 new, _ = self.card("new", supersedes=["old.md"])
-                if invalid == "body":
-                    old.write_text(text + "新增沒有原源的限制。\n", encoding="utf-8")
+                if invalid == "text":
+                    old.write_text(text + "2026-10-29：補充歷史。\n", encoding="utf-8")
+                    self.assertEqual(self.issues(new), [])
+                    old.write_text(text.replace('\ntext: ' + json.dumps(self.documents["old"]["text"], ensure_ascii=False),
+                                                '\ntext: "新增沒有原源的限制。"'), encoding="utf-8")
                     self.assertIn("bound", " ".join(self.issues(new)))
                 else:
                     source = Path(self.documents["old"]["sources"][0]["path"])

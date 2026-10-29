@@ -89,7 +89,7 @@ class RulePipeline(unittest.TestCase):
         reason, _advice = gate._card_review("rule-source-test.md", after,
                                           before_text=before, source_path=self.target)
         self.assertIsNone(reason)
-        changed = after.replace("核對原文的規則", "必須每次先問 Owner")
+        changed = after.replace(self.document["text"], "必須每次先問 Owner")
         reason, _advice = gate._card_review("rule-source-test.md", changed,
                                           before_text=before, source_path=self.target)
         self.assertIn("來源", reason)
@@ -178,16 +178,18 @@ class RulePipeline(unittest.TestCase):
         self.assertEqual(result["status"], core_gen.STATUS_UNREADABLE)
         self.assertEqual(out.read_bytes(), previous)
         self.assertEqual(core_gen.check([self.vault], out)["status"], core_gen.STATUS_UNREADABLE)
-        with self.assertRaises(ValueError):
-            host_sync.project_rules_text(self.vault, "codex")
+        notices = []
+        self.assertEqual(host_sync.project_rules_text(self.vault, "codex", notices=notices), "")
+        self.assertIn("未通過", notices[0])
 
     def test_missing_original_does_not_hide_changed_payload_or_revive_expiry(self):
         self.target.write_text(self.card(), encoding="utf-8")
         self.original.path.unlink()
-        self.target.write_text(self.target.read_text(encoding="utf-8") + "Extra unreviewed rule.\n", encoding="utf-8")
+        self.target.write_text(self.target.read_text(encoding="utf-8").replace(
+            self.document["text"], "Extra unreviewed rule."), encoding="utf-8")
         rules, errors = core_gen.collect_rules([self.vault])
         self.assertFalse(rules)
-        self.assertTrue(any("complete rule body" in error for error in errors))
+        self.assertTrue(any("INVALID" in error for error in errors))
         document = copy.deepcopy(self.document)
         document["scope"]["expiry"] = "2000-01-01"
         self.target.write_text(self.card(document), encoding="utf-8")
@@ -226,9 +228,9 @@ class RulePipeline(unittest.TestCase):
         _kind, findings = card_lint.check_card(self.target, self.target.name)
         self.assertTrue(any(level == card_lint.FAIL and key == "rule-source" for level, key, _ in findings))
 
-    def test_review_binding_covers_body_and_sequence_execution_fields(self):
+    def test_review_binding_covers_rule_text_and_sequence_execution_fields(self):
         before = self.card()
-        mutations = [before + "必須每次另問Owner批准所有工作。\n",
+        mutations = [before.replace(self.document["text"], "必須每次另問Owner批准所有工作。"),
                      before.replace("\n---\n來源測試", "\nforbidden: [所有工作]\n---\n來源測試"),
                      before.replace("\n---\n來源測試", "\nforbidden:\n  - 所有工作\n---\n來源測試")]
         for after in mutations:
@@ -251,7 +253,7 @@ class RulePipeline(unittest.TestCase):
         without = before.replace("  modified: 2026-09-24T08:01:40.599Z\n", "")
         self.assertEqual(rule_pipeline.payload_issues(document, without), [])
 
-    def test_metadata_modified_exemption_keeps_other_meaning_bound(self):
+    def test_generated_payload_excludes_auxiliary_metadata(self):
         before = self.card(status="active", metadata="\n  type: rule\n  node_type: memory"
             "\n  modified: 2026-09-24T08:01:40.599Z\n  survey:"
             "\n    modified: 2026-09-24\n    scope: project")
@@ -264,19 +266,19 @@ class RulePipeline(unittest.TestCase):
                          ("核對原文的規則", "改變規則適用範圍"),
                          ("status: active", "status: superseded")):
             with self.subTest(field=old):
-                self.assertTrue(rule_pipeline.payload_issues(document, before.replace(old, new)))
+                self.assertEqual(rule_pipeline.payload_issues(document, before.replace(old, new)), [])
 
-    def test_modified_exemption_is_only_a_metadata_date(self):
+    def test_generated_payload_excludes_auxiliary_dates(self):
         before = self.card(metadata="\n  type: rule\n  modified: 2026-09-24")
         fields, _ = memspec.frontmatter_text(before)
         document = json.loads(fields["rule_provenance"])
-        self.assertTrue(rule_pipeline.payload_issues(document,
-            before.replace("  modified: 2026-09-24", "  modified: must stop every task")))
+        self.assertEqual(rule_pipeline.payload_issues(document,
+            before.replace("  modified: 2026-09-24", "  modified: must stop every task")), [])
         top = self.card(modified="2026-09-24")
         fields, _ = memspec.frontmatter_text(top)
         document = json.loads(fields["rule_provenance"])
-        self.assertTrue(rule_pipeline.payload_issues(document,
-            top.replace("modified: 2026-09-24", "modified: 2026-10-03")))
+        self.assertEqual(rule_pipeline.payload_issues(document,
+            top.replace("modified: 2026-09-24", "modified: 2026-10-03")), [])
 
     def test_field_only_and_rule_identity_downgrade_cannot_escape_source(self):
         field_only = "---\nname: 規範\nmetadata:\n  type: feedback\nforbidden: [文字]\n---\n"
