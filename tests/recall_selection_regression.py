@@ -366,6 +366,12 @@ class RecallSelectionRegression(unittest.TestCase):
         groups = [[(1, "a"), (3, "b")], [], [(2, "c"), (0, "d")]]
         self.assertEqual(list(recall._merge_ordinary(groups)), ["c", "a", "b", "d"])
 
+    def test_each_vaults_top_card_precedes_another_vaults_second_card(self):
+        groups = [[(1, "project-first"), (1, "project-second")],
+                  [(8, "governance-first"), (7, "governance-second")]]
+        self.assertEqual(list(recall._merge_ordinary(groups)),
+                         ["governance-first", "project-first", "governance-second", "project-second"])
+
     def test_budget_sweep_keeps_whole_cards_header_and_authority_prefix(self):
         header = memspec.UNTRUSTED_ADVISORY + "\nvaults: V1=synthetic"
         pinned = ["- POLICY-" + "裁定" * 15, "- POLICY-" + "規則" * 30]

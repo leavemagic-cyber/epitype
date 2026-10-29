@@ -192,19 +192,19 @@ def _event_card(hit, path):
 
 
 def _merge_ordinary(groups):
-    """Compare evidence at each vault's frontier, never independent BM25 scores."""
+    """Interleave vault ranks; coverage breaks ties without starving another vault."""
     queue = []
     for vault_index, group in enumerate(groups):
         if group:
             coverage, value = group[0]
-            heapq.heappush(queue, (-coverage, 0, vault_index, value))
+            heapq.heappush(queue, (0, -coverage, vault_index, value))
     while queue:
-        _coverage, rank, vault_index, value = heapq.heappop(queue)
+        rank, _coverage, vault_index, value = heapq.heappop(queue)
         yield value
         rank += 1
         if rank < len(groups[vault_index]):
             coverage, value = groups[vault_index][rank]
-            heapq.heappush(queue, (-coverage, rank, vault_index, value))
+            heapq.heappush(queue, (rank, -coverage, vault_index, value))
 
 
 _DEFAULT_RECALL_SCOPE = {"actions": ["*"], "case": None, "conditions": [],
@@ -536,8 +536,10 @@ def _recall_cards(event, started_at, config, delivery_markers=None, deliveries=N
                     if integrity is not None and not integrity.allowed:
                         raise ValueError('; '.join(integrity.issues))
                 if "rule_provenance" in current_fields:
-                    from epitype import rule_pipeline
-                    source_projection = rule_pipeline.projection(current_fields, Path(path))
+                    from epitype import rule_provenance
+                    cache_path = memsearch._db_path(vault).parent / memspec.PROVENANCE_ORIGIN_CACHE_FILENAME
+                    with rule_provenance.authorship_cache(cache_path):
+                        source_projection = rule_pipeline.projection(current_fields, Path(path))
                     if source_projection['expired']:
                         continue
             except (OSError, ValueError) as error:

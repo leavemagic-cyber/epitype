@@ -46,6 +46,7 @@ class _ReadBudgetExhausted(OSError):
 # nightly dream) verifies to completion instead of refusing for lack of time.
 _UNBOUNDED = False
 _VERIFICATION_DEADLINE = ContextVar('verification_deadline', default=float('inf'))
+_AUTHORSHIP_CACHE = ContextVar('authorship_cache', default=None)
 
 
 @contextlib.contextmanager
@@ -447,7 +448,56 @@ def _origin_code():
 
 
 def _origin_cache_file():
-    return memspec.config_path().parent / memspec.PROVENANCE_ORIGIN_CACHE_FILENAME
+    return _AUTHORSHIP_CACHE.get() or memspec.config_path().parent / memspec.PROVENANCE_ORIGIN_CACHE_FILENAME
+
+
+@contextlib.contextmanager
+def authorship_cache(path):
+    """An index owns its prepared source offsets; proof still rereads originals."""
+    token = _AUTHORSHIP_CACHE.set(Path(path))
+    try:
+        yield
+    finally:
+        _AUTHORSHIP_CACHE.reset(token)
+
+
+def prepare_authorship(vault, cache_path):
+    """Batch earliest-occurrence scans outside the hook, without copying bodies."""
+    from . import cardscan
+    groups = {}
+    for _relative, path, *_ in cardscan.scan_cards(vault):
+        try:
+            fields, problem = memspec.frontmatter_fields(path)
+            document = parse(fields) if not problem else None
+            if not document or document.get('kind') != 'owner-directive':
+                continue
+            quote = document.get('quote')
+            if not isinstance(quote, str) or not quote:
+                continue
+            for source in document.get('sources', ()):
+                try:
+                    role, body, _digest = _original(source, path.parent, None,
+                                                   _ReadBudget(float('inf'), float('inf')))
+                except (OSError, ValueError, TypeError, KeyError, UnicodeError, zipfile.BadZipFile):
+                    continue
+                if role not in ('U', 'Q') or not _human_quote(body, quote):
+                    continue
+                locator = source.get('archive') or source.get('path')
+                if not isinstance(locator, str):
+                    continue
+                original = Path(locator).expanduser()
+                if not original.is_absolute():
+                    original = path.parent / original
+                key = (original.resolve(), source.get('member'))
+                groups.setdefault(key, set()).add(quote)
+        except (OSError, ValueError, TypeError):
+            continue
+    prepared = 0
+    with authorship_cache(cache_path):
+        for (path, member), quotes in groups.items():
+            found = first_authorship(path, quotes, seconds=float('inf'), member=member)
+            prepared += sum(row['status'] == VERIFIED for row in found.values())
+    return prepared
 
 
 def _origin_key(path, quote):

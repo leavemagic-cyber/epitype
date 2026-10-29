@@ -502,7 +502,7 @@ def _stable_card(path):
     return None
 
 
-def build_index(vault, lock_timeout=0.0):
+def build_index(vault, lock_timeout=0.0, *, prepare_sources=True):
     vault = _resolve_vault(vault)
     migrated_from = _migrate_legacy_index(vault)
     db_path = _db_path(vault)
@@ -629,6 +629,12 @@ def build_index(vault, lock_timeout=0.0):
         warnings = _index_warnings(vault)
         if warnings:
             payload["warnings"] = warnings
+        if prepare_sources:
+            if not __package__:
+                sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+            from epitype import rule_provenance
+            payload['prepared_authorship'] = rule_provenance.prepare_authorship(
+                vault, db_path.parent / memspec.PROVENANCE_ORIGIN_CACHE_FILENAME)
         return payload
 
 
@@ -1110,7 +1116,7 @@ def query_index(vault, term, include_superseded=False, include_noncard=False):
     if not migration_pending and _is_stale(vault, db_path):
         # 2026-09-01 實測事故：重建競爭若阻斷查詢會讓喚回不可用；規則：拿不到鎖
         # 即讀既有 SQLite 快照。
-        index_updated = build_index(vault, lock_timeout=0.0)["status"] == "built"
+        index_updated = build_index(vault, lock_timeout=0.0, prepare_sources=False)["status"] == "built"
 
     connection = _read_connection(db_path)
     connection.row_factory = sqlite3.Row
@@ -1178,7 +1184,7 @@ def recall_index(vault, prompt, include_superseded=False, include_noncard=False,
         return payload
     index_updated = False
     if not migration_pending and _is_stale(vault, db_path):
-        index_updated = build_index(vault, lock_timeout=0.0)["status"] == "built"
+        index_updated = build_index(vault, lock_timeout=0.0, prepare_sources=False)["status"] == "built"
 
     connection = _read_connection(db_path)
     connection.row_factory = sqlite3.Row
