@@ -5,11 +5,14 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import date
 from difflib import SequenceMatcher
+import hashlib
 import json
 import math
+import os
 from pathlib import Path
 import re
 import sys
+import tempfile
 import unicodedata
 
 try:
@@ -43,6 +46,7 @@ class Card:
     newest: str
     shingles: set[str]
     links: set[str]
+    fingerprint: str
 
 
 def normalize(text):
@@ -60,6 +64,144 @@ def body_shingles(text):
     text = WIKILINK.sub("", text)
     text = re.sub(r"https?://\S+", "", text)
     return shingles(text)
+
+
+def body_fingerprint(text):
+    front, closing = memspec.split_frontmatter(text)
+    if front is None or closing is None:
+        raise ValueError("card has no complete frontmatter")
+    body = "".join(text.splitlines(keepends=True)[closing + 1:])
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def pair_key(left, right):
+    return tuple(sorted(os.path.normcase(str(Path(p).resolve())) for p in (left, right)))
+
+
+def judged_path(governance):
+    return Path(governance) / "_drafts" / memspec.DUPES_DIRECTORY / "judged.json"
+
+
+def load_judged(path):
+    if not path.exists():
+        return {}
+    data = json.loads(path.read_text(encoding="utf-8-sig"))
+    if not isinstance(data, dict) or data.get("schema_version") != 1 or not isinstance(data.get("pairs"), list):
+        raise ValueError(f"invalid judged record: {path}")
+    result = {}
+    for row in data["pairs"]:
+        if (not isinstance(row, dict)
+                or any(not isinstance(row.get(k), str) or not row[k].strip()
+                       for k in ("left", "right", "reason", "date"))
+                or row.get("verdict") not in ("duplicate", "overlap", "unrelated")
+                or any(not isinstance(row.get(k), str) or not re.fullmatch(r"[a-f0-9]{64}", row[k])
+                       for k in ("left_fingerprint", "right_fingerprint"))):
+            raise ValueError(f"invalid judged pair: {path}")
+        date.fromisoformat(row["date"])
+        key = pair_key(row["left"], row["right"])
+        if key[0] == key[1] or key in result:
+            raise ValueError(f"repeated judged pair: {path}")
+        result[key] = row
+    return result
+
+
+def parse_verdicts(text, count):
+    verdicts = {}
+    for line_number, line in enumerate(text.splitlines(), 1):
+        if not line.strip():
+            continue
+        match = re.fullmatch(r"(DUPLICATE|OVERLAP|UNRELATED)\s+(\d+)\s*\|\s*(.+)", line.strip(), re.I)
+        if match:
+            verdict, number, reason = match.groups()
+        else:
+            match = re.fullmatch(
+                r"(OTHER-VAULT|SKIPPED-BINDING)\s+(\d+)\s*\|\s*(.+)", line.strip(), re.I)
+            if not match:
+                raise ValueError(f"invalid verdict line {line_number}")
+            kind, number, tail = match.groups()
+            pattern = (r"(DUPLICATE|OVERLAP|UNRELATED)\s*\|\s*(.+)" if kind.upper() == "OTHER-VAULT"
+                       else r"[^|]+\|\s*(DUPLICATE|OVERLAP|UNRELATED)\s*[:：]\s*(.+)")
+            match = re.fullmatch(pattern, tail, re.I)
+            if not match:
+                raise ValueError(f"invalid verdict line {line_number}")
+            verdict, reason = match.groups()
+        number = int(number)
+        if number in verdicts or not 1 <= number <= count or not reason.strip():
+            raise ValueError(f"repeated or out-of-range cluster at verdict line {line_number}")
+        verdicts[number] = (verdict.casefold(), reason.strip())
+    if set(verdicts) != set(range(1, count + 1)):
+        raise ValueError("verdicts must cover every report cluster exactly once")
+    return verdicts
+
+
+def import_verdicts(report_path, verdicts_path, governance, judged_on=None):
+    report = json.loads(Path(report_path).read_text(encoding="utf-8-sig"))
+    if (not isinstance(report, dict) or not isinstance(report.get("clusters"), list)
+            or not isinstance(report.get("date"), str)):
+        raise ValueError("invalid duplicate report")
+    stamp = date.fromisoformat(judged_on or report["date"]).isoformat()
+    verdicts = parse_verdicts(Path(verdicts_path).read_text(encoding="utf-8-sig"), len(report["clusters"]))
+    path = judged_path(governance)
+    records = load_judged(path)
+    imported, current = set(), set()
+    for number, cluster in enumerate(report["clusters"], 1):
+        if (not isinstance(cluster, dict) or not isinstance(cluster.get("cards"), list)
+                or not isinstance(cluster.get("pairs"), list) or not cluster["pairs"]):
+            raise ValueError("invalid report cluster")
+        fingerprints = {}
+        for card in cluster["cards"]:
+            if not isinstance(card, dict) or not isinstance(card.get("path"), str):
+                raise ValueError("invalid report card")
+            fingerprint = card.get("body_fingerprint")
+            if fingerprint is None:
+                # Legacy reports have no snapshot; disclose that these hashes are from import time.
+                fingerprint = body_fingerprint(Path(card["path"]).read_text(encoding="utf-8-sig"))
+                current.add(card["path"])
+            if not isinstance(fingerprint, str) or not re.fullmatch(r"[a-f0-9]{64}", fingerprint):
+                raise ValueError("invalid report body fingerprint")
+            fingerprints[card["path"]] = fingerprint
+        verdict, reason = verdicts[number]
+        for pair in cluster["pairs"]:
+            if not isinstance(pair, dict) or any(not isinstance(pair.get(k), str) for k in ("left", "right")):
+                raise ValueError("invalid report pair")
+            left, right = pair["left"], pair["right"]
+            if left not in fingerprints or right not in fingerprints:
+                raise ValueError("report pair is missing a card")
+            key = pair_key(left, right)
+            if key[0] == key[1] or key in imported:
+                raise ValueError("repeated report pair")
+            imported.add(key)
+            records[key] = {"left": left, "right": right, "verdict": verdict, "reason": reason,
+                            "date": stamp, "left_fingerprint": fingerprints[left],
+                            "right_fingerprint": fingerprints[right],
+                            "fingerprint_source": "import" if left in current or right in current else "report"}
+    data = {"schema_version": 1, "pairs": [records[key] for key in sorted(records)]}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None and temporary.exists():
+            temporary.unlink()
+    return {"path": str(path), "clusters": len(verdicts), "pairs": len(imported),
+            "current_fingerprints": len(current)}
+
+
+def suppress_judged(cards, pairs, records):
+    remaining = []
+    for pair in pairs:
+        left, right = cards[pair["left"]], cards[pair["right"]]
+        row = records.get(pair_key(left.path, right.path))
+        if row and row["verdict"] in ("overlap", "unrelated"):
+            fingerprints = {os.path.normcase(str(Path(row[side]).resolve())): row[side + "_fingerprint"]
+                            for side in ("left", "right")}
+            if all(fingerprints[os.path.normcase(str(card.path))] == card.fingerprint for card in (left, right)):
+                continue
+        remaining.append(pair)
+    return remaining, len(pairs) - len(remaining)
 
 
 def machine_fields(front, fields):
@@ -149,7 +291,8 @@ def load_cards(vaults):
                 machine = machine_fields(front, fields)
                 cards.append(Card(path, vault, fields.get("name") or path.stem, aliases,
                                   fields, machine, quote, max(dated, default=""),
-                                  body_shingles(body), {s.casefold().removesuffix(".md") for s in WIKILINK.findall(text)}))
+                                  body_shingles(body), {s.casefold().removesuffix(".md") for s in WIKILINK.findall(text)},
+                                  body_fingerprint(text)))
             except (OSError, UnicodeError, ValueError) as exc:
                 errors.append({"path": str(path), "error": f"{type(exc).__name__}: {exc}"})
     return cards, errors
@@ -253,6 +396,7 @@ def clusters_from_pairs(cards, pairs, threshold=DEFAULT_THRESHOLD):
         edges = [{**p, "left": str(cards[p["left"]].path), "right": str(cards[p["right"]].path)}
                  for p in accepted if root(p["left"]) == root(members[0])]
         result.append({"cards": [{"path": str(cards[i].path), "vault": str(cards[i].vault),
+                                   "body_fingerprint": cards[i].fingerprint,
                                    "machine_fields": cards[i].machine_fields,
                                    "newest_owner_quote": cards[i].owner_quote,
                                    "newest_date": cards[i].newest or None} for i in members],
@@ -260,19 +404,25 @@ def clusters_from_pairs(cards, pairs, threshold=DEFAULT_THRESHOLD):
     return sorted(result, key=lambda c: c["cards"][0]["path"])
 
 
-def detect(vaults, today=None, threshold=DEFAULT_THRESHOLD):
+def detect(vaults, today=None, threshold=DEFAULT_THRESHOLD, governance=None):
     if not 0 < threshold <= 1:
         raise ValueError("threshold must be in (0, 1]")
+    from epitype import dream
+    vaults = list(vaults)
+    source = governance if governance is not None else dream.governance_vault(vaults) if vaults else None
+    records = load_judged(judged_path(source)) if source is not None else {}
     cards, errors = load_cards(vaults)
+    pairs, suppressed = suppress_judged(cards, pair_scores(cards, threshold), records)
     return {"schema_version": 1, "date": (today or date.today()).isoformat(), "threshold": threshold,
             "shingle_size": SHINGLE_SIZE, "cards_scanned": len(cards), "errors": errors,
-            "clusters": clusters_from_pairs(cards, pair_scores(cards, threshold), threshold)}
+            "suppressed_pairs": suppressed, "clusters": clusters_from_pairs(cards, pairs, threshold)}
 
 
 def render_markdown(report):
     lines = [memspec.DUPES_TITLE, "", memspec.DUPES_POLICY, "",
              memspec.DUPES_SUMMARY.format(date=report["date"], cards=report["cards_scanned"],
-                                         clusters=len(report["clusters"]), threshold=report["threshold"])]
+                                         clusters=len(report["clusters"]), threshold=report["threshold"]),
+             memspec.DUPES_SUPPRESSED.format(pairs=report.get("suppressed_pairs", 0))]
     for number, cluster in enumerate(report["clusters"], 1):
         lines += ["", f"## {number}", "", memspec.DUPES_KEEP.format(path=cluster["suggested_keep"])]
         for card in cluster["cards"]:
@@ -308,12 +458,26 @@ def main(argv=None):
     parser.add_argument("vaults", nargs="*", type=Path)
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD)
+    parser.add_argument("--governance", type=Path, help=memspec.DUPES_GOVERNANCE_HELP)
+    parser.add_argument("--judge", nargs=2, type=Path, metavar=("REPORT", "VERDICTS"), help=memspec.DUPES_JUDGE_HELP)
+    parser.add_argument("--date", type=date.fromisoformat, help=memspec.DUPES_DATE_HELP)
     args = parser.parse_args(argv)
     try:
         from epitype import dream
-        vaults = [memsearch._resolve_vault(v) for v in args.vaults] if args.vaults else dream.configured_vaults()
-        report = detect(vaults, threshold=args.threshold)
-        write_report(report, dream.governance_vault(vaults))
+        vaults = ([memsearch._resolve_vault(v) for v in args.vaults] if args.vaults
+                  else [] if args.judge and args.governance is not None else dream.configured_vaults())
+        governance = args.governance if args.governance is not None else dream.governance_vault(vaults)
+        if args.judge:
+            result = import_verdicts(*args.judge, governance, args.date.isoformat() if args.date else None)
+            if args.json:
+                print(json.dumps(result, ensure_ascii=False, indent=2))
+            else:
+                print(memspec.DUPES_JUDGED.format(**result))
+                if result["current_fingerprints"]:
+                    print(memspec.DUPES_LEGACY.format(cards=result["current_fingerprints"]))
+            return 0
+        report = detect(vaults, today=args.date, threshold=args.threshold, governance=governance)
+        write_report(report, governance)
         print(json.dumps(report, ensure_ascii=False, indent=2) if args.json else render_markdown(report),
               end="\n" if args.json else "")
         return 1 if report["errors"] else 0

@@ -80,6 +80,55 @@ def main():
         card(chain, "second", "戊己庚辛", "decision_key: same\naliases: [bridge]\n")
         card(chain, "third", "戊己庚辛", "aliases: [bridge]\n")
         checks.append(("connected components group pair chains", len(dupes.detect([chain])["clusters"][0]["cards"]) == 3))
+        judgments = root / "judgments"
+        chain_report = dupes.detect([chain], governance=judgments)
+        report_path = root / "review.json"
+        verdict_path = root / "verdicts.md"
+        report_path.write_text(json.dumps(chain_report), encoding="utf-8")
+        verdict_path.write_text("OVERLAP 1 | separate uses\n", encoding="utf-8")
+        imported = dupes.import_verdicts(report_path, verdict_path, judgments)
+        filtered = dupes.detect([chain], governance=judgments)
+        checks.append(("unchanged judged edges removed before clustering", imported["pairs"] == 2
+                       and filtered["suppressed_pairs"] == 2 and filtered["clusters"] == []))
+        first = chain / "first.md"
+        original = first.read_text(encoding="utf-8")
+        first.write_text(original + "new owner wording\n", encoding="utf-8")
+        changed = dupes.detect([chain], governance=judgments)
+        checks.append(("changed body restores only its edges", changed["suppressed_pairs"] == 1
+                       and len(changed["clusters"]) == 1 and len(changed["clusters"][0]["cards"]) == 2))
+        # Importing a saved report must not bless changes made after the scan.
+        dupes.import_verdicts(report_path, verdict_path, judgments)
+        checks.append(("report-time fingerprints survive delayed import", len(dupes.detect([chain], governance=judgments)["clusters"]) == 1))
+        first.write_text(original, encoding="utf-8")
+        first.write_text(original.replace("description: synthetic", "description: edited metadata"), encoding="utf-8")
+        checks.append(("metadata-only edit preserves body judgment", not dupes.detect([chain], governance=judgments)["clusters"]))
+        first.write_text(original, encoding="utf-8")
+        verdict_path.write_text("DUPLICATE 1 | still needs settlement\n", encoding="utf-8")
+        dupes.import_verdicts(report_path, verdict_path, judgments)
+        checks.append(("duplicate verdict does not hide unsettled candidates", dupes.detect([chain], governance=judgments)["suppressed_pairs"] == 0))
+        for item in chain_report["clusters"][0]["cards"]:
+            item.pop("body_fingerprint")
+        report_path.write_text(json.dumps(chain_report), encoding="utf-8")
+        verdict_path.write_text("OTHER-VAULT 1 | UNRELATED | template only\n", encoding="utf-8")
+        legacy = dupes.import_verdicts(report_path, verdict_path, judgments)
+        checks.append(("legacy reports explicitly capture current fingerprints", legacy["current_fingerprints"] == 3
+                       and not dupes.detect([chain], governance=judgments)["clusters"]))
+        parsed = dupes.parse_verdicts("SKIPPED-BINDING 1 | verify, owner_quote | OVERLAP：different scopes\n", 1)
+        checks.append(("protected binding verdict syntax supported", parsed == {1: ("overlap", "different scopes")}))
+        saved_judgments = dupes.judged_path(judgments).read_bytes()
+        for invalid in ("", "OVERLAP 1 | why\nOVERLAP 1 | repeated", "UNRELATED 2 | wrong index", "unknown verdict"):
+            verdict_path.write_text(invalid, encoding="utf-8")
+            try:
+                dupes.import_verdicts(report_path, verdict_path, judgments)
+            except ValueError:
+                checks.append(("invalid import preserves judgments", dupes.judged_path(judgments).read_bytes() == saved_judgments))
+            else:
+                checks.append(("invalid import rejected", False))
+        with redirect_stdout(io.StringIO()) as isolated_output:
+            isolated_code = cli.main(["dupes", str(chain), "--governance", str(judgments), "--json"])
+        checks.append(("governance override reads and writes only the copied record/report", isolated_code == 0
+                       and json.loads(isolated_output.getvalue())["suppressed_pairs"] == 2
+                       and not (chain / "_drafts").exists()))
         empty = root / "empty"
         empty.mkdir()
         card(empty, "one", "")

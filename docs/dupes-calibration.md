@@ -37,6 +37,78 @@ pair scores/signals and the suggested keep path. Markdown and JSON are written
 to the governance vault's `_drafts/duplicates/YYYYMMDD.*`, including empty scans.
 The ledger holder is governance, falling back to the first input vault.
 
+## Remembering judgments
+
+`epitype dupes --judge <report.json> <verdicts.md>` imports the lead's verdicts
+into `_drafts/duplicates/judged.json` in the governance vault. `--governance
+<vault-copy>` reads judgments and writes reports there while keeping the scan
+vaults unchanged. It applies to both imports and scans. `--date YYYY-MM-DD`
+overrides the judgment date (otherwise the report date) or scan date.
+
+The verdict file has exactly one nonempty line per numbered report cluster:
+
+```text
+OVERLAP 1 | Separate rules with some shared wording.
+OTHER-VAULT 2 | UNRELATED | Shared template only.
+SKIPPED-BINDING 3 | owner_quote, verify | OVERLAP：Different scopes.
+DUPLICATE 4 | Same operative rule; settlement still needed.
+```
+
+Cluster verdicts apply to every reported pair in that cluster, without
+inventing judgments for unreported combinations. Unknown lines, duplicate
+numbers, missing clusters and invalid records fail without replacing the
+existing record. Reimports update matching pairs and preserve other judgments.
+The record is replaced atomically after validation.
+
+Each pair stores its two absolute card paths, verdict, reason, date and SHA-256
+body fingerprints. New reports retain these fingerprints from scan time, so
+delayed import cannot silently approve a later body edit. Fingerprints include
+all body text (including comments and links), with text-mode newline
+normalization; frontmatter is excluded. Legacy reports without fingerprints
+read the current bodies at import and explicitly warn that judging-time content
+cannot be reconstructed. Such records carry `fingerprint_source: import`.
+
+Both the CLI and nightly dream omit an overlap/unrelated pair only while both
+body fingerprints match. Filtering precedes clustering: disconnected groups
+split, isolated cards disappear, and groups with no remaining pairs disappear.
+New pairs and changed bodies return for judgment; a `duplicate` verdict stays
+visible until settlement. JSON, Markdown and the dream summary report the
+number of suppressed candidate pairs. Missing records suppress nothing;
+unreadable or malformed records surface an error rather than hide candidates.
+
+### EOPT3B real-data validation (2026-10-29)
+
+No test suites were run for EOPT3B. Regression cases were added to the existing
+registered `dupes_regression.py` selftest without running it.
+
+Commands executed from the feature worktree (local source paths abbreviated):
+
+```text
+python -m epitype dupes --governance <copy> --judge <copied-20261029.json> <dupes_DUPE1.md>
+python -m epitype dupes --governance <copy> --json
+python -m epitype dupes <left-card-copy-vault> <right-card-copy-vault> --governance <temporary-copy> --json
+```
+
+The original report contains 48 clusters: 45 overlap, 3 unrelated, 0 duplicate.
+Import produced 160 pair records: 109 overlap and 51 unrelated, over 138 cards.
+The legacy report has no fingerprints; all 138 were captured at import time
+and the CLI disclosed this limitation. The subsequent scan read the configured
+live vaults: **938 cards, 0 errors, 160 suppressed pairs, 0 remaining clusters**.
+The generated JSON and Markdown were read back and agree. Only the governance
+duplicates directory was copied; no live vault was written. Before/after hashes
+of every file in the live duplicates directory agree.
+
+For the body-change check, two actual cards from one judged pair were copied
+into temporary vaults and their copied record paths remapped. Appending one
+newline to one copied body restored **1 pair in 1 cluster**, with 0 suppressed
+pairs and 0 errors. Both live source-card hashes remained unchanged. The two
+temporary vaults and their record/report were removed after reading the output.
+
+The import copy and output remain under the feature worktree's ignored
+`.epitype/eopt3b-20261029/` for the lead's review. They are private local
+artifacts, excluded from the commit. Live import and activation remain with
+the lead after merging; the worktree does not activate live hooks.
+
 ## Ground truth and reconstruction
 
 Inputs: the ticket's `merge_plan_MERGE1.md` and `merge_plan_MERGE2.md`.
@@ -103,7 +175,7 @@ Source cards, quotes, local absolute paths and transcripts are not copied into
 the committed results. Only aggregate metrics, plan group IDs, hashes and
 source versions are retained. This worktree does not activate the live hooks.
 
-## Validation
+## Original EOPT3 validation
 
 - `python tests/dupes_regression.py --selftest`: 26/26 passed.
 - `python epitype/dream.py --selftest`: 70/70 passed.

@@ -4209,6 +4209,7 @@ def _main(argv, output):
             duplicate_summary = {
                 "clusters": len(duplicate_report["clusters"]),
                 "cards_scanned": duplicate_report["cards_scanned"],
+                "suppressed_pairs": duplicate_report["suppressed_pairs"],
                 "errors": duplicate_report["errors"],
                 "path": str(duplicate_path) if duplicate_path else None,
             }

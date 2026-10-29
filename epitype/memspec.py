@@ -4307,6 +4307,12 @@ DUPES_POLICY = (
     "相似度及建議不是裁定，須比較完整原文並保留有效欄位。Epitype 不呼叫模型、不修改或退役卡片。"
 )
 DUPES_SUMMARY = "日期 {date}；掃描 {cards} 張卡；{clusters} 群；門檻 {threshold}"
+DUPES_SUPPRESSED = "已略過 {pairs} 組裁定為重疊或無關、且兩卡內文皆未變的配對。"
+DUPES_GOVERNANCE_HELP = "裁定紀錄與報告寫入此治理庫；可指定副本，掃描的庫不變。"
+DUPES_JUDGE_HELP = "匯入逐群裁定：報告 JSON 與裁定文字檔。"
+DUPES_DATE_HELP = "ISO 日期；匯入預設用原報告日期，掃描預設用今天。"
+DUPES_JUDGED = "已匯入 {clusters} 群、{pairs} 組配對裁定：{path}"
+DUPES_LEGACY = "舊報告未存指紋：{cards} 張卡使用匯入時的內文，無法回溯確認裁定當時內容。"
 DUPES_KEEP = "建議保留：{path}"
 DUPES_FIELDS = "機器檢查欄位：{fields}"
 DUPES_QUOTE = "最新有日期的 owner 引文（{date}）：{text}"
@@ -4326,6 +4332,12 @@ _EN.update({
         "Epitype makes no model calls and never edits or retires cards."
     ),
     "DUPES_SUMMARY": "Date {date}; scanned {cards} cards; {clusters} clusters; threshold {threshold}",
+    "DUPES_SUPPRESSED": "Suppressed {pairs} pairs judged overlap/unrelated with both card bodies unchanged.",
+    "DUPES_GOVERNANCE_HELP": "Read judgments and write reports in this governance vault (may be a copy); scan vaults stay unchanged.",
+    "DUPES_JUDGE_HELP": "Import per-cluster verdicts from a report JSON and a verdict text file.",
+    "DUPES_DATE_HELP": "ISO date; imports default to the report date, scans to today.",
+    "DUPES_JUDGED": "Imported judgments for {clusters} clusters, {pairs} pairs: {path}",
+    "DUPES_LEGACY": "Legacy report has no fingerprints: {cards} cards use import-time bodies; judging-time content cannot be verified retrospectively.",
     "DUPES_KEEP": "Suggested keep: {path}",
     "DUPES_FIELDS": "Machine-check fields: {fields}",
     "DUPES_QUOTE": "Newest dated owner quote ({date}): {text}",
