@@ -19,6 +19,8 @@ classifiers = [
 
 [project.urls]
 Repository = "https://github.com/leavemagic-cyber/epitype"
+Changelog = "https://github.com/leavemagic-cyber/epitype/blob/master/CHANGELOG.md"
+Releases = "https://github.com/leavemagic-cyber/epitype/releases"
 
 [project.scripts]
 epitype = "epitype.cli:main"

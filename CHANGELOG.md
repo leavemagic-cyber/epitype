@@ -9,6 +9,7 @@
 - Add `epitype owner-index`, an incremental full-text index of the owner's own words with source locators and distinct roles for selected AI options.
 - Add `epitype dupes`, a nightly cross-vault near-duplicate report with remembered verdicts that are reconsidered when card bodies change.
 - Fuse recall ranking across BM25, aliases, one-hop links and dates, with source offsets prepared nightly.
+- Fix three regressions found by the release suite before publication: recall again rechecks a quieted card that became a behavior rule, a self-closing image tag no longer hides the owner's following words from the owner index, and status or successor edits with unchanged rule text are validated again.
 
 ## v1.9.2 (2026-10-21)
 

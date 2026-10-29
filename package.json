@@ -10,8 +10,13 @@
   "bin": {
     "epitype": "bin/epitype.js"
   },
+  "homepage": "https://github.com/leavemagic-cyber/epitype#readme",
+  "bugs": {
+    "url": "https://github.com/leavemagic-cyber/epitype/issues"
+  },
   "files": [
     "README.md",
+    "CHANGELOG.md",
     "bin/epitype.js"
   ]
 }
