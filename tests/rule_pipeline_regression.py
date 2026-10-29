@@ -178,8 +178,9 @@ class RulePipeline(unittest.TestCase):
         self.assertEqual(result["status"], core_gen.STATUS_UNREADABLE)
         self.assertEqual(out.read_bytes(), previous)
         self.assertEqual(core_gen.check([self.vault], out)["status"], core_gen.STATUS_UNREADABLE)
-        with self.assertRaises(ValueError):
-            host_sync.project_rules_text(self.vault, "codex")
+        notices = []
+        self.assertEqual(host_sync.project_rules_text(self.vault, "codex", notices=notices), "")
+        self.assertIn("未通過", notices[0])
 
     def test_missing_original_does_not_hide_changed_payload_or_revive_expiry(self):
         self.target.write_text(self.card(), encoding="utf-8")

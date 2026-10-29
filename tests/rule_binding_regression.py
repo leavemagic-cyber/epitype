@@ -5,15 +5,13 @@ from pathlib import Path
 sys.path[:0] = [str(Path(__file__).resolve().parents[1]), str(Path(__file__).resolve().parent)]
 import copy
 import hashlib
-import io
 import json
 import os
 import subprocess
 import unittest
-from unittest.mock import patch
 
 import rule_pipeline_regression as fixture
-from epitype import core_gen, host_sync, memspec, rule_legacy, rule_pipeline, rule_provenance
+from epitype import memspec, rule_legacy, rule_pipeline, rule_provenance
 
 
 class RuleBindings(unittest.TestCase):
