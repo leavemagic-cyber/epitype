@@ -80,12 +80,13 @@ class OwnerIndexTests(unittest.TestCase):
             return [{'type': 'session_meta', 'payload': {'id': 'session', 'originator': origin}},
                     {'type': 'event_msg', 'payload': {'type': 'user_message', 'message': '不收事件'}},
                     {'type': 'response_item', 'timestamp': '2026-10-02', 'payload': {
-                        'type': 'message', 'role': 'user', 'content': [
+                        'type': 'message', 'id': 'message-id', 'role': 'user', 'content': [
                             {'type': 'input_text', 'text': '真的輸入'}]}}]
         for origin in ('codex_exec', 'sdk-typescript'):
             self.assertEqual(0, self.build(codex(origin))['messages'])
         self.assertEqual(1, self.build(codex('codex_cli_rs'))['messages'])
         self.assertEqual('session', self.find('真的輸入')[0]['session_id'])
+        self.assertEqual('message-id', self.find('真的輸入')[0]['message_uuid'])
 
     def test_wrappers_commands_and_full_owner_text(self):
         self.build([message('<environment_context>不是原話</environment_context>\n真實輸入'),

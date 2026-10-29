@@ -197,13 +197,16 @@ def _consume(db, stream, source, state, offset, size, digest, immutable, report)
                 text = text.strip() if role == 'S' else owner_text(text, queued=role == 'Q')
                 if text:
                     question = _question(item, asked)
+                    payload = item.get('payload')
+                    message_id = item.get('uuid') or item.get('id') or (
+                        payload.get('id') if isinstance(payload, dict) else '')
                     db.execute('''INSERT INTO messages
                         (source, byte_offset, role, timestamp, session_id, message_uuid,
                          text, question, previous, record_sha256, search_text, search_question)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                         (source, start, role, str(item.get('timestamp') or ''),
                          str(item.get('sessionId') or state.get('session') or ''),
-                         str(item.get('uuid') or item.get('id') or ''), text, question,
+                         str(message_id or ''), text, question,
                          state.get('previous', ''), hashlib.sha256(raw).hexdigest(),
                          normalize(text), normalize(question)))
                     report['messages_added'] += 1
