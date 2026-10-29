@@ -2620,6 +2620,9 @@ def _render_markdown(report):
         lines.append(f"- {vault}")
     lines.append(f"事件卡老化門檻（--since）：{report['since']}")
     lines.append("")
+    if report.get("owner_index") is not None:
+        lines.extend((memspec.OWNER_INDEX_DREAM_LINE.format(
+            result=json.dumps(report["owner_index"], ensure_ascii=False)), ""))
     snapshots = report.get("vault_snapshots") or ()
     if snapshots:
         lines.extend((VAULT_SNAPSHOT_HEADING, ""))
@@ -2999,6 +3002,9 @@ def _report_errors(report):
                 "error": "transcripts omitted by scan cap",
                 "errors": [],
             }
+    indexed = report.get("owner_index") or {}
+    if indexed.get("error") or indexed.get("errors") or indexed.get("unreadable_rows") or indexed.get("skipped_zst"):
+        errors["owner_index"] = indexed
     return errors
 
 
@@ -4191,6 +4197,13 @@ def _main(argv, output):
                     views.generate(vault)
                 except Exception:
                     continue
+        owner_index_result = None
+        if not parsed.dry_run:
+            from epitype import owner_index
+            try:
+                owner_index_result = owner_index.update()
+            except (OSError, ValueError, owner_index.sqlite3.Error) as exc:
+                owner_index_result = {"error": f"{type(exc).__name__}: {exc}"}
         shaping = []
         for vault in vaults:
             try:
@@ -4215,6 +4228,7 @@ def _main(argv, output):
             host_sync_result=early_sync,
         )
         report["vault_snapshots"] = snapshots
+        report["owner_index"] = owner_index_result
         rendered = json.dumps(report, ensure_ascii=False, indent=1)
         content = rendered if parsed.json else _render_markdown(report)
 

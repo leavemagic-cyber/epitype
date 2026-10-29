@@ -3813,6 +3813,7 @@ def host_native_declared(front_lines):
 EPITYPE_LANG_ENV = "EPITYPE_LANG"
 OWNER_INDEX_HELP = "增量索引使用者輸入、排隊訊息與問答框回答；搜尋結果只供定位。"
 OWNER_INDEX_ROOT_HELP = "來源檔案或目錄（可重複）；指定時取代預設來源。"
+OWNER_INDEX_DREAM_LINE = "使用者原話索引更新：{result}"
 OWNER_INDEX_SCOPE = (
     "索引快照，尚未重讀原始列；不能證明現行決策或全域不存在。"
     "U=使用者輸入，Q=真人排隊訊息，S=使用者選取的 AI 選項文字。"
@@ -3860,6 +3861,7 @@ LANGUAGE = _resolve_language()
 _EN = {
     "OWNER_INDEX_HELP": "Incrementally index typed, queued and question-box answers; search hits are locators only.",
     "OWNER_INDEX_ROOT_HELP": "Source file or directory (repeatable); replaces default sources when supplied.",
+    "OWNER_INDEX_DREAM_LINE": "Owner input index update: {result}",
     "OWNER_INDEX_SCOPE": (
         "Index snapshot; original rows have not been reread. No current decision or global absence is proved. "
         "U=host user input, Q=human queue, S=owner-selected AI option text. "
