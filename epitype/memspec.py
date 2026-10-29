@@ -4298,6 +4298,44 @@ _LAZY_REGEX.update({
     "RECURRENCE_GATE_LEAD_REGEX": lambda: re.compile(RECURRENCE_GATE_LEAD_PATTERN),
 })
 
+DUPES_TITLE = "# 跨庫近重複卡片"
+DUPES_DIRECTORY = "duplicates"
+DUPES_HELP = "偵測跨庫近重複卡片，只寫報告，不改卡片。"
+DUPES_POLICY = (
+    "由主導 AI 依 owner 規則處理：最新 owner 原話優先；不得選擇 owner 未設的限制。"
+    "只在金錢、刪除、產品方向詢問 owner。建議保留卡先選帶機器檢查欄位者，否則選最新；"
+    "相似度及建議不是裁定，須比較完整原文並保留有效欄位。Epitype 不呼叫模型、不修改或退役卡片。"
+)
+DUPES_SUMMARY = "日期 {date}；掃描 {cards} 張卡；{clusters} 群；門檻 {threshold}"
+DUPES_KEEP = "建議保留：{path}"
+DUPES_FIELDS = "機器檢查欄位：{fields}"
+DUPES_QUOTE = "最新有日期的 owner 引文（{date}）：{text}"
+DUPES_UNDATED_QUOTE = "owner 引文（未標日期，無法判定先後）：{text}"
+DUPES_NO_QUOTE = "未找到明確歸屬 owner 的引文。"
+DUPES_PAIR = "內文 Jaccard {similarity}；候選分數 {score}；訊號 {signals}"
+DUPES_ERRORS = "## 掃描錯誤（覆蓋不完整）"
+DUPES_DREAM = "## 近重複卡片報告\n\n{result}"
+_EN.update({
+    "DUPES_TITLE": "# Cross-vault near-duplicate cards",
+    "DUPES_HELP": "Detect cross-vault near duplicates; write reports without editing cards.",
+    "DUPES_POLICY": (
+        "The lead AI settles candidates under the owner's rule: latest owner wording wins; never "
+        "prefer a limit the owner did not set. Ask the owner only about money, deletion or product "
+        "direction. Prefer a keep card with machine-check fields, otherwise the newest. Scores and "
+        "keep suggestions are not rulings: compare full originals and preserve valid fields. "
+        "Epitype makes no model calls and never edits or retires cards."
+    ),
+    "DUPES_SUMMARY": "Date {date}; scanned {cards} cards; {clusters} clusters; threshold {threshold}",
+    "DUPES_KEEP": "Suggested keep: {path}",
+    "DUPES_FIELDS": "Machine-check fields: {fields}",
+    "DUPES_QUOTE": "Newest dated owner quote ({date}): {text}",
+    "DUPES_UNDATED_QUOTE": "Owner quote (undated; chronology unknown): {text}",
+    "DUPES_NO_QUOTE": "No explicitly attributed owner quote found.",
+    "DUPES_PAIR": "Body Jaccard {similarity}; candidate score {score}; signals {signals}",
+    "DUPES_ERRORS": "## Scan errors (coverage incomplete)",
+    "DUPES_DREAM": "## Near-duplicate card report\n\n{result}",
+})
+
 # 最後才套用：上面每一個名字都必須已經存在，套用之後定義的常數不會被換掉。
 # 樣式全部留在原位不翻——__getattr__ 底下的延後編譯讀的就是那些名字。
 if LANGUAGE != DEFAULT_LANGUAGE:

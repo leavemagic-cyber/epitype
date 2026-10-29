@@ -12,6 +12,7 @@ import sys; sys.dont_write_bytecode = True; [getattr(stream, "reconfigure", lamb
 重註冊排程。盤點本身唯讀，寫的是 <治理 vault>/.epitype/ 的 pack／state／lock／log，
 外加三個順路任務：先做記憶庫 git 快照、重生 `_views/`，以及把 MEMORY.md 允許段以外、目錄已承載的卡片
 連結行搬進 `_drafts/index_pruned/`（原文照搬、不刪；`--dry-run` 只印不改）。
+目錄重生後另寫 `_drafts/duplicates/YYYYMMDD.md` 及 JSON；近重複卡片只列報告，交由主導 AI 處理。
 """
 
 import argparse
@@ -389,6 +390,9 @@ def _drafts_of(vault):
     judged = 0
     waiting = []
     for path in sorted(root.rglob("*.md")):
+        # Generated duplicate reports are findings, not captured card proposals.
+        if path.relative_to(root).parts[0] == memspec.DUPES_DIRECTORY:
+            continue
         if _draft_judged(path):
             judged += 1
         else:
@@ -2999,6 +3003,11 @@ def _report_errors(report):
                 "error": "transcripts omitted by scan cap",
                 "errors": [],
             }
+    duplicates = report.get("duplicates") or {}
+    if duplicates.get("error") or duplicates.get("errors"):
+        errors["duplicates"] = {
+            "error": duplicates.get("error"), "errors": duplicates.get("errors") or [],
+        }
     return errors
 
 
@@ -4191,6 +4200,20 @@ def _main(argv, output):
                     views.generate(vault)
                 except Exception:
                     continue
+        # Duplicate settlement belongs to the lead AI; the nightly job only reports.
+        try:
+            from epitype import dupes
+            duplicate_report = dupes.detect(vaults, today=today)
+            duplicate_path = None if parsed.dry_run else dupes.write_report(
+                duplicate_report, governance_vault(vaults))
+            duplicate_summary = {
+                "clusters": len(duplicate_report["clusters"]),
+                "cards_scanned": duplicate_report["cards_scanned"],
+                "errors": duplicate_report["errors"],
+                "path": str(duplicate_path) if duplicate_path else None,
+            }
+        except Exception as exc:
+            duplicate_summary = {"error": f"{type(exc).__name__}: {exc}"}
         shaping = []
         for vault in vaults:
             try:
@@ -4215,8 +4238,12 @@ def _main(argv, output):
             host_sync_result=early_sync,
         )
         report["vault_snapshots"] = snapshots
+        report["duplicates"] = duplicate_summary
         rendered = json.dumps(report, ensure_ascii=False, indent=1)
         content = rendered if parsed.json else _render_markdown(report)
+        if not parsed.json:
+            content += "\n" + memspec.DUPES_DREAM.format(
+                result=json.dumps(duplicate_summary, ensure_ascii=False)) + "\n"
 
         if parsed.dry_run:
             print(content, file=output)

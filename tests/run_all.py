@@ -10,6 +10,7 @@ import tempfile
 SELFTESTS = (
     Path("tests") / "rule_binding_regression.py",
     Path("tests") / "rule_sync_dedup_regression.py",
+    Path("tests") / "dupes_regression.py",
     Path("epitype") / "memspec.py",
     Path("epitype") / "memsearch.py",
     Path("epitype") / "card_lint.py",

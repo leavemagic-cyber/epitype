@@ -9,6 +9,7 @@ from . import __version__
 _COMMANDS = {
     "search": ("epitype.memsearch", "main", ()),
     "cards": ("epitype.card_lint", "main", ()),
+    "dupes": ("epitype.dupes", "main", ()),
     "views": ("epitype.views", "main", ()),
     "core-gen": ("epitype.core_gen", "main", ()),
     "sync": ("epitype.host_sync", "main", ()),
