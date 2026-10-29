@@ -10,9 +10,8 @@ except ImportError:
     import memspec
 
 STATE_FIELD = "cap_consolidation"
-# Owner 2026-09-09 (decision-memory-governance-final-design-20260909): contract and rule
-# text changes are settled between Claude and Codex, not shown to the owner word by word.
-NEXT_STEP = "擬精簡稿 → Claude 與 Codex 核對意義不變 → 走規則管線寫入並重新綁定 → 寫入後告知 owner 改了什麼與前後 bytes；不先送 owner 逐字核准（owner 2026-09-09 裁定）"
+# Shared by dream, sync and SessionStart; report changes after the meaning check and write.
+NEXT_STEP = "擬精簡稿 → Claude 與 Codex 核對意義不變 → 走規則管線寫入並重新綁定 → 寫入後告知 owner 改了什麼與前後 bytes；不先送 owner 逐字核准"
 
 
 def material_path(config):

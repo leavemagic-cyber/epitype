@@ -184,8 +184,7 @@ class CapConsolidation(unittest.TestCase):
         self.assertIn("--scheduled", plan.notices[0])
 
     def test_next_step_has_no_owner_approval_gate(self):
-        # Owner 2026-09-09: 「5.不要給我逐字看，你跟CODEX討論」. The owner is told
-        # afterwards; nothing waits on an owner approval of the wording.
+        # The owner is told afterwards; nothing waits on approval of the wording.
         steps = ["擬精簡稿", "Claude 與 Codex 核對意義不變", "規則管線寫入",
                  "寫入後告知 owner 改了什麼與前後 bytes"]
         positions = [cap.NEXT_STEP.find(step) for step in steps]
@@ -194,6 +193,8 @@ class CapConsolidation(unittest.TestCase):
         for gate in ("前後對照表", "核准後", "給 owner"):
             self.assertNotIn(gate, cap.NEXT_STEP)
         self.assertIn(cap.NEXT_STEP, dream.CAP_COMMAND)
+        self.assertEqual(dream.CAP_COMMAND,
+                         "依第 11 節排序清單" + cap.NEXT_STEP + "；夢不改規則卡、不提高上限")
 
     def test_under_or_exact_cap_has_no_material_or_notice(self):
         self.config["core_cap_bytes"] = max(self.loads.values())

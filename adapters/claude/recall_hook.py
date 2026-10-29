@@ -547,7 +547,7 @@ def _recall_cards(event, started_at, config, delivery_markers=None, deliveries=N
             # Indexed-active cards still pass through live verification and pinning.
             if _one_line(hit.get(memspec.DECISION_STATUS_FIELD)) != memspec.ACTIVE_DECISION_STATUS:
                 card_name = Path(_one_line(hit.get("card_path")) or path).name
-                if (_event_card(hit, path) or _one_line(hit.get("card_path")) in quiet
+                if (_event_card(hit, path)
                         or card_name in shown_names or ordinary >= memspec.FTS_TOP_K
                         or (list(hit.get("hit_fields") or ()) == ["body"]
                             and body_only >= memspec.RECALL_BODY_ONLY_MAX_PER_VAULT)):

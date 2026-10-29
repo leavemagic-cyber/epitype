@@ -151,6 +151,14 @@ class OwnerIndexTests(unittest.TestCase):
         self.assertEqual('new IDE request', self.find('IDE request')[0]['text'])
         self.assertEqual('<sample>long real paste</sample>' * 1000, self.find('long real paste')[0]['text'])
 
+    def test_image_boundaries_preserve_new_input_and_strip_paired_content(self):
+        for tag in ('<image src="attachment"/>', '<IMAGE src="attachment" / >'):
+            with self.subTest(tag=tag):
+                self.assertEqual('before\n\nafter', owner.owner_text(
+                    'before\n' + tag + '\nafter</image></image>'))
+        self.assertEqual('before\n\nafter', owner.owner_text(
+            'before\n<image src="attachment">ambient image text</image>\nafter'))
+
     def test_identical_text_across_archive_and_original_has_distinct_locators(self):
         self.build([message('identical owner words')])
         archive = self.root / 'copy.zip'

@@ -33,11 +33,12 @@ import uuid
 
 try:
     from . import (
-        alias_batch, card_io, card_lint, decision_lint, gates_report, memsearch, memspec,
-        pending_lint,
+        alias_batch, cap_consolidation, card_io, card_lint, decision_lint, gates_report,
+        memsearch, memspec, pending_lint,
     )
 except ImportError:  # Direct script execution keeps the CLI contract.
     import alias_batch
+    import cap_consolidation
     import card_io
     import card_lint
     import decision_lint
@@ -112,7 +113,7 @@ MIXED_SKIP_FRESH_SPLIT = "fresh_split"
 MIXED_SKIP_RECORD_TYPE = "record_type"
 MIXED_SKIPPED_NOTE = "已審過略過 {count} 張"
 CAP_UNSET_NOTE = "{field} 未設定，這一項跳過"
-CAP_COMMAND = "依第 11 節排序清單擬精簡稿 → Claude 與 Codex 核對意義不變 → 走規則管線寫入並重新綁定 → 寫入後告知 owner 改了什麼與前後 bytes；不先送 owner 逐字核准；夢不改規則卡、不提高上限"
+CAP_COMMAND = "依第 11 節排序清單" + cap_consolidation.NEXT_STEP + "；夢不改規則卡、不提高上限"
 # 同一批 core_files 順路多問一句：這個檔跟規則卡重組出來的生成塊還一不一致。
 # 只列候選——夢不重生成核心塊，那是本機作業（`epitype core-gen`）。
 CAP_DRIFT_KIND = "generated-block-drift"

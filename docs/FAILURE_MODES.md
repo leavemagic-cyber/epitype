@@ -42,6 +42,8 @@ Each startup segment needs a bounded deadline and a bounded result. Checking tim
 
 A recalled ruling is context, not proof of compliance. Content checks examine applicable forbidden wording while preserving quotations and documented exemptions.
 
+The Stop hook never blocks. A finding emits nothing on stdout, records a `stop_note` audit event, and leaves a bounded reminder for the next prompt. UserPromptSubmit delivers that reminder in context. Missing configuration, unreadable cards and the hook deadline let the turn end.
+
 ## 11. The gate reads commands, and the violation is written to a file
 
 Write checks inspect the proposed file content as well as tool arguments. An opaque program that creates content outside the visible tool payload remains a coverage limit.
