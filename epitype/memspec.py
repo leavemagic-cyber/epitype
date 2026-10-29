@@ -575,7 +575,21 @@ RECALL_TOTAL_MAX_LINES = 8
 # ordinary top-k (FTS_TOP_K, below), or one ranked sixth by word frequency would
 # never be seen. Three times the ordinary window.
 RECALL_PINNED_SCAN_LIMIT = 15
+# Source checks share the existing hook deadline, leaving time to render and emit.
+# This reserve follows the host time limit; it is not a source-admission rule.
+RECALL_SOURCE_RESERVE_SECONDS = 1.0
 RECALL_LEGEND_PREFIX = "vaults: "
+RECALL_LOOKUP_PREFIX = ""
+RECALL_REDIRECT_PREFIX = "繼任 | "
+RECALL_LOOKUP_LEGEND = "查找線索（來源未核；非授權或新增禁令）：未另標來源的項目皆適用。"
+RECALL_SOURCE_LEGEND = "有作者分類的項目：未標適用範圍＝{scope}；未標取代＝無。"
+RECALL_UNAVAILABLE_LEGEND = "未核＝原始對話無法讀取，保留卡片記載；作者與原話／AI 分類按卡片記載。"
+RECALL_SOURCE_OWNER = "Owner 原話（作者：{author}）"
+RECALL_SOURCE_AI = "AI 整理（作者：{author}；非 Owner 逐字裁定）"
+RECALL_SOURCE_UNKNOWN = "未核 | {label}"
+RECALL_SOURCE_SCOPE = "適用範圍：{scope}"
+RECALL_SOURCE_QUOTE = "原始 Owner 引句：{quote}"
+RECALL_SOURCE_SUPERSEDES = "取代關係：{cards}"
 # When a budget cuts the injected context, the cut is said, never silent.
 CONTEXT_TRUNCATED_SUFFIX = "…（超出預算，餘 {dropped} 段未注入）"
 
@@ -4100,6 +4114,17 @@ _EN = {
     "STOP_GATE_DECISION_NAMED": "{key}, {decided_at}",
     "REQUIRE_HINT_FALLBACK": "what this card requires",
     "RECALL_DECIDED_AT_SUFFIX": " ({decided_at})",
+    "RECALL_LOOKUP_PREFIX": "",
+    "RECALL_REDIRECT_PREFIX": "Successor | ",
+    "RECALL_LOOKUP_LEGEND": "Lookup hints (source UNVERIFIED; neither authority nor new restrictions): applies unless a source label says otherwise.",
+    "RECALL_SOURCE_LEGEND": "Items with authorship labels: omitted scope = {scope}; omitted supersession = none.",
+    "RECALL_UNAVAILABLE_LEGEND": "UNVERIFIED = original conversation unavailable; retaining the card's record, including author and owner-verbatim/AI classification.",
+    "RECALL_SOURCE_OWNER": "Owner verbatim (author: {author})",
+    "RECALL_SOURCE_AI": "AI wording (author: {author}; not an Owner verbatim ruling)",
+    "RECALL_SOURCE_UNKNOWN": "UNVERIFIED | {label}",
+    "RECALL_SOURCE_SCOPE": "Scope: {scope}",
+    "RECALL_SOURCE_QUOTE": "Original Owner quote: {quote}",
+    "RECALL_SOURCE_SUPERSEDES": "Supersedes: {cards}",
     "CARD_LINT_NO_FRONTMATTER_REASON": "no frontmatter, so the type and its required fields cannot be decided",
     "CARD_LINT_NO_BOUNDARY_REASON": "the frontmatter has no closing boundary",
     "CARD_LINT_DUPLICATE_FIELD_REASON": "duplicate field",

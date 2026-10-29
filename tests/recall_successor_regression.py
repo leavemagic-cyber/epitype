@@ -128,6 +128,7 @@ class SuccessorHost(unittest.TestCase):
             with self.subTest(event_format=event_format):
                 context = self.invoke(event_format)
                 self.assertIn("current.md", context)
+                self.assertIn("繼任 | ", context)
                 self.assertIn("Current instruction without the old search term", context)
                 self.assertNotIn("old.md", context)
                 self.assertNotIn("middle.md", context)

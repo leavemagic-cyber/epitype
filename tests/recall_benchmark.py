@@ -8,18 +8,40 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import statistics
 import subprocess
 import tempfile
 import time
 from unittest.mock import patch
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path[:0] = [str(ROOT), str(ROOT / 'adapters' / 'claude'), str(ROOT / 'tests')]
+RUN_ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(os.environ.get('EPITYPE_BENCHMARK_ROOT', RUN_ROOT)).resolve()
+sys.path[:0] = [str(ROOT), str(ROOT / 'adapters' / 'claude'), str(RUN_ROOT / 'tests')]
 from epitype import memsearch, memspec
 import _hook_common as common
 import recall_hook as hook
 import recall_regression as regression
+
+
+def delivered_kind(context, vault, expected):
+    legend = next((line for line in context.splitlines() if line.startswith(memspec.RECALL_LEGEND_PREFIX)), '')
+    aliases = dict(re.findall(r'(V\d+)=(.*?)(?= V\d+=|$)', legend))
+    for line in context.splitlines():
+        if not line.startswith('- '):
+            continue
+        located = line.rsplit(' | ', 1)[-1].removeprefix('- ')
+        alias, slash, relative = located.partition('/')
+        if not slash or alias not in aliases or Path(aliases[alias]).resolve() != vault.resolve():
+            continue
+        if not any(token.casefold() in regression._identifiers(relative, '') for token in expected):
+            continue
+        prefix = line.rsplit(' | ', 1)[0]
+        pointer = (' | ' not in line or prefix in (
+            '- 查找線索（來源未核；非授權或新增禁令）', '- 繼任')
+            or line.startswith('- 已核來源指路'))
+        return 'pointer' if pointer else 'card'
+    return None
 
 
 def snapshot(destination, config):
@@ -40,7 +62,10 @@ def snapshot(destination, config):
     (destination / 'manifest.json').write_text(json.dumps(manifests, indent=2), encoding='utf-8')
 
 
-def measure(root, corpus, repeats):
+def measure(root, corpus, repeats, scope='all', cold=False, process=False):
+    root = root.resolve()
+    source_hashes = {path: hashlib.sha256((ROOT / path).read_bytes()).hexdigest()
+                     for path in ('epitype/memsearch.py', 'epitype/memspec.py', 'epitype/rule_provenance.py', 'adapters/claude/recall_hook.py')}
     vaults = [root / f'V{index}' for index in range(1, 5)]
     for vault in vaults:
         memsearch.build_index(vault)
@@ -55,26 +80,52 @@ def measure(root, corpus, repeats):
         for question in corpus['questions']:
             vault = root / question['vault_id']
             outcome = regression.run_question(vault, question)
+            question_config = dict(config)
+            if scope == 'project':
+                question_config[memspec.CONFIG_VAULTS_FIELD] = list(dict.fromkeys((vault, vaults[0])))
             samples, contexts = [], []
             for _ in range(repeats):
+                if cold and hasattr(memsearch, '_alias_identity'):
+                    memsearch._alias_identity.cache_clear()
                 start = time.monotonic()
-                with contextlib.redirect_stderr(io.StringIO()):
-                    value = hook._recall({'prompt': question['prompt']}, start, config)
+                if process:
+                    runtime_config = root / 'process-config.json'
+                    common.write_config(runtime_config, question_config[memspec.CONFIG_VAULTS_FIELD])
+                    environment = dict(os.environ, EPITYPE_CONFIG=str(runtime_config))
+                    start = time.monotonic()
+                    child = subprocess.run(
+                        [sys.executable, str(ROOT / 'adapters/claude/recall_hook.py')],
+                        input=json.dumps({'prompt': question['prompt'], 'session_id': f'benchmark-{time.monotonic_ns()}'}),
+                        capture_output=True, text=True, encoding='utf-8', env=environment, check=True)
+                    value = json.loads(child.stdout) if child.stdout.strip() else None
+                else:
+                    with contextlib.redirect_stderr(io.StringIO()):
+                        value = hook._recall({'prompt': question['prompt']}, start, question_config)
                 samples.append((time.monotonic() - start) * 1000)
                 context = (value or {}).get('hookSpecificOutput', {}).get('additionalContext', '')
                 contexts.append(context)
             context = contexts[-1]
-            outcome['hook_hit'] = any(f'/{name}' in context for name in question['expect'])
+            kind = delivered_kind(context, vault, question['expect'])
+            outcome['hook_hit'] = kind == 'card'
+            outcome['hook_pointer_hit'] = kind == 'pointer'
             outcome['injected_bytes'] = len(context.encode('utf-8'))
             outcome['hook_ms'] = statistics.median(samples)
             outcomes.append(outcome)
+            print(f"{question['id']}: rank={outcome.get('rank')} hook={outcome['hook_hit']} "
+                  f"{outcome['hook_ms']:.0f} ms {outcome['injected_bytes']} bytes", flush=True)
+            (root / 'progress.json').write_text(json.dumps(outcomes, ensure_ascii=False), encoding='utf-8')
             durations.extend(samples)
             sizes.append(outcome['injected_bytes'])
-    return {'revision': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
+    return {'revision': os.environ.get('EPITYPE_BENCHMARK_REF') or subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
+            'scope': scope, 'cold_alias_cache': cold,
+            'latency_mode': 'hook-process' if process else 'recall-core',
+            'hook_match_method': 'selected-vault-and-final-card-path; pointers counted separately',
+            'source_sha256': source_hashes,
             'manifest': json.loads((root / 'manifest.json').read_text(encoding='utf-8')),
             'repeats': repeats, 'cases': len(outcomes),
             'hits_at_8': sum(row['passed'] for row in outcomes),
             'hook_hits': sum(row['hook_hit'] for row in outcomes),
+            'hook_pointer_hits': sum(row['hook_pointer_hit'] for row in outcomes),
             'hook_median_ms': statistics.median(durations), 'hook_max_ms': max(durations),
             'mean_injected_bytes': statistics.mean(sizes), 'outcomes': outcomes}
 
@@ -84,13 +135,22 @@ def main():
     parser.add_argument('--snapshot', type=Path, required=True)
     parser.add_argument('--create', action='store_true')
     parser.add_argument('--config', type=Path, default=Path.home() / '.epitype/config.json')
-    parser.add_argument('--corpus', type=Path, default=ROOT / 'tests/fixtures/recall_sessions_20261029.json')
+    parser.add_argument('--corpus', type=Path, default=RUN_ROOT / 'tests/fixtures/recall_sessions_20261029.json')
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--repeats', type=int, default=3)
+    parser.add_argument('--scope', choices=('all', 'project'), default='all')
+    parser.add_argument('--cold', action='store_true', help='clear pure alias parsing cache before every measured call')
+    parser.add_argument('--process', action='store_true', help='run the actual hook process; capture may write into the disposable snapshot')
+    parser.add_argument('--case', action='append', default=[], help='measure only these fixed corpus case IDs')
     args = parser.parse_args()
     if args.create:
         snapshot(args.snapshot, json.loads(args.config.read_text(encoding='utf-8')))
-    report = measure(args.snapshot, json.loads(args.corpus.read_text(encoding='utf-8')), args.repeats)
+    corpus = json.loads(args.corpus.read_text(encoding='utf-8'))
+    if args.case:
+        corpus['questions'] = [row for row in corpus['questions'] if row['id'] in args.case]
+        if {row['id'] for row in corpus['questions']} != set(args.case):
+            parser.error('unknown case ID')
+    report = measure(args.snapshot, corpus, args.repeats, args.scope, args.cold, args.process)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
     print(json.dumps({key: value for key, value in report.items() if key not in ('outcomes', 'manifest')}, ensure_ascii=False))

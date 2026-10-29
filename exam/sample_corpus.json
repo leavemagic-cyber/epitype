@@ -389,7 +389,7 @@
       "input": "pinboardmarker 的現行做法是什麼？",
       "expect": {
         "pinned_contains": [
-          "查找線索（來源未核；非授權或新增禁令） | synthetic-pinboard（2026-07-01）",
+          "synthetic-pinboard（2026-07-01）",
           "合成練習的置頂示例"
         ],
         "pinned_excludes": [

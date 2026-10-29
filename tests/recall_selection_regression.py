@@ -21,7 +21,7 @@ import recall_hook as recall
 # A card without a verified original source is recalled as a lookup hint, never as a
 # ruling (6f6fce1, docs/RULE_PROVENANCE.md). These fixtures are such legacy cards; an
 # active decision among them keeps its pinned seat and is told apart by its key and date.
-LOOKUP = "- 查找線索（來源未核；非授權或新增禁令） | "
+LOOKUP = "- " + memspec.RECALL_LOOKUP_PREFIX
 
 
 def _decision_line(line, key):

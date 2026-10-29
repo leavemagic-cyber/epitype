@@ -5,6 +5,7 @@ It does not prove semantic entailment or grant permission to execute an action.
 Legacy cards remain readable, but missing evidence is never upgraded to proof.
 """
 import contextlib
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime
 import functools
@@ -44,6 +45,7 @@ class _ReadBudgetExhausted(OSError):
 # The per-check budgets keep a tool call responsive. A run nobody waits on (the
 # nightly dream) verifies to completion instead of refusing for lack of time.
 _UNBOUNDED = False
+_VERIFICATION_DEADLINE = ContextVar('verification_deadline', default=float('inf'))
 
 
 @contextlib.contextmanager
@@ -57,7 +59,17 @@ def unbounded_verification():
 
 
 def verification_deadline(seconds):
-    return float('inf') if _UNBOUNDED else time.monotonic() + seconds
+    return float('inf') if _UNBOUNDED else min(time.monotonic() + seconds, _VERIFICATION_DEADLINE.get())
+
+
+@contextlib.contextmanager
+def verification_window(deadline):
+    """Nested source checks share the caller's deadline, without caching proof."""
+    token = _VERIFICATION_DEADLINE.set(min(deadline, _VERIFICATION_DEADLINE.get()))
+    try:
+        yield
+    finally:
+        _VERIFICATION_DEADLINE.reset(token)
 
 
 @dataclass
