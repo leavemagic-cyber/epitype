@@ -39,9 +39,15 @@ REPLAY_HEADERS = (
 CONTEXT_TAGS = (
     'in-app-browser-context', 'environment_context', 'system-reminder',
     'pasted_content', 'codex_internal_context', 'image',
+    'heartbeat', 'hook_prompt', 'local-command-stdout', 'scheduled-task',
+    'subagent_notification', 'side-sessions-event', 'codex_delegation',
+    'epitype-evaluation', 'external_codex_apps_open_page',
+    'external_codex_apps_writing_block_edits', 'recommended_plugins',
+    'turn_aborted', 'create-pr-command', 'command-message',
 )
 CONTEXT_BLOCK = re.compile(
-    r'<(' + '|'.join(CONTEXT_TAGS) + r')\b[^>]*>.*?(?:</\1(?:\s[^>]*)?>|&lt;/\1(?:\s.*?)?&gt;)'
+    # Escaped nested examples must not close the actual outer host block.
+    r'<(' + '|'.join(CONTEXT_TAGS) + r')\b[^>]*>(?:.*?</\1(?:\s[^>]*)?>|.*?&lt;/\1(?:\s.*?)?&gt;)'
     r'|</?image\b[^>]*>', re.DOTALL | re.IGNORECASE)
 
 
@@ -53,17 +59,55 @@ def normalize(text):
     return re.sub(r'[\W_]+', '', unicodedata.normalize('NFKC', text)).casefold()
 
 
+def _question_reply(text):
+    match = re.fullmatch(r'\s*<send_user_message_question_reply>\s*(.*?)\s*'
+                         r'</send_user_message_question_reply>\s*', text, re.S)
+    if match is None:
+        return None
+    try:
+        replies = json.loads(match.group(1))
+    except ValueError:
+        return ('', '')
+    if not isinstance(replies, list) or not replies or not all(
+            isinstance(reply, dict) and isinstance(reply.get('questionItemId'), str)
+            and isinstance(reply.get('question'), str) and isinstance(reply.get('answer'), str)
+            for reply in replies):
+        return ('', '')
+    return ('\n'.join(reply['answer'] for reply in replies),
+            '\n'.join(reply['question'] for reply in replies))
+
+
 def owner_text(text, *, queued=False):
     text = text.strip()
+    closing_tags = '|'.join(CONTEXT_TAGS)
+    if (text.startswith('</')
+            and re.fullmatch(r'(?:</(?:' + closing_tags + r'|input)\b[^>]*>\s*)+', text, re.I)
+            and re.search(r'</(?:' + closing_tags + r')\b', text, re.I)):
+        return ''
+    reply = _question_reply(text)
+    if reply is not None:
+        return reply[0].strip()
+    if text.startswith('<send_user_message_question_reply'):
+        return ''
+    if text.startswith('<realtime_delegation'):
+        request = re.search(r'<input>(.*?)</input>', text, re.S)
+        return owner_text(request.group(1)) if request else ''
     if text.startswith(('Caveat: The messages below', '# AGENTS.md',
                         'This session is being continued', *REPLAY_HEADERS,
                         '>>> SENDER USER MESSAGES START',
                         '>>> RETAINED USER INSTRUCTIONS START')):
         return ''
+    if text.startswith('# Context from my IDE setup:'):
+        request = re.search(r'(?m)^## My request(?: for Codex)?:[ \t]*', text)
+        if request is None:
+            return ''
+        text = text[request.end():].strip()
     text = CONTEXT_BLOCK.sub('', text).strip()
+    if re.match(r'<(?:' + '|'.join(CONTEXT_TAGS) + r')\b', text, re.I):
+        return ''  # An unfinished host block cannot prove where new owner text starts.
     # A file list is host context only when paired with its request delimiter.
     text = re.sub(r'(?ms)^# Files mentioned by the user:\s*.*?(?:^## My request:[ \t]*\n?|\Z)', '', text)
-    text = re.sub(r'(?m)^## My request:[ \t]*\n?', '', text).strip()
+    text = re.sub(r'(?m)^## My request(?: for Codex)?:[ \t]*\n?', '', text).strip()
     if text.casefold().startswith(memspec.MACHINE_TURN_PREFIXES):
         return ''
     if re.match(r'<(?:' + '|'.join(memspec.MACHINE_TURN_HARD_TAGS) + r')\b', text, re.I):
@@ -81,15 +125,15 @@ def _owner_record(item, asked):
         if isinstance(payload, dict) and payload.get('role') == 'user':
             content = payload.get('content')
             if isinstance(content, list):
-                texts = [b.get('text', '') for b in content if isinstance(b, dict)
-                         and b.get('type') in ('text', 'input_text')]
+                if any(isinstance(b, dict) and b.get('type') == 'tool_result' for b in content):
+                    return transcript.source_record(item, asked)
+                texts = [b['text'] for b in content if isinstance(b, dict)
+                         and b.get('type') in ('text', 'input_text') and isinstance(b.get('text'), str)]
                 # Guardian requests replay past turns as many separate input_text blocks.
                 if (any(isinstance(t, str) and t.lstrip().startswith(REPLAY_HEADERS) for t in texts)
                         or any(isinstance(t, str) and t.strip() == '>>> APPROVAL REQUEST END' for t in texts)):
                     return None
-                content = [dict(b, text=owner_text(b['text']))
-                           if isinstance(b, dict) and isinstance(b.get('text'), str)
-                           else b for b in content]
+                content = [{'type': 'input_text', 'text': '\n'.join(texts)}]
                 item = dict(item, payload=dict(payload, content=content))
     return transcript.source_record(item, asked)
 
@@ -205,6 +249,10 @@ def _fingerprint(stream, offset, report):
 
 
 def _question(item, asked):
+    payload = item.get('payload') if item.get('type') == 'response_item' else item.get('message')
+    reply = _question_reply(transcript.message_text(payload))
+    if reply is not None:
+        return reply[1]
     answers = item.get('toolUseResult')
     answers = answers.get('answers') if isinstance(answers, dict) else None
     if not isinstance(answers, dict):

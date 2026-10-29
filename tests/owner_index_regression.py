@@ -140,11 +140,15 @@ class OwnerIndexTests(unittest.TestCase):
                    '# Files mentioned by the user:\n## attached.png: /local/path\n'
                    '## My request:\nsecond new words\n<image src="attachment"/>\n'
                    '## My request:\nthird new words</image></image>')
-        self.build([message(wrapped), message('<sample>long real paste</sample>' * 1000)])
+        self.build([message(wrapped), message('<sample>long real paste</sample>' * 1000),
+                    message('# Context from my IDE setup:\n## Active file: ambient.py\n'
+                            '## Open tabs:\nambient.py\n## My request for Codex:\nnew IDE request'),
+                    message('# Context from my IDE setup:\n## Active file: only-ambient.py')])
         row = self.find('first')[0]
         self.assertEqual('first new words\n\nsecond new words\n\nthird new words', row['text'])
         self.assertEqual([], self.find('ambient'))
         self.assertEqual([], self.find('attached'))
+        self.assertEqual('new IDE request', self.find('IDE request')[0]['text'])
         self.assertEqual('<sample>long real paste</sample>' * 1000, self.find('long real paste')[0]['text'])
 
     def test_identical_text_across_archive_and_original_has_distinct_locators(self):
@@ -158,6 +162,33 @@ class OwnerIndexTests(unittest.TestCase):
         owner.update(self.index, [self.source])
         self.assertEqual(1, self.find('identical')[0]['locator_count'])
         self.assertTrue(self.find('identical')[0]['source'].endswith('copy.zip!copy.jsonl'))
+
+    def test_automation_context_and_new_wrapped_human_answers(self):
+        answer = '<send_user_message_question_reply>' + json.dumps([
+            {'questionItemId': 'synthetic-question', 'question': 'AI question context',
+             'answer': 'new human answer'}]) + '</send_user_message_question_reply>'
+        self.build([message('<heartbeat><instructions>automated replay</instructions></heartbeat>'),
+                    message('<subagent_notification>old agent report</subagent_notification>'),
+                    message('<hook_prompt>hook feedback</hook_prompt>'),
+                    message('<codex_delegation><input>relayed instructions</input></codex_delegation>'),
+                    message('</input>\n</codex_delegation>'),
+                    message('<codex_delegation><input>&lt;codex_delegation&gt;'
+                            'encoded old instructions&lt;/codex_delegation&gt;'
+                            '</input></codex_delegation>'),
+                    message(answer), message('<realtime_delegation><input>fresh voice input</input>'
+                                             '<transcript_delta>old voice turns</transcript_delta>'
+                                             '</realtime_delegation>'),
+                    message('<command-message>do</command-message><command-name>/do</command-name>'
+                            '<command-args>fresh command arguments</command-args>')])
+        self.assertEqual([], self.find('automated'))
+        self.assertEqual([], self.find('old'))
+        self.assertEqual([], self.find('feedback'))
+        self.assertEqual([], self.find('relayed'))
+        self.assertEqual([], self.find('codex_delegation'))
+        row = self.find('human answer')[0]
+        self.assertEqual(('new human answer', 'AI question context'), (row['text'],row['question']))
+        self.assertEqual('fresh voice input', self.find('voice input')[0]['text'])
+        self.assertEqual('fresh command arguments', self.find('command arguments')[0]['text'])
 
     def test_append_checks_only_a_small_boundary_and_rereads_on_mismatch(self):
         self.build([message('original'), message('padding' * owner.WINDOW_BYTES)])

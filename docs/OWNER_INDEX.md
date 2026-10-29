@@ -36,11 +36,24 @@ They are rejected before their numbered `[N] user:` blocks are joined. Those
 blocks are old turns, not new input. Browser/environment context, system
 reminders, pasted context, internal context, file-mention lists and image tags
 are removed; repeated `## My request:` delimiters carry no owner words.
+Older `# Context from my IDE setup:` blocks (active file/open tabs) retain only
+the text after `## My request:` or `## My request for Codex:`; an IDE-only block
+has no new owner text.
 Other long pasted text has no length limit and remains searchable, including
 ordinary XML that is not a host context tag. For U and Q, copied
 assistant text before inline `《`, `<`, `<-` or `<=` reply markers is removed using
 the existing `capture.owner_reply` rule. Only the following human annotations
 are indexed; S continues to retain the selected AI option's distinct role.
+
+Known machine packets also include heartbeat/scheduled automation, hook and
+command output, subagent notifications, relayed Codex instructions and ambient
+app/plugin state. Their bodies are not newly authored owner messages. Unknown
+XML remains a paste, rather than being discarded merely for starting with `<`.
+Codex question-reply envelopes retain only their `answer` strings, with the
+AI-written questions stored separately; realtime voice envelopes retain only
+the new `input`, excluding `transcript_delta`. Text blocks are joined before
+wrapper removal so a tag split around an image cannot leak its closing tag or
+discard the new request between blocks.
 
 Rows retain full owner text, role, timestamp, session ID, message UUID when the
 host provides one, source path, physical byte offset and the original row's
