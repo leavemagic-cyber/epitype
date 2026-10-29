@@ -214,8 +214,10 @@ def default_roots():
     if isinstance(configured, list) and all(isinstance(p, str) for p in configured):
         return [Path(p).expanduser() for p in configured]
     projects = home / '.claude' / 'projects'
+    extra = memspec.config_options().get('owner_index_extra_roots')
+    extra = [Path(p).expanduser() for p in extra] if isinstance(extra, list) else []
     return [*sorted(projects.glob('*/*.jsonl')), *sorted(projects.glob('*/*.jsonl.backup*')),
-            home / '.codex' / 'sessions', home / '.codex' / 'archived_sessions']
+            home / '.codex' / 'sessions', home / '.codex' / 'archived_sessions', *extra]
 
 
 def _supported(path):
