@@ -577,7 +577,7 @@ RECALL_TOTAL_MAX_LINES = 8
 RECALL_PINNED_SCAN_LIMIT = 15
 # Source checks share the existing hook deadline, leaving time to render and emit.
 # This reserve follows the host time limit; it is not a source-admission rule.
-RECALL_SOURCE_RESERVE_SECONDS = 1.0
+RECALL_SOURCE_RESERVE_SECONDS = 3.0
 RECALL_LEGEND_PREFIX = "vaults: "
 RECALL_LOOKUP_PREFIX = ""
 RECALL_REDIRECT_PREFIX = "繼任 | "

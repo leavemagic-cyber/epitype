@@ -159,6 +159,14 @@ class RecallTextRegression(unittest.TestCase):
                         budget.check()
             self.assertEqual(rule_provenance.verification_deadline(50), 150)
 
+    def test_hook_leaves_time_for_search_rendering_and_process_exit(self):
+        with patch.object(rule_provenance.time, 'monotonic', return_value=100), \
+             patch.object(hook, '_recall_cards') as cards:
+            cards.side_effect = lambda *args: rule_provenance.verification_deadline(50)
+            deadline = hook._recall({'prompt': 'source check'}, 100, {})
+        self.assertEqual(deadline, 106)
+        self.assertLess(deadline, 100 + memspec.HOOK_TIMEOUT_SECONDS)
+
     def projection(self, kind='owner-directive', verified=True):
         return {'document': {'key': 'source-key', 'kind': kind, 'author': 'owner' if kind == 'owner-directive' else 'codex',
                              'scope': copy.deepcopy(hook._DEFAULT_RECALL_SCOPE), 'quote': 'Original owner words'},
