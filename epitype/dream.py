@@ -10,8 +10,9 @@ import sys; sys.dont_write_bytecode = True; [getattr(stream, "reconfigure", lamb
 脫鉤的低優先權背景程序）、nightly（graft 註冊系統排程）、off。三者跑的都是同一條
 命令 `dream.py --scheduled`——庫與輸出路徑由這裡自己從 config 解出，所以換庫不必
 重註冊排程。盤點本身唯讀，寫的是 <治理 vault>/.epitype/ 的 pack／state／lock／log，
-外加兩個順路任務：重生 `_views/`，以及把 MEMORY.md 允許段以外、目錄已承載的卡片
+外加三個順路任務：先做記憶庫 git 快照、重生 `_views/`，以及把 MEMORY.md 允許段以外、目錄已承載的卡片
 連結行搬進 `_drafts/index_pruned/`（原文照搬、不刪；`--dry-run` 只印不改）。
+目錄重生後另寫 `_drafts/duplicates/YYYYMMDD.md` 及 JSON；近重複卡片只列報告，交由主導 AI 處理。
 """
 
 import argparse
@@ -64,12 +65,22 @@ COMPLIANCE_STUCK_ERROR = (
     "本晚只讀了其中 {read} 份，下一晚會重算同一段"
 )
 RECENT_WINDOW_DAYS = 7
+VAULT_SNAPSHOT_STALE_SECONDS = 120
+VAULT_SNAPSHOT_TIMEOUT_SECONDS = 300
+VAULT_SNAPSHOT_HEADING = "## 記憶庫快照"
+VAULT_SNAPSHOT_LINE = "- {vault}｜{status}｜{detail}"
+VAULT_SNAPSHOT_LABELS = {
+    "committed": "已提交", "clean": "沒有變更", "busy": "另一場持鎖，今晚略過",
+    "not-git": "不是 git 記憶庫", "error": "快照失敗",
+}
+VAULT_SNAPSHOT_CLEAN = "沒有需要提交的變更"
+VAULT_SNAPSHOT_BUSY = "快照鎖未超過 120 秒"
+VAULT_SNAPSHOT_NOT_GIT = "沒有 .git 目錄"
+VAULT_SNAPSHOT_GIT_ERROR = "git {command} 失敗：{detail}"
+VAULT_SNAPSHOT_CLEANUP_ERROR = "快照鎖清理失敗：{detail}"
 DRAFT_DIRNAME = "_drafts"
 _EVENT_TYPE_BY_DIR = dict(memspec.EVENT_CARD_DIRECTORIES)  # {"grants": "grant", ...}
 
-# 第 8–12 節（U-K，owner 2026-09-09）：全部只列候選，一個檔都不搬、不改、不刪。夢的
-# 這五節回答的是「有什麼東西沒經過確認就留在那裡」，處置一律是人的動作。
-# 每一庫自己的手寫段清單：白名單只寫得出治理庫的段名，別的庫的段名只有它自己知道。
 INDEX_SECTIONS_FILENAME = "index_sections.json"
 INDEX_SECTIONS_VERSION = 1
 INDEX_SECTIONS_FIRST_RUN = "首次納管：記下 {count} 個手寫段，本次未整形"
@@ -101,7 +112,7 @@ MIXED_SKIP_FRESH_SPLIT = "fresh_split"
 MIXED_SKIP_RECORD_TYPE = "record_type"
 MIXED_SKIPPED_NOTE = "已審過略過 {count} 張"
 CAP_UNSET_NOTE = "{field} 未設定，這一項跳過"
-CAP_COMMAND = "依第 11 節排序清單擬精簡稿 → Claude 與 Codex 核對意義不變 → 走規則管線寫入並重新綁定 → 寫入後告知 owner 改了什麼與前後 bytes；不先送 owner 逐字核准（owner 2026-09-09 裁定）；夢不改規則卡、不提高上限"
+CAP_COMMAND = "依第 11 節排序清單擬精簡稿 → Claude 與 Codex 核對意義不變 → 走規則管線寫入並重新綁定 → 寫入後告知 owner 改了什麼與前後 bytes；不先送 owner 逐字核准；夢不改規則卡、不提高上限"
 # 同一批 core_files 順路多問一句：這個檔跟規則卡重組出來的生成塊還一不一致。
 # 只列候選——夢不重生成核心塊，那是本機作業（`epitype core-gen`）。
 CAP_DRIFT_KIND = "generated-block-drift"
@@ -119,8 +130,6 @@ QUOTE_DELIMITER_CATEGORIES = ("Pi", "Pf", "Ps", "Pe")
 QUOTE_DELIMITER_CHARS = "\"'"
 UNCARRIED_COMMAND = "人工判斷這句原話該不該升成決策卡（或標 verified: false 降級）；夢不自動升卡"
 
-# 第 15 節（U-P，owner 2026-09-09「應該有回饋檢討機制」）：把四種來源的證據對齊到卡上
-# 並數次數。只列候選——不判型別（A／B／C 由檢討場判）、不改卡、不動層、不注入對話。
 REVIEW_PACK_SECTION_ID = 15
 REVIEW_PACK_TITLE = "檢討包 / review pack"
 REVIEW_PACK_MAX_ROWS = 50
@@ -149,6 +158,94 @@ REVIEW_PACK_EXAM_UNMAPPED_NOTE = "{count} 題失敗但題目沒寫對到哪張�
 
 
 # --------------------------------------------------------------------------- helpers
+
+
+def _snapshot_vault(vault, today):
+    vault = Path(vault)
+    result = {"vault": str(vault), "status": "not-git", "detail": VAULT_SNAPSHOT_NOT_GIT}
+    lock = vault / ".git_snapshot.lock"
+    token = uuid.uuid4().hex
+    identity = None
+    stop = threading.Event()
+    heartbeat = None
+
+    def refresh():
+        # git 可跑超過接管門檻；持續更新鎖，避免 hook 把仍在工作的夢當成陳鎖。
+        while not stop.wait(VAULT_SNAPSHOT_STALE_SECONDS / 4):
+            try:
+                if lock.read_text(encoding="utf-8") != token:
+                    return
+                os.utime(lock, None)
+            except (OSError, UnicodeError):
+                return
+
+    def git(*args):
+        completed = subprocess.run(
+            ["git", "-C", str(vault), *args], capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=VAULT_SNAPSHOT_TIMEOUT_SECONDS,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if completed.returncode and not (
+                args[0] == "commit" and "nothing to commit" in completed.stdout + completed.stderr):
+            raise RuntimeError(VAULT_SNAPSHOT_GIT_ERROR.format(
+                command=args[0], detail=(completed.stderr or completed.stdout).strip()))
+        return completed
+
+    try:
+        if not (vault / ".git").is_dir():
+            return result
+        try:
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            if time.time() - lock.stat().st_mtime <= VAULT_SNAPSHOT_STALE_SECONDS:
+                result.update(status="busy", detail=VAULT_SNAPSHOT_BUSY)
+                return result
+            lock.unlink()
+            try:
+                fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            except FileExistsError:
+                result.update(status="busy", detail=VAULT_SNAPSHOT_BUSY)
+                return result
+        identity = os.fstat(fd)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(token)
+        thread = threading.Thread(target=refresh, daemon=True)
+        thread.start()
+        heartbeat = thread
+        index_lock = vault / ".git" / "index.lock"
+        if index_lock.exists() and time.time() - index_lock.stat().st_mtime > VAULT_SNAPSHOT_STALE_SECONDS:
+            index_lock.unlink()
+        pending = vault / "_GIT_PENDING"
+        lines = [line for line in git("status", "--porcelain").stdout.splitlines() if line.strip()]
+        if lines:
+            added = sum(line[:2].strip() in ("A", "??") for line in lines)
+            modified = sum(line[:2].strip() in ("M", "AM", "MM") for line in lines)
+            deleted = sum(line[:2].strip() == "D" for line in lines)
+            message = f"dream {today.isoformat()} | cards +{added} ~{modified} -{deleted} | by:dream"
+            git("add", "-A")
+            committed = git("commit", "-m", message).returncode == 0
+            result.update(status="committed" if committed else "clean",
+                          detail=message if committed else VAULT_SNAPSHOT_CLEAN)
+        else:
+            result.update(status="clean", detail=VAULT_SNAPSHOT_CLEAN)
+        pending.unlink(missing_ok=True)
+    except Exception as exc:
+        result.update(status="error", detail=f"{type(exc).__name__}: {exc}")
+    finally:
+        stop.set()
+        if heartbeat is not None:
+            heartbeat.join()
+        if identity is not None:
+            try:
+                # 只移除自己建立的鎖；接管後的新鎖不能替別人清掉。
+                current = lock.stat()
+                if (current.st_dev, current.st_ino) == (identity.st_dev, identity.st_ino):
+                    lock.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                result.update(status="error", detail=VAULT_SNAPSHOT_CLEANUP_ERROR.format(detail=exc))
+    return result
 
 
 def _bounded(vaults, fn):
@@ -288,6 +385,9 @@ def _drafts_of(vault):
     judged = 0
     waiting = []
     for path in sorted(root.rglob("*.md")):
+        # Generated duplicate reports are findings, not captured card proposals.
+        if path.relative_to(root).parts[0] == memspec.DUPES_DIRECTORY:
+            continue
         if _draft_judged(path):
             judged += 1
         else:
@@ -349,8 +449,6 @@ def _section_drafts(vaults, today, since_date, config, context=None):
             commands.append(
                 f'python epitype/harvest.py --reevaluate "{Path(vault) / DRAFT_DIRNAME / "decisions"}" [--apply]'
             )
-        # 捕捉提案不走 --reevaluate：那條路是「今天的規則還會不會捕捉」，而提案被扣住
-        # 的原因正是它會被捕捉；轉正是人看過、改 verified 的動作（owner 2026-09-09 Q5「C」）。
         if any(pending_root in path.parts for path in paths):
             commands.append(memspec.CAPTURE_PENDING_REVIEW_COMMAND.format(
                 path=Path(vault).joinpath(*memspec.CAPTURE_PENDING_SUBPATH)
@@ -677,8 +775,7 @@ def _project_dir_exists(project_dir, max_rows=40):
 def _section_pocket_vaults(vaults, today, since_date, config):
     """未登記卻裝著卡的目錄＝口袋庫；只列歸戶候選，不搬不改。
 
-    owner 2026-09-09：「我不知道會有多少地方在產生非整理的記憶」。登記清單答不了這個
-    問題——它只列得出已經知道的庫。所以這一節反過來從磁碟數，再扣掉登記的。
+    登記清單只列得出已經知道的庫，所以這一節從磁碟數，再扣掉登記的。
     """
     # 登記清單直接讀設定，不走 configured_vaults()：那個入口為「一個庫都沒登記」丟
     # 例外，而在這裡「沒登記」正是要回答的問題，不是這一節跑不下去的理由。
@@ -967,7 +1064,7 @@ def _positive_int(value):
 
 
 def _section_caps(vaults, today, since_date, config):
-    """上限＝檢討值＋兩成（owner 2026-09-09）。超量產出整理材料，不改卡或上限。
+    """上限＝檢討值＋兩成。超量產出整理材料，不改卡或上限。
 
     三個鍵都選填，而且缺鍵一律寫一行「未設定」而不是套內建門檻：一個產品猜出來的
     上限被寫成「超上限」，讀的人會以為那是 owner 的判斷。
@@ -1241,7 +1338,7 @@ def _uncarried_quotes_of(vault, carriers):
             ):
                 continue
             # 一次性的話沒有東西可以往前帶。把當下那一句產品意見升成常設規則，等於讓
-            # 一句「這頁不用寫」永遠管著以後每一頁（2026-09-19 抽查 daipai 三張都是這種）。
+            # 一句「這頁不用寫」永遠管著以後每一頁（2026-09-19 抽查 sample-app 三張都是這種）。
             if fields.get(memspec.SCOPE_FIELD, "").strip().casefold() == memspec.SCOPE_ONE_TIME:
                 continue
             # 已核可又有別名的事件卡自己就找得到：這一節要防的是「沒有任何到達路徑」，
@@ -1608,7 +1705,7 @@ def _allowed_index_section(title, allowed=None):
 
     白名單寫死四個段名時，那四個其實只是治理庫自己的段名；別的庫用自己的段名（例如
     「## 專案執行約束」）整段都會被判成可搬，而專案庫的 MEMORY.md 是宿主每一場自動
-    載入的送達面，搬走等於當場斷了那個專案的記憶（owner 2026-09-21）。
+    載入的送達面，搬走等於當場斷了那個專案的記憶。
     """
     key = " ".join(str(title or "").split()).casefold()
     if any(key == item.casefold() for item in memspec.INDEX_ALLOWED_SECTIONS):
@@ -2530,6 +2627,17 @@ def _render_markdown(report):
         lines.append(f"- {vault}")
     lines.append(f"事件卡老化門檻（--since）：{report['since']}")
     lines.append("")
+    if report.get("owner_index") is not None:
+        lines.extend((memspec.OWNER_INDEX_DREAM_LINE.format(
+            result=json.dumps(report["owner_index"], ensure_ascii=False)), ""))
+    snapshots = report.get("vault_snapshots") or ()
+    if snapshots:
+        lines.extend((VAULT_SNAPSHOT_HEADING, ""))
+        for item in snapshots:
+            lines.append(VAULT_SNAPSHOT_LINE.format(
+                vault=item["vault"], status=VAULT_SNAPSHOT_LABELS[item["status"]],
+                detail=item["detail"].replace("\n", "；").replace("\r", "")))
+        lines.append("")
     # 第 13、14 節（整形與下一步）在 U-K 就已經佔住那兩個號碼，所以第 15 節接在它們
     # 後面印，號碼才跟閱讀順序一致；盤點節照樣先印。
     for section in report["sections"]:
@@ -2820,7 +2928,7 @@ def configured_vaults(config_path=None):
     """夢今晚要整理的庫：設定檔登記的，加上掃描到裝著卡的原生庫。
 
     登記清單答不了「這台機器上有多少地方在產生記憶」——裝著卡的原生庫本來就受管
-    （capture_route.managed_vaults，owner 2026-09-21）。夢只讀這份清單：跑不跑由排程器
+    （capture_route.managed_vaults）。夢只讀這份清單：跑不跑由排程器
     與 hook 決定。要掃哪一個家由讀到的設定檔決定，合成設定不會掃到真機。
     """
     path = Path(config_path or _config_path())
@@ -2901,6 +3009,14 @@ def _report_errors(report):
                 "error": "transcripts omitted by scan cap",
                 "errors": [],
             }
+    duplicates = report.get("duplicates") or {}
+    if duplicates.get("error") or duplicates.get("errors"):
+        errors["duplicates"] = {
+            "error": duplicates.get("error"), "errors": duplicates.get("errors") or [],
+        }
+    indexed = report.get("owner_index") or {}
+    if indexed.get("error") or indexed.get("errors") or indexed.get("unreadable_rows") or indexed.get("skipped_zst"):
+        errors["owner_index"] = indexed
     return errors
 
 
@@ -3064,7 +3180,7 @@ def _selftest():
                 by_id[7]["counts"]["recent_7d"] == 1
                 and by_id[7]["examples"][0]["path"] == "grants/new_grant.md"
             )))
-            checks.append(("no section counts AI commitments any more (owner 2026-09-09)", not any(
+            checks.append(("no section counts AI commitments any more", not any(
                 "commitment" in key
                 for section in report["sections"]
                 for key in (section.get("counts") or {})
@@ -4082,6 +4198,7 @@ def _main(argv, output):
         except Exception as exc:
             early_sync = {"id": 14, "title": host_title,
                           "error": f"{type(exc).__name__}: {exc}"}
+        snapshots = [] if parsed.dry_run else [_snapshot_vault(vault, today) for vault in vaults]
         # 順路重生閱讀目錄：夜間整理已經在走每一個庫，而生成本身是「輸入指紋沒變就
         # 不寫」。失敗不影響審核包——目錄過期還有 card_lint --deep 的漏卡檢查會報。
         # 必須排在整形之前：整形的判準是「目錄已經承載這張卡」，判準本身不能是舊的。
@@ -4092,6 +4209,35 @@ def _main(argv, output):
                     views.generate(vault)
                 except Exception:
                     continue
+            # Hook-time refreshes skip source preparation; without this nightly pass, new or
+            # edited cards fall back to the slow transcript scan inside the recall hook.
+            for vault in vaults:
+                try:
+                    memsearch.build_index(vault, prepare_sources=True)
+                except Exception:
+                    continue
+        # Duplicate settlement belongs to the lead AI; the nightly job only reports.
+        try:
+            from epitype import dupes
+            duplicate_report = dupes.detect(vaults, today=today)
+            duplicate_path = None if parsed.dry_run else dupes.write_report(
+                duplicate_report, governance_vault(vaults))
+            duplicate_summary = {
+                "clusters": len(duplicate_report["clusters"]),
+                "cards_scanned": duplicate_report["cards_scanned"],
+                "suppressed_pairs": duplicate_report["suppressed_pairs"],
+                "errors": duplicate_report["errors"],
+                "path": str(duplicate_path) if duplicate_path else None,
+            }
+        except Exception as exc:
+            duplicate_summary = {"error": f"{type(exc).__name__}: {exc}"}
+        owner_index_result = None
+        if not parsed.dry_run:
+            from epitype import owner_index
+            try:
+                owner_index_result = owner_index.update()
+            except (OSError, ValueError, owner_index.sqlite3.Error) as exc:
+                owner_index_result = {"error": f"{type(exc).__name__}: {exc}"}
         shaping = []
         for vault in vaults:
             try:
@@ -4115,8 +4261,14 @@ def _main(argv, output):
             compliance_window_reset="；".join(window_reset),
             host_sync_result=early_sync,
         )
+        report["vault_snapshots"] = snapshots
+        report["duplicates"] = duplicate_summary
+        report["owner_index"] = owner_index_result
         rendered = json.dumps(report, ensure_ascii=False, indent=1)
         content = rendered if parsed.json else _render_markdown(report)
+        if not parsed.json:
+            content += "\n" + memspec.DUPES_DREAM.format(
+                result=json.dumps(duplicate_summary, ensure_ascii=False)) + "\n"
 
         if parsed.dry_run:
             print(content, file=output)

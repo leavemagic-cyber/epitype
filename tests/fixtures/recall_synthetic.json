@@ -1,0 +1,365 @@
+{
+  "description": "Entirely invented corpus; no real owner words, cards, sessions or vaults. Populate matching synthetic cards before benchmarking.",
+  "questions": [
+    {
+      "id": "dated-orchard",
+      "vault_id": "V1",
+      "prompt": "Find the invented orchard note for sample 01.",
+      "expect": [
+        "synthetic-orchard-01.md"
+      ],
+      "source": "invented:synthetic-orchard-01; fixed sample date 2026-01-01"
+    },
+    {
+      "id": "synthetic-orchard-02",
+      "vault_id": "V1",
+      "prompt": "Find the invented orchard note for sample 02.",
+      "expect": [
+        "synthetic-orchard-02.md"
+      ],
+      "source": "invented:synthetic-orchard-02; fixed sample date 2026-01-01"
+    },
+    {
+      "id": "synthetic-orchard-03",
+      "vault_id": "V1",
+      "prompt": "Find the invented orchard note for sample 03.",
+      "expect": [
+        "synthetic-orchard-03.md"
+      ],
+      "source": "invented:synthetic-orchard-03; fixed sample date 2026-01-01"
+    },
+    {
+      "id": "synthetic-orchard-04",
+      "vault_id": "V1",
+      "prompt": "Find the invented orchard note for sample 04.",
+      "expect": [
+        "synthetic-orchard-04.md"
+      ],
+      "source": "invented:synthetic-orchard-04; fixed sample date 2026-01-01"
+    },
+    {
+      "id": "synthetic-orchard-05",
+      "vault_id": "V1",
+      "prompt": "Find the invented orchard note for sample 05.",
+      "expect": [
+        "synthetic-orchard-05.md"
+      ],
+      "source": "invented:synthetic-orchard-05; fixed sample date 2026-01-01"
+    },
+    {
+      "id": "synthetic-orchard-06",
+      "vault_id": "V1",
+      "prompt": "Find the invented orchard note for sample 06.",
+      "expect": [
+        "synthetic-orchard-06.md"
+      ],
+      "source": "invented:synthetic-orchard-06; fixed sample date 2026-01-01"
+    },
+    {
+      "id": "synthetic-orchard-07",
+      "vault_id": "V1",
+      "prompt": "Find the invented orchard note for sample 07.",
+      "expect": [
+        "synthetic-orchard-07.md"
+      ],
+      "source": "invented:synthetic-orchard-07; fixed sample date 2026-01-01"
+    },
+    {
+      "id": "synthetic-orchard-08",
+      "vault_id": "V1",
+      "prompt": "Find the invented orchard note for sample 08.",
+      "expect": [
+        "synthetic-orchard-08.md"
+      ],
+      "source": "invented:synthetic-orchard-08; fixed sample date 2026-01-01"
+    },
+    {
+      "id": "synthetic-orchard-09",
+      "vault_id": "V1",
+      "prompt": "Find the invented orchard note for sample 09.",
+      "expect": [
+        "synthetic-orchard-09.md"
+      ],
+      "source": "invented:synthetic-orchard-09; fixed sample date 2026-01-01"
+    },
+    {
+      "id": "synthetic-orchard-10",
+      "vault_id": "V1",
+      "prompt": "Find the invented orchard note for sample 10.",
+      "expect": [
+        "synthetic-orchard-10.md"
+      ],
+      "source": "invented:synthetic-orchard-10; fixed sample date 2026-01-01"
+    },
+    {
+      "id": "dated-pottery",
+      "vault_id": "V2",
+      "prompt": "Find the invented pottery note for sample 01.",
+      "expect": [
+        "synthetic-pottery-01.md"
+      ],
+      "source": "invented:synthetic-pottery-01; fixed sample date 2026-01-01"
+    },
+    {
+      "id": "synthetic-pottery-02",
+      "vault_id": "V2",
+      "prompt": "Find the invented pottery note for sample 02.",
+      "expect": [
+        "synthetic-pottery-02.md"
+      ],
+      "source": "invented:synthetic-pottery-02; fixed sample date 2026-01-01"
+    },
+    {
+      "id": "synthetic-pottery-03",
+      "vault_id": "V2",
+      "prompt": "Find the invented pottery note for sample 03.",
+      "expect": [
+        "synthetic-pottery-03.md"
+      ],
+      "source": "invented:synthetic-pottery-03; fixed sample date 2026-01-01"
+    },
+    {
+      "id": "synthetic-pottery-04",
+      "vault_id": "V2",
+      "prompt": "Find the invented pottery note for sample 04.",
+      "expect": [
+        "synthetic-pottery-04.md"
+      ],
+      "source": "invented:synthetic-pottery-04; fixed sample date 2026-01-01"
+    },
+    {
+      "id": "synthetic-pottery-05",
+      "vault_id": "V2",
+      "prompt": "Find the invented pottery note for sample 05.",
+      "expect": [
+        "synthetic-pottery-05.md"
+      ],
+      "source": "invented:synthetic-pottery-05; fixed sample date 2026-01-01"
+    },
+    {
+      "id": "synthetic-pottery-06",
+      "vault_id": "V2",
+      "prompt": "Find the invented pottery note for sample 06.",
+      "expect": [
+        "synthetic-pottery-06.md"
+      ],
+      "source": "invented:synthetic-pottery-06; fixed sample date 2026-01-01"
+    },
+    {
+      "id": "synthetic-pottery-07",
+      "vault_id": "V2",
+      "prompt": "Find the invented pottery note for sample 07.",
+      "expect": [
+        "synthetic-pottery-07.md"
+      ],
+      "source": "invented:synthetic-pottery-07; fixed sample date 2026-01-01"
+    },
+    {
+      "id": "synthetic-pottery-08",
+      "vault_id": "V2",
+      "prompt": "Find the invented pottery note for sample 08.",
+      "expect": [
+        "synthetic-pottery-08.md"
+      ],
+      "source": "invented:synthetic-pottery-08; fixed sample date 2026-01-01"
+    },
+    {
+      "id": "synthetic-pottery-09",
+      "vault_id": "V2",
+      "prompt": "Find the invented pottery note for sample 09.",
+      "expect": [
+        "synthetic-pottery-09.md"
+      ],
+      "source": "invented:synthetic-pottery-09; fixed sample date 2026-01-01"
+    },
+    {
+      "id": "synthetic-pottery-10",
+      "vault_id": "V2",
+      "prompt": "Find the invented pottery note for sample 10.",
+      "expect": [
+        "synthetic-pottery-10.md"
+      ],
+      "source": "invented:synthetic-pottery-10; fixed sample date 2026-01-01"
+    },
+    {
+      "id": "dated-kites",
+      "vault_id": "V3",
+      "prompt": "Find the invented kites note for sample 01.",
+      "expect": [
+        "synthetic-kites-01.md"
+      ],
+      "source": "invented:synthetic-kites-01; fixed sample date 2026-01-01"
+    },
+    {
+      "id": "synthetic-kites-02",
+      "vault_id": "V3",
+      "prompt": "Find the invented kites note for sample 02.",
+      "expect": [
+        "synthetic-kites-02.md"
+      ],
+      "source": "invented:synthetic-kites-02; fixed sample date 2026-01-01"
+    },
+    {
+      "id": "synthetic-kites-03",
+      "vault_id": "V3",
+      "prompt": "Find the invented kites note for sample 03.",
+      "expect": [
+        "synthetic-kites-03.md"
+      ],
+      "source": "invented:synthetic-kites-03; fixed sample date 2026-01-01"
+    },
+    {
+      "id": "synthetic-kites-04",
+      "vault_id": "V3",
+      "prompt": "Find the invented kites note for sample 04.",
+      "expect": [
+        "synthetic-kites-04.md"
+      ],
+      "source": "invented:synthetic-kites-04; fixed sample date 2026-01-01"
+    },
+    {
+      "id": "synthetic-kites-05",
+      "vault_id": "V3",
+      "prompt": "Find the invented kites note for sample 05.",
+      "expect": [
+        "synthetic-kites-05.md"
+      ],
+      "source": "invented:synthetic-kites-05; fixed sample date 2026-01-01"
+    },
+    {
+      "id": "synthetic-kites-06",
+      "vault_id": "V3",
+      "prompt": "Find the invented kites note for sample 06.",
+      "expect": [
+        "synthetic-kites-06.md"
+      ],
+      "source": "invented:synthetic-kites-06; fixed sample date 2026-01-01"
+    },
+    {
+      "id": "synthetic-kites-07",
+      "vault_id": "V3",
+      "prompt": "Find the invented kites note for sample 07.",
+      "expect": [
+        "synthetic-kites-07.md"
+      ],
+      "source": "invented:synthetic-kites-07; fixed sample date 2026-01-01"
+    },
+    {
+      "id": "synthetic-kites-08",
+      "vault_id": "V3",
+      "prompt": "Find the invented kites note for sample 08.",
+      "expect": [
+        "synthetic-kites-08.md"
+      ],
+      "source": "invented:synthetic-kites-08; fixed sample date 2026-01-01"
+    },
+    {
+      "id": "synthetic-kites-09",
+      "vault_id": "V3",
+      "prompt": "Find the invented kites note for sample 09.",
+      "expect": [
+        "synthetic-kites-09.md"
+      ],
+      "source": "invented:synthetic-kites-09; fixed sample date 2026-01-01"
+    },
+    {
+      "id": "synthetic-kites-10",
+      "vault_id": "V3",
+      "prompt": "Find the invented kites note for sample 10.",
+      "expect": [
+        "synthetic-kites-10.md"
+      ],
+      "source": "invented:synthetic-kites-10; fixed sample date 2026-01-01"
+    },
+    {
+      "id": "dated-coral",
+      "vault_id": "V4",
+      "prompt": "Find the invented coral note for sample 01.",
+      "expect": [
+        "synthetic-coral-01.md"
+      ],
+      "source": "invented:synthetic-coral-01; fixed sample date 2026-01-01"
+    },
+    {
+      "id": "synthetic-coral-02",
+      "vault_id": "V4",
+      "prompt": "Find the invented coral note for sample 02.",
+      "expect": [
+        "synthetic-coral-02.md"
+      ],
+      "source": "invented:synthetic-coral-02; fixed sample date 2026-01-01"
+    },
+    {
+      "id": "synthetic-coral-03",
+      "vault_id": "V4",
+      "prompt": "Find the invented coral note for sample 03.",
+      "expect": [
+        "synthetic-coral-03.md"
+      ],
+      "source": "invented:synthetic-coral-03; fixed sample date 2026-01-01"
+    },
+    {
+      "id": "synthetic-coral-04",
+      "vault_id": "V4",
+      "prompt": "Find the invented coral note for sample 04.",
+      "expect": [
+        "synthetic-coral-04.md"
+      ],
+      "source": "invented:synthetic-coral-04; fixed sample date 2026-01-01"
+    },
+    {
+      "id": "synthetic-coral-05",
+      "vault_id": "V4",
+      "prompt": "Find the invented coral note for sample 05.",
+      "expect": [
+        "synthetic-coral-05.md"
+      ],
+      "source": "invented:synthetic-coral-05; fixed sample date 2026-01-01"
+    },
+    {
+      "id": "synthetic-coral-06",
+      "vault_id": "V4",
+      "prompt": "Find the invented coral note for sample 06.",
+      "expect": [
+        "synthetic-coral-06.md"
+      ],
+      "source": "invented:synthetic-coral-06; fixed sample date 2026-01-01"
+    },
+    {
+      "id": "synthetic-coral-07",
+      "vault_id": "V4",
+      "prompt": "Find the invented coral note for sample 07.",
+      "expect": [
+        "synthetic-coral-07.md"
+      ],
+      "source": "invented:synthetic-coral-07; fixed sample date 2026-01-01"
+    },
+    {
+      "id": "synthetic-coral-08",
+      "vault_id": "V4",
+      "prompt": "Find the invented coral note for sample 08.",
+      "expect": [
+        "synthetic-coral-08.md"
+      ],
+      "source": "invented:synthetic-coral-08; fixed sample date 2026-01-01"
+    },
+    {
+      "id": "synthetic-coral-09",
+      "vault_id": "V4",
+      "prompt": "Find the invented coral note for sample 09.",
+      "expect": [
+        "synthetic-coral-09.md"
+      ],
+      "source": "invented:synthetic-coral-09; fixed sample date 2026-01-01"
+    },
+    {
+      "id": "synthetic-coral-10",
+      "vault_id": "V4",
+      "prompt": "Find the invented coral note for sample 10.",
+      "expect": [
+        "synthetic-coral-10.md"
+      ],
+      "source": "invented:synthetic-coral-10; fixed sample date 2026-01-01"
+    }
+  ]
+}

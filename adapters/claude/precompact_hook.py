@@ -153,9 +153,14 @@ def _handle(event, started_at, learn=True, trace=None):
 
 
 def _selftest():
+    import contextlib
+    from datetime import datetime, timedelta, timezone
+    from functools import partial
+    import io
     import tempfile
+    from unittest.mock import patch
 
-    from epitype import context_meter
+    from epitype import context_meter, meter_trace
 
     checks = []
     try:
@@ -183,6 +188,10 @@ def _selftest():
             )
             config = root / "config.json"
             write_config(config, [vault])
+            options = json.loads(config.read_text(encoding="utf-8"))
+            options[memspec.CONTEXT_METER_CONFIG_FIELD] = {
+                memspec.CONTEXT_METER_TRACE_UNTIL_FIELD: "9999-12-31"}
+            config.write_text(json.dumps(options), encoding="utf-8")
             result = run_synthetic(
                 Path(__file__),
                 {"transcript_path": str(transcript)},
@@ -281,9 +290,6 @@ def _selftest():
                 and not (project_vault / memspec.COMPACT_MAP_DIRECTORY).exists(),
             ))
 
-            # Owner 2026-09-09 (§30): the commitment ledger is gone, so the map is
-            # the transcript's recovery map and nothing else — a leftover ledger in
-            # the vault must not be appended to it.
             legacy_ledger = vault / memspec.FTS_INDEX_DIRECTORY / "commitments.jsonl"
             legacy_ledger.parent.mkdir(parents=True, exist_ok=True)
             legacy_ledger.write_text(
@@ -495,8 +501,24 @@ def _selftest():
 
             # 追蹤：每次一行，寫在設定檔旁；提早結束要說出原因。
             run_synthetic(Path(__file__), {"session_id": "no-transcript"}, config)
-            run_synthetic(Path(__file__), {"transcript_path": str(transcript)}, root / "absent-config.json")
+            # 壞設定與缺設定不能自行延長追蹤；用到期日兩側的固定時間驗真正的入口。
+            last_day = datetime.combine(meter_trace.until({}), datetime.min.time(), timezone.utc)
+            failure_runs = []
+            expired_unchanged = []
             trace_file = root / memspec.CONTEXT_METER_TRACE_FILENAME
+            for failure_config in (bad_config, root / "absent-config.json"):
+                for now in (last_day, last_day + timedelta(days=1)):
+                    before = trace_file.read_bytes()
+                    stdout, stderr = io.StringIO(), io.StringIO()
+                    with patch.dict(os.environ, {memspec.EPITYPE_CONFIG_ENV: os.fspath(failure_config)}), \
+                            patch.object(sys, "argv", [os.fspath(Path(__file__))]), \
+                            patch.object(sys, "stdin", io.StringIO(json.dumps({"transcript_path": str(transcript)}))), \
+                            patch.dict(globals(), {"_STARTED_AT": time.monotonic()}), \
+                            patch.object(meter_trace, "record", partial(meter_trace.record, now=now)), \
+                            contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                        failure_runs.append(main() == 0 and not stdout.getvalue() and not stderr.getvalue())
+                    if now > last_day:
+                        expired_unchanged.append(trace_file.read_bytes() == before)
             rows = [json.loads(line) for line in trace_file.read_text(encoding="utf-8").splitlines()]
             rows = [row for row in rows if row.get("event") == "PreCompact"]
             starts = [row for row in rows if row.get("phase") == "start"]
@@ -511,6 +533,7 @@ def _selftest():
                 and any(row["host"] == "codex" and row["outcome"] == "ok" for row in rows)
                 and any(row["session"] == "session-b" for row in rows)
                 and {"exception:JSONDecodeError", "config-missing", "no-transcript"} <= outcomes
+                and failure_runs == [True] * 4 and expired_unchanged == [True] * 2
                 and all(row["map"] is False for row in rows if row["outcome"] != "ok"),
             ))
             checks.append((
@@ -524,7 +547,7 @@ def _selftest():
             broken_root.mkdir()
             (broken_root / memspec.CONTEXT_METER_TRACE_FILENAME).mkdir()
             broken_config = broken_root / "config.json"
-            write_config(broken_config, [vault])
+            broken_config.write_text(config.read_text(encoding="utf-8"), encoding="utf-8")
             broken_transcript = root / "transcript-broken-trace.jsonl"
             broken_transcript.write_text(transcript.read_text(encoding="utf-8"), encoding="utf-8")
             broken_run = run_synthetic(Path(__file__), {"transcript_path": str(broken_transcript)}, broken_config)

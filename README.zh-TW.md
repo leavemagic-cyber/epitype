@@ -132,7 +132,7 @@ UserPromptSubmit 只端卡片。細節與量測見 `docs/FAILURE_MODES.md` §32 
 
 ```text
 HOSTS: claude, codex
-SHIM RESOLUTION: PASS 5/5 repo_root=C:\Epitype\repo
+SHIM RESOLUTION: PASS 5/5 repo_root=C:\path\to\epitype
 REGISTRATION claude: PASS 6/6
 REGISTRATION codex: PASS 6/6
 HOOK SessionStart: PASS (515 ms)
@@ -210,10 +210,12 @@ epitype search recall "自然語言提示" --vault C:\path\to\vault
 | `epitype dream [vaults...] [--since SINCE] [--dry-run] [--scheduled] [--json]` | 唯讀離線整理盤點（缺別名、卡片 lint 結果、殭屍待辦、待審草稿、老化事件卡，以及未登記的口袋庫、草稿老化、混雜卡拆卡候選、超過設定上限的檔案、沒有決策卡承接的 owner 原話、與規則卡重組結果不一致的生成塊，以及把 owner 事件、閘門擋下與考題失敗對齊到卡上的檢討包），整理成一份編號審核包；本身不套用任何建議。排程模式是 config 的 `dream.mode`——`piggyback`（預設：開場時起一個脫鉤背景程序）、`nightly`（系統排程）、`off`；用 `epitype install --dream {piggyback,nightly,off} [--at HH:MM]` 切換（nightly 預設 `03:30`）。 |
 | `epitype gates <vault> [--since Nd\|YYYY-MM-DD] [--json] [--by kind\|decision\|session\|day]` | 把 `_GATE_LOG.jsonl` 整理成閘門實際擋下什麼的報告，例如 `epitype gates C:\path\to\vault --since 2d`。 |
 | `epitype cards <vault> [--strict] [--verbose] [--deep] [--json] [--fix-dates [--dry-run]]` | 依必填欄位檢查記憶卡。`--deep` 另加庫層級檢查：同一個 `decision_key` 只有一張現行卡、取代鏈完整、每張納管卡都在生成目錄與搜尋索引裡。`--fix-dates` 是唯一會寫檔的旗標：把推得的日期補成一行 `last_verified_at:`；先用 `--fix-dates --dry-run` 預覽會寫什麼。 |
+| `epitype dupes [vaults...] [--json] [--threshold N]` | 用字元片段與欄位偵測跨庫近重複候選；預設採共用的設定庫清單、門檻 0.35。每次寫入治理庫 `_drafts/duplicates/YYYYMMDD.md` 和同名 JSON；`--json` 另讓標準輸出採 JSON。夢在目錄重生後寫相同報告（`--dry-run` 不寫）。列出機器檢查欄位、owner 引文、成對相似度及建議保留卡；主導 AI 依 owner 規則處理，Epitype 不改卡或退役卡。語意改寫仍易漏抓，校準結果見 `docs/dupes-calibration.md`。 |
 | `epitype views <vaults...> [--force] [--json]` | 依卡片欄位重生可瀏覽的目錄：`_views/current.md`（現用卡，含完整現行決策清單）與 `_views/history/closed.md`（已結案專案與已取代決策）。永遠不寫 `MEMORY.md`；輸入指紋沒變就不重寫；同庫並行有鎖。說明見 [四個閱讀層級](docs/ARCHITECTURE.md#four-reading-levels)。 |
 | `epitype core-gen <vaults...> --out FILE [--cap-bytes N] [--dry-run] [--check] [--json]` | 由 `type: rule` 卡組裝常駐核心塊：`floor` 依 `order` 編號、`resident` 依 `section` 分小節、只給單一宿主的卡另立宿主區，每張卡核准過的 `text` 逐位元組照抄，並在庫內寫一份核准包。組出來超過上限、或生成層的卡缺 `approved_by`／`approved_at` 時拒絕寫出（回非零）。`--check` 只比對不寫檔，供漂移稽核使用。說明見 [核心生成](docs/ARCHITECTURE.md#core-generation-rule-cards--the-resident-block)。 |
 | `epitype aliases {export,apply}` | `export` 把缺別名的卡片列成 JSON 工作清單；`apply` 把審核過的 `suggested` 別名寫回卡片，只新增不刪改。 |
 | `epitype search {build,query,recall}` | 建立本機 FTS 索引，並用關鍵詞或自然語言查詢；詳見上方〈搜尋本機 vault〉。 |
+| `epitype owner-index {build,update,find}` | 增量建立使用者輸入的全文索引，保留來源位元組位置；搜尋結果僅供定位，不代表已核實的決策。詳見 [Owner input index](docs/OWNER_INDEX.md)。 |
 
 ### 維護／批次
 
@@ -245,7 +247,7 @@ python tests/privacy_lint.py
 python exam/exam_runner.py --strict
 ```
 
-`tests/run_all.py` 執行元件 selftest，涵蓋核心工具、hook adapter、套件介面、安裝器、筆試引擎與隱私閘。repo 內的筆試題庫是小型合成樣本。本次發布另以嚴格模式通過 330 題行為題庫與兩份種子回顧；這些發布材料不包含在本 repo。
+`tests/run_all.py` 執行元件 selftest，涵蓋核心工具、hook adapter、套件介面、安裝器、筆試引擎與隱私閘。repo 內的筆試題庫是小型合成樣本。GitHub 發行工作流程執行發行檢查；本機量測與私人題庫不包含在本 repo。
 
 這些結果是防回歸證據，不代表未來每個 host 版本或每一種記憶失效都已涵蓋。
 
@@ -300,4 +302,4 @@ HTTP 客戶端，也沒有任何回傳、帳號或金鑰。卡片是你自己目
 
 ## 專案狀態
 
-目前 v1.8.0，2026-09-28 發布。發布時機看一批修正什麼時候齊，不是固定日期。Issue 都會看，開 issue 是讓修正往前排最快的方式。
+原始碼版本為 1.10.0；實際發布狀態見上方 GitHub release 與 PyPI 標章。發布時機依一批修正完成的時間決定，沒有固定日期。

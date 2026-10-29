@@ -180,7 +180,7 @@ _EVENT_DIRECTORIES = frozenset(directory for directory, _type in memspec.EVENT_C
 def _event_card(hit, path):
     """True for a verbatim capture file under grants/ corrections/ rulings/.
 
-    U-H (owner 2026-09-09): the quote files are the bottom reading layer — an AI
+    Quote files are the bottom reading layer — an AI
     reaches them with `memsearch`, one at a time, when a card it was handed points
     there. Recall hands out cards only, so a raw sentence nobody curated can no
     longer arrive at every prompt reading like a standing ruling. The vault-relative
@@ -192,19 +192,69 @@ def _event_card(hit, path):
 
 
 def _merge_ordinary(groups):
-    """Compare evidence at each vault's frontier, never independent BM25 scores."""
+    """Interleave vault ranks; coverage breaks ties without starving another vault."""
     queue = []
     for vault_index, group in enumerate(groups):
         if group:
             coverage, value = group[0]
-            heapq.heappush(queue, (-coverage, 0, vault_index, value))
+            heapq.heappush(queue, (0, -coverage, vault_index, value))
     while queue:
-        _coverage, rank, vault_index, value = heapq.heappop(queue)
+        rank, _coverage, vault_index, value = heapq.heappop(queue)
         yield value
         rank += 1
         if rank < len(groups[vault_index]):
             coverage, value = groups[vault_index][rank]
-            heapq.heappush(queue, (-coverage, rank, vault_index, value))
+            heapq.heappush(queue, (rank, -coverage, vault_index, value))
+
+
+def _recall_candidates(result):
+    ranked = result.get('results', ())
+    replacements = result.get('replacement_results', ())
+    pinned_paths = set()
+    for hit in (*replacements, *ranked):
+        if _one_line(hit.get(memspec.DECISION_STATUS_FIELD)) != memspec.ACTIVE_DECISION_STATUS:
+            continue
+        path = _one_line(hit.get('path'))
+        try:
+            fields = _frontmatter_fields(Path(path))
+        except (OSError, ValueError):
+            continue
+        # Active project records are ordinary cards unless they have a decision key.
+        if (fields.get(memspec.DECISION_KEY_FIELD, '').strip()
+                and fields.get(memspec.DECISION_STATUS_FIELD) == memspec.ACTIVE_DECISION_STATUS):
+            pinned_paths.add(path)
+
+    def pinned(hit):
+        return _one_line(hit.get('path')) in pinned_paths
+
+    # Successor hints must not consume ordinary slots before the search winner.
+    # Active decisions retain their existing successor-first priority and order.
+    return [*(hit for hit in (*replacements, *ranked) if pinned(hit)),
+            *(hit for hit in ranked if not pinned(hit)),
+            *(hit for hit in replacements if not pinned(hit))]
+
+
+_DEFAULT_RECALL_SCOPE = {"actions": ["*"], "case": None, "conditions": [],
+                         "exceptions": [], "expiry": "unspecified", "level": "global", "project": None}
+
+
+def _recall_projection(projected):
+    """The hook shares boilerplate; other projection consumers keep their full form."""
+    from epitype import rule_provenance
+    document = projected['document']
+    label = (memspec.RECALL_SOURCE_OWNER if document['kind'] == 'owner-directive'
+             else memspec.RECALL_SOURCE_AI).format(author=document['author'])
+    if projected['provenance']['status'] != rule_provenance.VERIFIED:
+        label = memspec.RECALL_SOURCE_UNKNOWN.format(label=label)
+    parts = [f"[{document['key']}] {label}"]
+    if document['scope'] != _DEFAULT_RECALL_SCOPE:
+        parts.append(memspec.RECALL_SOURCE_SCOPE.format(scope=rule_provenance.serialize(document['scope'])))
+    if document['kind'] == 'ai-derived':
+        parts.append(memspec.RECALL_SOURCE_QUOTE.format(quote=document['quote']))
+    parts.append(projected['text'])
+    if projected['supersedes']:
+        parts.append(memspec.RECALL_SOURCE_SUPERSEDES.format(cards='、'.join(projected['supersedes'])))
+    return ' | '.join(parts)
 
 
 def _bounded_recall(pieces, budget, required_count, header_count):
@@ -429,6 +479,13 @@ def _with_lifecycle(value, config, event, released=()):
 
 
 def _recall(event, started_at, config, delivery_markers=None, deliveries=None):
+    from epitype import rule_provenance
+    with rule_provenance.verification_window(
+            started_at + memspec.HOOK_TIMEOUT_SECONDS - memspec.RECALL_SOURCE_RESERVE_SECONDS):
+        return _recall_cards(event, started_at, config, delivery_markers, deliveries)
+
+
+def _recall_cards(event, started_at, config, delivery_markers=None, deliveries=None):
     prompt = event["prompt"]
 
     # 落點依「這場對話屬於哪個專案」決定（_hook_common.capture_vault）：專案的卡
@@ -453,6 +510,9 @@ def _recall(event, started_at, config, delivery_markers=None, deliveries=None):
     source_routes = {}
     pointer_lines = set()
     replacement_paths = set()
+    source_labels = False
+    lookup_labels = False
+    unavailable_sources = False
     for vault in scoped_vaults(config, event):
         if expired(started_at):
             return None
@@ -472,15 +532,26 @@ def _recall(event, started_at, config, delivery_markers=None, deliveries=None):
         ordinary_lines = []
         # The old wording may be absent from its replacement. Search supplies
         # live endpoints separately; they use the same caps and authority checks.
-        hits = [*result.get("replacement_results", ()), *result.get("results", ())]
+        hits = _recall_candidates(result)
         replacement_paths.update(_one_line(hit.get("path"))
                                  for hit in result.get("replacement_results", ()))
         visited_paths = set()
         for hit in hits:
+            if expired(started_at):
+                return None
             path = _one_line(hit.get("path"))
             if path in visited_paths:
                 continue
             visited_paths.add(path)
+            # Reject already-full ordinary slots before costly source checks.
+            # Indexed-active cards still pass through live verification and pinning.
+            if _one_line(hit.get(memspec.DECISION_STATUS_FIELD)) != memspec.ACTIVE_DECISION_STATUS:
+                card_name = Path(_one_line(hit.get("card_path")) or path).name
+                if (_event_card(hit, path) or _one_line(hit.get("card_path")) in quiet
+                        or card_name in shown_names or ordinary >= memspec.FTS_TOP_K
+                        or (list(hit.get("hit_fields") or ()) == ["body"]
+                            and body_only >= memspec.RECALL_BODY_ONLY_MAX_PER_VAULT)):
+                    continue
             source_projection = None
             try:
                 current_fields = _frontmatter_fields(Path(path))
@@ -492,8 +563,10 @@ def _recall(event, started_at, config, delivery_markers=None, deliveries=None):
                     if integrity is not None and not integrity.allowed:
                         raise ValueError('; '.join(integrity.issues))
                 if "rule_provenance" in current_fields:
-                    from epitype import rule_pipeline
-                    source_projection = rule_pipeline.projection(current_fields, Path(path))
+                    from epitype import rule_provenance
+                    cache_path = memsearch._db_path(vault).parent / memspec.PROVENANCE_ORIGIN_CACHE_FILENAME
+                    with rule_provenance.authorship_cache(cache_path):
+                        source_projection = rule_pipeline.projection(current_fields, Path(path))
                     if source_projection['expired']:
                         continue
             except (OSError, ValueError) as error:
@@ -536,14 +609,13 @@ def _recall(event, started_at, config, delivery_markers=None, deliveries=None):
             name = _one_line(hit.get("name"))
             description = _one_line(hit.get("description"))[: memspec.RECALL_DESCRIPTION_MAX_CHARS]
             if source_projection is not None:
-                description = _one_line(rule_pipeline.render_projection(source_projection))
+                description = _one_line(_recall_projection(source_projection))
+                source_labels = True
+                unavailable_sources |= source_projection['provenance']['status'] != 'VERIFIED'
+            else:
+                lookup_labels = True
             if decision is not None:
                 key, decided_at, quote = decision
-                # The card layer carries what was decided in understood words; the
-                # owner's verbatim quote is raw memory, one level down, reached by
-                # opening the card (owner 2026-09-17). A quote fragment without its
-                # context reads as nothing. The description goes in uncut: a ruling
-                # cut to 120 characters is what let 08-13 come back as an option.
                 full = description if source_projection is not None else _one_line(hit.get("description"))
                 suffix = (memspec.RECALL_DECIDED_AT_SUFFIX.format(decided_at=decided_at)
                           if decided_at else "")
@@ -554,13 +626,15 @@ def _recall(event, started_at, config, delivery_markers=None, deliveries=None):
                 mark = _stale_state_mark(path)
                 if mark:
                     parts = (mark + parts[0], *parts[1:])
-            prefix = (memspec.DECISION_PREFIX if decision is not None else "") if source_projection is not None else "查找線索（來源未核；非授權或新增禁令） | "
+            prefix = (memspec.DECISION_PREFIX if decision is not None else "") if source_projection is not None else memspec.RECALL_LOOKUP_PREFIX
+            redirect = memspec.RECALL_REDIRECT_PREFIX if path in replacement_paths else ""
+            prefix += redirect
             line = "- " + prefix + " | ".join(part for part in parts if part)
             if source_projection is not None:
                 source_routes[line] = (
-                    "- 已核來源指路（正文／原句／範圍未載入，請讀卡片） | " + located)
+                    "- 已核來源指路（正文／原句／範圍未載入，請讀卡片） | " + redirect + located)
             else:
-                source_routes[line] = "- 查找線索（來源未核；非授權或新增禁令） | " + located
+                source_routes[line] = "- " + memspec.RECALL_LOOKUP_PREFIX + redirect + located
             origins[line] = (vault, card_identity, memspec.RECALL_DELIVERY_MODE_DECISION
                              if decision is not None else memspec.RECALL_DELIVERY_MODE_CARD)
             if decision is not None:
@@ -570,7 +644,6 @@ def _recall(event, started_at, config, delivery_markers=None, deliveries=None):
                                        (line, path, vault, result.get("terms", ()), name)))
             shown_names.add(card_name)
             used = True
-        ordinary_lines.sort(key=lambda item: -item[0])
         ordinary_groups.append(ordinary_lines)
         if used:
             legend.append(f"{alias}={vault}")
@@ -580,11 +653,31 @@ def _recall(event, started_at, config, delivery_markers=None, deliveries=None):
     if not pinned_entries and not other_entries:
         return None
     head = memspec.UNTRUSTED_ADVISORY
+    if lookup_labels:
+        head += "\n" + memspec.RECALL_LOOKUP_LEGEND
+    if source_labels:
+        from epitype import rule_provenance
+        head += "\n" + memspec.RECALL_SOURCE_LEGEND.format(scope=rule_provenance.serialize(_DEFAULT_RECALL_SCOPE))
+    if unavailable_sources:
+        head += "\n" + memspec.RECALL_UNAVAILABLE_LEGEND
     if legend:
         head += "\n" + memspec.RECALL_LEGEND_PREFIX + " ".join(legend)
+    session_id = event.get("session_id", event.get("sessionId", ""))
+    if not isinstance(session_id, str):
+        session_id = ""
+    aliases = dict(entry.split("=", 1) for entry in legend)
+
+    def already_delivered(line):
+        kind = "pointer-" if line in pointer_lines else "card-"
+        digest = kind + hashlib.sha256(_card_identity(line, aliases).encode("utf-8")).hexdigest()
+        return bool(session_id) and (recall_marker_directory(session_id) / digest).is_file()
+
     pinned = []
     source_reads = 0
     for position, (line, path, vault, terms, name) in enumerate(pinned_entries):
+        source_added = False
+        if already_delivered(line):
+            continue
         origin = origins.get(line)
         route = source_routes.get(line)
         if route and not payload_fits("UserPromptSubmit", "\n".join([head, *pinned, line]),
@@ -603,7 +696,11 @@ def _recall(event, started_at, config, delivery_markers=None, deliveries=None):
                 if payload_fits("UserPromptSubmit", "\n".join(required),
                                 config[memspec.CONFIG_BUDGET_BYTES_FIELD]):
                     line = expanded
-                    source_reads += 1
+                    source_added = True
+        # A delivered ruling must not force the next card into pointer fallback.
+        if already_delivered(line):
+            continue
+        source_reads += source_added
         origins[line] = origin
         pinned.append(line)
     others = []
@@ -629,17 +726,12 @@ def _recall(event, started_at, config, delivery_markers=None, deliveries=None):
                     line = expanded
         origins[line] = origin
         others.append(line)
-    session_id = event.get("session_id", event.get("sessionId", ""))
-    if not isinstance(session_id, str):
-        session_id = ""
-    # The advisory and the legend are paid for once per session (and again after
-    # compaction, which clears the markers); each distinct legend is sent once.
+    # Each injection carries the legend that gives its compact item labels meaning.
     head_digest = "head-" + hashlib.sha256(head.encode("utf-8")).hexdigest()[:24]
     head_seen = bool(session_id) and (recall_marker_directory(session_id) / head_digest).is_file()
     # Deduplicate by card identity (real vault path), not by alias: aliases are numbered
     # per prompt, so keying on them re-sent every card whenever the set of vaults used
     # changed. A line cut by the byte budget has not been delivered and stays eligible.
-    aliases = dict(entry.split("=", 1) for entry in legend)
     pending = []
     for line in [*pinned, *others]:
         kind = "pointer-" if line in pointer_lines else "card-"
@@ -652,10 +744,10 @@ def _recall(event, started_at, config, delivery_markers=None, deliveries=None):
         directory = recall_marker_directory(session_id)
         _sweep_recall_markers(directory.parent, time.time(), keep=directory)
     lines = [line for line, _digest in pending]
-    pieces = lines if head_seen else [head, *lines]
+    pieces = [head, *lines]
 
     pinned_set = set(pinned)
-    header_count = 0 if head_seen else 1
+    header_count = 1
     context = _bounded_recall(
         pieces,
         config[memspec.CONFIG_BUDGET_BYTES_FIELD],
@@ -713,7 +805,7 @@ def _selftest():
     marker_directory = None
     # The decision fixtures below carry no verified original source, so they are recalled
     # as lookup hints, never as rulings (6f6fce1); they keep their pinned seat, key and date.
-    lookup = "- 查找線索（來源未核；非授權或新增禁令） | "
+    lookup = "- " + memspec.RECALL_LOOKUP_PREFIX
     try:
         with tempfile.TemporaryDirectory(prefix="epitype-recall-") as temp_dir:
             root = Path(temp_dir).resolve()
@@ -874,7 +966,7 @@ def _selftest():
                     supersession_result.returncode == 0
                     and len(injected_cards) == 1
                     # An active decision is pinned by its key, not its card name.
-                    and injected_cards[0].startswith(lookup + "hook-read-contract")
+                    and injected_cards[0].startswith(lookup + memspec.RECALL_REDIRECT_PREFIX + "hook-read-contract")
                     and memspec.DECISION_PREFIX not in supersession_context
                     and f"V1/{current_decision.name}" in supersession_context
                     and "Retired Hook Decision" not in supersession_context
@@ -886,8 +978,6 @@ def _selftest():
             checks.append(
                 (
                     "same-session deduplication",
-                    # Cards and the procedure were both delivered once; nothing is
-                    # re-sent until compaction clears the markers (owner 2026-09-09).
                     second.returncode == 0
                     and second.stdout.strip() == ""
                     and not second.stderr,
@@ -1237,8 +1327,6 @@ def _selftest():
                 encoding="utf-8",
             )
             memsearch.build_index(grant_vault)
-            # 2026-09-09 owner Q5「C」：喚回這幾條驗的是「入庫的卡怎麼端出來」，題目
-            # 一律用白名單形狀；白名單以外的句子落提案區，由下面那條專門驗。
             correction_sentence = "不要亂處理 SWSetup，我不是說過你只能處理AI產生資料"
             correction_session = uuid.uuid4().hex
             for _ in range(2):
@@ -1307,9 +1395,9 @@ def _selftest():
             )
 
             widened = (
-                "3.不是!只有6s是標準合約，其他還是微型，小單期是指1口",
-                "6S 維持擋單<我怎麼不知道有這個設定，請深度分析記憶",
-                "小口合約意思是1口，不是指微型，6S就是沒有微型，我很清楚",
+                "3.不是!只有8x是標準茶杯，其他還是迷你，試飲組是指1杯",
+                "8X 維持擋單<我怎麼不知道有這個設定，請深度分析記憶",
+                "小口合約意思是1杯，不是指迷你，8X就是沒有迷你，我很清楚",
             )
             widened_ok = True
             pending_root = grant_vault.joinpath(*memspec.CAPTURE_PENDING_SUBPATH)
@@ -1319,9 +1407,6 @@ def _selftest():
                     {"prompt": sentence, "session_id": uuid.uuid4().hex},
                     grant_config,
                 )
-                # 三句仍然全部被判成糾正；差別只在落點——存下來的句子是「不是!…」開頭
-                # 的那句進 corrections/，另外兩句（箭頭長接話、陳述句）落提案區等人核
-                # （owner 2026-09-09 Q5「C」）。
                 stored = _matched_sentence(sentence, memspec.CORRECTION_TRIGGER_REGEX)
                 widened_ok = widened_ok and bool(stored) and any(
                     _grant_digest(stored) in path.name
@@ -1344,7 +1429,7 @@ def _selftest():
             proposal_needle = next(pending_root.rglob("correction-*.md")).stem
             proposal_recall = run_synthetic(
                 Path(__file__),
-                {"prompt": "6S 標準合約 微型 擋單 設定", "session_id": uuid.uuid4().hex},
+                {"prompt": "8X 標準茶杯 迷你 擋單 設定", "session_id": uuid.uuid4().hex},
                 grant_config,
             )
             checks.append((
@@ -1355,7 +1440,7 @@ def _selftest():
             ))
 
             transcript = root / "ruling-transcript.jsonl"
-            asked = "請你定一下：小單期是「1 口標準合約」還是維持「換微型合約」？定了我才動，要你裁決。"
+            asked = "請你定一下：試飲組是「1 杯標準茶杯」還是維持「換迷你茶杯」？定了我才動，要你裁決。"
             transcript.write_text(
                 json.dumps({"type": "user", "message": {"role": "user", "content": "先前的問題"}}, ensure_ascii=False)
                 + "\n"
@@ -1366,7 +1451,7 @@ def _selftest():
                 + "\n",
                 encoding="utf-8",
             )
-            answer = "不是！只有6s是標準合約，其他還是微型，小單期是指1口(微型或標準)"
+            answer = "不是！只有8x是標準茶杯，其他還是迷你，試飲組是指1杯(迷你或標準)"
             ruling_session = uuid.uuid4().hex
             for _ in range(2):
                 run_reviewed_capture(
@@ -1381,7 +1466,7 @@ def _selftest():
                     "owner answer to an explicit ruling request is captured once with the question",
                     len(ruling_files) == 1
                     and answer in ruling_text
-                    and "小單期是「1 口標準合約」" in ruling_text
+                    and "試飲組是「1 杯標準茶杯」" in ruling_text
                     and "description: owner ruling auto-captured " in ruling_text,
                 )
             )
@@ -1445,7 +1530,7 @@ def _selftest():
             )
             pinned = run_synthetic(
                 Path(__file__),
-                {"prompt": "小單期 6S 標準合約 還是微型", "session_id": uuid.uuid4().hex},
+                {"prompt": "試飲組 8X 標準茶杯 還是迷你", "session_id": uuid.uuid4().hex},
                 grant_config,
             )
             pinned_value = json.loads(pinned.stdout) if pinned.stdout.strip() else {}
@@ -1549,8 +1634,6 @@ def _selftest():
                     and ("V1/" not in tight_context or memspec.RECALL_LEGEND_PREFIX in tight_context),
                 )
             )
-            # 2026-09-05 事故：owner 08-13 的裁定被當成選項端回來。決策卡是 owner 親裁
-            # 的現況，要與 rulings 同級置頂、排在自動捕捉之前，並帶原話。
             decision_vault = root / "decision-vault"
             decision_vault.mkdir()
             (decision_vault / memspec.CORRECTION_DIRECTORY).mkdir()
@@ -1568,7 +1651,7 @@ def _selftest():
                     f"{memspec.DECISION_STATUS_FIELD}: {memspec.ACTIVE_DECISION_STATUS}\n"
                     f"{memspec.CURRENT_DECISION_AT_FIELD}: 2026-08-1{index}\n"
                     f"{memspec.DECIDED_BY_FIELD}: {memspec.OWNER_EXPLICIT_DECIDER}\n"
-                    f"{memspec.OWNER_QUOTE_FIELD}: 只有 6s 是標準合約 {index}\n---\n"
+                    f"{memspec.OWNER_QUOTE_FIELD}: 只有 8x 是標準茶杯 {index}\n---\n"
                     f"decisionneedle body {index}\n",
                     encoding="utf-8",
                 )
@@ -1593,7 +1676,7 @@ def _selftest():
             decision_context = decision_value.get("hookSpecificOutput", {}).get("additionalContext", "")
             decision_lines = [line for line in decision_context.splitlines() if line.startswith("- ")]
             decision_pinned = [
-                line for line in decision_lines if line.startswith(lookup + "rule-")
+                line for line in decision_lines if line.startswith((lookup + "rule-", lookup + memspec.RECALL_REDIRECT_PREFIX + "rule-"))
             ]
             checks.append(
                 (
@@ -1601,10 +1684,10 @@ def _selftest():
                     "not the owner's raw quote",
                     decision_result.returncode == 0
                     and bool(decision_pinned)
-                    and decision_lines[0].startswith(lookup + "rule-")
+                    and decision_lines[0] in decision_pinned
                     and memspec.DECISION_PREFIX not in decision_context
                     and any("（2026-08-1" in line and "decisionneedle 摘要" in line for line in decision_pinned)
-                    and not any("只有 6s 是標準合約" in line for line in decision_pinned),
+                    and not any("只有 8x 是標準茶杯" in line for line in decision_pinned),
                 )
             )
             checks.append(
@@ -1989,7 +2072,8 @@ def _selftest():
                 write_config(path, [meter_vault], budget=budget)
                 options = json.loads(path.read_text(encoding="utf-8"))
                 options[memspec.CONTEXT_METER_CONFIG_FIELD] = {
-                    memspec.CONTEXT_METER_OVERRIDE_FIELD: 100000}
+                    memspec.CONTEXT_METER_OVERRIDE_FIELD: 100000,
+                    memspec.CONTEXT_METER_TRACE_UNTIL_FIELD: "9999-12-31"}
                 path.write_text(json.dumps(options), encoding="utf-8")
                 return path
 

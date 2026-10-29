@@ -138,7 +138,7 @@ The last section is the feedback review pack: one row per card that owner events
 
 ```text
 HOSTS: claude, codex
-SHIM RESOLUTION: PASS 5/5 repo_root=C:\Epitype\repo
+SHIM RESOLUTION: PASS 5/5 repo_root=C:\path\to\epitype
 REGISTRATION claude: PASS 6/6
 REGISTRATION codex: PASS 6/6
 HOOK SessionStart: PASS (515 ms)
@@ -219,6 +219,7 @@ The database lives at `<vault>/.epitype/memory_fts.sqlite3` and Git ignores it. 
 | `epitype dream [vaults...] [--since SINCE] [--dry-run] [--scheduled] [--json]` | Read-only tidy inventory rendered as a numbered review packet, applying nothing itself: missing aliases, card-lint findings, zombie pending lines, unreviewed drafts, aging event cards, unregistered pocket vaults, draft aging, mixed cards to split, files over their cap, owner quotes no decision card carries, generated core blocks that have drifted from their rule cards, and the review pack. Scheduling is `dream.mode` in config — `piggyback` (default), `nightly` (an OS task) or `off` — switched with `epitype install --dream {piggyback,nightly,off} [--at HH:MM]` (nightly defaults to `03:30`). |
 | `epitype gates <vault> [--since Nd\|YYYY-MM-DD] [--json] [--by kind\|decision\|session\|day]` | Turns `_GATE_LOG.jsonl` into a report of what the gates actually blocked, e.g. `epitype gates C:\path\to\vault --since 2d`. |
 | `epitype cards <vault> [--strict] [--verbose] [--deep] [--json] [--fix-dates [--dry-run]]` | Type-checks cards against their required fields. `--deep` adds vault-level checks: one active card per `decision_key`, valid supersession chains, every managed card present in both the generated views and the search index. `--fix-dates` is the only flag that writes, backfilling a derived `last_verified_at:`; preview it with `--fix-dates --dry-run`. |
+| `epitype dupes [vaults...] [--json] [--threshold N]` | Cross-vault near-duplicate candidates using character shingles and metadata. Defaults to the shared configured vault list and threshold 0.35. Always writes Markdown and JSON to the governance vault's `_drafts/duplicates/YYYYMMDD.*`; `--json` selects JSON on stdout. Dream writes the same report after regenerating views (except in `--dry-run`). Lists machine-check fields, owner quotes, pair similarities and suggested keep cards. The lead AI settles candidates under the owner's rule; Epitype never edits or retires cards. Lexical detection misses semantic paraphrases; see `docs/dupes-calibration.md`. |
 | `epitype views <vaults...> [--force] [--json]` | Regenerates the browsable catalogue from card fields: `_views/current.md` (cards in use, with every active decision) and `_views/history/closed.md` (closed projects and superseded decisions). Never writes `MEMORY.md`, rewrites nothing when the input fingerprint is unchanged, and takes a lock so two generators cannot overlap. See [Four reading levels](docs/ARCHITECTURE.md#four-reading-levels). |
 | `epitype core-gen <vaults...> --out FILE [--cap-bytes N] [--dry-run] [--check] [--json]` | Assembles the resident core block from `type: rule` cards — `floor` numbered by `order`, `resident` grouped by `section`, host-only cards in their own zone — copying each approved `text` byte for byte and writing an approval pack beside it. Refuses to write when the assembly is over its cap or a card in a generated layer has no `approved_by` / `approved_at`. `--check` compares instead of writing, for drift audits. See [Core generation](docs/ARCHITECTURE.md#core-generation-rule-cards--the-resident-block). |
 | `epitype aliases {export,apply}` | `export` lists cards missing aliases as a JSON worklist; `apply` writes reviewed `suggested` aliases back, additive only. |
@@ -239,6 +240,8 @@ The database lives at `<vault>/.epitype/memory_fts.sqlite3` and Git ignores it. 
 | `epitype scar-census build` | Builds the machine-generated view of the four-layer scar census. |
 | `epitype compact-map build` | Builds a bounded compact-recovery map, the same kind `PreCompact` writes per session. |
 | `epitype source SOURCE.jsonl [--find TEXT] [--role user\|assistant\|all] [--line N] [--offset BYTES] [--limit 1..8]` | Reads original messages back with roles, physical lines, hashes and explicit truncation and coverage. Line numbers are relative when you supply an offset. Finding a sentence is not proof that it is the current decision. |
+| `epitype owner-index build\|update\|find [WORDS ...] [--index PATH] [--root PATH] [--after DATE] [--role U,Q,S] [--limit N]` | Incremental SQLite trigram search of owner input, human queues and question-box answers, including their question context. See [owner index](docs/OWNER_INDEX.md) for archive sources and integrity checks. |
+| `epitype source --find TEXT [--index PATH]` | Searches the owner index for unverified locators; supply a source file and byte offset to read original evidence. Does not build or update the index. |
 | `epitype pending <vault> [--max-age-days N] [--strict] [--json]` | Lints for zombie pending lines: a todo marker with no closing text, no runnable `verify:`, and past the age threshold. |
 | `epitype exam [corpus] [--strict] [--selftest]` | Runs the exam engine against a behavior-question corpus. |
 | `epitype trust [--home HOME]` | Checks Codex's real hook trust state; see [Approve Codex hooks](#approve-codex-hooks). |
@@ -254,7 +257,7 @@ python tests/privacy_lint.py
 python exam/exam_runner.py --strict
 ```
 
-`tests/run_all.py` runs component selftests across the core tools, hook adapters, package surface, installer, exam engine and privacy gate. The exam corpus in this repository is a small synthetic sample. The release gate for this version also passed a strict 330-case behavior corpus and two seed reviews, which are not part of this repository.
+`tests/run_all.py` runs component selftests across the core tools, hook adapters, package surface, installer, exam engine and privacy gate. The exam corpus in this repository is a small synthetic sample. The GitHub release workflow runs the release checks; local measurements and private corpora are not included in the repository.
 
 These checks are regression evidence. They are not proof that every future host version, or every way memory can fail you, is covered.
 
@@ -311,4 +314,4 @@ They compose: nothing here stops you running a memory summariser alongside it.
 
 ## Status
 
-v1.8.1, released 2026-09-28. Releases are cut when a batch of fixes is ready rather than on a fixed date. Issues get read, and an issue is the fastest way to move a fix up the queue.
+Source version 1.10.0. Publication status is shown by the GitHub releases and PyPI badges above. Releases are cut when a batch of fixes is ready rather than on a fixed date.

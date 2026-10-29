@@ -9,4 +9,4 @@ prefix_rule(pattern=["git", ["checkout", "restore"], "--"], decision="forbidden"
 prefix_rule(pattern=["taskkill"], decision="forbidden")
 prefix_rule(pattern=["pskill"], decision="forbidden")
 prefix_rule(pattern=["Stop-Process"], decision="forbidden")
-prefix_rule(pattern=[["cat", "type", "Get-Content", "more", "less", "head", "tail"], [".env", ".env.local", ".env.production", "brain.json"]], decision="forbidden")
+prefix_rule(pattern=[["cat", "type", "Get-Content", "more", "less", "head", "tail"], [".env", ".env.local", ".env.production", "sample-settings.json"]], decision="forbidden")

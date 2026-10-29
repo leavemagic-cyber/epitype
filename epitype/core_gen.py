@@ -26,6 +26,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import tempfile
 
 try:
@@ -64,7 +65,7 @@ def _sort_key(rule):
     return (rule["order"] is None, rule["order"] or 0, rule["vault"], rule["path"])
 
 
-def collect_rules(vaults):
+def collect_rules(vaults, failures=None):
     """(規則卡清單, 讀不到的東西)。
 
     掃描範圍與型別判定都不自己造一套：範圍用 `memsearch.scan_cards`、型別用
@@ -85,6 +86,8 @@ def collect_rules(vaults):
                 text = path.read_text(encoding="utf-8-sig")
             except (OSError, UnicodeError) as exc:
                 errors.append(f"{vault}｜{relative}: {type(exc).__name__}: {exc}")
+                if failures is not None:
+                    failures.append((str(vault), relative, str(exc), {}))
                 continue
             card_type, fields = card_lint.card_type_of(relative, text, path)
             if card_type != memspec.CARD_TYPE_RULE:
@@ -96,8 +99,10 @@ def collect_rules(vaults):
                 projected = rule_pipeline.projection(
                     fields, path, legacy_text=fields.get(memspec.RULE_TEXT_FIELD, ""), card_text=text,
                     allow_unavailable_sources=True)
-            except ValueError as exc:
+            except (ValueError, OSError, UnicodeError) as exc:
                 errors.append(f"{vault}｜{relative}: {exc}")
+                if failures is not None:
+                    failures.append((str(vault), relative, str(exc), fields))
                 continue
             if status == memspec.SUPERSEDED_DECISION_STATUS or projected["expired"]:
                 continue
@@ -162,26 +167,71 @@ def unapproved(rules):
     ]
 
 
-def _section_lines(members):
+def _section_lines(members, defaults=None):
     lines = []
     for section, section_members in _resident_sections(members):
         lines.append(memspec.CORE_GEN_SECTION_HEADING.format(section=section))
-        lines.extend(
-            memspec.CORE_GEN_RESIDENT_LINE.format(text=_display_rule(rule)) for rule in section_members
-        )
+        for rule in section_members:
+            rendered = memspec.CORE_GEN_RESIDENT_LINE.format(text=_display_rule(rule, defaults))
+            lines.append(_rule_marker(rule, rendered))
+            lines.append(rendered)
         lines.append("")
     return lines
 
 
-def _display_rule(rule):
+def rule_identity(relative):
+    return hashlib.sha256(relative.encode("utf-8")).hexdigest()[:16]
+
+
+def _rule_marker(rule, rendered):
+    source = " U" if rule.get("provenance", {}).get("source_unavailable") else ""
+    order = "x" if rule["order"] is None else str(rule["order"])
+    return "<!--r:" + rule_identity(rule["path"]) + " " + str(len(rendered.splitlines())) + " " + order + source + "-->"
+
+
+def _default_source(rule, defaults):
+    match = re.fullmatch(r"rule-core-(\d{2})-english\.md", rule["path"])
+    return (rule["vault"] == defaults["vault"] and match is not None
+            and rule["text"].startswith("CORE-" + match.group(1) + "."))
+
+
+def _source_path(rule, defaults):
+    return rule["path"] if rule["vault"] == defaults["vault"] else str(Path(rule["vault"]) / rule["path"])
+
+
+def _display_rule(rule, defaults=None):
+    if "previous_rendering" in rule:
+        return rule["previous_rendering"]
     if rule.get("core_display") == "plain" and rule.get("provenance", {}).get("status") == "VERIFIED":
-        return rule["text"]
+        text = rule["text"]
+        if defaults:
+            text += "\n" + memspec.CORE_GEN_VERIFIED_SOURCE
+            if not _default_source(rule, defaults):
+                text += "\n" + memspec.CORE_GEN_CARD_PATH.format(path=_source_path(rule, defaults))
+        return text
     if (rule.get("provenance", {}).get("status") != "VERIFIED"
             and not rule.get("provenance", {}).get("source_unavailable")):
         return rule["text"]
     from epitype import rule_pipeline
-    return rule_pipeline.render_projection(
+    if defaults and rule.get("provenance", {}).get("source_unavailable"):
+        document = rule["projection"]["document"]
+        lines = [rule["text"]]
+        if document["author"] != "claude":
+            lines.append(memspec.CORE_GEN_CARD_AUTHOR.format(author=document["author"]))
+        if document["scope"] != defaults["scope"]:
+            from epitype import rule_provenance
+            lines.append(memspec.CORE_GEN_CARD_SCOPE.format(scope=rule_provenance.serialize(document["scope"])))
+        if not _default_source(rule, defaults):
+            lines.append(memspec.CORE_GEN_CARD_PATH.format(path=_source_path(rule, defaults)))
+        return "\n".join(lines)
+    rendered = rule_pipeline.render_projection(
         rule["projection"], card_path=Path(rule["vault"]) / rule["path"])
+    if defaults and rule.get("provenance", {}).get("status") == "VERIFIED":
+        if rule["vault"] == defaults["vault"]:
+            rendered = rendered.replace("\n來源卡：" + str(Path(rule["vault"]) / rule["path"]),
+                                        "\n來源卡：" + rule["path"])
+        rendered += "\n" + memspec.CORE_GEN_VERIFIED_SOURCE
+    return rendered
 
 
 def assemble(rules):
@@ -204,6 +254,7 @@ def assemble(rules):
         note += memspec.CORE_GEN_OUTPUT_NOTE_HOSTS_SUFFIX.format(host_only=len(host_only))
     lines = [memspec.CORE_GEN_OUTPUT_TITLE, note, ""]
     legacy = [rule for rule in rules if rule["layer"] in memspec.RULE_GENERATED_LAYERS
+              and "previous_rendering" not in rule
               and rule.get("provenance", {}).get("status") != "VERIFIED"
               and not rule.get("provenance", {}).get("source_unavailable")]
     if legacy:
@@ -211,23 +262,36 @@ def assemble(rules):
         lines.extend((f"來源未核的舊卡：本生成包共 {len(legacy)} 條；原正文保留，尚未完成原句、作者與範圍遷移。"
                       "未帶已核來源欄位的條目均屬此類；逐卡狀態見 " + manifests + "。", ""))
     unavailable = [rule for rule in rules if rule.get("provenance", {}).get("source_unavailable")]
+    defaults = None
     if unavailable:
-        lines.extend((f"原始對話無法讀取：{len(unavailable)} 條仍照卡片內容生成，來源狀態保留 UNVERIFIED。", ""))
+        from epitype import rule_provenance
+        defaults = {"scope": {"level": "global", "project": None, "case": None, "actions": ["*"],
+                              "conditions": [], "exceptions": [], "expiry": "unspecified"},
+                    "vault": unavailable[0]["vault"]}
+        lines.extend((memspec.CORE_GEN_SHARED_SOURCE.format(
+            count=len(unavailable), scope=rule_provenance.serialize(defaults["scope"])), ""))
+    directories = sorted({rule["vault"] for rule in rules if rule["layer"] in memspec.RULE_GENERATED_LAYERS})
+    if directories:
+        default_vault = defaults["vault"] if defaults else directories[0]
+        lines.extend((memspec.CORE_GEN_SOURCE_DIRECTORY.format(path=default_vault), ""))
+    held = [rule for rule in rules if "previous_rendering" in rule]
+    if held:
+        lines.extend((memspec.HOST_SYNC_HELD_SUMMARY.format(count=len(held)), ""))
     if floor:
         lines.append(memspec.CORE_GEN_FLOOR_HEADING)
-        lines.extend(
-            memspec.CORE_GEN_FLOOR_LINE.format(number=number, text=_display_rule(rule))
-            for number, rule in enumerate(floor, start=1)
-        )
+        for number, rule in enumerate(floor, start=1):
+            rendered = memspec.CORE_GEN_FLOOR_LINE.format(number=number, text=_display_rule(rule, defaults))
+            lines.append(_rule_marker(rule, rendered))
+            lines.append(rendered)
         lines.append("")
     if shared:
         lines.append(memspec.CORE_GEN_RESIDENT_HEADING)
-        lines.extend(_section_lines(shared))
+        lines.extend(_section_lines(shared, defaults))
     if host_only:
         lines.append(memspec.CORE_GEN_HOST_HEADING)
         for host in _hosts_present(host_only):
             lines.append(memspec.CORE_GEN_HOST_BEGIN.format(host=host))
-            lines.extend(_section_lines([rule for rule in host_only if host in rule["hosts"]]))
+            lines.extend(_section_lines([rule for rule in host_only if host in rule["hosts"]], defaults))
             lines.append(memspec.CORE_GEN_HOST_END.format(host=host))
             lines.append("")
     return "\n".join(lines).rstrip("\n") + "\n"

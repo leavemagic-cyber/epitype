@@ -21,7 +21,7 @@ import recall_hook as recall
 # A card without a verified original source is recalled as a lookup hint, never as a
 # ruling (6f6fce1, docs/RULE_PROVENANCE.md). These fixtures are such legacy cards; an
 # active decision among them keeps its pinned seat and is told apart by its key and date.
-LOOKUP = "- 查找線索（來源未核；非授權或新增禁令） | "
+LOOKUP = "- " + memspec.RECALL_LOOKUP_PREFIX
 
 
 def _decision_line(line, key):
@@ -390,6 +390,27 @@ class RecallSelectionRegression(unittest.TestCase):
     def test_merge_keeps_each_vaults_order_even_when_coverage_varies(self):
         groups = [[(1, "a"), (3, "b")], [], [(2, "c"), (0, "d")]]
         self.assertEqual(list(recall._merge_ordinary(groups)), ["c", "a", "b", "d"])
+
+    def test_each_vaults_top_card_precedes_another_vaults_second_card(self):
+        groups = [[(1, "project-first"), (1, "project-second")],
+                  [(8, "governance-first"), (7, "governance-second")]]
+        self.assertEqual(list(recall._merge_ordinary(groups)),
+                         ["governance-first", "project-first", "governance-second", "project-second"])
+
+    def test_successor_hints_follow_ranked_ordinary_cards_and_preserve_pins(self):
+        def hit(path, active=False):
+            return {'path': path, 'status': 'active' if active else ''}
+        result = {'results': [hit('winner'), hit('ranked-pin', True), hit('runner-up')],
+                  'replacement_results': [hit('hint'), hit('successor-pin', True)]}
+        with patch.object(recall, '_frontmatter_fields', return_value={'status': 'active', 'decision_key': 'pin'}):
+            self.assertEqual([value['path'] for value in recall._recall_candidates(result)],
+                             ['successor-pin', 'ranked-pin', 'winner', 'runner-up', 'hint'])
+
+    def test_active_project_record_does_not_jump_ahead_of_search_winner(self):
+        result = {'results': [{'path': 'winner'}],
+                  'replacement_results': [{'path': 'project', 'status': 'active'}]}
+        with patch.object(recall, '_frontmatter_fields', return_value={'status': 'active', 'type': 'project'}):
+            self.assertEqual([value['path'] for value in recall._recall_candidates(result)], ['winner', 'project'])
 
     def test_budget_sweep_keeps_whole_cards_header_and_authority_prefix(self):
         header = memspec.UNTRUSTED_ADVISORY + "\nvaults: V1=synthetic"

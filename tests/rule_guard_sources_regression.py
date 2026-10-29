@@ -206,6 +206,15 @@ class GuardSources(unittest.TestCase):
         self.assertIsNone(self.denial(self.call(defects=defects)))
         self.assertTrue(any('INVALID' in item for item in defects))
 
+    def test_unavailable_original_keeps_guard_as_reminder(self):
+        self.card()
+        self.source.unlink()
+        defects = []
+        context = self.advice('unavailable-original', defects)
+        self.assertIn(self.document['quote'], context)
+        self.assertIn('來源未核', context)
+        self.assertFalse(any('INVALID' in item for item in defects))
+
     def test_complete_body_and_execution_fields_read_fresh(self):
         for old, new in ((b'Synthetic body.', b'Synthetic evil.'),
                          (b'guard_all_of: ["guard-hit-marker"]',
@@ -360,9 +369,6 @@ class GuardSources(unittest.TestCase):
             self.assertIsNotNone(self.denial(self.call()))
 
     def test_real_write_caller_obeys_source_case_and_reports_unknown(self):
-        # The encoding check only notes (owner 2026-10-03; CORE-25). A Write is repaired
-        # whatever the cards say, so an Edit, which only the card's note covers, is what
-        # shows the source scope being obeyed.
         self.card(scope=self.scope(level='case', project=str(self.root), case='case-A'),
                   fields={'write_check': memspec.WRITE_CHECK_PS51_UTF8_BOM})
         target = self.root / 'synthetic.ps1'

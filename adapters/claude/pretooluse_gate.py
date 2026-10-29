@@ -751,9 +751,11 @@ def _read_guard(path):
             memspec.ACTION_GUARD_TOOL_FIELD, "advise_tool", "require_tool_before", memspec.WRITE_CHECK_FIELD)):
         return None
     try:
+        # An unreadable original conversation leaves the card UNVERIFIED; the
+        # caller then demotes block to note, so it must not drop the guard here.
         projected = rule_pipeline.projection(
             fields, path, legacy_text=fields.get("guard_advice") or fields.get("description", ""),
-            card_text=card_text)
+            card_text=card_text, allow_unavailable_sources=True)
     except (ValueError, OSError, UnicodeError) as exc:
         return f"[{path.name}] guard source INVALID: {exc}"
     if projected["expired"]:
@@ -3081,8 +3083,6 @@ def _selftest():
                 and not regex_accepted("a" * (memspec.FORBIDDEN_REGEX_MAX_CHARS + 1)),
             ))
 
-            # Owner 2026-09-09 (§30): the narration meter is gone. A transcript
-            # whose turn is full of mid-run prose must produce no context at all.
             def transcript_rows(*rows):
                 path = root / f"transcript-{uuid.uuid4().hex}.jsonl"
                 path.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n", encoding="utf-8")
@@ -3268,6 +3268,7 @@ def _selftest():
                         "HOME": os.fspath(write_root),
                         "USERPROFILE": os.fspath(write_root),
                     },
+                    clock=memspec.HOOK_CLOCK_FROZEN,
                 )
                 value = json.loads(result.stdout) if result.stdout.strip() else {}
                 return result, value.get("hookSpecificOutput", {})
@@ -3625,9 +3626,7 @@ def _selftest():
                 and noted(bare_write_out, forbidden_note),
             ))
 
-            # 規則再犯（2026-09-25 titan）：往已存在的行為卡追加事故敘述、卻沒動任何武裝欄位，擋；
-            # 同時在武裝、新卡、非行為卡、一般用語與判不準的輸入，全部放行。
-            recurrence_line = "**再犯（2026-09-25，titan 台指期休市事故）**：Run 區塊又拆成兩條指令。"
+            recurrence_line = "**再犯（2026-09-25，sample-project 台指期休市事故）**：Run 區塊又拆成兩條指令。"
             recurrence_body = "Run 按鈕區塊必須是一條完整的 PowerShell 指令。\n"
 
             def recurrence_card(name, card_type="feedback", extra=""):
@@ -3720,8 +3719,8 @@ def _selftest():
                     "content": recurrence_card("feedback-fresh") + "\n" + recurrence_line + "\n",
                 },
             )
-            project_card = write_vault / "project-titan.md"
-            project_card.write_text(recurrence_card("project-titan", "project"), encoding="utf-8")
+            project_card = write_vault / "project-sample-project.md"
+            project_card.write_text(recurrence_card("project-sample-project", "project"), encoding="utf-8")
             project_result, project_out = append_incident(project_card)
             checks.append((
                 "新建的卡含「再犯」、以及 project 卡追加再犯敘述，都放行",
@@ -3759,7 +3758,7 @@ def _selftest():
                 "timestamp": "2026-06-18T00:00:00Z",
                 "message": {"content": ordinary_owner_words}}, ensure_ascii=False) + "\n", encoding="utf-8")
             for index, text in enumerate((
-                "owner 2026-06-18：「驗證程式片段太大問題，免得以後再犯。」",
+                "synthetic owner 2026-01-01：「範例程式片段太長，請拆成可讀的小段。」",
                 "## 我最大的錯（永遠別再犯）",
                 "這是行為層的防再犯規則，2026-09-20 起適用。",
                 "- 不要再犯沒有對於各商品有不同判斷方式（2026-07-12）",
@@ -3799,9 +3798,9 @@ def _selftest():
 
             headline = []
             for index, text in enumerate((
-                "**再犯（titan 台指期休市事故）**：Run 區塊又拆成兩條指令。",
+                "**再犯（sample-project 台指期休市事故）**：Run 區塊又拆成兩條指令。",
                 "## 第二次犯同一件事",
-                "3. **（titan）又犯**：同一件事。",
+                "3. **（sample-project）又犯**：同一件事。",
             )):
                 headline_card = write_vault / f"feedback-headline-{index}.md"
                 headline_card.write_text(
@@ -4058,7 +4057,8 @@ def _selftest():
             write_config(meter_config, [meter_vault])
             meter_options = json.loads(meter_config.read_text(encoding="utf-8"))
             meter_options[memspec.CONTEXT_METER_CONFIG_FIELD] = {
-                memspec.CONTEXT_METER_OVERRIDE_FIELD: 100000}
+                memspec.CONTEXT_METER_OVERRIDE_FIELD: 100000,
+                memspec.CONTEXT_METER_TRACE_UNTIL_FIELD: "9999-12-31"}
             meter_config.write_text(json.dumps(meter_options), encoding="utf-8")
             meter_transcript = root / "meter.jsonl"
             meter_transcript.write_text(json.dumps({"type": "assistant", "message": {"usage": {

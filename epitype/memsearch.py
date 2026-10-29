@@ -2,6 +2,8 @@ import sys; [getattr(stream, "reconfigure", lambda **_: None)(encoding="utf-8", 
 """Epitype 記憶卡的本機 FTS5 全文與別名搜尋器。"""
 
 import json
+from difflib import SequenceMatcher
+from functools import lru_cache
 import os
 from pathlib import Path
 import posixpath
@@ -24,6 +26,7 @@ _SEARCH_FRONT_FIELDS = ("name", "description", memspec.ALIASES_FIELD, memspec.SC
 _FRONT_FIELDS = _SEARCH_FRONT_FIELDS + (
     memspec.DECISION_STATUS_FIELD,
     memspec.SUPERSEDED_BY_FIELD,
+    "current_decision_at", "last_verified_at",
 )
 _ALL_FIELDS = _SEARCH_FRONT_FIELDS + ("body",)
 # 卡的身分欄：一個切詞碰到這裡，講的是這張卡是什麼；碰到描述或本文只是提到。
@@ -46,7 +49,7 @@ _RECALL_PART = re.compile(f"[{_CJK_RANGE}]+|[^\\s{_CJK_RANGE}，。！？：；�
 # bigrams indexable while the cards table and returned hit fields stay raw.
 _CJK_BIGRAM_PREFIX = "\ue000"
 _FTS_FORMAT_KEY = "fts_format"
-_FTS_FORMAT_VERSION = "8"
+_FTS_FORMAT_VERSION = "9"
 _CURRENT_DECISION_GUIDANCE = "此題現行決定="
 
 
@@ -420,6 +423,7 @@ def _ensure_schema(connection):
         memspec.DECISION_STATUS_FIELD,
         memspec.SUPERSEDED_BY_FIELD,
         "body",
+        "recall_date", "recall_links",
     }
     rebuild = row is None or row[0] != _FTS_FORMAT_VERSION or not expected_columns.issubset(columns)
     if rebuild:
@@ -441,7 +445,9 @@ def _ensure_schema(connection):
             fm_scope TEXT NOT NULL,
             status TEXT NOT NULL,
             superseded_by TEXT NOT NULL,
-            body TEXT NOT NULL
+            body TEXT NOT NULL,
+            recall_date TEXT NOT NULL,
+            recall_links TEXT NOT NULL
         );
         CREATE VIRTUAL TABLE IF NOT EXISTS cards_fts USING fts5(
             card_path UNINDEXED, name, description, fm_aliases, fm_scope, body,
@@ -496,7 +502,7 @@ def _stable_card(path):
     return None
 
 
-def build_index(vault, lock_timeout=0.0):
+def build_index(vault, lock_timeout=0.0, *, prepare_sources=False):
     vault = _resolve_vault(vault)
     migrated_from = _migrate_legacy_index(vault)
     db_path = _db_path(vault)
@@ -551,15 +557,16 @@ def build_index(vault, lock_timeout=0.0):
                         """
                         INSERT INTO cards(
                             card_path, mtime_ns, size, is_card, name, description, fm_aliases,
-                            fm_scope, status, superseded_by, body
+                            fm_scope, status, superseded_by, body, recall_date, recall_links
                         )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT(card_path) DO UPDATE SET
                             mtime_ns=excluded.mtime_ns, size=excluded.size,
                             is_card=excluded.is_card, name=excluded.name,
                             description=excluded.description, fm_aliases=excluded.fm_aliases,
                             fm_scope=excluded.fm_scope, status=excluded.status,
-                            superseded_by=excluded.superseded_by, body=excluded.body
+                            superseded_by=excluded.superseded_by, body=excluded.body,
+                            recall_date=excluded.recall_date, recall_links=excluded.recall_links
                         """,
                         (
                             card_path,
@@ -573,6 +580,8 @@ def build_index(vault, lock_timeout=0.0):
                             fields[memspec.DECISION_STATUS_FIELD],
                             fields[memspec.SUPERSEDED_BY_FIELD],
                             fields["body"],
+                            _recall_date(fields, card_path),
+                            json.dumps(re.findall(r"\[\[([^\]#|]+)(?:[^\]]*)\]\]", fields["body"])),
                         ),
                     )
                     row_id = connection.execute(
@@ -620,6 +629,12 @@ def build_index(vault, lock_timeout=0.0):
         warnings = _index_warnings(vault)
         if warnings:
             payload["warnings"] = warnings
+        if prepare_sources:
+            if not __package__:
+                sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+            from epitype import rule_provenance
+            payload['prepared_authorship'] = rule_provenance.prepare_authorship(
+                vault, db_path.parent / memspec.PROVENANCE_ORIGIN_CACHE_FILENAME)
         return payload
 
 
@@ -792,10 +807,8 @@ _LATIN_ALPHA_TERM = re.compile(r"^[a-z]+$")
 
 
 def _short_latin_pattern(key):
-    """≤3 字母的純英文詞只認「詞尾邊界」比對：`bug\\b` 吃得到 debug 的字尾（真字根，
-    2026-09-06 迴歸題 titan-log-over-screenshot 就靠這個），但 `tie\\b` 吃不到 tier／
-    tiered／service_tier 的字首（2026-09-06 真機實測：這種字首巧合灌了 27 張卡，
-    無一命中該卡的 name 欄）。≥4 字母與中文維持子字串比對，規格未變。"""
+    """≤3 字母的純英文詞只認詞尾邊界：`bug\\b` 可匹配 debug 的字尾，
+    `tie\\b` 不匹配 tier／tiered／service_tier 的字首。≥4 字母與中文用子字串比對。"""
     if len(key) <= 3 and _LATIN_ALPHA_TERM.fullmatch(key):
         return re.compile(re.escape(key) + r"\b")
     return None
@@ -822,11 +835,9 @@ def _recall_hits(row, terms):
 
 
 def _strong_terms(terms):
-    """實詞＝不是泛詞的切詞。2026-09-06 實測：「今天天氣如何」注入 7 張卡，命中的全
-    是「今天」「天天」碰到卡片正文；泛詞碰到什麼都不代表這句話問的是那件事。
+    """實詞排除泛詞，避免通用寒暄喚回無關正文。
 
-    庫內高頻詞不當泛詞：同日實測 bug 佔 titan 庫 30%、titan 佔 41%、記憶佔 25%，
-    以 df 比例判泛詞會把「這個 bug 要不要我截圖」的答案卡一起殺掉（回歸退 1 題）。"""
+    庫內高頻詞仍可代表主題；僅憑文件頻率排除會漏掉相關答案。"""
     return {
         term.casefold()
         for term in terms
@@ -991,6 +1002,104 @@ def _result(vault, row, hits):
     }
 
 
+def _recall_date(fields, card_path):
+    dates = [fields.get(key, "")[:10] for key in ("current_decision_at", "last_verified_at")]
+    dates.extend("-".join(match) for match in re.findall(r"(20\d{2})-?(\d{2})-?(\d{2})", card_path))
+    return max((value for value in dates if memspec.is_iso_date(value)), default="")
+
+
+@lru_cache(maxsize=4096)
+def _alias_identity(name, aliases):
+    # Pure indexed strings are the key: editing an alias cannot reuse old terms.
+    identities = tuple(value.casefold() for value in (name, *aliases.splitlines()) if value)
+    parts = tuple(frozenset(_strong_terms(_recall_terms(value))) for value in identities)
+    words = tuple(set(re.findall(r"[a-z]{4,}", " ".join(identities))))
+    return identities, parts, words
+
+
+def _alias_rank(row, prompt, terms):
+    identities, parts, words = _alias_identity(row["name"], row["fm_aliases"])
+    exact = sum(bool(pattern.search(prompt.casefold())) if pattern else value in prompt.casefold()
+                for value in identities for pattern in [_short_latin_pattern(value)])
+    coverage = sum(bool(group) and len(group & terms) / len(group) >= .8 for group in parts)
+    # Fuzzy Latin identifiers supplement trigram search; short CJK fragments
+    # remain subject to the existing substantive-term test.
+    near = 0 if exact or coverage else sum(
+        any(abs(len(term) - len(word)) <= 2 and SequenceMatcher(None, term, word).ratio() >= .84 for word in words)
+        for term in terms if re.fullmatch(r"[a-z]{4,}", term))
+    matched = max((len(group & terms) for group in parts), default=0)
+    # A CJK phrase decomposes into overlapping bigrams, not independent words.
+    cjk_phrase = any(group and len(group & terms) / len(group) >= .8
+                     and any(_CJK_RUN.fullmatch(term) for term in group & terms) for group in parts)
+    support = min(1.0, max(1, matched, near) / max(1, len(terms)))
+    return (exact, coverage, near, 1.0 if cjk_phrase else support * support)
+
+
+def _fuse_recall(connection, candidates, prompt, terms, include_superseded, include_noncard):
+    """Fuse ordinal signals; independent vault BM25 values are never comparable."""
+    # A busy upgrade lock leaves the old snapshot readable with its old ranking.
+    columns = {row[1] for row in connection.execute('PRAGMA table_info(cards)')}
+    if not {'recall_date', 'recall_links'} <= columns:
+        return sorted(candidates, key=lambda item: item[0])
+    metadata = connection.execute(
+        "SELECT card_path, name, fm_aliases, recall_date, recall_links, is_card, status, description, fm_scope FROM cards"
+    ).fetchall()
+    eligible = {row['card_path']: row for row in metadata
+                if (include_noncard or row['is_card'])
+                and (include_superseded or not _is_superseded(row))
+                and not historical_only(row['description'], row['fm_scope'], row['status'])}
+    ordered = sorted(candidates, key=lambda item: item[0])
+    base = [item[1]['card_path'] for item in ordered]
+    base_keys = {item[1]['card_path']: item[0][:-1] for item in ordered}
+    aliases = {path: _alias_rank(row, prompt, terms) for path, row in eligible.items()}
+    alias_list = sorted((path for path, score in aliases.items() if any(score[:3])),
+                        key=lambda path: (tuple(-value for value in aliases[path]), path))
+    # Only lexical seeds expand. Newly discovered neighbours cannot recursively
+    # traverse the graph or turn a generic prompt into a vault-wide recall.
+    seeds = set(base[:3])
+    names = {}
+    qualified = {posixpath.splitext(path)[0].casefold(): path for path in eligible}
+    for path, row in eligible.items():
+        for name in (path, posixpath.splitext(path)[0], Path(path).stem, row['name']):
+            names.setdefault(name.casefold(), set()).add(path)
+    neighbours = set()
+    for path, row in eligible.items():
+        for link in json.loads(row['recall_links']):
+            key = link.strip().replace('\\', '/').casefold().removesuffix('.md')
+            relative = posixpath.normpath(posixpath.join(posixpath.dirname(path), key))
+            target = qualified.get(relative, qualified.get(key))
+            targets = {target} if target else names.get(key, set())
+            if len(targets) != 1:
+                continue
+            target = next(iter(targets))
+            if path in seeds:
+                neighbours.add(target)
+            if target in seeds:
+                neighbours.add(path)
+    discovered = (set(alias_list) | neighbours) - set(base)
+    for path in sorted(discovered):
+        row = connection.execute('SELECT * FROM cards WHERE card_path = ?', (path,)).fetchone()
+        hits, matched, _fields = _recall_hits(row, terms)
+        candidates.append(((0, 0, 0, 0, path),
+                           {**_result(Path('.'), row, hits), 'matched_term_count': len(matched),
+                            'hit_fields': hits or ([memspec.ALIASES_FIELD] if path in aliases and any(aliases[path][:3]) else ['wikilink'])}))
+    pool = {item[1]['card_path'] for item in candidates}
+    recent = sorted((path for path in pool if eligible[path]['recall_date']),
+                    key=lambda path: (eligible[path]['recall_date'], path), reverse=True)
+    scores = dict.fromkeys(pool, 0.0)
+    for weight, ranking, keys in ((2.0, base, base_keys), (.35, alias_list, aliases),
+                                  (.15, sorted(neighbours), dict.fromkeys(neighbours, 0)),
+                                  (.15, recent, {path: eligible[path]['recall_date'] for path in recent})):
+        previous, rank = object(), 0
+        for position, path in enumerate(ranking, 1):
+            if keys[path] != previous:
+                rank, previous = position, keys[path]
+            # One alias term is weaker evidence when the prompt names many topics.
+            support = aliases[path][3] if keys is aliases else 1.0
+            scores[path] += weight * support / (60 + rank)
+    return sorted(candidates, key=lambda item: (-scores[item[1]['card_path']], item[1]['card_path']))
+
+
 def query_index(vault, term, include_superseded=False, include_noncard=False):
     vault = _resolve_vault(vault)
     term = str(term).strip()
@@ -1003,7 +1112,7 @@ def query_index(vault, term, include_superseded=False, include_noncard=False):
     if not migration_pending and _is_stale(vault, db_path):
         # 2026-09-01 實測事故：重建競爭若阻斷查詢會讓喚回不可用；規則：拿不到鎖
         # 即讀既有 SQLite 快照。
-        index_updated = build_index(vault, lock_timeout=0.0)["status"] == "built"
+        index_updated = build_index(vault, lock_timeout=0.0, prepare_sources=False)["status"] == "built"
 
     connection = _read_connection(db_path)
     connection.row_factory = sqlite3.Row
@@ -1071,7 +1180,7 @@ def recall_index(vault, prompt, include_superseded=False, include_noncard=False,
         return payload
     index_updated = False
     if not migration_pending and _is_stale(vault, db_path):
-        index_updated = build_index(vault, lock_timeout=0.0)["status"] == "built"
+        index_updated = build_index(vault, lock_timeout=0.0, prepare_sources=False)["status"] == "built"
 
     connection = _read_connection(db_path)
     connection.row_factory = sqlite3.Row
@@ -1117,6 +1226,10 @@ def recall_index(vault, prompt, include_superseded=False, include_noncard=False,
                     {**_result(vault, row, hits), "matched_term_count": len(strong)},
                 )
             )
+        candidates = _fuse_recall(connection, candidates, prompt,
+                                  strong_terms, include_superseded, include_noncard)
+        for _rank, hit in candidates:
+            hit['path'] = str(vault / hit['card_path'])
         indexed_paths = (
             [item[0] for item in connection.execute("SELECT card_path FROM cards")]
             if excluded_links
@@ -1124,7 +1237,6 @@ def recall_index(vault, prompt, include_superseded=False, include_noncard=False,
         )
     finally:
         connection.close()
-    candidates.sort(key=lambda item: item[0])
     window = memspec.FTS_TOP_K if limit is None else max(int(limit), memspec.FTS_TOP_K)
     results = [item[1] for item in candidates[:window]]
     replacements = _current_successors(vault, excluded_links, indexed_paths)
@@ -2214,7 +2326,7 @@ def main(argv=None):
         return _selftest()
     try:
         if args.command == "build":
-            payload = build_index(args.vault)
+            payload = build_index(args.vault, prepare_sources=True)
             exit_code = 0 if payload["status"] == "built" else 3
         elif args.command == "query":
             payload = query_index(

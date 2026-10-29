@@ -1352,6 +1352,9 @@ def _selftest():
             root = Path(temp_dir).resolve()
             # 追蹤檔落在設定檔旁：自測一律指到暫存根，絕不寫進真的 ~/.epitype。
             os.environ[memspec.EPITYPE_CONFIG_ENV] = os.fspath(root / "selftest-config.json")
+            (root / "selftest-config.json").write_text(json.dumps({
+                memspec.CONTEXT_METER_CONFIG_FIELD: {
+                    memspec.CONTEXT_METER_TRACE_UNTIL_FIELD: "9999-12-31"}}), encoding="utf-8")
             transcript = root / "t.jsonl"
 
             # 1. 跨塊：最後一列是遠大於首塊的工具結果，用量在它前面。

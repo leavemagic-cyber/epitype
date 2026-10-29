@@ -977,7 +977,7 @@ def _asks_again(decision, message):
     """True when one question sentence names this same ruling by two of its aliases.
 
     Two aliases of one card, not one: a single shared word ("虛擬") appears in
-    unrelated questions, while「虛擬盤」and「鏡像實盤」together in a question is the
+    unrelated questions, while「模型船」and「鏡像原型船」together in a question is the
     settled subject being put back to the owner. Aliases belonging to different cards
     never add up."""
     # Only a sourced, explicit owner ruling can make a question "already decided".
@@ -1584,9 +1584,6 @@ def _first_violation(decisions, event, message, config, started_at, defects, tur
             verdicts.append((decision, _TURN_CHECK_RULE, reason, ""))
             break
     if not verdicts:
-        # 圍籬區塊在上面的字面比對裡是遮掉的（2026-09-19）；這一道不看字面，直接問 owner
-        # 按執行時會跑它的那個殼層「這段合不合法」。沒有卡宣告殼層、或沒有相符的區塊時，
-        # 一個行程都不起。
         for decision in (() if _is_subagent_stop(event) else decisions):
             reason = _fence_shell_gap(decision, message, event, started_at, defects)
             if reason is None:
@@ -1643,15 +1640,15 @@ def _selftest():
             vault.mkdir()
             (vault / "mirror.md").write_text(
                 "---\n"
-                "name: 虛擬盤鏡像裁定\n"
-                "description: 虛擬盤與實盤參數一致\n"
+                "name: 模型船鏡像裁定\n"
+                "description: 模型船與原型船參數一致\n"
                 f"{memspec.DECISION_KEY_FIELD}: virtual-mirrors-live\n"
                 f"{memspec.DECISION_STATUS_FIELD}: {memspec.ACTIVE_DECISION_STATUS}\n"
                 f"{memspec.CURRENT_DECISION_AT_FIELD}: 2026-08-13\n"
                 f"{memspec.DECIDED_BY_FIELD}: {memspec.OWNER_EXPLICIT_DECIDER}\n"
-                f"{memspec.OWNER_QUOTE_FIELD}: 虛擬必須鏡像實盤\n"
-                f"{memspec.ALIASES_FIELD}:\n  - 虛擬盤\n  - 鏡像實盤\n  - virtual mirror\n"
-                f"{memspec.FORBIDDEN_FIELD}:\n  - 虛擬盤(?:先)?用不同參數\n  - 兩套參數\n"
+                f"{memspec.OWNER_QUOTE_FIELD}: 虛擬必須鏡像原型船\n"
+                f"{memspec.ALIASES_FIELD}:\n  - 模型船\n  - 鏡像原型船\n  - virtual mirror\n"
+                f"{memspec.FORBIDDEN_FIELD}:\n  - 模型船(?:先)?用不同參數\n  - 兩套參數\n"
                 "---\nbody\n",
                 encoding="utf-8",
             )
@@ -1751,7 +1748,7 @@ def _selftest():
                 return result, value, session_id
 
             forbidden_result, forbidden_value, forbidden_session = run(
-                "我建議虛擬盤先用不同參數跑一週再說。"
+                "我建議模型船先用不同參數跑一週再說。"
             )
             log_rows = gate_rows()
             forbidden_notes = notes(forbidden_session)
@@ -1784,7 +1781,7 @@ def _selftest():
 
             # U64: citing a forbidden phrase as evidence is not re-proposing it.
             quoted_result, quoted_value, _ = run(
-                "實測表：「虛擬盤先用不同參數」是被擋下的例子，僅供舉例說明。"
+                "實測表：「模型船先用不同參數」是被擋下的例子，僅供舉例說明。"
             )
             checks.append((
                 "forbidden 落在中文引號「」內是引用，不算再提議",
@@ -1804,7 +1801,7 @@ def _selftest():
             ))
 
             blockquote_result, blockquote_value, _ = run(
-                "引用回顧：\n> 虛擬盤先用不同參數跑一週再說\n以上是先前被擋下的話，現在已經照裁定改了。"
+                "引用回顧：\n> 模型船先用不同參數跑一週再說\n以上是先前被擋下的話，現在已經照裁定改了。"
             )
             checks.append((
                 "forbidden 整行落在 > 引用行內是引用，不算再提議",
@@ -1814,7 +1811,7 @@ def _selftest():
             ))
 
             table_result, table_value, _ = run(
-                "| 案例 | 結果 |\n| --- | --- |\n| 「虛擬盤先用不同參數」 | 擋下 |\n"
+                "| 案例 | 結果 |\n| --- | --- |\n| 「模型船先用不同參數」 | 擋下 |\n"
             )
             checks.append((
                 "forbidden 落在表格儲存格的引號內是引用，不算再提議",
@@ -1825,9 +1822,9 @@ def _selftest():
 
             mixed_source = root / "mixed-owner.jsonl"
             mixed_source.write_text(json.dumps({"type": "user", "message": {
-                "content": "虛擬盤先用不同參數不行"}}, ensure_ascii=False)+"\n", encoding="utf-8")
+                "content": "模型船先用不同參數不行"}}, ensure_ascii=False)+"\n", encoding="utf-8")
             mixed_result, mixed_value, mixed_session = run(
-                "owner 說過「虛擬盤先用不同參數」不行，但我還是想虛擬盤先用不同參數看看。",
+                "owner 說過「模型船先用不同參數」不行，但我還是想模型船先用不同參數看看。",
                 extra={"transcript_path": str(mixed_source)},
             )
             checks.append((
@@ -1853,7 +1850,7 @@ def _selftest():
             ))
 
             question_result, question_value, question_session = run(
-                "先講結論。虛擬盤要不要改成鏡像實盤，還是維持現狀？"
+                "先講結論。模型船要不要改成鏡像原型船，還是維持現狀？"
             )
             checks.append((
                 "a question naming the ruling by two of its aliases is noted, not blocked",
@@ -1863,7 +1860,7 @@ def _selftest():
             ))
 
             statement_result, statement_value, _ = run(
-                "已依裁定把虛擬盤設成鏡像實盤，參數表已同步。"
+                "已依裁定把模型船設成鏡像原型船，參數表已同步。"
             )
             checks.append((
                 "a statement that merely names the aliases is left alone",
@@ -1873,7 +1870,7 @@ def _selftest():
             ))
 
             split_result, split_value, split_session = run(
-                "虛擬盤跟排程甲要不要一起處理？"
+                "模型船跟排程甲要不要一起處理？"
             )
             two_alias_result, two_alias_value, two_alias_session = run(
                 "排程甲跟排程乙要不要一起處理？"
@@ -1892,7 +1889,7 @@ def _selftest():
                 "session_id": "stopgate-active",
                 "hook_event_name": "Stop",
                 "stop_hook_active": True,
-                "last_assistant_message": "我建議虛擬盤先用不同參數跑一週再說。",
+                "last_assistant_message": "我建議模型船先用不同參數跑一週再說。",
             }
             active_result = synthetic(active_event, config)
             checks.append((
@@ -1910,7 +1907,7 @@ def _selftest():
                 retired_result.returncode == 0 and not retired_value,
             ))
 
-            repeat_message = "我建議虛擬盤先用不同參數跑一週再說。"
+            repeat_message = "我建議模型船先用不同參數跑一週再說。"
             _first, first_value, repeat_session = run(repeat_message)
             _second, second_value, _ = run(repeat_message, session=repeat_session)
             markers = sorted(
@@ -1934,7 +1931,7 @@ def _selftest():
             ))
 
             codex_result, codex_value, codex_session = run(
-                "我建議虛擬盤先用不同參數跑一週再說。",
+                "我建議模型船先用不同參數跑一週再說。",
                 extra={
                     "transcript_path": os.fspath(root / "synthetic.jsonl"),
                     "cwd": os.fspath(root),
@@ -1979,7 +1976,7 @@ def _selftest():
                 {
                     "session_id": "stopgate-plain",
                     "stop_hook_active": False,
-                    "last_assistant_message": "虛擬盤要不要改成鏡像實盤？",
+                    "last_assistant_message": "模型船要不要改成鏡像原型船？",
                 },
                 plain_config,
             )
@@ -1996,7 +1993,7 @@ def _selftest():
                 {
                     "session_id": "stopgate-bad",
                     "stop_hook_active": False,
-                    "last_assistant_message": "我建議虛擬盤先用不同參數跑一週再說。",
+                    "last_assistant_message": "我建議模型船先用不同參數跑一週再說。",
                 },
                 bad_config,
             )
@@ -2043,14 +2040,11 @@ def _selftest():
                 and memspec.STOP_GATE_PATTERN_DEFECT.split("{", 1)[0] in evil_result.stderr,
             ))
 
-            # Owner 2026-09-09 (§30): Stop keeps the decision gate and writes no
-            # commitment ledger. A turn whose tail is a promise is still noted on the
-            # forbidden phrase, and leaves no commitment ledger behind.
             ledger = vault / memspec.FTS_INDEX_DIRECTORY / "commitments.jsonl"
             before = ledger.stat().st_mtime_ns if ledger.exists() else None
             promise = "我等一下會把參數表補上。"
             blocked_result, blocked_value, blocked_session = run(
-                "我建議虛擬盤先用不同參數跑一週再說。" + promise
+                "我建議模型船先用不同參數跑一週再說。" + promise
             )
             after = ledger.stat().st_mtime_ns if ledger.exists() else None
             checks.append((
@@ -2090,8 +2084,7 @@ def _selftest():
                 value = json.loads(result.stdout) if result.stdout.strip() else {}
                 return result, value, session_id
 
-            # 2026-09-25 原句：宿主要求標 bash，owner 按下去是 PowerShell 5.1 → ParserError。
-            original = 'cd C:/titan && PYTHONIOENCODING=utf-8 "...python.exe" "...py"'
+            original = 'cd C:/sample-project && PYTHONIOENCODING=utf-8 "...python.exe" "...py"'
             native_parse_ok = True
             if native_powershell:
                 try:
@@ -2171,8 +2164,8 @@ def _selftest():
                      else "FileNotFoundError" in good_result.stderr),
             ))
             prose_result, _prose_value, _ = fence_run(
-                "先 cd C:/titan && python a.py 再看結果；沒標語言的區塊不查：\n"
-                "```\ncd C:/titan && python a.py\n```\n")
+                "先 cd C:/sample-project && python a.py 再看結果；沒標語言的區塊不查：\n"
+                "```\ncd C:/sample-project && python a.py\n```\n")
             checks.append((
                 "fence_shell: 區塊外的 && 與未標語言的區塊都不受影響",
                 prose_result.returncode == 0
@@ -2356,7 +2349,7 @@ def _selftest():
                     "session_id": late_session,
                     "hook_event_name": "Stop",
                     "stop_hook_active": False,
-                    "last_assistant_message": "我建議虛擬盤先用不同參數跑一週再說。",
+                    "last_assistant_message": "我建議模型船先用不同參數跑一週再說。",
                 },
                 config,
                 environment={"HOME": os.fspath(root), "USERPROFILE": os.fspath(root)},
@@ -2505,9 +2498,6 @@ def main():
     try:
         event = read_event(sys.stdin)
         value = _handle(event, _STARTED_AT, defects)
-        # 斷點檔：不管這一回合有沒有被擋，都把「改了什麼、跑了什麼、最後一句話」寫下來。
-        # 進度只存在對話裡的話，這一場結束或被停掉就等於沒發生過（owner 2026-09-19）。
-        # 純副作用，寫不出來也不影響這道閘的判斷。
         try:
             from epitype import handoff
 

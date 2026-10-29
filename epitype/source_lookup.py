@@ -4,6 +4,7 @@ from collections import deque
 import hashlib
 import json
 from pathlib import Path
+import sqlite3
 import sys
 import time
 
@@ -152,7 +153,8 @@ def main(argv=None):
     for stream in (sys.stdout, sys.stderr):
         getattr(stream, "reconfigure", lambda **_: None)(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("source", type=Path)
+    parser.add_argument("source", type=Path, nargs="?")
+    parser.add_argument("--index", type=Path, help="owner index locator search when source is omitted")
     parser.add_argument("--find", default="", help="case-insensitive literal substring, not semantic search")
     parser.add_argument("--role", choices=("all", "user", "assistant"), default="all")
     parser.add_argument("--line", type=int, help="physical line; relative to --offset when supplied")
@@ -160,10 +162,19 @@ def main(argv=None):
     parser.add_argument("--limit", type=int, default=5, help="latest matching records, in source order; 1..8")
     args = parser.parse_args(argv)
     try:
+        if args.source is None:
+            if not args.find or args.role == "assistant" or args.line is not None or args.offset:
+                parser.error("without a source, supply --find for owner-index locator search")
+            try:
+                from .owner_index import find
+            except ImportError:
+                from owner_index import find
+            print(json.dumps(find([args.find], path=args.index, limit=args.limit), ensure_ascii=False))
+            return 0
         result = lookup(args.source, query=args.find, role=args.role, line=args.line,
                         offset=args.offset, limit=args.limit)
         print(encode(result))
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, sqlite3.Error) as exc:
         print(f"ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
     return 0

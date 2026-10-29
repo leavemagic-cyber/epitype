@@ -21,11 +21,11 @@ class WhatCountsAsAPendingEntry(unittest.TestCase):
         self.assertTrue(pending_lint._is_pending("## 待辦（2026-06-27 時點）"))
 
     def test_narrative_prose_does_not_count(self):
-        # 2026-09-19：通用庫 7 行全是這種——卡片正文在敘述往事，不是一條沒做完的事。
+        # Invented historical prose is not an unfinished list entry.
         self.assertFalse(pending_lint._is_pending(
-            "**Why:** 2026-09-02 某場照抄交接本的 ⏳ 清單回報「未決」，owner 當場糾正"))
+            "**Why:** 合成花園的 ⏳ 標記曾被誤認為未決事項"))
         self.assertFalse(pending_lint._is_pending(
-            "**追加(2026-09-01)**：同族行為——被問還有問題嗎，就把全局 ⏳待辦清單端出來"))
+            "**追加(2026-01-01)**：範例花園曾把舊 ⏳待辦清單當成目前狀態"))
 
     def test_a_line_that_says_it_is_closed_does_not_count(self):
         self.assertFalse(pending_lint._is_pending("## 2026-08-27 到期檢視（本卡的待辦在此結案）"))
@@ -67,9 +67,7 @@ class MissingVaultIsNotClean(unittest.TestCase):
 
 
 class NoOrphans(unittest.TestCase):
-    """owner 2026-09-19：「不能有孤兒！有孤兒很容易放到忘記」。
-
-    孤兒＝沒有人掛名的待辦條目。不看年齡——等它變老才報，等於等它被忘記。
+    """孤兒＝沒有人掛名的待辦條目，不以年齡作為必要條件。
     判準比殭屍嚴：標記必須在條目最前面。誤報會變成每晚都在報的假帳。"""
 
     def test_a_marked_entry_is_an_orphan_candidate(self):
@@ -78,12 +76,12 @@ class NoOrphans(unittest.TestCase):
             self.assertTrue(pending_lint._is_orphan_candidate(line), msg=line)
 
     def test_prose_that_merely_contains_the_word_is_not(self):
-        # 2026-09-19 通用庫實測的原文：這四種以前都被算成孤兒，11 報 3 準。
+        # Invented reports, references and prose are not marked list entries.
         for line in (
-            "- **殭屍待辦 19 → 4**：原本把「卡片正文在敘述往事」也算成沒做完的事。",
+            "- **範例待辦 8 → 2**：這裡描述的是歷史統計。",
             "- 時間到才能驗的三項：看待辦卡。",
-            "- 此處舊「寫檔閘引用禁詞待修」已由 U64 處理；不列待辦。",
-            "- [[project-titan-state]] — 同日七項待辦的深度分析",
+            "- 此處舊「花盆待修」已由範例維修單處理；不列待辦。",
+            "- [[synthetic-garden-state]] — 範例待辦的背景說明",
         ):
             self.assertFalse(pending_lint._is_orphan_candidate(line), msg=line)
 

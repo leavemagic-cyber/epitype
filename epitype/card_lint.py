@@ -31,8 +31,6 @@ except ImportError:  # Direct script execution keeps the CLI contract.
 MAX_CARD_BYTES = 256 * 1024
 FAIL = "FAIL"
 WARN = "WARN"
-# owner 2026-09-06:「沒有有效期限可能是 owner 希望永久有效」——那不是缺口，是選擇。
-# INFO 只在 --verbose 與審核包出現，不進 SessionStart 那一行的 WARN 數。
 INFO = "INFO"
 # 中文提問喚不回全英文卡（2026-08-13 鏡射裁定事故）；CJK 統一表意文字＋擴充 A＋相容區。
 CJK_REGEX = re.compile(r"[㐀-䶿一-鿿豈-﫿]")
@@ -191,8 +189,6 @@ def _host_field_findings(front_lines):
     體檢說合格的值，就是會寫進宿主設定的值。"""
     _values, problems = memspec.host_native_values(front_lines)
     findings = [(FAIL, "host-field", problem) for problem in problems]
-    # 宿主的設定鍵與行為要照官方文件或官方原始碼定，不准從紀錄推測（owner 2026-09-29）。
-    # 出處寫在卡上，寫卡當下就擋得到，不必等到同步才發現。
     if memspec.host_native_declared(front_lines):
         sources = memspec.sequence_items(front_lines or (), memspec.HOST_SOURCE_FIELD)
         if not any(re.match(r"https://\S+\.\S+", source) for source in sources):
@@ -508,7 +504,7 @@ def _pattern_findings(fields, front_lines):
 
 
 def _guard_findings(fields, front_lines):
-    """動作守衛欄位的可用性（owner 2026-09-16 解除 §34 的動作條件禁令）。
+    """動作守衛欄位的可用性。
 
     §34 對 `trigger:` 的第三個理由是「卡片寫錯會靜默失效」。這裡就是那個理由的答案：
     守衛寫壞由體檢當場判 FAIL，不會等到該擋的時候才發現沒擋。"""
@@ -775,6 +771,102 @@ def _body_text(text, closing):
     return "\n".join(text.lstrip("﻿").splitlines()[closing + 1:])[
         : memspec.CARD_DATE_BODY_SCAN_CHARS
     ]
+
+
+_NOISE_FENCE = re.compile(r"^```.*?^```", re.M | re.S)
+_NOISE_QUOTE = re.compile(r"「[^」]*」|“[^”]*”")
+_SUPERSEDED_MARKER = re.compile(
+    r"取代上段|取代前段|取代上一段|已作廢|作廢|已撤銷|已過時|舊版段落|沿革|superseded", re.I)
+_NOISE_PATTERNS = (
+    re.compile(r"(?<![0-9A-Za-z])[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}(?![0-9A-Za-z])"),
+    re.compile(r"(?<![0-9A-Za-z])(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{7,64}(?![0-9A-Za-z])"),
+    re.compile(r"[\w-]*\.bak[_.-]?\w*\d[\w.-]*|[\w-]*\.bak_[\w.-]+"),
+    re.compile(r"AppData[\\/]+Local[\\/]+Temp[^\s`）)]*|scratchpad[\\/][^\s`）)]*", re.I),
+    re.compile(r"rollout-20\d\d-[\w-]+"),
+)
+
+
+def _live_rule_body(card_type, fields, text, closing):
+    status = fields.get(memspec.DECISION_STATUS_FIELD, "").strip().casefold()
+    if card_type not in memspec.CARD_LINT_BODY_NOISE_TYPES or status in memspec.STOP_GATE_SILENT_STATUSES:
+        return ""
+    body = "\n".join(text.lstrip("﻿").splitlines()[closing + 1:])
+    return _NOISE_QUOTE.sub(" ", _NOISE_FENCE.sub(" ", body))
+
+
+def _superseded_chain_findings(card_type, fields, text, closing):
+    body = _live_rule_body(card_type, fields, text, closing)
+    found = [match.group(0) for match in _SUPERSEDED_MARKER.finditer(body)]
+    if len(found) < 2:
+        return []
+    return [(WARN, "superseded-chain", memspec.CARD_LINT_SUPERSEDED_CHAIN_REASON.format(
+        markers=memspec.SLASH_JOINER.join(dict.fromkeys(found))))]
+
+
+OWNER_QUOTE_TIME_LIMIT_MARKERS = (
+    "一禮拜", "一個禮拜", "一週", "一周", "這週", "幾天", "先試", "試行", "試用",
+    "暫時", "暫定", "之後再", "到時候再", "為止", "之後要通知", "後要通知",
+)
+_OWNER_ATTRIBUTION = re.compile(r"owner|使用者|原話", re.I)
+_OWNER_LINE_QUOTE = re.compile(r"「([^」\n]*)」")
+
+
+def _unfenced_lines(text):
+    """Yield prose lines, excluding backtick/tilde fences through their close or EOF."""
+    fence = None
+    for line in text.splitlines():
+        stripped = line.lstrip()
+        if fence is not None:
+            character, length = fence
+            if re.fullmatch(re.escape(character) + "{" + str(length) + r",}\s*", stripped):
+                fence = None
+            continue
+        opening = re.match(r"(`{3,}|~{3,})", stripped)
+        if opening:
+            delimiter = opening.group(0)
+            fence = delimiter[0], len(delimiter)
+            continue
+        yield line
+
+
+# Time-limited wording needs review when no expiry or reviewed conclusion exists.
+def _owner_quote_time_limit_findings(fields, text, closing):
+    status = fields.get(memspec.DECISION_STATUS_FIELD, "").strip().casefold()
+    if status not in ("", memspec.ACTIVE_DECISION_STATUS):
+        return []
+    if any(fields.get(field, "").strip()
+           for field in (*memspec.CARD_EXPIRY_FIELDS, memspec.TIME_LIMIT_REVIEWED_FIELD)):
+        return []
+    quotes = list(_unfenced_lines(fields.get(memspec.OWNER_QUOTE_FIELD, "")))
+    body = "\n".join(text.lstrip("﻿").splitlines()[closing + 1:])
+    for line in _unfenced_lines(body):
+        if _OWNER_ATTRIBUTION.search(line):
+            quotes.extend(_OWNER_LINE_QUOTE.findall(line))
+    found = [marker for marker in OWNER_QUOTE_TIME_LIMIT_MARKERS
+             if any(marker in quote for quote in quotes)]
+    if not found:
+        return []
+    return [(WARN, "owner-quote-time-limit", memspec.CARD_LINT_OWNER_QUOTE_TIME_LIMIT_REASON.format(
+        markers=memspec.SLASH_JOINER.join(found),
+        fields=memspec.SLASH_JOINER.join(memspec.CARD_EXPIRY_FIELDS),
+        reviewed=memspec.TIME_LIMIT_REVIEWED_FIELD))]
+
+
+def _body_noise_findings(card_type, fields, text, closing):
+    """Hashes, session ids, backup names and temp paths in a rule-like card body.
+
+    Recall injects these cards into later sessions, so a one-off work record costs
+    tokens every time and teaches nothing. Owner quotes and fenced examples are kept
+    out of the scan: quotes stay verbatim, and a guard example may need the literal."""
+    body = _live_rule_body(card_type, fields, text, closing)
+    found = list(dict.fromkeys(
+        match.group(0) for pattern in _NOISE_PATTERNS for match in pattern.finditer(body)))
+    if not found:
+        return []
+    shown = memspec.SLASH_JOINER.join(found[:memspec.CARD_LINT_BODY_NOISE_SHOWN])
+    if len(found) > memspec.CARD_LINT_BODY_NOISE_SHOWN:
+        shown += f" 等 {len(found)} 處"
+    return [(FAIL, "body-noise", memspec.CARD_LINT_BODY_NOISE_REASON.format(fragments=shown))]
 
 
 def _iso_of(match):
@@ -1082,6 +1174,9 @@ def _check_card(path, relative, today, known_cards=None, source_path=None):
                 memspec.CARD_LINT_NO_CHINESE_REASON,
             ))
 
+    findings.extend(_body_noise_findings(card_type, fields, text, closing))
+    findings.extend(_superseded_chain_findings(card_type, fields, text, closing))
+    findings.extend(_owner_quote_time_limit_findings(fields, text, closing))
     findings.extend(_expiry_warnings(fields, today, card_type))
     scope_value = fields.get(memspec.APPLIES_TO_FIELD, "").strip().casefold()
     if scope_value and scope_value not in memspec.APPLIES_TO_VALUES:
@@ -1398,7 +1493,7 @@ def no_chinese_cards(reports):
 def no_chinese_line(reports, governance, limit=memspec.CARD_NO_CHINESE_PER_SESSION):
     """本場順手補中文別名的卡，一行。
 
-    owner 2026-09-06 裁定：缺中文別名不是給 owner 的決定題，AI 自主翻譯就好。所以
+    缺中文別名可由本場 AI 補上。所以
     這一行不是警告而是派工，而派工要輪替——游標記上次列到哪，否則每一場都點同三張，
     第四張以後永遠輪不到。
     """
@@ -1751,7 +1846,7 @@ def _selftest():
                 and "apply" in _reason_of(report, "feedback-bad.md", "aliases"),
             ))
             checks.append((
-                "沒中文不再問 owner：INFO 明寫本場 AI 自主補（owner 2026-09-06 裁定）",
+                "沒中文不再問 owner：INFO 明寫本場 AI 自主補",
                 "自主補中文別名" in _reason_of(report, "feedback-bad.md", "no-chinese")
                 and "請 owner 決定" not in _reason_of(report, "feedback-bad.md", "no-chinese"),
             ))

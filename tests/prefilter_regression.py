@@ -5,7 +5,7 @@
 命中」的訊息判成不可能命中，那條規則就默默不生效——比慢糟得多。所以這裡的測試方向是
 單邊的：**凡是真的會命中的，過濾一律不准擋掉**。
 
-最後一題拿四個庫裡所有真規則與它們自己的必擋例句來跑：規則與例句都是真的，不是編的。
+最後一題可選擇讀取明確提供的本機庫；沒有環境變數時跳過，必跑覆蓋使用合成卡。
 """
 import sys
 
@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 import re
+import os
 import unittest
 
 from epitype import cardscan, memspec
@@ -133,22 +134,14 @@ class AgainstFixtureCards(unittest.TestCase):
 
 
 class AgainstTheRealVaults(unittest.TestCase):
-    """作者本機四個庫的真規則、真例句。**找不到就整題跳過**，不當成失敗。
-
-    這一題是額外的稽核，不是必跑覆蓋——必跑那一份在上面用專案自帶的樣本。
-    """
-
-    VAULTS = (
-        Path.home() / ".claude" / "projects" / "C--" / "memory",
-        Path.home() / ".claude" / "projects" / "C--Users-User-Desktop-titan--" / "memory",
-        Path.home() / ".claude" / "projects" / "C--dev-daipai" / "memory",
-        Path.home() / ".claude" / "projects" / "C--Users-User-Desktop-beer--" / "memory",
-    )
+    """Optional local audit; EPITYPE_PREFILTER_VAULTS uses the OS path separator."""
 
     def test_no_card_example_is_filtered_away(self):
-        present = [vault for vault in self.VAULTS if vault.is_dir()]
+        vaults = [Path(raw).expanduser() for raw in
+                  os.environ.get("EPITYPE_PREFILTER_VAULTS", "").split(os.pathsep) if raw]
+        present = [vault for vault in vaults if vault.is_dir()]
         if not present:
-            self.skipTest("這台機器上沒有那幾個私人記憶庫；必跑覆蓋在合成樣本那一題")
+            self.skipTest("未提供可讀的 EPITYPE_PREFILTER_VAULTS；必跑覆蓋使用合成樣本")
         checked = 0
         for vault in present:
             if not vault.is_dir():
@@ -181,7 +174,7 @@ class AgainstTheRealVaults(unittest.TestCase):
                         self.assertFalse(
                             memspec.prefilter_misses(pattern, sentence),
                             msg="%s 的例句「%s」被前置過濾擋掉了" % (path.name, sentence[:40]))
-        self.assertGreater(checked, 0, "四個庫裡一組真規則加真例句都沒掃到，這一題等於沒跑")
+        self.assertGreater(checked, 0, "指定庫中沒有可核對的規則與例句")
 
 
 def _selftest():

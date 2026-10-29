@@ -126,19 +126,133 @@ def contract_vaults(vaults, home=None):
     return [Path(vault) for vault in vaults if _dir_key(Path(vault).expanduser().resolve()) == key][:1]
 
 
-def rules_text(vaults, host, home=None):
+def rules_text(vaults, host, home=None, current="", notices=None):
     """這個宿主實際該載入的規則塊：共用區加它自己的宿主區。
 
     走 core_gen 的 `host_view`，與 `epitype core-gen` 是同一條判斷；兩邊若各寫一份，
     同一張卡會在產生時屬於一個宿主、在同步時屬於另一個。
     """
-    rules, unreadable = core_gen.collect_rules(contract_vaults(vaults, home))
-    if unreadable:
-        # 讀不到一部分卡就不是「規則少幾條」，是這份規則塊不完整。寧可拒絕同步，也不要
-        # 把殘缺的核心寫進宿主檔——少一條規則不會有人發現。
-        raise ValueError("讀不到部分卡片：" + "；".join(unreadable[:3]))
-    assembled = core_gen.assemble(rules)
-    return _normalised(core_gen.host_view(assembled, host))
+    return _rules_text(contract_vaults(vaults, home), host, current, notices)
+
+
+def _previous_rules(current, host):
+    """Recover individual entries from both the old and the indexed renderer."""
+    entries, active = [], None
+    layer, section, hosts = "resident", "", ()
+    indexed = any(prefix in current for prefix in ("<!--r:", "<!-- epr:", "<!-- epitype-rule:"))
+    remaining = 0
+
+    def finish():
+        if active is not None:
+            active["previous_rendering"] = "\n".join(active.pop("lines")).rstrip("\n")
+            entries.append(active)
+
+    for line in current.splitlines():
+        if remaining:
+            if not active["lines"]:
+                start = re.match(r"^(?:- |\d+\. )(.*)", line)
+                if not start:
+                    raise ValueError(memspec.HOST_SYNC_ENTRY_MARKERS_INVALID)
+                line = start.group(1)
+            active["lines"].append(line)
+            remaining -= 1
+            if not remaining:
+                finish()
+                active = None
+            continue
+        marker = re.fullmatch(r"<!--(?:r:| (?:epr|epitype-rule):)([0-9a-f]{16}) ([1-9]\d*) (x|-?\d+)( U)? ?-->", line)
+        if line.startswith(("<!--r:", "<!-- epr:", "<!-- epitype-rule:")) and marker is None:
+            raise ValueError(memspec.HOST_SYNC_ENTRY_MARKERS_INVALID)
+        heading = line.startswith("## ") or line.startswith("### ")
+        start = re.match(r"^(?:- |\d+\. )(.*)", line)
+        if marker or heading or start and not indexed:
+            finish()
+            active = None
+        if marker:
+            remaining = int(marker.group(2))
+            active = {"path": None, "identity": marker.group(1), "layer": layer,
+                      "section": section, "hosts": hosts,
+                      "order": None if marker.group(3) == "x" else int(marker.group(3)),
+                      "lines": [], "inherits_defaults": bool(marker.group(4))}
+        elif heading:
+            if line == memspec.CORE_GEN_FLOOR_HEADING:
+                layer, hosts = "floor", ()
+            elif line == memspec.CORE_GEN_RESIDENT_HEADING:
+                layer, hosts = "resident", ()
+            elif line == memspec.CORE_GEN_HOST_HEADING:
+                layer, hosts = "resident", (host,)
+            elif line.startswith("### "):
+                section = line[4:]
+        elif start and active is None:
+            active = {"path": None, "layer": layer, "section": section, "hosts": hosts,
+                      "order": len(entries) + 1, "lines": [start.group(1)],
+                      "inherits_defaults": False}
+        elif active is not None:
+            active["lines"].append(line)
+    if remaining:
+        raise ValueError(memspec.HOST_SYNC_ENTRY_MARKERS_INVALID)
+    finish()
+    return entries
+
+
+def _failed_cards(notices):
+    prefixes = [message.split("{card}")[0] for message in
+                (memspec.HOST_SYNC_CARD_HELD, memspec.HOST_SYNC_CARD_OMITTED)]
+    return any(notice.startswith(prefix) for notice in notices for prefix in prefixes)
+
+
+def _rules_text(vaults, host, current="", notices=None):
+    failures = []
+    rules, unreadable = core_gen.collect_rules(vaults, failures=failures)
+    if len(unreadable) != len(failures):
+        raise ValueError(memspec.HOST_SYNC_VAULT_UNREADABLE.format(errors="；".join(unreadable)))
+    previous = _previous_rules(current, host) if failures else []
+    for vault, relative, reason, fields in failures:
+        path = Path(vault) / relative
+        candidates = [item for item in previous if item.get("identity") == core_gen.rule_identity(relative)
+                      or str(path) in item["previous_rendering"]]
+        if not candidates:
+            # Older plain blocks have no path labels. Match only an exact text
+            # entry or its stable CORE identifier, never an ordinal guess.
+            texts = {fields.get("text", "")}
+            try:
+                from epitype import rule_provenance
+                document = rule_provenance.parse(fields)
+                if document:
+                    texts.add(document.get("text", ""))
+            except (OSError, ValueError, TypeError):
+                pass
+            for item in previous:
+                for text in texts - {""}:
+                    core = re.match(r"CORE-\d+\.", text)
+                    if (item["previous_rendering"] == text
+                            or core and re.search(r"\b" + re.escape(core.group()), item["previous_rendering"])):
+                        candidates.append(item)
+                        break
+        if len(candidates) == 1:
+            rendering = candidates[0]["previous_rendering"]
+            # A retained entry must not lose facts it previously inherited from
+            # the shared header, even if every other such card has disappeared.
+            if candidates[0]["inherits_defaults"]:
+                from epitype import rule_provenance
+                if memspec.CORE_GEN_CARD_AUTHOR.split("{author}")[0] not in rendering:
+                    rendering += "\n" + memspec.CORE_GEN_CARD_AUTHOR.format(author="claude")
+                if memspec.CORE_GEN_CARD_SCOPE.split("{scope}")[0] not in rendering:
+                    scope = {"level": "global", "project": None, "case": None, "actions": ["*"],
+                             "conditions": [], "exceptions": [], "expiry": "unspecified"}
+                    rendering += "\n" + memspec.CORE_GEN_CARD_SCOPE.format(scope=rule_provenance.serialize(scope))
+            held = dict(candidates[0], vault=vault, path=relative,
+                        order=candidates[0]["order"] if candidates[0].get("identity") else core_gen._order_of(fields),
+                        text=rendering, previous_rendering=rendering,
+                        provenance={"status": "INVALID"})
+            rules.append(held)
+            message = memspec.HOST_SYNC_CARD_HELD
+        else:
+            message = memspec.HOST_SYNC_CARD_OMITTED
+        if notices is not None:
+            notices.append(message.format(card=path, reason=reason))
+    rules.sort(key=core_gen._sort_key)
+    return _normalised(core_gen.host_view(core_gen.assemble(rules), host))
 
 
 def _index_of(vault):
@@ -164,19 +278,13 @@ def index_text(vaults, home=None):
     return ""
 
 
-def project_rules_text(vault, host):
+def project_rules_text(vault, host, current="", notices=None):
     """這個專案庫自己的規則塊；一張規則卡都沒有就回空字串（不建空塊）。
 
-    只收這一個庫：專案根的檔是那個專案的，寫進別庫的規則等於把專案規則互相污染。讀不到
-    卡片時丟例外——同 `rules_text` 的態度，殘缺的規則塊比沒有規則塊更危險，因為少的那幾
-    條不會有人發現。
+    只收這一個庫；壞卡只能沿用這個宿主目前區塊中的舊版本。
     """
-    rules, unreadable = core_gen.collect_rules([Path(vault)])
-    if unreadable:
-        raise ValueError("讀不到部分卡片：" + "；".join(unreadable[:3]))
-    if not rules:
-        return ""
-    return _normalised(core_gen.host_view(core_gen.assemble(rules), host))
+    text = _rules_text([Path(vault)], host, current, notices)
+    return text if "<!--r:" in text else ""
 
 
 def project_index_text(vault):
@@ -280,13 +388,14 @@ def render(raw, name, wanted):
 
 def plan_for(host, vaults, home=None):
     """這個宿主檔要改什麼：每塊的現況與應有內容，以及擋住寫入的問題。"""
-    return _plan(host, host, None, host_path(host, home), lambda: {
-        memspec.HOST_SYNC_RULES_REGION: rules_text(vaults, host, home),
+    return _plan(host, host, None, host_path(host, home), lambda raw, notices: {
+        memspec.HOST_SYNC_RULES_REGION: rules_text(vaults, host, home,
+            _current_rules(raw, memspec.HOST_SYNC_RULES_REGION), notices),
         memspec.HOST_SYNC_INDEX_REGION: index_text(vaults, home),
-    }, home)
+    }, home, contextual=True)
 
 
-def _plan(host, label, key, path, wanted_of, home=None, over_cap=None):
+def _plan(host, label, key, path, wanted_of, home=None, over_cap=None, contextual=False):
     """一個目標檔要改什麼：每塊的現況與應有內容，以及擋住寫入的問題。
 
     `host` 是真正的宿主（決定規則視圖與載入上限），`label` 是輸出裡的名字，`key` 是狀態
@@ -302,7 +411,7 @@ def _plan(host, label, key, path, wanted_of, home=None, over_cap=None):
     regions, problems, notices = [], [], []
     damaged = False
     try:
-        wanted = wanted_of()
+        wanted = wanted_of(raw, notices) if contextual else wanted_of()
     except Exception as exc:
         return Plan(label, path, [], [f"組不出要寫的內容：{type(exc).__name__}: {exc}"], False, key)
 
@@ -448,7 +557,7 @@ def project_targets(vaults, hosts=None, home=None):
 
     回傳 ([(宿主, 專案根, 庫)], [(要報的路徑, 跳過的原因)])。治理庫不在內：它的規則走全域
     宿主檔，在專案根再寫一份就是同一段字每場付兩次。專案根不靠名冊反查，靠宿主自己留下
-    的對話紀錄（owner 2026-09-21：不應該是登記制）。
+    的對話紀錄。
 
     另一個專案根的上層目錄也不在內：兩個宿主都沿路往上讀祖先目錄的 AGENTS.md／CLAUDE.md，
     所以寫進上層等於把那一庫的卡塞進底下每一個專案的每一場。這是純祖先關係判斷，不是
@@ -504,14 +613,20 @@ def project_targets(vaults, hosts=None, home=None):
     return targets, skipped
 
 
+def _current_rules(raw, name):
+    found, _markers, _legacy = _locate(raw, name)
+    return found[1] if found else ""
+
+
 def project_plan(host, root, vault, home=None):
     """專案根那個檔要改什麼。規則只收這個庫的卡，索引只收它自己的 MEMORY.md。"""
     path = Path(root) / memspec.HOST_SYNC_PROJECT_FILES[host]
     label = f"project:{Path(root).name}/{path.name}"
 
-    def wanted_of():
+    def wanted_of(raw, notices):
         builders = {
-            memspec.HOST_SYNC_PROJECT_RULES_REGION: lambda: project_rules_text(vault, host),
+            memspec.HOST_SYNC_PROJECT_RULES_REGION: lambda: project_rules_text(vault, host,
+                _current_rules(raw, memspec.HOST_SYNC_PROJECT_RULES_REGION), notices),
             memspec.HOST_SYNC_PROJECT_INDEX_REGION: lambda: project_index_text(vault),
         }
         # 沒內容的那一塊整塊不要：這個庫沒有規則卡，就不該在別人的專案根長出一個空殼區
@@ -524,7 +639,7 @@ def project_plan(host, root, vault, home=None):
         return wanted
 
     return _plan(host, label, os.fspath(path), path, wanted_of, home, over_cap={
-        memspec.HOST_SYNC_PROJECT_INDEX_REGION: project_index_pointer(vault)})
+        memspec.HOST_SYNC_PROJECT_INDEX_REGION: project_index_pointer(vault)}, contextual=True)
 
 
 def _plans(vaults, hosts=None, home=None):
@@ -723,7 +838,10 @@ def check(vaults, hosts=None, home=None, output=sys.stdout):
     if not plans:
         print("沒有偵測到任何宿主（家目錄底下沒有 .claude／.codex）", file=output)
     elif not drift and not refused:
-        print(f"OK 宿主檔與卡片一致（{_targets_word(plans)}）", file=output)
+        if any(_failed_cards(item.notices) for item in plans):
+            print(memspec.HOST_SYNC_PARTIAL_OK.format(targets=_targets_word(plans)), file=output)
+        else:
+            print(f"OK 宿主檔與卡片一致（{_targets_word(plans)}）", file=output)
     return EXIT_REFUSED if refused else (EXIT_DRIFT if drift else EXIT_OK)
 
 
@@ -767,7 +885,10 @@ def apply(vaults, hosts=None, home=None, output=sys.stdout, actor=memspec.HOST_S
         for region in item.regions:
             updated = render(updated, region.name, region.text)
         if updated == raw:
-            print(f"OK     {item.host}: 已經一致", file=output)
+            if _failed_cards(item.notices):
+                print(memspec.HOST_SYNC_PARTIAL_OK.format(targets=item.host), file=output)
+            else:
+                print(f"OK     {item.host}: 已經一致", file=output)
             continue
         payload = updated.replace("\n", newline or "\n").encode("utf-8")
         foreign = [region for region in item.regions if region.unrecognised]
@@ -1366,9 +1487,6 @@ def main(argv=None, output=sys.stdout):
                           vaults=parsed.vaults or _managed_vaults())
         vaults = parsed.vaults
         if not vaults:
-            # 沒給路徑＝「這台機器該同步的那些庫」：設定登記的加上掃描到裝著卡的原生庫
-            # （owner 2026-09-21：vaults 不是名冊）。寫進宿主檔的仍只有治理庫的規則，
-            # 那道界線在 contract_vaults，不因為清單變長而放寬。
             vaults = _managed_vaults()
             if not vaults:
                 parser.error("要比對或寫入時必須給至少一個記憶庫路徑")

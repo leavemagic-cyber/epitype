@@ -4,11 +4,11 @@ host_source:
   - https://code.claude.com/docs/en/permissions
   - https://developers.openai.com/codex/rules
 host_claude_deny:
-  - "Edit(**/brain.json)"
-  - "Read(**/council_snapshot/**)"
-  - "Glob(**/council_snapshot/**)"
-  - "Grep(**/council_snapshot/**)"
-  - "Write(**/brain.json)"
+  - "Edit(**/sample-settings.json)"
+  - "Read(**/sample_snapshots/**)"
+  - "Glob(**/sample_snapshots/**)"
+  - "Grep(**/sample_snapshots/**)"
+  - "Write(**/sample-settings.json)"
   - "Bash(taskkill *claude*)"
   - "Bash(taskkill *codex*)"
   - "Bash(pskill *claude*)"
@@ -34,12 +34,12 @@ host_claude_deny:
   - "Bash(git -C * commit -a*)"
   - "Bash(git -C * commit --all*)"
   - "Read(**/.env*)"
-  - "Read(**/.titan_secrets/**)"
-  - "Edit(**/.titan_secrets/**)"
-  - "Write(**/.titan_secrets/**)"
-  - "Read(**/.titan-secrets/**)"
-  - "Edit(**/.titan-secrets/**)"
-  - "Write(**/.titan-secrets/**)"
+  - "Read(**/.sample-project_secrets/**)"
+  - "Edit(**/.sample-project_secrets/**)"
+  - "Write(**/.sample-project_secrets/**)"
+  - "Read(**/.sample-project-secrets/**)"
+  - "Edit(**/.sample-project-secrets/**)"
+  - "Write(**/.sample-project-secrets/**)"
   - "Read(**/*.pfx)"
   - "Read(**/*.p12)"
   - "Read(**/*.pem)"
@@ -57,6 +57,6 @@ host_codex_rules:
   - "git add -A|--all|."
   - "git commit -a|--all"
   - "git checkout|restore --"
-  - "cat|type|Get-Content|more|less|head|tail .env|.env.local|.env.production|brain.json"
+  - "cat|type|Get-Content|more|less|head|tail .env|.env.local|.env.production|sample-settings.json"
 ---
 Migration fixture; preserves exact legacy restrictions.

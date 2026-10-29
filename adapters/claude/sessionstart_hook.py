@@ -1,7 +1,7 @@
 import sys, time; sys.dont_write_bytecode = True; _STARTED_AT = time.monotonic(); [getattr(stream, "reconfigure", lambda **_: None)(encoding="utf-8", errors="replace") for stream in (sys.stdin, sys.stdout, sys.stderr)]  # cp950 consoles must not break hook entrypoints.
 """Claude SessionStart adapter: only the lines that name something to do.
 
-owner 2026-09-09（FAILURE_MODES §35、§40）：開場不再注入工作帳本、現行裁定、殭屍待辦、
+依開場內容契約（FAILURE_MODES §35、§40）：不注入工作帳本、現行裁定、殭屍待辦、
 任何固定說明文字，也不再回音短入口索引。宿主自己會載入 CLAUDE.md／AGENTS.md（索引分區
 就在裡面），每一場再回音一次是重複付錢。留下的每一段都必須有人要做的事。
 """
@@ -203,7 +203,7 @@ def _dream_running(governance):
 
 def _dream_notice(governance, source, settings, deliveries=None):
     """夢的一行只在有人要做事時出現：夢報錯、夢列了待審候選、夢到期卻沒跑。
-    乾淨跑完的那一場什麼都不說（owner 2026-09-09：沒必要就拿掉）。
+    乾淨跑完的那一場什麼都不說。
     壓縮續場不印——那不是新的一場。"""
     if settings.get(memspec.DREAM_MODE_FIELD) == memspec.DREAM_MODE_OFF:
         return None
@@ -377,8 +377,6 @@ def _startup_segments(pieces, vaults, resolved, governance, started_at, *, event
         if malformed:
             pieces.append(malformed)
 
-        # owner 2026-09-06 裁定：卡沒有中文別名不是給 owner 的決定題，是本場 AI 順手
-        # 補的事。
         try:
             translate = card_lint.no_chinese_line(reports, governance)
         except Exception:
@@ -509,9 +507,6 @@ def _handle(event, started_at, deliveries=None, trace=None):
         if notice:
             pieces.append(notice)
 
-    # 短入口索引也不再回音（owner 2026-09-09「原生功能就會讀 claude.md／agents.md」
-    # 「不應該塞，這是多餘設計」；FAILURE_MODES §40）。索引分區由同步工具寫進宿主檔，
-    # 宿主每一場自己載入；hook 再送一份，是同一段文字付兩次錢。
     if expired(started_at):
         trace["outcome"] = "budget-expired"
         return None
@@ -540,6 +535,15 @@ def _selftest():
 
         with ExitStack() as fixtures, tempfile.TemporaryDirectory(prefix="epitype-sessionstart-") as temp_dir:
             root = Path(temp_dir).resolve()
+            # 卡片檢查與翻譯可因啟動預算省略；行為題固定時鐘，計時題仍跑真正入口。
+            frozen_start = root / "sessionstart-frozen.py"
+            frozen_start.write_text(
+                "import runpy, sys, time\n"
+                f"sys.path.insert(0, {os.fspath(Path(__file__).resolve().parent)!r})\n"
+                "time.monotonic = lambda: 0.0\n"
+                f"runpy.run_path({os.fspath(Path(__file__).resolve())!r}, run_name='__main__')\n",
+                encoding="utf-8",
+            )
             vault = root / "vault"
             vault.mkdir()
             (vault / memspec.MEMORY_INDEX_FILENAME).write_text(
@@ -558,8 +562,6 @@ def _selftest():
             result = run_synthetic(Path(__file__), {"source": "startup"}, config)
             value = json.loads(result.stdout) if result.stdout.strip() else {}
             context = value.get("hookSpecificOutput", {}).get("additionalContext", "")
-            # §40：索引分區由同步工具寫進 CLAUDE.md／AGENTS.md，宿主每一場自己載入；
-            # hook 再回音一份就是同一段文字付兩次錢（owner 2026-09-09「不應該塞」）。
             checks.append(
                 (
                     "§40：短入口索引一個字都不回音，檔案在不在都一樣",
@@ -657,14 +659,14 @@ def _selftest():
             broken.write_text(broken_card.format(name="broken-card"), encoding="utf-8")
             card_config = root / "card-config.json"
             write_config(card_config, [card_vault])
-            broken_result = run_synthetic(Path(__file__), {"source": "startup"}, card_config)
+            broken_result = run_synthetic(frozen_start, {"source": "startup"}, card_config)
             broken_value = json.loads(broken_result.stdout) if broken_result.stdout.strip() else {}
             broken_context = broken_value.get("hookSpecificOutput", {}).get("additionalContext", "")
             broken.write_text(
                 "---\nname: broken-card\ndescription: 2026-09-01 乾淨卡\naliases:\n  - 乾淨\nmetadata:\n  type: feedback\n---\nbody\n",
                 encoding="utf-8",
             )
-            clean_result = run_synthetic(Path(__file__), {"source": "startup"}, card_config)
+            clean_result = run_synthetic(frozen_start, {"source": "startup"}, card_config)
             clean_value = json.loads(clean_result.stdout) if clean_result.stdout.strip() else {}
             clean_context = clean_value.get("hookSpecificOutput", {}).get("additionalContext", "")
             checks.append(
@@ -680,7 +682,6 @@ def _selftest():
                 )
             )
 
-            # owner 2026-09-06：沒中文別名的卡不是 WARN，是本場的順手任務，每場換人。
             translate_vault = root / "translate-vault"
             translate_vault.mkdir()
             (translate_vault / memspec.MEMORY_INDEX_FILENAME).write_text(
@@ -698,7 +699,7 @@ def _selftest():
             write_config(translate_config, [translate_vault])
 
             def translate_run(source="startup"):
-                done = run_synthetic(Path(__file__), {"source": source}, translate_config)
+                done = run_synthetic(frozen_start, {"source": source}, translate_config)
                 value = json.loads(done.stdout) if done.stdout.strip() else {}
                 return done, value.get("hookSpecificOutput", {}).get("additionalContext", "")
 
@@ -808,8 +809,6 @@ def _selftest():
                 )
             )
 
-            # owner 2026-09-09（§35）：現行裁定清單退場。裁定由喚回在命中時帶回（帶原話），
-            # 開場不再逐條重送——連會擋人的 forbidden 那種也不送，一般場與壓縮續場都一樣。
             decision_vault = root / "decision-vault"
             decision_vault.mkdir()
             (decision_vault / memspec.MEMORY_INDEX_FILENAME).write_text(
@@ -858,9 +857,6 @@ def _selftest():
                     ),
                 )
             )
-            # Owner 2026-09-09 (§30): the AI commitment ledger is gone. A vault
-            # holding a ledger file gets no line from it, at startup or after
-            # compaction — and since §35 neither does an overdue pending line.
             promise_vault = root / "promise-vault"
             promise_vault.mkdir()
             (promise_vault / memspec.MEMORY_INDEX_FILENAME).write_text(
@@ -884,7 +880,7 @@ def _selftest():
             promise_config = root / "promise-config.json"
             write_config(promise_config, [promise_vault])
             for promise_source in ("startup", "compact"):
-                promise_result = run_synthetic(Path(__file__), {"source": promise_source}, promise_config)
+                promise_result = run_synthetic(frozen_start, {"source": promise_source}, promise_config)
                 promise_value = json.loads(promise_result.stdout) if promise_result.stdout.strip() else {}
                 promise_context = promise_value.get("hookSpecificOutput", {}).get("additionalContext", "")
                 checks.append(
@@ -1152,6 +1148,10 @@ def _selftest():
                 else:
                     raise AssertionError("no writable fixture path fits the unchanged 240-byte notice cap")
             write_config(map_config, [map_vault])
+            map_options = json.loads(map_config.read_text(encoding="utf-8"))
+            map_options[memspec.CONTEXT_METER_CONFIG_FIELD] = {
+                memspec.CONTEXT_METER_TRACE_UNTIL_FIELD: "9999-12-31"}
+            map_config.write_text(json.dumps(map_options), encoding="utf-8")
             precompact = Path(__file__).with_name("precompact_hook.py")
             precompact_event = {
                 "session_id": map_session,

@@ -13,7 +13,7 @@ from pathlib import Path
 import re
 import time
 
-from . import memspec, rule_provenance
+from . import memspec, rule_binding, rule_provenance
 
 _NORMATIVE = re.compile(
     r"必須|不得|一律|禁止|不可|不准|規則[：:]|原則[：:]|"
@@ -91,12 +91,32 @@ def _meaning(text, *, include_source=True, exclude_metadata_modified=True):
     return json.dumps([data, body], ensure_ascii=False, sort_keys=True)
 
 
+def _payload_meaning(card_text, document=None):
+    fields, _problem = memspec.frontmatter_text(card_text)
+    if not fields.get("text") or fields.get("layer") not in memspec.RULE_GENERATED_LAYERS:
+        # Field-driven guards have no separate generated rule text.
+        return _meaning(card_text, include_source=False)
+    scope = {key: fields[key] for key in rule_provenance.SCOPE_KEYS if key in fields}
+    blocks, _body = json.loads(_meaning(card_text, include_source=False))
+    scope["execution"] = {key: blocks[key] for key in _EXECUTION_FIELDS if key in blocks}
+    lines, _closing = memspec.split_frontmatter(card_text)
+    scope["hosts"] = memspec.sequence_items(lines or (), memspec.RULE_HOSTS_FIELD)
+    if document is not None:
+        scope["source_scope"] = document.get("scope")
+    return json.dumps([fields["text"], scope], ensure_ascii=False, sort_keys=True)
+
+
+def _digest(meaning):
+    return hashlib.sha256(meaning.encode()).hexdigest()
+
+
 def bind_payload(document, card_text, *, reviewer, reviewed_at=None,
                  rationale="Reviewed the complete interpretation and execution fields."):
     """Freeze the exact reviewed interpretation; this hash is not semantic proof."""
     bound = copy.deepcopy(document)
     bound["payload_binding"] = {
-        "sha256": hashlib.sha256(_meaning(card_text, include_source=False).encode()).hexdigest(),
+        "version": 2,
+        "sha256": _digest(_payload_meaning(card_text, document)),
         "reviewed_by": reviewer,
         "reviewed_at": reviewed_at or datetime.now(timezone.utc).isoformat(),
         "rationale": rationale}
@@ -107,13 +127,20 @@ def payload_issues(document, card_text):
     binding = document.get("payload_binding", {})
     if not isinstance(binding, dict):
         return ["complete interpretation binding must be an object"]
-    expected = hashlib.sha256(_meaning(card_text, include_source=False).encode()).hexdigest()
-    if binding.get("sha256") != expected:
-        return ["complete rule body and execution fields are not bound to this source review"]
     if not (isinstance(binding.get("reviewed_by"), str) and binding["reviewed_by"].strip()
             and rule_provenance._iso(binding.get("reviewed_at"))
             and isinstance(binding.get("rationale"), str) and binding["rationale"].strip()):
         return ["complete interpretation review must identify reviewer, date and rationale"]
+    expected = _digest(_payload_meaning(card_text, document))
+    old = binding.get("sha256")
+    identity = [document.get("key"), old]
+    if "version" not in binding:
+        if old == _digest(_meaning(card_text, include_source=False)):
+            rule_binding.remember("payload", identity, expected)
+        elif not rule_binding.matches("payload", identity, expected):
+            return ["complete rule body and execution fields are not bound to this source review"]
+    elif binding.get("version") != 2 or old != expected:
+        return ["complete rule body and execution fields are not bound to this source review"]
     return []
 
 
@@ -259,8 +286,10 @@ def admission(before, after, card_type, card_path):
     if (not is_rule(fields, card_type, after)
             and not (before and is_rule(old_fields, old_fields.get("type", card_type), before))):
         return []
-    if before and _meaning(before) == _meaning(after):
-        return []
+    if before and _payload_meaning(before) == _payload_meaning(after):
+        # Source envelope edits still need validation, even with identical text.
+        if old_fields.get(rule_provenance.FIELD) == fields.get(rule_provenance.FIELD):
+            return []
     result = rule_provenance.validate(fields, card_path)
     if not result.verified:
         return ["規則來源 " + result.status + "：" + "; ".join(result.issues)]
@@ -307,11 +336,23 @@ def legacy_integrity(fields, path, *, card_text=None):
     text = card_text if card_text is not None else Path(path).read_text(encoding='utf-8-sig')
     current, _problem = memspec.frontmatter_text(text)
     from . import rule_legacy
-    # The pinned legacy baseline was made with the original complete metadata
-    # hash. Date maintenance is exempt only in reviewed payload bindings.
-    meaning_sha256 = hashlib.sha256(_meaning(
-        text, include_source=False, exclude_metadata_modified=False).encode()).hexdigest()
+    # A pin still authenticates the original baseline bytes. Narrow migration
+    # state is usable only after that exact baseline and path have matched.
+    meaning_sha256 = _digest(_meaning(
+        text, include_source=False, exclude_metadata_modified=False))
     check = rule_legacy.check(Path(path).resolve(), meaning_sha256)
+    narrowed = _digest(_payload_meaning(text))
+    identity = [str(Path(path).resolve()), check.baseline_sha256]
+    if check.matched and check.configured is True:
+        rule_binding.remember("legacy", identity, narrowed)
+    elif check.baseline_contains is True and isinstance(check.baseline_sha256, str):
+        # Recheck the pin and membership above before consulting migration state.
+        narrowed_check = rule_legacy.check(Path(path).resolve(), narrowed)
+        if narrowed_check.matched:
+            check = narrowed_check
+        elif rule_binding.matches("legacy", identity, narrowed):
+            check.status = rule_legacy.MATCHED
+            check.issues.clear()
     if not is_rule(current, current.get('type', ''), text):
         # Previously enrolled rules retain their identity even after a shell
         # removes all fields used for rule classification. A bad configured

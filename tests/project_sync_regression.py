@@ -1,9 +1,8 @@
 import sys; sys.dont_write_bytecode = True; [getattr(stream, "reconfigure", lambda **_: None)(encoding="utf-8", errors="replace") for stream in (sys.stdout, sys.stderr)]  # cp950 主控台先轉 UTF-8。
 """專案庫的規則要送到專案根，不然 Codex 進到那個專案等於沒有規則。
 
-2026-09-20 實測事故：一場 Codex 在 `C:\\projects\\自主賺錢方案` 跑，讀不到那個專案的規則
-卡。Codex 開場只讀全域 `~/.codex/AGENTS.md`（只收治理庫）與專案根的 `AGENTS.md`，而那個
-專案根沒有 AGENTS.md。Claude Code 沒出事只是因為宿主自己會載入 cwd 專案庫的 MEMORY.md。
+Codex 開場讀全域 `~/.codex/AGENTS.md` 與專案根的 `AGENTS.md`；
+專案規則必須送達該專案根。Claude Code 另可載入 cwd 專案庫的 MEMORY.md。
 
 這裡驗的是那條送達路徑：專案根反查（靠對話紀錄的 cwd，不是名冊）、兩個檔的內容分工、
 舊標記就地換、使用者原有的位元組不動、拿得回來。
@@ -178,11 +177,10 @@ class ProjectSync(unittest.TestCase):
         self.assertEqual(targets, [])
         self.assertEqual(len(skipped), 2)
 
-    # (e) 舊的 titan 標記就地換成產品標記，只留一組
     def test_the_private_script_markers_are_replaced_in_place(self):
-        project, vault = self._project("titan")
+        project, vault = self._project("sample-project")
         (project / "AGENTS.md").write_text(
-            "# titan\n\n我自己的開頭\n\n"
+            "# sample-project\n\n我自己的開頭\n\n"
             f"{LEGACY_RULES_BEGIN}\n舊的規則字\n{LEGACY_RULES_END}\n\n"
             f"{LEGACY_INDEX_BEGIN}\n舊的索引字\n{LEGACY_INDEX_END}\n",
             encoding="utf-8")
@@ -342,12 +340,12 @@ class ProjectSync(unittest.TestCase):
 
     # 舊標記就地換成產品標記那一條路，一樣只動標記之間
     def test_replacing_the_private_markers_keeps_every_byte_around_them(self):
-        project, vault = self._project("titan")
+        project, vault = self._project("sample-project")
         path = project / "CLAUDE.md"
         before = self._write(path, (
-            "# titan\n\n我自己的開頭\n\n"
+            "# sample-project\n\n我自己的開頭\n\n"
             f"{LEGACY_RULES_BEGIN}\n舊的規則字\n{LEGACY_RULES_END}\n\n"
-            "## titan 記憶索引分區\n\n- [一張卡](a.md)\n"))
+            "## sample-project 記憶索引分區\n\n- [一張卡](a.md)\n"))
         code, report = self._apply([self.governance, vault])
         self.assertEqual(code, host_sync.EXIT_OK, report)
         after = path.read_bytes()

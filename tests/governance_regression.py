@@ -154,6 +154,10 @@ class GovernanceRegression(unittest.TestCase):
 
     def test_budget_omitted_cards_remain_eligible(self):
         path = self.card(quote="x" * 120)
+        # Each whole card must exceed the omission notice even with compact labels.
+        path.write_text(path.read_text(encoding="utf-8").replace(
+            "description: fixturedecision current rule",
+            "description: fixturedecision current rule " + "budgetfixture " * 12), encoding="utf-8")
         second = self.vault / "second.md"
         second.write_text(path.read_text(encoding="utf-8").replace(
             "decision_key: fixturedecision", "decision_key: secondfixture"), encoding="utf-8")
@@ -165,9 +169,10 @@ class GovernanceRegression(unittest.TestCase):
         budget = len((head + "\n" + first + "\n" + suffix).encode("utf-8"))
         common.write_config(self.config, [self.vault], budget=budget)
         first_output = json.loads(self.recall_once())["hookSpecificOutput"]["additionalContext"]
-        self.assertEqual(sum(line.startswith("- ") for line in first_output.splitlines()), 1)
+        self.assertEqual(sum("budgetfixture" in line for line in first_output.splitlines()), 1)
         second_output = json.loads(self.recall_once())["hookSpecificOutput"]["additionalContext"]
-        self.assertEqual(sum(line.startswith("- ") for line in second_output.splitlines()), 1)
+        self.assertEqual(sum("budgetfixture" in line for line in second_output.splitlines()), 1)
+        self.assertIn(_second, second_output)
         self.assertNotIn(first, second_output)
         # Every card was delivered once; nothing repeats until compaction clears the markers.
         self.assertEqual(self.recall_once(), "")
@@ -198,7 +203,6 @@ class GovernanceRegression(unittest.TestCase):
                 spawn.assert_not_called()
                 notice.assert_not_called()
         self.assertFalse((self.vault / memspec.GATE_LOG_FILENAME).exists())
-        # Owner 2026-09-09 (§30): no commitment ledger is written anywhere any more.
         self.assertFalse((self.vault / memspec.FTS_INDEX_DIRECTORY / "commitments.jsonl").exists())
 
 

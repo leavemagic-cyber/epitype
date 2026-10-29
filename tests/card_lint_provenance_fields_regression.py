@@ -79,8 +79,10 @@ class ProvenanceApprovalFields(unittest.TestCase):
     def test_unverified_provenance_grants_no_credential(self):
         path = self.write('tampered', rule_text('tampered'))
         text = with_approval(path.read_text(encoding='utf-8'), {'by': 'owner', 'at': '2026-10-04'})
-        # The body change breaks the payload binding; the approval must not count.
-        path.write_text(text.replace('body\n', 'changed body\n'), encoding='utf-8', newline='\n')
+        # Approval cannot authenticate a different generated rule sentence.
+        path.write_text(text.replace('\ntext: Synthetic rule sentence for the fixtures.',
+                                     '\ntext: Changed rule sentence for the fixtures.', 1),
+                        encoding='utf-8', newline='\n')
         self.assertTrue([f for f in self.findings(path) if f[1] == 'rule-source'])
         self.assertEqual(self.required(path), {'decided_by', 'approved_by', 'approved_at'})
 

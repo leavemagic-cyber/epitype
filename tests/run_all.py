@@ -8,6 +8,9 @@ import tempfile
 
 
 SELFTESTS = (
+    Path("tests") / "rule_binding_regression.py",
+    Path("tests") / "rule_sync_dedup_regression.py",
+    Path("tests") / "dupes_regression.py",
     Path("epitype") / "memspec.py",
     Path("epitype") / "memsearch.py",
     Path("epitype") / "card_lint.py",
@@ -51,6 +54,10 @@ SELFTESTS = (
     Path("tests") / "rule_provenance_regression.py",
     Path("tests") / "rule_pipeline_regression.py",
     Path("tests") / "card_lint_provenance_fields_regression.py",
+    Path("tests") / "card_lint_body_noise_regression.py",
+    Path("tests") / "card_lint_superseded_chain_regression.py",
+    Path("tests") / "card_lint_owner_quote_time_limit_regression.py",
+    Path("tests") / "dream_vault_snapshot_regression.py",
     Path("tests") / "rule_text_advisory_regression.py",
     Path("tests") / "rule_source_consumers_regression.py",
     Path("tests") / "rule_source_entrypoints_regression.py",
@@ -67,6 +74,7 @@ SELFTESTS = (
     Path("tests") / "shared_index_scope_regression.py",
     Path("tests") / "cap_consolidation_regression.py",
     Path("tests") / "recall_regression.py",
+    Path("tests") / "recall_rank_regression.py",
     Path("tests") / "governance_regression.py",
     Path("tests") / "recall_selection_regression.py",
     Path("tests") / "no_semantic_gate_regression.py",
@@ -85,6 +93,7 @@ SELFTESTS = (
     Path("tests") / "stop_freshness_regression.py",
     Path("tests") / "transcript_provenance_regression.py",
     Path("tests") / "source_lookup_regression.py",
+    Path("tests") / "owner_index_regression.py",
     Path("tests") / "compact_map_destination_regression.py",
     Path("tests") / "hook_input_bom_regression.py",
     Path("tests") / "action_guard_regression.py",

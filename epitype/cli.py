@@ -9,6 +9,7 @@ from . import __version__
 _COMMANDS = {
     "search": ("epitype.memsearch", "main", ()),
     "cards": ("epitype.card_lint", "main", ()),
+    "dupes": ("epitype.dupes", "main", ()),
     "views": ("epitype.views", "main", ()),
     "core-gen": ("epitype.core_gen", "main", ()),
     "sync": ("epitype.host_sync", "main", ()),
@@ -16,6 +17,7 @@ _COMMANDS = {
     "ledger": ("epitype.ledger_gate", "main", ()),
     "compact-map": ("epitype.compact_map", "main", ()),
     "source": ("epitype.source_lookup", "main", ()),
+    "owner-index": ("epitype.owner_index", "main", ()),
     "rule-source": ("epitype.rule_pipeline", "main", ()),
     "scar-census": ("epitype.scar_census", "main", ()),
     "pending": ("epitype.pending_lint", "main", ()),
