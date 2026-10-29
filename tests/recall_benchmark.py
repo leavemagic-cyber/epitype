@@ -83,33 +83,44 @@ def measure(root, corpus, repeats, scope='all', cold=False, process=False):
             question_config = dict(config)
             if scope == 'project':
                 question_config[memspec.CONFIG_VAULTS_FIELD] = list(dict.fromkeys((vault, vaults[0])))
-            samples, contexts = [], []
-            for _ in range(repeats):
+            samples, contexts, runs = [], [], []
+            for repeat in range(repeats):
                 if cold and hasattr(memsearch, '_alias_identity'):
                     memsearch._alias_identity.cache_clear()
                 start = time.monotonic()
+                event = {'prompt': question['prompt'], 'session_id': f'benchmark-{time.monotonic_ns()}'}
+                errors = io.StringIO()
                 if process:
                     runtime_config = root / 'process-config.json'
                     common.write_config(runtime_config, question_config[memspec.CONFIG_VAULTS_FIELD])
-                    environment = dict(os.environ, EPITYPE_CONFIG=str(runtime_config))
+                    temporary = root / 'tmp'
+                    temporary.mkdir(exist_ok=True)
+                    environment = dict(os.environ, EPITYPE_CONFIG=str(runtime_config),
+                                       TMPDIR=str(temporary), TEMP=str(temporary), TMP=str(temporary))
                     start = time.monotonic()
                     child = subprocess.run(
                         [sys.executable, str(ROOT / 'adapters/claude/recall_hook.py')],
-                        input=json.dumps({'prompt': question['prompt'], 'session_id': f'benchmark-{time.monotonic_ns()}'}),
+                        input=json.dumps(event),
                         capture_output=True, text=True, encoding='utf-8', env=environment, check=True)
                     value = json.loads(child.stdout) if child.stdout.strip() else None
+                    errors.write(child.stderr)
                 else:
-                    with contextlib.redirect_stderr(io.StringIO()):
-                        value = hook._recall({'prompt': question['prompt']}, start, question_config)
+                    with contextlib.redirect_stderr(errors):
+                        value = hook._recall(event, start, question_config)
                 samples.append((time.monotonic() - start) * 1000)
                 context = (value or {}).get('hookSpecificOutput', {}).get('additionalContext', '')
                 contexts.append(context)
+                runs.append({'repeat': repeat + 1, 'session_id': event['session_id'],
+                             'hook_ms': samples[-1], 'injected_bytes': len(context.encode('utf-8')),
+                             'delivery_kind': delivered_kind(context, vault, question['expect']),
+                             'output': value, 'stderr': errors.getvalue()})
             context = contexts[-1]
             kind = delivered_kind(context, vault, question['expect'])
             outcome['hook_hit'] = kind == 'card'
             outcome['hook_pointer_hit'] = kind == 'pointer'
             outcome['injected_bytes'] = len(context.encode('utf-8'))
             outcome['hook_ms'] = statistics.median(samples)
+            outcome['runs'] = runs
             outcomes.append(outcome)
             print(f"{question['id']}: rank={outcome.get('rank')} hook={outcome['hook_hit']} "
                   f"{outcome['hook_ms']:.0f} ms {outcome['injected_bytes']} bytes", flush=True)
@@ -125,6 +136,8 @@ def measure(root, corpus, repeats, scope='all', cold=False, process=False):
             'repeats': repeats, 'cases': len(outcomes),
             'hits_at_8': sum(row['passed'] for row in outcomes),
             'hook_hits': sum(row['hook_hit'] for row in outcomes),
+            'hook_hits_all_repeats': sum(all(run['delivery_kind'] == 'card' for run in row['runs']) for row in outcomes),
+            'complete_card_runs': sum(run['delivery_kind'] == 'card' for row in outcomes for run in row['runs']),
             'hook_pointer_hits': sum(row['hook_pointer_hit'] for row in outcomes),
             'hook_median_ms': statistics.median(durations), 'hook_max_ms': max(durations),
             'mean_injected_bytes': statistics.mean(sizes), 'outcomes': outcomes}
