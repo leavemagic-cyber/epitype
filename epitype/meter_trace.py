@@ -352,10 +352,17 @@ def _selftest():
                     record("x", event, path=shared, now=now, options={}, worker=worker, index=index)
 
             threads = [threading.Thread(target=burst, args=(worker,)) for worker in range(8)]
-            for thread in threads:
-                thread.start()
-            for thread in threads:
-                thread.join()
+            # Integrity under contention, not the production fail-open budget (checked above):
+            # a loaded CI runner can exceed 0.2 s and drop a line by design.
+            budget = memspec.CONTEXT_METER_TRACE_LOCK_SECONDS
+            memspec.CONTEXT_METER_TRACE_LOCK_SECONDS = 10
+            try:
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join()
+            finally:
+                memspec.CONTEXT_METER_TRACE_LOCK_SECONDS = budget
             written = [json.loads(line) for line in shared.read_text(encoding="utf-8").splitlines()]
             checks.append(("concurrent writers each keep every line intact",
                            len(written) == 200
