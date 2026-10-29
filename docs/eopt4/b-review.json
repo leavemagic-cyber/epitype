@@ -1,0 +1,103 @@
+{
+  "reviewed_revision": "5806612d629882aee3d0e87d88182a4b72a13ad9",
+  "all_repeat_mean_bytes": {
+    "core_before": 3362.8863636363635,
+    "core_after": 3524.340909090909,
+    "process_before": 2849.3333333333335,
+    "process_after": 3115.3333333333335
+  },
+  "before_after_manifest_identical": true,
+  "actual_core_manifest_matches": true,
+  "actual_process_manifest_matches": true,
+  "historical_original_manifest_identical": false,
+  "paired_repeat_pinned_checks": 132,
+  "lost_previously_delivered_pins": [],
+  "lost_before_complete_card_cases": [],
+  "lost_original_master_complete_card_cases": [],
+  "lost_before_search_passes": [],
+  "empty_core_outputs": 0,
+  "empty_process_outputs": 0,
+  "four_case_repeats": {
+    "v2-03": [
+      {
+        "repeat": 1,
+        "kind": "card",
+        "bytes": 4531,
+        "ms": 1554.9333000017214
+      },
+      {
+        "repeat": 2,
+        "kind": "card",
+        "bytes": 4531,
+        "ms": 1723.4615999987
+      },
+      {
+        "repeat": 3,
+        "kind": "card",
+        "bytes": 4531,
+        "ms": 1624.291300002369
+      }
+    ],
+    "v3-07": [
+      {
+        "repeat": 1,
+        "kind": "card",
+        "bytes": 3880,
+        "ms": 1524.8224000024493
+      },
+      {
+        "repeat": 2,
+        "kind": "card",
+        "bytes": 3880,
+        "ms": 1119.5004999972298
+      },
+      {
+        "repeat": 3,
+        "kind": "card",
+        "bytes": 3880,
+        "ms": 1119.0290999948047
+      }
+    ],
+    "v3-09": [
+      {
+        "repeat": 1,
+        "kind": "card",
+        "bytes": 2967,
+        "ms": 562.8249000001233
+      },
+      {
+        "repeat": 2,
+        "kind": "card",
+        "bytes": 2967,
+        "ms": 496.7562000019825
+      },
+      {
+        "repeat": 3,
+        "kind": "card",
+        "bytes": 2967,
+        "ms": 629.8644999988028
+      }
+    ],
+    "v3-11": [
+      {
+        "repeat": 1,
+        "kind": "card",
+        "bytes": 3584,
+        "ms": 1736.5847999972175
+      },
+      {
+        "repeat": 2,
+        "kind": "card",
+        "bytes": 3584,
+        "ms": 1816.5846999982023
+      },
+      {
+        "repeat": 3,
+        "kind": "card",
+        "bytes": 3584,
+        "ms": 1666.8231000003289
+      }
+    ]
+  },
+  "source_sha256_matches_checkout": true
+}

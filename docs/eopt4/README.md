@@ -1,5 +1,9 @@
 # EOPT4: recall ranking and compact injection
 
+Current follow-up: [EOPT4B results and evidence limits](EOPT4B.md), measured at
+`5806612`. The measurements and remaining gaps below describe the historical
+`e89ef1a` delivery, before EOPT4B.
+
 Implementation: `4dc1ee7` and `092cc4e`, on `opt/recall-rank-20261029`, based on `97ab94d`.
 The installed/live repository and live memory cards were not edited or activated.
 
