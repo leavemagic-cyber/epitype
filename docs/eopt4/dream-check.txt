@@ -1,0 +1,3 @@
+Command: python epitype/dream.py --scheduled
+Isolated synthetic home/config/vault, exit 0.
+Live nightly state was not updated.

@@ -1,0 +1,9 @@
+Original 97ab94dbdc8b6f5ccf660ea0aa321ecfc6429305, isolated source archive.
+Command: python tests/privacy_lint.py (cwd=isolated original archive)
+Exit: 1
+FAIL tests/card_lint_body_noise_regression.py:32 [session-uuid]
+FAIL tests/card_lint_body_noise_regression.py:33 [windows-home]
+FAIL tests/dream_vault_snapshot_regression.py:29 [email]
+PRIVACY FAIL 3 finding(s) in 279 tracked file(s)
+Original tests/run_all.py _unregistered_regressions: ["tests/shim_dispatch_regression.py"]
+Original component count: 145
