@@ -1,0 +1,2782 @@
+{
+  "revision": "97ab94dbdc8b6f5ccf660ea0aa321ecfc6429305",
+  "manifest": {
+    "V1": {
+      "cards": 640,
+      "sha256": "29873d67f8923f39ca54b2397c32deec31841c9ac3e34d4c4001f8f11d3e19b0"
+    },
+    "V2": {
+      "cards": 454,
+      "sha256": "e2894f1ff21259efd4c510f0ca56adb5e489dff09f2ebf849d992d6fbbe08d8c"
+    },
+    "V3": {
+      "cards": 263,
+      "sha256": "67bbf1be9792f5e0825596396cf0b426aec4f3c6dcd6671701edac08b895d81c"
+    },
+    "V4": {
+      "cards": 35,
+      "sha256": "9845331834ec3815ac5610c8b0d5cd49add09634d17a43a9779a1a6e404d0941"
+    }
+  },
+  "repeats": 3,
+  "cases": 44,
+  "hits_at_8": 37,
+  "hook_hits": 23,
+  "hook_median_ms": 3113.6865000044054,
+  "hook_max_ms": 9682.238699999289,
+  "mean_injected_bytes": 3807.7272727272725,
+  "outcomes": [
+    {
+      "id": "v1-01",
+      "prompt": "不要建議就過審，這個不是我規定的，建議如果我需要多方意見我會明確指示雙方討論或者三方討論，怎麼會有這種規定，你確認清楚那些要過審(你認為，不要亂設定規則，導致浪費token)",
+      "terms": [
+        "token)",
+        "建議",
+        "浪費",
+        "規定",
+        "致浪",
+        "多方",
+        "導致",
+        "方意",
+        "定規",
+        "意見",
+        "設定",
+        "明確",
+        "亂設",
+        "確指",
+        "清楚",
+        "指示",
+        "認清",
+        "示雙",
+        "確認",
+        "雙方"
+      ],
+      "expect": [
+        "decision-advice-review-only-when-requested-20260925.md"
+      ],
+      "forbid": [],
+      "expect_empty": false,
+      "total": 166,
+      "top": [
+        [
+          "corrections/correction-20260925-f85ec46c2665-698a6482a8eb.md",
+          [
+            "description",
+            "body"
+          ]
+        ],
+        [
+          "decision-advice-review-only-when-requested-20260925.md",
+          [
+            "description",
+            "aliases",
+            "body"
+          ]
+        ],
+        [
+          "feedback_owner_sets_rules_dont_second_guess.md",
+          [
+            "description",
+            "body"
+          ]
+        ]
+      ],
+      "guidance": [
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\decision-claimed-reads-must-be-real-20260919.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\decision-delegated-work-keeps-its-owner-20260919.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\decision-memory-index-generated-views-20260909.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\rule-core-10-english.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\rule-core-17-english.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\rule-core-08-english.md"
+      ],
+      "leaked_rank": null,
+      "rank": 2,
+      "hit_fields": [
+        "description",
+        "aliases",
+        "body"
+      ],
+      "passed": true,
+      "gap": "",
+      "reason": "",
+      "hook_hit": false,
+      "injected_bytes": 4118,
+      "hook_ms": 3128.7959000037517
+    },
+    {
+      "id": "v1-02",
+      "prompt": "這是問題，怎麼會跟最新狀態不一樣?",
+      "terms": [
+        "問題",
+        "狀態",
+        "新狀"
+      ],
+      "expect": [
+        "decision-claimed-reads-must-be-real-20260919.md"
+      ],
+      "forbid": [],
+      "expect_empty": false,
+      "total": 65,
+      "top": [
+        [
+          "rule-execution-report-problems-when-found-20260909.md",
+          [
+            "description",
+            "aliases",
+            "body"
+          ]
+        ],
+        [
+          "feedback_dont_hand_rebuild_production_input_read_its_record.md",
+          [
+            "description",
+            "aliases",
+            "body"
+          ]
+        ],
+        [
+          "feedback-closeout-includes-background-tasks.md",
+          [
+            "body"
+          ]
+        ]
+      ],
+      "guidance": [
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\feedback_commit_per_unit_keep_clean.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\decision-memory-index-generated-views-20260909.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\rule-core-11-english.md"
+      ],
+      "leaked_rank": null,
+      "rank": 48,
+      "hit_fields": [
+        "body"
+      ],
+      "passed": false,
+      "gap": "ranking",
+      "reason": "期望卡排第 48 名（門檻前 8 名）",
+      "hook_hit": false,
+      "injected_bytes": 3925,
+      "hook_ms": 2601.433399999223
+    },
+    {
+      "id": "v1-03",
+      "prompt": "好！把能擋的都裝上，剩下的你想辦法變成也是可以遵守的",
+      "terms": [
+        "裝上",
+        "遵守",
+        "剩下",
+        "法變",
+        "想辦",
+        "辦法"
+      ],
+      "expect": [
+        "decision-completion-carries-evidence-20260916.md"
+      ],
+      "forbid": [],
+      "expect_empty": false,
+      "total": 9,
+      "top": [
+        [
+          "decision-memory-governance-final-design-20260909.md",
+          [
+            "body"
+          ]
+        ],
+        [
+          "corrections/correction-20260809-dd19f25129f0.md",
+          [
+            "description",
+            "aliases",
+            "body"
+          ]
+        ],
+        [
+          "rule-owner-github-free-resources-20260909.md",
+          [
+            "aliases"
+          ]
+        ]
+      ],
+      "guidance": [],
+      "leaked_rank": null,
+      "rank": null,
+      "hit_fields": [],
+      "card_path": "decision-completion-carries-evidence-20260916.md",
+      "term_hits": {},
+      "passed": false,
+      "gap": "alias",
+      "reason": "期望卡排第 — 名（門檻前 8 名）",
+      "hook_hit": false,
+      "injected_bytes": 3210,
+      "hook_ms": 1956.312700000126
+    },
+    {
+      "id": "v1-04",
+      "prompt": "維持92並且優化",
+      "terms": [
+        "維持",
+        "優化"
+      ],
+      "expect": [
+        "decision-context-meter-handoff-20260925.md"
+      ],
+      "forbid": [],
+      "expect_empty": false,
+      "total": 7,
+      "top": [
+        [
+          "rulings/ruling-20260818-eca07aa1ea35.md",
+          [
+            "description",
+            "aliases",
+            "body"
+          ]
+        ],
+        [
+          "feedback_optimize_my_idea_just_build.md",
+          [
+            "description",
+            "aliases",
+            "body"
+          ]
+        ],
+        [
+          "feedback_codex_claude_discussion_workflow.md",
+          [
+            "description",
+            "aliases",
+            "body"
+          ]
+        ]
+      ],
+      "guidance": [
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\project-review-pack-dispositions-20260919.md"
+      ],
+      "leaked_rank": null,
+      "rank": null,
+      "hit_fields": [],
+      "card_path": "decision-context-meter-handoff-20260925.md",
+      "term_hits": {},
+      "passed": false,
+      "gap": "alias",
+      "reason": "期望卡排第 — 名（門檻前 8 名）",
+      "hook_hit": false,
+      "injected_bytes": 2903,
+      "hook_ms": 408.7796999956481
+    },
+    {
+      "id": "v1-05",
+      "prompt": "先檢查核心規則沒有發揮作用的！我都要讓他會真正發揮作用",
+      "terms": [
+        "先檢",
+        "作用",
+        "檢查",
+        "揮作",
+        "查核",
+        "發揮",
+        "核心",
+        "正發",
+        "心規",
+        "真正"
+      ],
+      "expect": [
+        "decision-correction-carries-a-recheck-20260919.md"
+      ],
+      "forbid": [],
+      "expect_empty": false,
+      "total": 67,
+      "top": [
+        [
+          "decision-tests-are-not-deployment-20260919.md",
+          [
+            "description",
+            "body"
+          ]
+        ],
+        [
+          "decision-find-existing-before-writing-new-20260919.md",
+          [
+            "body"
+          ]
+        ],
+        [
+          "decision-correction-carries-a-recheck-20260919.md",
+          [
+            "body"
+          ]
+        ]
+      ],
+      "guidance": [
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\rule-core-11-english.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\decision-memory-index-generated-views-20260909.md"
+      ],
+      "leaked_rank": null,
+      "rank": 3,
+      "hit_fields": [
+        "body"
+      ],
+      "passed": true,
+      "gap": "",
+      "reason": "",
+      "hook_hit": true,
+      "injected_bytes": 3789,
+      "hook_ms": 4710.749500001839
+    },
+    {
+      "id": "v1-06",
+      "prompt": "這就不對啊！一定要有人負責",
+      "terms": [
+        "人負",
+        "負責"
+      ],
+      "expect": [
+        "decision-delegated-work-keeps-its-owner-20260919.md"
+      ],
+      "forbid": [],
+      "expect_empty": false,
+      "total": 5,
+      "top": [
+        [
+          "decision-no-orphan-pending-items-20260919.md",
+          [
+            "description",
+            "aliases",
+            "body"
+          ]
+        ],
+        [
+          "decision-delegated-work-keeps-its-owner-20260919.md",
+          [
+            "aliases",
+            "body"
+          ]
+        ],
+        [
+          "feedback_codex_owner_debug_claude_commit.md",
+          [
+            "description",
+            "aliases",
+            "body"
+          ]
+        ]
+      ],
+      "guidance": [],
+      "leaked_rank": null,
+      "rank": 2,
+      "hit_fields": [
+        "aliases",
+        "body"
+      ],
+      "passed": true,
+      "gap": "",
+      "reason": "",
+      "hook_hit": true,
+      "injected_bytes": 3377,
+      "hook_ms": 156.96369999932358
+    },
+    {
+      "id": "v1-07",
+      "prompt": "Repo整個做好(我不是說發布)",
+      "terms": [
+        "Repo",
+        "做好",
+        "發布"
+      ],
+      "expect": [
+        "decision-dogfood-mode.md"
+      ],
+      "forbid": [],
+      "expect_empty": false,
+      "total": 126,
+      "top": [
+        [
+          "rule-owner-extra-review-round-until-fixed-20260909.md",
+          [
+            "description",
+            "aliases",
+            "body"
+          ]
+        ],
+        [
+          "decision-dogfood-mode.md",
+          [
+            "description",
+            "aliases"
+          ]
+        ],
+        [
+          "reference_epitype_gate_evidence_20260908.md",
+          [
+            "description",
+            "aliases",
+            "body"
+          ]
+        ]
+      ],
+      "guidance": [
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\decision-plain-words-to-owner-20260918.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\decision-advice-review-only-when-requested-20260925.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\feedback_commit_per_unit_keep_clean.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\decision-memory-index-generated-views-20260909.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\rule-core-21-english.md"
+      ],
+      "leaked_rank": null,
+      "rank": 2,
+      "hit_fields": [
+        "description",
+        "aliases"
+      ],
+      "passed": true,
+      "gap": "",
+      "reason": "",
+      "hook_hit": true,
+      "injected_bytes": 3843,
+      "hook_ms": 4580.175200004305
+    },
+    {
+      "id": "v1-08",
+      "prompt": "給你一個專案規則(之前給過)，我們這台機器，只要發現事epitype的錯誤就是立刻修，然後紀錄，一段時間就是我會檢討是不是去更版epitype",
+      "terms": [
+        "epitype",
+        "專案",
+        "檢討",
+        "案規",
+        "時間",
+        "台機",
+        "段時",
+        "機器",
+        "紀錄",
+        "發現",
+        "後紀",
+        "現事",
+        "然後",
+        "錯誤",
+        "刻修",
+        "立刻"
+      ],
+      "expect": [
+        "decision-epitype-bugfix-autonomy-20260902.md"
+      ],
+      "forbid": [],
+      "expect_empty": false,
+      "total": 200,
+      "top": [
+        [
+          "rulings/ruling-20260906-22dd55717ef5.md",
+          [
+            "description",
+            "body"
+          ]
+        ],
+        [
+          "decision-epitype-bugfix-autonomy-20260902.md",
+          [
+            "name",
+            "description",
+            "aliases",
+            "body"
+          ]
+        ],
+        [
+          "feedback_every_result_affecting_defect_gets_root_fix_20260906.md",
+          [
+            "body"
+          ]
+        ]
+      ],
+      "guidance": [
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\decision-delegated-work-keeps-its-owner-20260919.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\decision-exit-zero-is-not-success-20260916.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\rule-core-11-english.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\decision-advice-review-only-when-requested-20260925.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\feedback_commit_per_unit_keep_clean.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\rule-core-20-english.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\rule-core-10-english.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\rule-core-07-english.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\rule-core-02-english.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\rule-core-23-english.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\rule-core-17-english.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\rule-core-08-english.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\rule-core-04-english.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\rule-core-03-english.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\rule-core-06-english.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\rule-core-14-english.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\rule-core-13-english.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\rule-core-18-english.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\rule-core-15-english.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\rule-core-24-english.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\rule-core-16-english.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\rule-core-19-english.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\rule-core-01-english.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\rule-core-09-english.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\rule-core-22-english.md"
+      ],
+      "leaked_rank": null,
+      "rank": 2,
+      "hit_fields": [
+        "name",
+        "description",
+        "aliases",
+        "body"
+      ],
+      "passed": true,
+      "gap": "",
+      "reason": "",
+      "hook_hit": true,
+      "injected_bytes": 4238,
+      "hook_ms": 8856.411399996432
+    },
+    {
+      "id": "v1-09",
+      "prompt": "我這邊是凌晨自動，但是分享出去的repo，使用者習慣不知道，怎樣能夠默默做完不影響使用？",
+      "terms": [
+        "repo",
+        "凌晨",
+        "使用",
+        "晨自",
+        "響使",
+        "自動",
+        "影響",
+        "分享",
+        "做完",
+        "享出",
+        "默做",
+        "習慣",
+        "默默",
+        "知道",
+        "夠默"
+      ],
+      "expect": [
+        "decision-epitype-dream-mode-20260906.md"
+      ],
+      "forbid": [],
+      "expect_empty": false,
+      "total": 187,
+      "top": [
+        [
+          "decision-epitype-dream-mode-20260906.md",
+          [
+            "description",
+            "aliases",
+            "body"
+          ]
+        ],
+        [
+          "rulings/ruling-20260906-e5c05bb9416d.md",
+          [
+            "description",
+            "body"
+          ]
+        ],
+        [
+          "project-epitype-release-log-20260902.md",
+          [
+            "body"
+          ]
+        ]
+      ],
+      "guidance": [
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\decision-plain-words-to-owner-20260918.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\decision-advice-review-only-when-requested-20260925.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\feedback_commit_per_unit_keep_clean.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\rule-core-21-english.md"
+      ],
+      "leaked_rank": null,
+      "rank": 1,
+      "hit_fields": [
+        "description",
+        "aliases",
+        "body"
+      ],
+      "passed": true,
+      "gap": "",
+      "reason": "",
+      "hook_hit": true,
+      "injected_bytes": 4193,
+      "hook_ms": 4050.2725999976974
+    },
+    {
+      "id": "v1-10",
+      "prompt": "他直接帶著出廠傷疤包開始用<-又犯我說過的，根本不會有，我沒有要提供我目前記憶",
+      "terms": [
+        "直接",
+        "記憶",
+        "接帶",
+        "前記",
+        "出廠",
+        "目前",
+        "廠傷",
+        "提供",
+        "傷疤",
+        "根本",
+        "疤包",
+        "始用",
+        "包開",
+        "開始"
+      ],
+      "expect": [
+        "decision-epitype-empty-skeleton-release-20260909.md"
+      ],
+      "forbid": [],
+      "expect_empty": false,
+      "total": 137,
+      "top": [
+        [
+          "corrections/correction-20260901-825f013fc207.md",
+          [
+            "description",
+            "aliases",
+            "body"
+          ]
+        ],
+        [
+          "decision-epitype-empty-skeleton-release-20260909.md",
+          [
+            "description",
+            "aliases",
+            "body"
+          ]
+        ],
+        [
+          "recall-universal-door-and-action-traps-20260901.md",
+          [
+            "description",
+            "aliases",
+            "body"
+          ]
+        ]
+      ],
+      "guidance": [
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\pending-list-needs-verify-line-and-exit.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\project-review-pack-dispositions-20260919.md"
+      ],
+      "leaked_rank": null,
+      "rank": 2,
+      "hit_fields": [
+        "description",
+        "aliases",
+        "body"
+      ],
+      "passed": true,
+      "gap": "",
+      "reason": "",
+      "hook_hit": true,
+      "injected_bytes": 4227,
+      "hook_ms": 4430.829199998698
+    },
+    {
+      "id": "v2-01",
+      "prompt": "外匯本來就是要做，根本不應該有排除，你去查清楚記憶",
+      "terms": [
+        "外匯",
+        "記憶",
+        "匯本",
+        "楚記",
+        "根本",
+        "清楚",
+        "排除",
+        "查清"
+      ],
+      "expect": [
+        "correction-fx-sleeve-was-never-excluded-20260920.md"
+      ],
+      "forbid": [],
+      "expect_empty": false,
+      "total": 43,
+      "top": [
+        [
+          "correction-fx-sleeve-was-never-excluded-20260920.md",
+          [
+            "description",
+            "aliases",
+            "body"
+          ]
+        ],
+        [
+          "rulings/ruling-20260906-8e27541749c2.md",
+          [
+            "description",
+            "body"
+          ]
+        ],
+        [
+          "project_sanjun_taifex_seat_stays_dedicated_20260909.md",
+          [
+            "body"
+          ]
+        ]
+      ],
+      "guidance": [],
+      "leaked_rank": null,
+      "rank": 1,
+      "hit_fields": [
+        "description",
+        "aliases",
+        "body"
+      ],
+      "passed": true,
+      "gap": "",
+      "reason": "",
+      "hook_hit": false,
+      "injected_bytes": 5069,
+      "hook_ms": 493.18819999461994
+    },
+    {
+      "id": "v2-02",
+      "prompt": "1.甲 2.甲，另外同時觀察評估乙 3.我接受，但是我希望標註本次由哪幾家 AI判斷",
+      "terms": [
+        "1.",
+        "2.",
+        "3.",
+        "AI",
+        "外同",
+        "判斷",
+        "同時",
+        "幾家",
+        "時觀",
+        "次由",
+        "觀察",
+        "本次",
+        "察評",
+        "註本",
+        "評估",
+        "標註",
+        "估乙",
+        "望標",
+        "接受",
+        "希望"
+      ],
+      "expect": [
+        "decision-titan-ai-evidence-plan-a-label-ais-20260909.md"
+      ],
+      "forbid": [],
+      "expect_empty": false,
+      "total": 108,
+      "top": [
+        [
+          "rulings/ruling-20260902-97c0607b88cb.md",
+          [
+            "description",
+            "body"
+          ]
+        ],
+        [
+          "decision-titan-ai-evidence-plan-a-label-ais-20260909.md",
+          [
+            "name",
+            "description",
+            "aliases",
+            "body"
+          ]
+        ],
+        [
+          "project-titan-goal-round1-fix-evolve-20261026.md",
+          [
+            "description",
+            "body"
+          ]
+        ]
+      ],
+      "guidance": [
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V2\\reference_quorum_four_seat_vote_and_entry_20260813.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V2\\reference_quorum_position_action_boundary_20260813.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V2\\project_prelive_local_remediation_closeout_20260812.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V2\\reference_titan_index_generated_views_20260909.md"
+      ],
+      "leaked_rank": null,
+      "rank": 2,
+      "hit_fields": [
+        "name",
+        "description",
+        "aliases",
+        "body"
+      ],
+      "passed": true,
+      "gap": "",
+      "reason": "",
+      "hook_hit": true,
+      "injected_bytes": 4400,
+      "hook_ms": 1910.9554999959073
+    },
+    {
+      "id": "v2-03",
+      "prompt": "外部老師<-因為額度問題，原則依照設計，例外就是誰有額度用誰",
+      "terms": [
+        "外部",
+        "度用",
+        "部老",
+        "額度",
+        "老師",
+        "例外",
+        "度問",
+        "設計",
+        "問題",
+        "照設",
+        "依照"
+      ],
+      "expect": [
+        "decision-titan-external-teacher-quota-exception-20260909.md"
+      ],
+      "forbid": [],
+      "expect_empty": false,
+      "total": 81,
+      "top": [
+        [
+          "rulings/ruling-20260902-29dac6fb0280.md",
+          [
+            "description",
+            "body"
+          ]
+        ],
+        [
+          "decision-titan-external-teacher-quota-exception-20260909.md",
+          [
+            "description",
+            "aliases",
+            "body"
+          ]
+        ],
+        [
+          "reference-quorum-souls-cli-schedule-and-info-routing.md",
+          [
+            "description",
+            "aliases",
+            "body"
+          ]
+        ]
+      ],
+      "guidance": [
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V2\\decision-titan-validation-full-council-virtual-20260909.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V2\\reference_quorum_four_seat_vote_and_entry_20260813.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V2\\reference_titan_index_generated_views_20260909.md"
+      ],
+      "leaked_rank": null,
+      "rank": 2,
+      "hit_fields": [
+        "description",
+        "aliases",
+        "body"
+      ],
+      "passed": true,
+      "gap": "",
+      "reason": "",
+      "hook_hit": true,
+      "injected_bytes": 4195,
+      "hook_ms": 4978.771900001448
+    },
+    {
+      "id": "v2-04",
+      "prompt": "小迴、小雙、小三如果有類似規格，同樣不受限制，懂？",
+      "terms": [
+        "小迴",
+        "限制",
+        "小雙",
+        "受限",
+        "小三",
+        "同樣",
+        "類似",
+        "規格",
+        "似規"
+      ],
+      "expect": [
+        "decision-titan-member-evolution-not-bounded-by-birth-spec-20261021.md"
+      ],
+      "forbid": [],
+      "expect_empty": false,
+      "total": 108,
+      "top": [
+        [
+          "project_sanjun_experience_layer_calibration_20260615.md",
+          [
+            "description",
+            "aliases",
+            "body"
+          ]
+        ],
+        [
+          "decision-titan-member-evolution-not-bounded-by-birth-spec-20261021.md",
+          [
+            "description",
+            "aliases",
+            "body"
+          ]
+        ],
+        [
+          "project_shuang_decide_geometry_conf_and_target_20260615.md",
+          [
+            "description",
+            "aliases",
+            "body"
+          ]
+        ]
+      ],
+      "guidance": [
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V2\\decision-titan-validation-full-council-virtual-20260909.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V2\\reference_quorum_position_action_boundary_20260813.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V2\\reference_titan_index_generated_views_20260909.md"
+      ],
+      "leaked_rank": null,
+      "rank": 2,
+      "hit_fields": [
+        "description",
+        "aliases",
+        "body"
+      ],
+      "passed": true,
+      "gap": "",
+      "reason": "",
+      "hook_hit": false,
+      "injected_bytes": 3759,
+      "hook_ms": 5276.169599994319
+    },
+    {
+      "id": "v2-05",
+      "prompt": "未成交的真倉停損",
+      "terms": [
+        "真倉",
+        "停損",
+        "倉停"
+      ],
+      "expect": [
+        "decision-titan-telegram-quiet-hours-w5-teacher-budget-20261005.md"
+      ],
+      "forbid": [],
+      "expect_empty": false,
+      "total": 15,
+      "top": [
+        [
+          "decision-titan-telegram-quiet-hours-w5-teacher-budget-20261005.md",
+          [
+            "description",
+            "aliases",
+            "body"
+          ]
+        ],
+        [
+          "feedback_real_broker_executor_review_loop.md",
+          [
+            "aliases",
+            "body"
+          ]
+        ],
+        [
+          "feedback_optimize_my_idea_just_build.md",
+          [
+            "body"
+          ]
+        ]
+      ],
+      "guidance": [],
+      "leaked_rank": null,
+      "rank": 1,
+      "hit_fields": [
+        "description",
+        "aliases",
+        "body"
+      ],
+      "passed": true,
+      "gap": "",
+      "reason": "",
+      "hook_hit": true,
+      "injected_bytes": 2940,
+      "hook_ms": 129.5460000037565
+    },
+    {
+      "id": "v2-06",
+      "prompt": "真正的驗證要靠現在這個完整議會在虛擬收集裡跑出來《算清楚就是直接上線了，後續解除虛擬單進入實單階段，就是拿真錢在試驗，另外昨天codex不是有多跑回測結果嗎？為什麼沒納入分析？",
+      "terms": [
+        "codex",
+        "真正",
+        "分析",
+        "驗證",
+        "入分",
+        "靠現",
+        "納入",
+        "完整",
+        "結果",
+        "整議",
+        "測結",
+        "虛擬",
+        "回測",
+        "擬收",
+        "跑回",
+        "收集",
+        "多跑",
+        "集裡",
+        "昨天",
+        "裡跑"
+      ],
+      "expect": [
+        "decision-titan-validation-full-council-virtual-20260909.md"
+      ],
+      "forbid": [],
+      "expect_empty": false,
+      "total": 192,
+      "top": [
+        [
+          "rulings/ruling-20260909-3f5ef3b90c9c.md",
+          [
+            "description",
+            "body"
+          ]
+        ],
+        [
+          "decision-titan-validation-full-council-virtual-20260909.md",
+          [
+            "description",
+            "aliases",
+            "body"
+          ]
+        ],
+        [
+          "rule-titan-evidence-standard-no-point-estimate-20260909.md",
+          [
+            "aliases",
+            "body"
+          ]
+        ]
+      ],
+      "guidance": [
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V2\\rule-titan-data-correctness-outranks-section11-20260909.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V2\\decision-titan-external-teacher-quota-exception-20260909.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V2\\project_prelive_local_remediation_closeout_20260812.md"
+      ],
+      "leaked_rank": null,
+      "rank": 2,
+      "hit_fields": [
+        "description",
+        "aliases",
+        "body"
+      ],
+      "passed": true,
+      "gap": "",
+      "reason": "",
+      "hook_hit": false,
+      "injected_bytes": 3923,
+      "hook_ms": 4180.799800000386
+    },
+    {
+      "id": "v3-01",
+      "prompt": "我說過應該要通過最新版本，而不是退版，之前都是通過codemagic現在無法通過太奇怪，你去查清楚記憶",
+      "terms": [
+        "codemagic",
+        "新版",
+        "記憶",
+        "版本",
+        "楚記",
+        "退版",
+        "清楚",
+        "法通",
+        "查清",
+        "奇怪"
+      ],
+      "expect": [
+        "decision-build-on-latest-not-downgrade-20260903.md"
+      ],
+      "forbid": [],
+      "expect_empty": false,
+      "total": 62,
+      "top": [
+        [
+          "corrections/correction-20260903-e0a86a77c96b.md",
+          [
+            "description",
+            "body"
+          ]
+        ],
+        [
+          "decision-build-on-latest-not-downgrade-20260903.md",
+          [
+            "description",
+            "aliases",
+            "body"
+          ]
+        ],
+        [
+          "feedback_run_to_device_test_without_asking.md",
+          [
+            "body"
+          ]
+        ]
+      ],
+      "guidance": [],
+      "leaked_rank": null,
+      "rank": 2,
+      "hit_fields": [
+        "description",
+        "aliases",
+        "body"
+      ],
+      "passed": true,
+      "gap": "",
+      "reason": "",
+      "hook_hit": true,
+      "injected_bytes": 3966,
+      "hook_ms": 731.5861999959452
+    },
+    {
+      "id": "v3-02",
+      "prompt": "我不是說過在這專案，文案要通過三方及去AI味?",
+      "terms": [
+        "AI",
+        "專案",
+        "三方",
+        "文案"
+      ],
+      "expect": [
+        "decision-copy-needs-three-way-review-20260905.md"
+      ],
+      "forbid": [],
+      "expect_empty": false,
+      "total": 31,
+      "top": [
+        [
+          "decision-copy-needs-three-way-review-20260905.md",
+          [
+            "description",
+            "aliases",
+            "body"
+          ]
+        ],
+        [
+          "corrections/correction-20260905-e034e7bc198f.md",
+          [
+            "description",
+            "body"
+          ]
+        ],
+        [
+          "feedback_reviewer_routing_grok_first.md",
+          [
+            "description",
+            "aliases",
+            "body"
+          ]
+        ]
+      ],
+      "guidance": [],
+      "leaked_rank": null,
+      "rank": 1,
+      "hit_fields": [
+        "description",
+        "aliases",
+        "body"
+      ],
+      "passed": true,
+      "gap": "",
+      "reason": "",
+      "hook_hit": false,
+      "injected_bytes": 3825,
+      "hook_ms": 4603.372599995055
+    },
+    {
+      "id": "v3-03",
+      "prompt": "非常好！你已經完全理解我要表達，我剛剛只是舉例給你看，我相信還是有多種問題，比如不能拿低一點、不願蹲下等問題要通案檢討",
+      "terms": [
+        "常好",
+        "檢討",
+        "經完",
+        "案檢",
+        "完全",
+        "通案",
+        "全理",
+        "問題",
+        "理解",
+        "蹲下",
+        "表達",
+        "願蹲",
+        "剛剛",
+        "拿低",
+        "舉例",
+        "種問",
+        "相信",
+        "多種"
+      ],
+      "expect": [
+        "decision-fix-the-class-not-the-example-20260907.md"
+      ],
+      "forbid": [],
+      "expect_empty": false,
+      "total": 28,
+      "top": [
+        [
+          "rulings/ruling-20260907-0a87f4e4b92d.md",
+          [
+            "description",
+            "body"
+          ]
+        ],
+        [
+          "decision-fix-the-class-not-the-example-20260907.md",
+          [
+            "description",
+            "aliases",
+            "body"
+          ]
+        ],
+        [
+          "grants/grant-20260922-a8bad3a70099-013f0593eda6.md",
+          [
+            "description",
+            "body"
+          ]
+        ]
+      ],
+      "guidance": [
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V3\\feedback_colab_a100_only_for_large_jobs_20260929.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V3\\reference_vyou_optimization_authority_20260908.md"
+      ],
+      "leaked_rank": null,
+      "rank": 2,
+      "hit_fields": [
+        "description",
+        "aliases",
+        "body"
+      ],
+      "passed": true,
+      "gap": "",
+      "reason": "",
+      "hook_hit": false,
+      "injected_bytes": 3971,
+      "hook_ms": 2763.9388000025065
+    },
+    {
+      "id": "v3-04",
+      "prompt": "我不是說過應該要最簡單使用，不然完全看不懂阿，你現在叫人站在照片中央??你確定這樣有符合拍攝技巧????",
+      "terms": [
+        "簡單",
+        "技巧",
+        "單使",
+        "攝技",
+        "使用",
+        "拍攝",
+        "然完",
+        "合拍",
+        "完全",
+        "符合",
+        "全看",
+        "確定",
+        "懂阿",
+        "中央",
+        "叫人",
+        "片中",
+        "人站",
+        "照片"
+      ],
+      "expect": [
+        "decision-interface-must-be-obvious-20260906.md"
+      ],
+      "forbid": [],
+      "expect_empty": false,
+      "total": 30,
+      "top": [
+        [
+          "corrections/correction-20260906-b63d1cf1a31d.md",
+          [
+            "description",
+            "body"
+          ]
+        ],
+        [
+          "rulings/ruling-20260906-81352e21b392.md",
+          [
+            "description",
+            "body"
+          ]
+        ],
+        [
+          "rulings/ruling-20260906-3b368347ab87.md",
+          [
+            "description",
+            "body"
+          ]
+        ]
+      ],
+      "guidance": [
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V3\\decision_data_on_drive_local_only_needed_20261012.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V3\\feedback_colab_a100_only_for_large_jobs_20260929.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V3\\reference_vyou_optimization_authority_20260908.md"
+      ],
+      "leaked_rank": null,
+      "rank": 9,
+      "hit_fields": [
+        "description",
+        "aliases",
+        "body"
+      ],
+      "passed": false,
+      "gap": "ranking",
+      "reason": "期望卡排第 9 名（門檻前 8 名）",
+      "hook_hit": true,
+      "injected_bytes": 4175,
+      "hook_ms": 684.5123999955831
+    },
+    {
+      "id": "v3-05",
+      "prompt": "已經運用你這高級AI，你不能拿人類的排程來排",
+      "terms": [
+        "AI",
+        "經運",
+        "排程",
+        "運用",
+        "人類",
+        "高級",
+        "拿人"
+      ],
+      "expect": [
+        "decision-schedule-at-ai-speed-20260929.md"
+      ],
+      "forbid": [],
+      "expect_empty": false,
+      "total": 7,
+      "top": [
+        [
+          "decision-schedule-at-ai-speed-20260929.md",
+          [
+            "name",
+            "description",
+            "aliases",
+            "body"
+          ]
+        ],
+        [
+          "project_quorum_disabled_20260920.md",
+          [
+            "description",
+            "aliases",
+            "body"
+          ]
+        ],
+        [
+          "reference_cloud_runs_via_routine_not_agent_remote_20261025.md",
+          [
+            "description",
+            "body"
+          ]
+        ]
+      ],
+      "guidance": [],
+      "leaked_rank": null,
+      "rank": 1,
+      "hit_fields": [
+        "name",
+        "description",
+        "aliases",
+        "body"
+      ],
+      "passed": true,
+      "gap": "",
+      "reason": "",
+      "hook_hit": true,
+      "injected_bytes": 3578,
+      "hook_ms": 329.5481000022846
+    },
+    {
+      "id": "v3-06",
+      "prompt": "會增加很多問題就先主力做iOS",
+      "terms": [
+        "iOS",
+        "增加",
+        "力做",
+        "多問",
+        "主力",
+        "問題",
+        "先主"
+      ],
+      "expect": [
+        "decision_android_after_ios_submission_20261024.md"
+      ],
+      "forbid": [],
+      "expect_empty": false,
+      "total": 19,
+      "top": [
+        [
+          "decision_android_after_ios_submission_20261024.md",
+          [
+            "description",
+            "body"
+          ]
+        ],
+        [
+          "feedback_goal_by_claimed_segments_with_exit_20260924.md",
+          [
+            "body"
+          ]
+        ],
+        [
+          "rulings/ruling-20260905-45b70847cf1c.md",
+          [
+            "body"
+          ]
+        ]
+      ],
+      "guidance": [
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V3\\feedback_builtin_browser_first_20261028.md"
+      ],
+      "leaked_rank": null,
+      "rank": 1,
+      "hit_fields": [
+        "description",
+        "body"
+      ],
+      "passed": true,
+      "gap": "",
+      "reason": "",
+      "hook_hit": true,
+      "injected_bytes": 3510,
+      "hook_ms": 608.5696000009193
+    },
+    {
+      "id": "v3-07",
+      "prompt": "我給你雲端額度與 codex 協作，就是不希望遇到這個事情",
+      "terms": [
+        "codex",
+        "雲端",
+        "事情",
+        "端額",
+        "遇到",
+        "額度",
+        "望遇",
+        "協作",
+        "希望"
+      ],
+      "expect": [
+        "decision_codex_codes_when_claude_quota_tight_20260930.md"
+      ],
+      "forbid": [],
+      "expect_empty": false,
+      "total": 104,
+      "top": [
+        [
+          "decision_codex_codes_when_claude_quota_tight_20260930.md",
+          [
+            "name",
+            "description",
+            "aliases",
+            "body"
+          ]
+        ],
+        [
+          "feedback_suggest_cloud_credits_for_independent_thinking_20261007.md",
+          [
+            "description",
+            "body"
+          ]
+        ],
+        [
+          "reference_cloud_runs_via_routine_not_agent_remote_20261025.md",
+          [
+            "description",
+            "body"
+          ]
+        ]
+      ],
+      "guidance": [
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V3\\decision_data_on_drive_local_only_needed_20261012.md"
+      ],
+      "leaked_rank": null,
+      "rank": 1,
+      "hit_fields": [
+        "name",
+        "description",
+        "aliases",
+        "body"
+      ],
+      "passed": true,
+      "gap": "",
+      "reason": "",
+      "hook_hit": false,
+      "injected_bytes": 3719,
+      "hook_ms": 4493.162299993855
+    },
+    {
+      "id": "v3-08",
+      "prompt": "我們這幾天決定、討論很多細節，有模型訓練、操作介面等，並且還有三方討論情況，我建議等介面的三方討論完（幫我確定還有沒有其他正在討論或決定部分），再來運用雲端額度梳理執行計劃，避免疏漏或者衝突，再來將執行計劃送codex審查（一樣是避免疏漏），確認執行計劃完整且詳細後，再繼續執行，你認為呢？",
+      "terms": [
+        "codex",
+        "幾天",
+        "執行",
+        "天決",
+        "續執",
+        "決定",
+        "繼續",
+        "討論",
+        "細後",
+        "多細",
+        "詳細",
+        "細節",
+        "完整",
+        "模型",
+        "劃完",
+        "型訓",
+        "計劃",
+        "訓練",
+        "行計",
+        "操作"
+      ],
+      "expect": [
+        "decision_consolidate_runbook_before_resuming_20260930.md"
+      ],
+      "forbid": [],
+      "expect_empty": false,
+      "total": 134,
+      "top": [
+        [
+          "decision_consolidate_runbook_before_resuming_20260930.md",
+          [
+            "description",
+            "body"
+          ]
+        ],
+        [
+          "feedback_do_not_stop_between_units.md",
+          [
+            "aliases",
+            "body"
+          ]
+        ],
+        [
+          "feedback_execution_plan_is_runbook_only_20260929.md",
+          [
+            "description",
+            "aliases",
+            "body"
+          ]
+        ]
+      ],
+      "guidance": [],
+      "leaked_rank": null,
+      "rank": 1,
+      "hit_fields": [
+        "description",
+        "body"
+      ],
+      "passed": true,
+      "gap": "",
+      "reason": "",
+      "hook_hit": false,
+      "injected_bytes": 3911,
+      "hook_ms": 9001.093999999284
+    },
+    {
+      "id": "v3-09",
+      "prompt": "我建議能用雲端優先用雲端，能用d槽優先用d槽，最後才考慮c槽，懂？",
+      "terms": [
+        "建議",
+        "考慮",
+        "用雲",
+        "先用",
+        "雲端",
+        "優先",
+        "端優",
+        "槽優"
+      ],
+      "expect": [
+        "decision_data_on_drive_local_only_needed_20261012.md"
+      ],
+      "forbid": [],
+      "expect_empty": false,
+      "total": 38,
+      "top": [
+        [
+          "decision_data_on_drive_local_only_needed_20261012.md",
+          [
+            "description",
+            "body"
+          ]
+        ],
+        [
+          "feedback_real_simulator_over_partial_sim_20261016.md",
+          [
+            "description",
+            "body"
+          ]
+        ],
+        [
+          "feedback_suggest_cloud_credits_for_independent_thinking_20261007.md",
+          [
+            "description",
+            "body"
+          ]
+        ]
+      ],
+      "guidance": [],
+      "leaked_rank": null,
+      "rank": 1,
+      "hit_fields": [
+        "description",
+        "body"
+      ],
+      "passed": true,
+      "gap": "",
+      "reason": "",
+      "hook_hit": true,
+      "injected_bytes": 3632,
+      "hook_ms": 392.0321999976295
+    },
+    {
+      "id": "v3-10",
+      "prompt": "我建議你再做一次分區塊深度審查，由你綜合治理，避免一堆自我限制導致的BUG或者根本錯誤、未發現的問題等，剛剛有做，你覺得還要做嗎?",
+      "terms": [
+        "BUG",
+        "建議",
+        "剛剛",
+        "次分",
+        "問題",
+        "分區",
+        "發現",
+        "區塊",
+        "未發",
+        "塊深",
+        "錯誤",
+        "深度",
+        "本錯",
+        "度審",
+        "根本",
+        "審查",
+        "導致",
+        "綜合",
+        "制導",
+        "合治"
+      ],
+      "expect": [
+        "decision_deep_audit_at_pack_commit_20261027.md"
+      ],
+      "forbid": [],
+      "expect_empty": false,
+      "total": 89,
+      "top": [
+        [
+          "decision_deep_audit_at_pack_commit_20261027.md",
+          [
+            "body"
+          ]
+        ],
+        [
+          "feedback_whole_app_must_run_core_first_20261028.md",
+          [
+            "description",
+            "body"
+          ]
+        ],
+        [
+          "decision_codex_codes_when_claude_quota_tight_20260930.md",
+          [
+            "description",
+            "body"
+          ]
+        ]
+      ],
+      "guidance": [
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V3\\feedback_claude_lead_stays_in_session_20260929.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V3\\reference_vyou_optimization_authority_20260908.md"
+      ],
+      "leaked_rank": null,
+      "rank": 1,
+      "hit_fields": [
+        "body"
+      ],
+      "passed": true,
+      "gap": "",
+      "reason": "",
+      "hook_hit": false,
+      "injected_bytes": 4363,
+      "hook_ms": 2657.147400001122
+    },
+    {
+      "id": "v3-11",
+      "prompt": "妳把主控交給動物時鐘，你專心做Vyou",
+      "terms": [
+        "Vyou",
+        "主控",
+        "心做",
+        "控交",
+        "專心",
+        "動物",
+        "時鐘",
+        "物時"
+      ],
+      "expect": [
+        "decision_resource_controller_moved_to_clock_20261028.md"
+      ],
+      "forbid": [],
+      "expect_empty": false,
+      "total": 116,
+      "top": [
+        [
+          "decision_resource_controller_moved_to_clock_20261028.md",
+          [
+            "description",
+            "aliases",
+            "body"
+          ]
+        ],
+        [
+          "reference_app_resource_table_and_gitlab_20261027.md",
+          [
+            "description",
+            "body"
+          ]
+        ],
+        [
+          "reference_openai_api_credit_bank_20261029.md",
+          [
+            "description",
+            "body"
+          ]
+        ]
+      ],
+      "guidance": [
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V3\\feedback_review_subject_must_not_be_the_review_record.md"
+      ],
+      "leaked_rank": null,
+      "rank": 1,
+      "hit_fields": [
+        "description",
+        "aliases",
+        "body"
+      ],
+      "passed": true,
+      "gap": "",
+      "reason": "",
+      "hook_hit": false,
+      "injected_bytes": 3723,
+      "hook_ms": 6316.280400002142
+    },
+    {
+      "id": "v3-12",
+      "prompt": "這個不是都授權給你了嗎？",
+      "terms": [
+        "授權"
+      ],
+      "expect": [
+        "decision_use_max_monthly_api_credits_20261008.md"
+      ],
+      "forbid": [],
+      "expect_empty": false,
+      "total": 5,
+      "top": [
+        [
+          "feedback_standing_authorisation_no_pay_no_delete_20260929.md",
+          [
+            "description",
+            "aliases",
+            "body"
+          ]
+        ],
+        [
+          "feedback_login_first_owner_handles_hard_limits_20261002.md",
+          [
+            "description",
+            "aliases",
+            "body"
+          ]
+        ],
+        [
+          "feedback_spend_existing_quota_freely.md",
+          [
+            "description",
+            "aliases",
+            "body"
+          ]
+        ]
+      ],
+      "guidance": [],
+      "leaked_rank": null,
+      "rank": null,
+      "hit_fields": [],
+      "card_path": "decision_use_max_monthly_api_credits_20261008.md",
+      "term_hits": {
+        "body": [
+          "授權"
+        ]
+      },
+      "passed": false,
+      "gap": "ranking",
+      "reason": "期望卡排第 — 名（門檻前 8 名）",
+      "hook_hit": false,
+      "injected_bytes": 3551,
+      "hook_ms": 1813.5173999980907
+    },
+    {
+      "id": "v4-01",
+      "prompt": "品牌是優先才對，沒有才是釀造商，先以這個為主",
+      "terms": [
+        "品牌",
+        "造商",
+        "優先",
+        "釀造"
+      ],
+      "expect": [
+        "decision-brand-before-brewer-20260903.md"
+      ],
+      "forbid": [],
+      "expect_empty": false,
+      "total": 11,
+      "top": [
+        [
+          "decision-brand-before-brewer-20260903.md",
+          [
+            "description",
+            "aliases",
+            "body"
+          ]
+        ],
+        [
+          "rulings/ruling-20260903-244294c607e8.md",
+          [
+            "description",
+            "body"
+          ]
+        ],
+        [
+          "project_beer_collab_brand_rule.md",
+          [
+            "description",
+            "aliases",
+            "body"
+          ]
+        ]
+      ],
+      "guidance": [],
+      "leaked_rank": null,
+      "rank": 1,
+      "hit_fields": [
+        "description",
+        "aliases",
+        "body"
+      ],
+      "passed": true,
+      "gap": "",
+      "reason": "",
+      "hook_hit": true,
+      "injected_bytes": 3278,
+      "hook_ms": 209.00500000425382
+    },
+    {
+      "id": "v4-02",
+      "prompt": "3百多筆確認是逐筆判斷嗎?我說過逐筆不准用腳本，不准偷懶，而且我現在發現你才在看03表????你真的有依照pdf規則做?",
+      "terms": [
+        "pdf",
+        "百多",
+        "依照",
+        "多筆",
+        "發現",
+        "筆確",
+        "偷懶",
+        "確認",
+        "准偷",
+        "逐筆",
+        "腳本",
+        "筆判",
+        "用腳",
+        "判斷",
+        "准用"
+      ],
+      "expect": [
+        "decision-judge-row-by-row-no-scripts-20260827.md"
+      ],
+      "forbid": [],
+      "expect_empty": false,
+      "total": 18,
+      "top": [
+        [
+          "corrections/correction-20260827-2451abe2b0cc.md",
+          [
+            "description",
+            "body"
+          ]
+        ],
+        [
+          "decision-judge-row-by-row-no-scripts-20260827.md",
+          [
+            "description",
+            "aliases",
+            "body"
+          ]
+        ],
+        [
+          "project_beer_stage3_done.md",
+          [
+            "aliases",
+            "body"
+          ]
+        ]
+      ],
+      "guidance": [],
+      "leaked_rank": null,
+      "rank": 2,
+      "hit_fields": [
+        "description",
+        "aliases",
+        "body"
+      ],
+      "passed": true,
+      "gap": "",
+      "reason": "",
+      "hook_hit": true,
+      "injected_bytes": 4186,
+      "hook_ms": 4852.792700003192
+    },
+    {
+      "id": "v4-03",
+      "prompt": "<-我不懂你不想自己決定是為什麼，我說過PDF是最高原則，最高原則怎麼寫怎麼做，也不是叫你決定",
+      "terms": [
+        "PDF",
+        "想自",
+        "決定",
+        "自己",
+        "高原",
+        "己決"
+      ],
+      "expect": [
+        "decision-manual-is-the-highest-authority-20260825.md"
+      ],
+      "forbid": [],
+      "expect_empty": false,
+      "total": 6,
+      "top": [
+        [
+          "decision-manual-is-the-highest-authority-20260825.md",
+          [
+            "description",
+            "aliases",
+            "body"
+          ]
+        ],
+        [
+          "corrections/correction-20260825-6d8257cdd99d.md",
+          [
+            "description",
+            "body"
+          ]
+        ],
+        [
+          "feedback_derived_rule_vs_manual.md",
+          [
+            "description",
+            "aliases",
+            "body"
+          ]
+        ]
+      ],
+      "guidance": [],
+      "leaked_rank": null,
+      "rank": 1,
+      "hit_fields": [
+        "description",
+        "aliases",
+        "body"
+      ],
+      "passed": true,
+      "gap": "",
+      "reason": "",
+      "hook_hit": true,
+      "injected_bytes": 4735,
+      "hook_ms": 3514.654500002507
+    },
+    {
+      "id": "v4-04",
+      "prompt": "依照手冊規定，不用問我",
+      "terms": [
+        "依照",
+        "用問",
+        "照手",
+        "規定",
+        "手冊",
+        "冊規"
+      ],
+      "expect": [
+        "decision-manual-says-so-just-do-it-20260827.md"
+      ],
+      "forbid": [],
+      "expect_empty": false,
+      "total": 15,
+      "top": [
+        [
+          "decision-manual-says-so-just-do-it-20260827.md",
+          [
+            "description",
+            "aliases",
+            "body"
+          ]
+        ],
+        [
+          "rulings/ruling-20260827-05d5e192aa26.md",
+          [
+            "description",
+            "body"
+          ]
+        ],
+        [
+          "feedback_dont_ask_when_rule_decides.md",
+          [
+            "description",
+            "aliases",
+            "body"
+          ]
+        ]
+      ],
+      "guidance": [],
+      "leaked_rank": null,
+      "rank": 1,
+      "hit_fields": [
+        "description",
+        "aliases",
+        "body"
+      ],
+      "passed": true,
+      "gap": "",
+      "reason": "",
+      "hook_hit": true,
+      "injected_bytes": 3752,
+      "hook_ms": 471.32000000419794
+    },
+    {
+      "id": "v4-05",
+      "prompt": "一定要符合手冊標準，找不到品牌就不應該亂自創",
+      "terms": [
+        "符合",
+        "自創",
+        "合手",
+        "亂自",
+        "手冊",
+        "品牌",
+        "冊標",
+        "到品",
+        "標準"
+      ],
+      "expect": [
+        "decision-never-invent-a-brand-20260825.md"
+      ],
+      "forbid": [],
+      "expect_empty": false,
+      "total": 21,
+      "top": [
+        [
+          "decision-never-invent-a-brand-20260825.md",
+          [
+            "description",
+            "aliases",
+            "body"
+          ]
+        ],
+        [
+          "rulings/ruling-20260825-1a87de8aff6f.md",
+          [
+            "description",
+            "body"
+          ]
+        ],
+        [
+          "project_beer_nonspirit_backfill.md",
+          [
+            "aliases",
+            "body"
+          ]
+        ]
+      ],
+      "guidance": [],
+      "leaked_rank": null,
+      "rank": 1,
+      "hit_fields": [
+        "description",
+        "aliases",
+        "body"
+      ],
+      "passed": true,
+      "gap": "",
+      "reason": "",
+      "hook_hit": true,
+      "injected_bytes": 4213,
+      "hook_ms": 2462.9811999984668
+    },
+    {
+      "id": "v4-06",
+      "prompt": "**我要裁示什麼，所有都是應該以手冊PDF為最高規則，我根本沒有能裁示部分才對**",
+      "terms": [
+        "PDF",
+        "裁示",
+        "部分",
+        "手冊",
+        "示部",
+        "高規",
+        "根本"
+      ],
+      "expect": [
+        "feedback_derived_rule_vs_manual.md"
+      ],
+      "forbid": [],
+      "expect_empty": false,
+      "total": 18,
+      "top": [
+        [
+          "feedback_derived_rule_vs_manual.md",
+          [
+            "description",
+            "aliases",
+            "body"
+          ]
+        ],
+        [
+          "project_beer_nonspirit_backfill.md",
+          [
+            "description",
+            "body"
+          ]
+        ],
+        [
+          "project_beer_item_classification_stage1.md",
+          [
+            "description",
+            "body"
+          ]
+        ]
+      ],
+      "guidance": [],
+      "leaked_rank": null,
+      "rank": 1,
+      "hit_fields": [
+        "description",
+        "aliases",
+        "body"
+      ],
+      "passed": true,
+      "gap": "",
+      "reason": "",
+      "hook_hit": true,
+      "injected_bytes": 3996,
+      "hook_ms": 1260.574899999483
+    },
+    {
+      "id": "v4-07",
+      "prompt": "我有明確說過**prompt盡量不要放在檔案，我很難複製**",
+      "terms": [
+        "**prompt",
+        "明確",
+        "複製",
+        "盡量",
+        "難複",
+        "檔案"
+      ],
+      "expect": [
+        "feedback_prompt_in_chat_not_file.md"
+      ],
+      "forbid": [],
+      "expect_empty": false,
+      "total": 7,
+      "top": [
+        [
+          "feedback_prompt_in_chat_not_file.md",
+          [
+            "description",
+            "aliases",
+            "body"
+          ]
+        ],
+        [
+          "project_beer_collab_brand_rule.md",
+          [
+            "body"
+          ]
+        ],
+        [
+          "project_beer_verify_20260826b.md",
+          [
+            "body"
+          ]
+        ]
+      ],
+      "guidance": [],
+      "leaked_rank": null,
+      "rank": 1,
+      "hit_fields": [
+        "description",
+        "aliases",
+        "body"
+      ],
+      "passed": true,
+      "gap": "",
+      "reason": "",
+      "hook_hit": true,
+      "injected_bytes": 3831,
+      "hook_ms": 770.4985000018496
+    },
+    {
+      "id": "v4-08",
+      "prompt": "**明明就有很多方式去查找，為什麼執著在單一種查找方式，而且如果就是沒辦法依手冊規定處理就好了**",
+      "terms": [
+        "明明",
+        "處理",
+        "多方",
+        "定處",
+        "方式",
+        "規定",
+        "查找",
+        "冊規",
+        "種查",
+        "手冊",
+        "找方",
+        "依手",
+        "辦法",
+        "法依"
+      ],
+      "expect": [
+        "feedback_search_tool_discipline.md"
+      ],
+      "forbid": [],
+      "expect_empty": false,
+      "total": 22,
+      "top": [
+        [
+          "feedback_search_tool_discipline.md",
+          [
+            "body"
+          ]
+        ],
+        [
+          "feedback_read_manual_not_invent.md",
+          [
+            "description",
+            "aliases",
+            "body"
+          ]
+        ],
+        [
+          "feedback_dont_ask_when_rule_decides.md",
+          [
+            "description",
+            "aliases",
+            "body"
+          ]
+        ]
+      ],
+      "guidance": [],
+      "leaked_rank": null,
+      "rank": 1,
+      "hit_fields": [
+        "body"
+      ],
+      "passed": true,
+      "gap": "",
+      "reason": "",
+      "hook_hit": true,
+      "injected_bytes": 3371,
+      "hook_ms": 2911.6093999982695
+    },
+    {
+      "id": "today-codex",
+      "prompt": "記得多用codex",
+      "terms": [
+        "codex",
+        "多用"
+      ],
+      "expect": [
+        "feedback-dispatch-prefer-codex-implementer-20261027.md"
+      ],
+      "forbid": [],
+      "expect_empty": false,
+      "total": 200,
+      "top": [
+        [
+          "project_epitype_optimization_plan_20261029.md",
+          [
+            "body"
+          ]
+        ],
+        [
+          "feedback_independent_completion_defer_codex_when_drift_risk.md",
+          [
+            "name",
+            "description",
+            "aliases",
+            "body"
+          ]
+        ],
+        [
+          "feedback_gui_bug_codex_protocol.md",
+          [
+            "name",
+            "description",
+            "aliases",
+            "body"
+          ]
+        ]
+      ],
+      "guidance": [
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\decision-epitype-behavior-layer-removed-20260909.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\rule-core-10-english.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\rule-evidence-never-refile-settled-rulings-20260909.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\feedback-execution-file-placement.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\feedback_commit_per_unit_keep_clean.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\feedback-corroboration-is-not-cause.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\project-review-pack-dispositions-20260919.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\rule-core-02-english.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\feedback-dont-ask-owner-what-the-machine-knows.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\rule-core-11-english.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\rule-core-09-english.md"
+      ],
+      "leaked_rank": null,
+      "rank": 9,
+      "hit_fields": [
+        "name",
+        "description",
+        "aliases",
+        "body"
+      ],
+      "passed": false,
+      "gap": "ranking",
+      "reason": "期望卡排第 9 名（門檻前 8 名）",
+      "hook_hit": false,
+      "injected_bytes": 3628,
+      "hook_ms": 8578.181299999414
+    },
+    {
+      "id": "today-antigravity",
+      "prompt": "記得多用codex",
+      "terms": [
+        "codex",
+        "多用"
+      ],
+      "expect": [
+        "feedback_agy_print_mode_is_autonomous_agent.md"
+      ],
+      "forbid": [],
+      "expect_empty": false,
+      "total": 200,
+      "top": [
+        [
+          "project_epitype_optimization_plan_20261029.md",
+          [
+            "body"
+          ]
+        ],
+        [
+          "feedback_independent_completion_defer_codex_when_drift_risk.md",
+          [
+            "name",
+            "description",
+            "aliases",
+            "body"
+          ]
+        ],
+        [
+          "feedback_gui_bug_codex_protocol.md",
+          [
+            "name",
+            "description",
+            "aliases",
+            "body"
+          ]
+        ]
+      ],
+      "guidance": [
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\decision-epitype-behavior-layer-removed-20260909.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\rule-core-10-english.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\rule-evidence-never-refile-settled-rulings-20260909.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\feedback-execution-file-placement.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\feedback_commit_per_unit_keep_clean.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\feedback-corroboration-is-not-cause.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\project-review-pack-dispositions-20260919.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\rule-core-02-english.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\feedback-dont-ask-owner-what-the-machine-knows.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\rule-core-11-english.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\rule-core-09-english.md"
+      ],
+      "leaked_rank": null,
+      "rank": null,
+      "hit_fields": [],
+      "card_path": "feedback_agy_print_mode_is_autonomous_agent.md",
+      "term_hits": {},
+      "passed": false,
+      "gap": "alias",
+      "reason": "期望卡排第 — 名（門檻前 8 名）",
+      "hook_hit": false,
+      "injected_bytes": 3628,
+      "hook_ms": 8096.945199999027
+    },
+    {
+      "id": "today-graphify",
+      "prompt": "graphify 要不要參考",
+      "terms": [
+        "graphify",
+        "參考"
+      ],
+      "expect": [
+        "project_epitype_optimization_plan_20261029.md"
+      ],
+      "forbid": [],
+      "expect_empty": false,
+      "total": 2,
+      "top": [
+        [
+          "project_epitype_optimization_plan_20261029.md",
+          [
+            "aliases",
+            "body"
+          ]
+        ],
+        [
+          "feedback-ai-lane-roles-gemini-breadth-only.md",
+          [
+            "description",
+            "aliases",
+            "body"
+          ]
+        ]
+      ],
+      "guidance": [],
+      "leaked_rank": null,
+      "rank": 1,
+      "hit_fields": [
+        "aliases",
+        "body"
+      ],
+      "passed": true,
+      "gap": "",
+      "reason": "",
+      "hook_hit": true,
+      "injected_bytes": 1507,
+      "hook_ms": 103.6820999943302
+    },
+    {
+      "id": "dispatch-1",
+      "prompt": "能用CODEX盡量用CODEX，懂?",
+      "terms": [
+        "CODEX",
+        "盡量",
+        "量用"
+      ],
+      "expect": [
+        "feedback-dispatch-prefer-codex-implementer-20261027.md"
+      ],
+      "forbid": [],
+      "expect_empty": false,
+      "total": 200,
+      "top": [
+        [
+          "feedback-dispatch-prefer-codex-implementer-20261027.md",
+          [
+            "name",
+            "description",
+            "aliases",
+            "body"
+          ]
+        ],
+        [
+          "reference_taskoutput_avoids_allow_once.md",
+          [
+            "aliases",
+            "body"
+          ]
+        ],
+        [
+          "feedback_long_run_validation_fix_inplace_not_monolithic_redo.md",
+          [
+            "body"
+          ]
+        ]
+      ],
+      "guidance": [
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\decision-epitype-behavior-layer-removed-20260909.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\rule-core-10-english.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\rule-evidence-never-refile-settled-rulings-20260909.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\feedback-execution-file-placement.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\feedback_commit_per_unit_keep_clean.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\feedback-corroboration-is-not-cause.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\project-review-pack-dispositions-20260919.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\rule-core-02-english.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\feedback-dont-ask-owner-what-the-machine-knows.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\rule-core-11-english.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\rule-core-09-english.md"
+      ],
+      "leaked_rank": null,
+      "rank": 1,
+      "hit_fields": [
+        "name",
+        "description",
+        "aliases",
+        "body"
+      ],
+      "passed": true,
+      "gap": "",
+      "reason": "",
+      "hook_hit": false,
+      "injected_bytes": 3628,
+      "hook_ms": 6252.27520000044
+    },
+    {
+      "id": "dispatch-2",
+      "prompt": "補充!用內部瀏覽器，另外派工以CODEX為主",
+      "terms": [
+        "CODEX",
+        "補充",
+        "派工",
+        "用內",
+        "外派",
+        "內部",
+        "覽器",
+        "部瀏",
+        "瀏覽"
+      ],
+      "expect": [
+        "feedback-dispatch-prefer-codex-implementer-20261027.md"
+      ],
+      "forbid": [],
+      "expect_empty": false,
+      "total": 200,
+      "top": [
+        [
+          "feedback-dispatch-prefer-codex-implementer-20261027.md",
+          [
+            "name",
+            "description",
+            "aliases",
+            "body"
+          ]
+        ],
+        [
+          "reference-captive-portal-kills-codex-exec.md",
+          [
+            "name",
+            "description",
+            "aliases",
+            "body"
+          ]
+        ],
+        [
+          "grants/grant-20260818-d6541e8550cb.md",
+          [
+            "aliases"
+          ]
+        ]
+      ],
+      "guidance": [
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\decision-epitype-behavior-layer-removed-20260909.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\rule-core-10-english.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\feedback-execution-file-placement.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\feedback_commit_per_unit_keep_clean.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\feedback-closeout-includes-background-tasks.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\feedback-corroboration-is-not-cause.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\project-review-pack-dispositions-20260919.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\rule-core-02-english.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\rule-core-16-english.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\feedback-dont-ask-owner-what-the-machine-knows.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\scar-heredoc-eats-backslash-20260916.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\rule-core-11-english.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\rule-core-09-english.md"
+      ],
+      "leaked_rank": null,
+      "rank": 1,
+      "hit_fields": [
+        "name",
+        "description",
+        "aliases",
+        "body"
+      ],
+      "passed": true,
+      "gap": "",
+      "reason": "",
+      "hook_hit": false,
+      "injected_bytes": 3806,
+      "hook_ms": 6351.563899996108
+    },
+    {
+      "id": "dispatch-3",
+      "prompt": "盡量利用codex額度，但是你判定需要用你自己還是要用，懂?",
+      "terms": [
+        "codex",
+        "盡量",
+        "自己",
+        "量利",
+        "定需",
+        "利用",
+        "判定",
+        "額度"
+      ],
+      "expect": [
+        "feedback-dispatch-prefer-codex-implementer-20261027.md"
+      ],
+      "forbid": [],
+      "expect_empty": false,
+      "total": 200,
+      "top": [
+        [
+          "feedback-dispatch-prefer-codex-implementer-20261027.md",
+          [
+            "name",
+            "description",
+            "aliases",
+            "body"
+          ]
+        ],
+        [
+          "feedback_diagnose_resource_bottleneck_by_cpu_util.md",
+          [
+            "description",
+            "aliases",
+            "body"
+          ]
+        ],
+        [
+          "reference_taskoutput_avoids_allow_once.md",
+          [
+            "aliases",
+            "body"
+          ]
+        ]
+      ],
+      "guidance": [
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\decision-epitype-behavior-layer-removed-20260909.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\rule-core-10-english.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\rule-evidence-never-refile-settled-rulings-20260909.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\feedback-execution-file-placement.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\decision-no-third-try-same-way-20260919.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\feedback_commit_per_unit_keep_clean.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\project-review-pack-dispositions-20260919.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\rule-core-02-english.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\decision-tests-are-not-deployment-20260919.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\rule-core-11-english.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\rule-core-09-english.md"
+      ],
+      "leaked_rank": null,
+      "rank": 1,
+      "hit_fields": [
+        "name",
+        "description",
+        "aliases",
+        "body"
+      ],
+      "passed": true,
+      "gap": "",
+      "reason": "",
+      "hook_hit": false,
+      "injected_bytes": 3776,
+      "hook_ms": 7109.678400003759
+    },
+    {
+      "id": "resources-1",
+      "prompt": "把系統資源讓出給我，我要用電腦",
+      "terms": [
+        "系統",
+        "電腦",
+        "統資",
+        "用電",
+        "資源"
+      ],
+      "expect": [
+        "decision_resource_controller_moved_to_clock_20261028.md"
+      ],
+      "forbid": [],
+      "expect_empty": false,
+      "total": 16,
+      "top": [
+        [
+          "feedback_lead_balances_resources_when_owner_away_20261022.md",
+          [
+            "description",
+            "body"
+          ]
+        ],
+        [
+          "feedback-vyou-subagent-cap-3-20260929.md",
+          [
+            "description",
+            "body"
+          ]
+        ],
+        [
+          "decision_resource_controller_moved_to_clock_20261028.md",
+          [
+            "description",
+            "aliases",
+            "body"
+          ]
+        ]
+      ],
+      "guidance": [],
+      "leaked_rank": null,
+      "rank": 3,
+      "hit_fields": [
+        "description",
+        "aliases",
+        "body"
+      ],
+      "passed": true,
+      "gap": "",
+      "reason": "",
+      "hook_hit": false,
+      "injected_bytes": 4293,
+      "hook_ms": 3804.586099999142
+    },
+    {
+      "id": "resources-2",
+      "prompt": "我是要你管好自己專案就好，該釋放的系統資源就釋放，不要無故佔著，或者用更好的方式處理，懂？",
+      "terms": [
+        "管好",
+        "處理",
+        "好自",
+        "式處",
+        "自己",
+        "方式",
+        "己專",
+        "故佔",
+        "專案",
+        "釋放",
+        "系統",
+        "資源",
+        "統資"
+      ],
+      "expect": [
+        "feedback-dispatch-prefer-codex-implementer-20261027.md"
+      ],
+      "forbid": [],
+      "expect_empty": false,
+      "total": 146,
+      "top": [
+        [
+          "feedback-dispatch-prefer-codex-implementer-20261027.md",
+          [
+            "description",
+            "body"
+          ]
+        ],
+        [
+          "feedback-release-resources-means-trim-not-archive-20261013.md",
+          [
+            "description",
+            "body"
+          ]
+        ],
+        [
+          "feedback-execution-waste-review-20261028.md",
+          [
+            "description",
+            "body"
+          ]
+        ]
+      ],
+      "guidance": [
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\decision-epitype-behavior-layer-removed-20260909.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\decision-exit-zero-is-not-success-20260916.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\decision-advice-review-only-when-requested-20260925.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\feedback-corroboration-is-not-cause.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\decision-memory-index-generated-views-20260909.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\rule-core-10-english.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-snapshot\\V1\\rule-core-20-english.md"
+      ],
+      "leaked_rank": null,
+      "rank": 1,
+      "hit_fields": [
+        "description",
+        "body"
+      ],
+      "passed": true,
+      "gap": "",
+      "reason": "",
+      "hook_hit": false,
+      "injected_bytes": 3879,
+      "hook_ms": 4263.5386000038125
+    }
+  ]
+}

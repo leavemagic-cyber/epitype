@@ -72,6 +72,7 @@ SELFTESTS = (
     Path("tests") / "shared_index_scope_regression.py",
     Path("tests") / "cap_consolidation_regression.py",
     Path("tests") / "recall_regression.py",
+    Path("tests") / "recall_rank_regression.py",
     Path("tests") / "governance_regression.py",
     Path("tests") / "recall_selection_regression.py",
     Path("tests") / "no_semantic_gate_regression.py",

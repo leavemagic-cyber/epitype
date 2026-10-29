@@ -1,0 +1,210 @@
+{
+  "revision": "97ab94dbdc8b6f5ccf660ea0aa321ecfc6429305",
+  "scope": "project",
+  "cold_alias_cache": false,
+  "latency_mode": "hook-process",
+  "source_sha256": {
+    "epitype/memsearch.py": "08d78651f2d082cbf2f746dc68b811e81dc45517975dea32fc8ce6c75f28709a",
+    "epitype/memspec.py": "5f0c337c92da5c939a8e94fe12da13e7820ab074107df2707d67cae169a4aa0a",
+    "epitype/rule_provenance.py": "91bc80b405652d3ada6260b6d40561e86cd2309b75f46a1b063a646c8c3ecd05",
+    "adapters/claude/recall_hook.py": "08c85b93ff9cb5a55579228519323aa9a6cebb2508c0768c43464df31bc288c0"
+  },
+  "manifest": {
+    "V1": {
+      "cards": 640,
+      "sha256": "29873d67f8923f39ca54b2397c32deec31841c9ac3e34d4c4001f8f11d3e19b0"
+    },
+    "V2": {
+      "cards": 454,
+      "sha256": "e2894f1ff21259efd4c510f0ca56adb5e489dff09f2ebf849d992d6fbbe08d8c"
+    },
+    "V3": {
+      "cards": 263,
+      "sha256": "67bbf1be9792f5e0825596396cf0b426aec4f3c6dcd6671701edac08b895d81c"
+    },
+    "V4": {
+      "cards": 35,
+      "sha256": "9845331834ec3815ac5610c8b0d5cd49add09634d17a43a9779a1a6e404d0941"
+    }
+  },
+  "repeats": 3,
+  "cases": 3,
+  "hits_at_8": 2,
+  "hook_hits": 2,
+  "hook_median_ms": 3030.5647999994108,
+  "hook_max_ms": 9710.304500003986,
+  "mean_injected_bytes": 2931.6666666666665,
+  "outcomes": [
+    {
+      "id": "v3-11",
+      "prompt": "妳把主控交給動物時鐘，你專心做Vyou",
+      "terms": [
+        "Vyou",
+        "主控",
+        "心做",
+        "控交",
+        "專心",
+        "動物",
+        "時鐘",
+        "物時"
+      ],
+      "expect": [
+        "decision_resource_controller_moved_to_clock_20261028.md"
+      ],
+      "forbid": [],
+      "expect_empty": false,
+      "total": 116,
+      "top": [
+        [
+          "decision_resource_controller_moved_to_clock_20261028.md",
+          [
+            "description",
+            "aliases",
+            "body"
+          ]
+        ],
+        [
+          "reference_app_resource_table_and_gitlab_20261027.md",
+          [
+            "description",
+            "body"
+          ]
+        ],
+        [
+          "reference_openai_api_credit_bank_20261029.md",
+          [
+            "description",
+            "body"
+          ]
+        ]
+      ],
+      "guidance": [
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-process-baseline\\V3\\feedback_review_subject_must_not_be_the_review_record.md"
+      ],
+      "leaked_rank": null,
+      "rank": 1,
+      "hit_fields": [
+        "description",
+        "aliases",
+        "body"
+      ],
+      "passed": true,
+      "gap": "",
+      "reason": "",
+      "hook_hit": true,
+      "injected_bytes": 3911,
+      "hook_ms": 9066.400900002918
+    },
+    {
+      "id": "today-codex",
+      "prompt": "記得多用codex",
+      "terms": [
+        "codex",
+        "多用"
+      ],
+      "expect": [
+        "feedback-dispatch-prefer-codex-implementer-20261027.md"
+      ],
+      "forbid": [],
+      "expect_empty": false,
+      "total": 200,
+      "top": [
+        [
+          "project_epitype_optimization_plan_20261029.md",
+          [
+            "body"
+          ]
+        ],
+        [
+          "feedback_independent_completion_defer_codex_when_drift_risk.md",
+          [
+            "name",
+            "description",
+            "aliases",
+            "body"
+          ]
+        ],
+        [
+          "feedback_gui_bug_codex_protocol.md",
+          [
+            "name",
+            "description",
+            "aliases",
+            "body"
+          ]
+        ]
+      ],
+      "guidance": [
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-process-baseline\\V1\\decision-epitype-behavior-layer-removed-20260909.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-process-baseline\\V1\\rule-core-10-english.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-process-baseline\\V1\\rule-evidence-never-refile-settled-rulings-20260909.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-process-baseline\\V1\\feedback-execution-file-placement.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-process-baseline\\V1\\feedback_commit_per_unit_keep_clean.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-process-baseline\\V1\\feedback-corroboration-is-not-cause.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-process-baseline\\V1\\project-review-pack-dispositions-20260919.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-process-baseline\\V1\\rule-core-02-english.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-process-baseline\\V1\\feedback-dont-ask-owner-what-the-machine-knows.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-process-baseline\\V1\\rule-core-11-english.md",
+        "此題現行決定=C:\\Epitype\\wt-eopt4-20261029\\.eopt4-process-baseline\\V1\\rule-core-09-english.md"
+      ],
+      "leaked_rank": null,
+      "rank": 9,
+      "hit_fields": [
+        "name",
+        "description",
+        "aliases",
+        "body"
+      ],
+      "passed": false,
+      "gap": "ranking",
+      "reason": "期望卡排第 9 名（門檻前 8 名）",
+      "hook_hit": false,
+      "injected_bytes": 3709,
+      "hook_ms": 3030.5647999994108
+    },
+    {
+      "id": "today-graphify",
+      "prompt": "graphify 要不要參考",
+      "terms": [
+        "graphify",
+        "參考"
+      ],
+      "expect": [
+        "project_epitype_optimization_plan_20261029.md"
+      ],
+      "forbid": [],
+      "expect_empty": false,
+      "total": 2,
+      "top": [
+        [
+          "project_epitype_optimization_plan_20261029.md",
+          [
+            "aliases",
+            "body"
+          ]
+        ],
+        [
+          "feedback-ai-lane-roles-gemini-breadth-only.md",
+          [
+            "description",
+            "aliases",
+            "body"
+          ]
+        ]
+      ],
+      "guidance": [],
+      "leaked_rank": null,
+      "rank": 1,
+      "hit_fields": [
+        "aliases",
+        "body"
+      ],
+      "passed": true,
+      "gap": "",
+      "reason": "",
+      "hook_hit": true,
+      "injected_bytes": 1175,
+      "hook_ms": 1123.4814999988885
+    }
+  ]
+}

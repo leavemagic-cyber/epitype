@@ -1,0 +1,179 @@
+{
+  "command": "python epitype/dream.py --scheduled",
+  "isolated_home": "C:\\Epitype\\wt-eopt4-20261029\\.eopt4b\\dream\\home",
+  "exit_code": 0,
+  "stdout": "DREAM PACK C:\\Epitype\\wt-eopt4-20261029\\.eopt4b\\dream\\home\\.claude\\projects\\synthetic\\memory\\.epitype\\dream_pack_latest.md\n",
+  "stderr": "",
+  "artifacts": [
+    "note.md",
+    "_WORK_LEDGER.md",
+    ".epitype\\dream.lock.guard",
+    ".epitype\\dream_pack_latest.json",
+    ".epitype\\dream_pack_latest.md",
+    ".epitype\\dream_state.json",
+    ".epitype\\gate_health.json",
+    ".epitype\\harvest_manifest.json",
+    ".epitype\\recall_health.json",
+    ".epitype\\views_fingerprint.json",
+    "_views\\current.md",
+    "_views\\history\\closed.md"
+  ],
+  "states": {
+    ".epitype\\dream_state.json": {
+      "completed_at": "2026-10-29T10:49:31+00:00",
+      "completed": 1793270971.433,
+      "date": "2026-10-29",
+      "elapsed_seconds": 5.314,
+      "pack": "C:\\Epitype\\wt-eopt4-20261029\\.eopt4b\\dream\\home\\.claude\\projects\\synthetic\\memory\\.epitype\\dream_pack_latest.md",
+      "headline": {
+        "card_fail": 1,
+        "missing_aliases": 1,
+        "drafts": 0
+      },
+      "complete": true,
+      "section_errors": {},
+      "sections": {
+        "1": {
+          "missing_aliases": 1
+        },
+        "2": {
+          "fail": 1,
+          "warn": 2,
+          "fail_cards": 1,
+          "native_docs_skipped": 0,
+          "enforce_host": 0,
+          "enforce_gate": 0,
+          "enforce_text": 0,
+          "enforce_gap": 0,
+          "enforce_unclassified": 1,
+          "enforce_exempt": 0
+        },
+        "3": {
+          "zombie_cards": 0,
+          "zombie_lines": 0,
+          "oldest_days": 0,
+          "orphan_cards": 0,
+          "orphan_lines": 0
+        },
+        "4": {
+          "total_drafts": 0,
+          "judged_kept": 0,
+          "by_subdir": {},
+          "captured_pending": 0,
+          "harvest_new_drafts": 0,
+          "harvest_files": 0
+        },
+        "5": {
+          "active": 0,
+          "superseded": 0,
+          "missing_owner_or_forbidden": 0
+        },
+        "6": {
+          "by_type": {
+            "grant": 0,
+            "correction": 0,
+            "ruling": 0
+          },
+          "aging_by_type": {
+            "grant": 0,
+            "correction": 0,
+            "ruling": 0
+          },
+          "aging_total": 0
+        },
+        "7": {
+          "recent_7d": 1
+        },
+        "8": {
+          "pocket_vaults": 0,
+          "pocket_cards": 0,
+          "native_vaults_in_live_projects": 0,
+          "roots_scanned": 1
+        },
+        "9": {
+          "total_drafts": 0,
+          "over_7_days": 0,
+          "over_30_days": 0,
+          "expired_tonight": 0,
+          "by_subdir": {}
+        },
+        "10": {
+          "mixed_cards": 0,
+          "reviewed_skipped": 0,
+          "skipped_by_reason": {},
+          "by_vault": {
+            "C:\\Epitype\\wt-eopt4-20261029\\.eopt4b\\dream\\home\\.claude\\projects\\synthetic\\memory": 0
+          },
+          "listed_cap_per_vault": 50
+        },
+        "11": {
+          "over_cap": 0,
+          "unset_keys": 2,
+          "drift": 0
+        },
+        "12": {
+          "uncarried_quotes": 0,
+          "noise_candidates": 0,
+          "by_vault": {
+            "C:\\Epitype\\wt-eopt4-20261029\\.eopt4b\\dream\\home\\.claude\\projects\\synthetic\\memory": 0
+          },
+          "listed_cap_per_vault": 30
+        },
+        "13": {
+          "hits": 0,
+          "blocked": 0,
+          "missed": 0,
+          "outside_gate_view": 0,
+          "silent_rules": 0,
+          "transcripts": 0,
+          "transcripts_skipped": 0,
+          "transcripts_claude": 0,
+          "available_claude": 0,
+          "transcripts_codex": 0,
+          "available_codex": 0,
+          "coverage_pct": 100,
+          "coverage_status": "完整",
+          "compliance_frontier": null,
+          "window_reset": "狀態檔不存在",
+          "quoted_exemptions": 0,
+          "recall_quiet": 0,
+          "deliveries": 0,
+          "delivered_cards": 0,
+          "delivered_violated_sessions": 0,
+          "first_call_input_tokens_median": null
+        },
+        "14": {
+          "drifted": 2,
+          "written": 1,
+          "replaced": 0,
+          "refused": 0,
+          "reverted": 0
+        },
+        "15": {
+          "cards": 0,
+          "review_items": 0,
+          "background_cards": 0,
+          "trigger": 5,
+          "at_threshold": false,
+          "events": 0,
+          "unverified_events": 0,
+          "unmapped_events": 0,
+          "blocks": 0,
+          "exam_failures": 0,
+          "exam_unmapped": 0,
+          "exam_rules_version": "",
+          "dream_candidates": {
+            "pocket_vaults": 0,
+            "drafts_over_7_days": 0,
+            "mixed_cards": 0,
+            "over_cap": 0,
+            "uncarried_quotes": 0
+          },
+          "listed_cap": 50
+        }
+      },
+      "last_compliance_started": 1793270966.1190567,
+      "notified_at": null
+    }
+  }
+}

@@ -1,0 +1,401 @@
+{
+  "description": "Session-derived owner quotations recorded in four vaults, plus owner ticket prompts. Card records are evidence of wording, not independent original-session verification.",
+  "questions": [
+    {
+      "id": "v1-01",
+      "vault_id": "V1",
+      "prompt": "不要建議就過審，這個不是我規定的，建議如果我需要多方意見我會明確指示雙方討論或者三方討論，怎麼會有這種規定，你確認清楚那些要過審(你認為，不要亂設定規則，導致浪費token)",
+      "expect": [
+        "decision-advice-review-only-when-requested-20260925.md"
+      ],
+      "source": "decision-advice-review-only-when-requested-20260925.md: owner quotation recorded on card (original session not independently verified)"
+    },
+    {
+      "id": "v1-02",
+      "vault_id": "V1",
+      "prompt": "這是問題，怎麼會跟最新狀態不一樣?",
+      "expect": [
+        "decision-claimed-reads-must-be-real-20260919.md"
+      ],
+      "source": "decision-claimed-reads-must-be-real-20260919.md: owner quotation recorded on card (original session not independently verified)"
+    },
+    {
+      "id": "v1-03",
+      "vault_id": "V1",
+      "prompt": "好！把能擋的都裝上，剩下的你想辦法變成也是可以遵守的",
+      "expect": [
+        "decision-completion-carries-evidence-20260916.md"
+      ],
+      "source": "decision-completion-carries-evidence-20260916.md: owner quotation recorded on card (original session not independently verified)"
+    },
+    {
+      "id": "v1-04",
+      "vault_id": "V1",
+      "prompt": "維持92並且優化",
+      "expect": [
+        "decision-context-meter-handoff-20260925.md"
+      ],
+      "source": "decision-context-meter-handoff-20260925.md: owner quotation recorded on card (original session not independently verified)"
+    },
+    {
+      "id": "v1-05",
+      "vault_id": "V1",
+      "prompt": "先檢查核心規則沒有發揮作用的！我都要讓他會真正發揮作用",
+      "expect": [
+        "decision-correction-carries-a-recheck-20260919.md"
+      ],
+      "source": "decision-correction-carries-a-recheck-20260919.md: owner quotation recorded on card (original session not independently verified)"
+    },
+    {
+      "id": "v1-06",
+      "vault_id": "V1",
+      "prompt": "這就不對啊！一定要有人負責",
+      "expect": [
+        "decision-delegated-work-keeps-its-owner-20260919.md"
+      ],
+      "source": "decision-delegated-work-keeps-its-owner-20260919.md: owner quotation recorded on card (original session not independently verified)"
+    },
+    {
+      "id": "v1-07",
+      "vault_id": "V1",
+      "prompt": "Repo整個做好(我不是說發布)",
+      "expect": [
+        "decision-dogfood-mode.md"
+      ],
+      "source": "decision-dogfood-mode.md: owner quotation recorded on card (original session not independently verified)"
+    },
+    {
+      "id": "v1-08",
+      "vault_id": "V1",
+      "prompt": "給你一個專案規則(之前給過)，我們這台機器，只要發現事epitype的錯誤就是立刻修，然後紀錄，一段時間就是我會檢討是不是去更版epitype",
+      "expect": [
+        "decision-epitype-bugfix-autonomy-20260902.md"
+      ],
+      "source": "decision-epitype-bugfix-autonomy-20260902.md: owner quotation recorded on card (original session not independently verified)"
+    },
+    {
+      "id": "v1-09",
+      "vault_id": "V1",
+      "prompt": "我這邊是凌晨自動，但是分享出去的repo，使用者習慣不知道，怎樣能夠默默做完不影響使用？",
+      "expect": [
+        "decision-epitype-dream-mode-20260906.md"
+      ],
+      "source": "decision-epitype-dream-mode-20260906.md: owner quotation recorded on card (original session not independently verified)"
+    },
+    {
+      "id": "v1-10",
+      "vault_id": "V1",
+      "prompt": "他直接帶著出廠傷疤包開始用<-又犯我說過的，根本不會有，我沒有要提供我目前記憶",
+      "expect": [
+        "decision-epitype-empty-skeleton-release-20260909.md"
+      ],
+      "source": "decision-epitype-empty-skeleton-release-20260909.md: owner quotation recorded on card (original session not independently verified)"
+    },
+    {
+      "id": "v2-01",
+      "vault_id": "V2",
+      "prompt": "外匯本來就是要做，根本不應該有排除，你去查清楚記憶",
+      "expect": [
+        "correction-fx-sleeve-was-never-excluded-20260920.md"
+      ],
+      "source": "correction-fx-sleeve-was-never-excluded-20260920.md: owner quotation recorded on card (original session not independently verified)"
+    },
+    {
+      "id": "v2-02",
+      "vault_id": "V2",
+      "prompt": "1.甲 2.甲，另外同時觀察評估乙 3.我接受，但是我希望標註本次由哪幾家 AI判斷",
+      "expect": [
+        "decision-titan-ai-evidence-plan-a-label-ais-20260909.md"
+      ],
+      "source": "decision-titan-ai-evidence-plan-a-label-ais-20260909.md: owner quotation recorded on card (original session not independently verified)"
+    },
+    {
+      "id": "v2-03",
+      "vault_id": "V2",
+      "prompt": "外部老師<-因為額度問題，原則依照設計，例外就是誰有額度用誰",
+      "expect": [
+        "decision-titan-external-teacher-quota-exception-20260909.md"
+      ],
+      "source": "decision-titan-external-teacher-quota-exception-20260909.md: owner quotation recorded on card (original session not independently verified)"
+    },
+    {
+      "id": "v2-04",
+      "vault_id": "V2",
+      "prompt": "小迴、小雙、小三如果有類似規格，同樣不受限制，懂？",
+      "expect": [
+        "decision-titan-member-evolution-not-bounded-by-birth-spec-20261021.md"
+      ],
+      "source": "decision-titan-member-evolution-not-bounded-by-birth-spec-20261021.md: owner quotation recorded on card (original session not independently verified)"
+    },
+    {
+      "id": "v2-05",
+      "vault_id": "V2",
+      "prompt": "未成交的真倉停損",
+      "expect": [
+        "decision-titan-telegram-quiet-hours-w5-teacher-budget-20261005.md"
+      ],
+      "source": "decision-titan-telegram-quiet-hours-w5-teacher-budget-20261005.md: owner quotation recorded on card (original session not independently verified)"
+    },
+    {
+      "id": "v2-06",
+      "vault_id": "V2",
+      "prompt": "真正的驗證要靠現在這個完整議會在虛擬收集裡跑出來《算清楚就是直接上線了，後續解除虛擬單進入實單階段，就是拿真錢在試驗，另外昨天codex不是有多跑回測結果嗎？為什麼沒納入分析？",
+      "expect": [
+        "decision-titan-validation-full-council-virtual-20260909.md"
+      ],
+      "source": "decision-titan-validation-full-council-virtual-20260909.md: owner quotation recorded on card (original session not independently verified)"
+    },
+    {
+      "id": "v3-01",
+      "vault_id": "V3",
+      "prompt": "我說過應該要通過最新版本，而不是退版，之前都是通過codemagic現在無法通過太奇怪，你去查清楚記憶",
+      "expect": [
+        "decision-build-on-latest-not-downgrade-20260903.md"
+      ],
+      "source": "decision-build-on-latest-not-downgrade-20260903.md: owner quotation recorded on card (original session not independently verified)"
+    },
+    {
+      "id": "v3-02",
+      "vault_id": "V3",
+      "prompt": "我不是說過在這專案，文案要通過三方及去AI味?",
+      "expect": [
+        "decision-copy-needs-three-way-review-20260905.md"
+      ],
+      "source": "decision-copy-needs-three-way-review-20260905.md: owner quotation recorded on card (original session not independently verified)"
+    },
+    {
+      "id": "v3-03",
+      "vault_id": "V3",
+      "prompt": "非常好！你已經完全理解我要表達，我剛剛只是舉例給你看，我相信還是有多種問題，比如不能拿低一點、不願蹲下等問題要通案檢討",
+      "expect": [
+        "decision-fix-the-class-not-the-example-20260907.md"
+      ],
+      "source": "decision-fix-the-class-not-the-example-20260907.md: owner quotation recorded on card (original session not independently verified)"
+    },
+    {
+      "id": "v3-04",
+      "vault_id": "V3",
+      "prompt": "我不是說過應該要最簡單使用，不然完全看不懂阿，你現在叫人站在照片中央??你確定這樣有符合拍攝技巧????",
+      "expect": [
+        "decision-interface-must-be-obvious-20260906.md"
+      ],
+      "source": "decision-interface-must-be-obvious-20260906.md: owner quotation recorded on card (original session not independently verified)"
+    },
+    {
+      "id": "v3-05",
+      "vault_id": "V3",
+      "prompt": "已經運用你這高級AI，你不能拿人類的排程來排",
+      "expect": [
+        "decision-schedule-at-ai-speed-20260929.md"
+      ],
+      "source": "decision-schedule-at-ai-speed-20260929.md: owner quotation recorded on card (original session not independently verified)"
+    },
+    {
+      "id": "v3-06",
+      "vault_id": "V3",
+      "prompt": "會增加很多問題就先主力做iOS",
+      "expect": [
+        "decision_android_after_ios_submission_20261024.md"
+      ],
+      "source": "decision_android_after_ios_submission_20261024.md: owner quotation recorded on card (original session not independently verified)"
+    },
+    {
+      "id": "v3-07",
+      "vault_id": "V3",
+      "prompt": "我給你雲端額度與 codex 協作，就是不希望遇到這個事情",
+      "expect": [
+        "decision_codex_codes_when_claude_quota_tight_20260930.md"
+      ],
+      "source": "decision_codex_codes_when_claude_quota_tight_20260930.md: owner quotation recorded on card (original session not independently verified)"
+    },
+    {
+      "id": "v3-08",
+      "vault_id": "V3",
+      "prompt": "我們這幾天決定、討論很多細節，有模型訓練、操作介面等，並且還有三方討論情況，我建議等介面的三方討論完（幫我確定還有沒有其他正在討論或決定部分），再來運用雲端額度梳理執行計劃，避免疏漏或者衝突，再來將執行計劃送codex審查（一樣是避免疏漏），確認執行計劃完整且詳細後，再繼續執行，你認為呢？",
+      "expect": [
+        "decision_consolidate_runbook_before_resuming_20260930.md"
+      ],
+      "source": "decision_consolidate_runbook_before_resuming_20260930.md: owner quotation recorded on card (original session not independently verified)"
+    },
+    {
+      "id": "v3-09",
+      "vault_id": "V3",
+      "prompt": "我建議能用雲端優先用雲端，能用d槽優先用d槽，最後才考慮c槽，懂？",
+      "expect": [
+        "decision_data_on_drive_local_only_needed_20261012.md"
+      ],
+      "source": "decision_data_on_drive_local_only_needed_20261012.md: owner quotation recorded on card (original session not independently verified)"
+    },
+    {
+      "id": "v3-10",
+      "vault_id": "V3",
+      "prompt": "我建議你再做一次分區塊深度審查，由你綜合治理，避免一堆自我限制導致的BUG或者根本錯誤、未發現的問題等，剛剛有做，你覺得還要做嗎?",
+      "expect": [
+        "decision_deep_audit_at_pack_commit_20261027.md"
+      ],
+      "source": "decision_deep_audit_at_pack_commit_20261027.md: owner quotation recorded on card (original session not independently verified)"
+    },
+    {
+      "id": "v3-11",
+      "vault_id": "V3",
+      "prompt": "妳把主控交給動物時鐘，你專心做Vyou",
+      "expect": [
+        "decision_resource_controller_moved_to_clock_20261028.md"
+      ],
+      "source": "decision_resource_controller_moved_to_clock_20261028.md: owner quotation recorded on card (original session not independently verified)"
+    },
+    {
+      "id": "v3-12",
+      "vault_id": "V3",
+      "prompt": "這個不是都授權給你了嗎？",
+      "expect": [
+        "decision_use_max_monthly_api_credits_20261008.md"
+      ],
+      "source": "decision_use_max_monthly_api_credits_20261008.md: owner quotation recorded on card (original session not independently verified)"
+    },
+    {
+      "id": "v4-01",
+      "vault_id": "V4",
+      "prompt": "品牌是優先才對，沒有才是釀造商，先以這個為主",
+      "expect": [
+        "decision-brand-before-brewer-20260903.md"
+      ],
+      "source": "decision-brand-before-brewer-20260903.md: owner quotation recorded on card (original session not independently verified)"
+    },
+    {
+      "id": "v4-02",
+      "vault_id": "V4",
+      "prompt": "3百多筆確認是逐筆判斷嗎?我說過逐筆不准用腳本，不准偷懶，而且我現在發現你才在看03表????你真的有依照pdf規則做?",
+      "expect": [
+        "decision-judge-row-by-row-no-scripts-20260827.md"
+      ],
+      "source": "decision-judge-row-by-row-no-scripts-20260827.md: owner quotation recorded on card (original session not independently verified)"
+    },
+    {
+      "id": "v4-03",
+      "vault_id": "V4",
+      "prompt": "<-我不懂你不想自己決定是為什麼，我說過PDF是最高原則，最高原則怎麼寫怎麼做，也不是叫你決定",
+      "expect": [
+        "decision-manual-is-the-highest-authority-20260825.md"
+      ],
+      "source": "decision-manual-is-the-highest-authority-20260825.md: owner quotation recorded on card (original session not independently verified)"
+    },
+    {
+      "id": "v4-04",
+      "vault_id": "V4",
+      "prompt": "依照手冊規定，不用問我",
+      "expect": [
+        "decision-manual-says-so-just-do-it-20260827.md"
+      ],
+      "source": "decision-manual-says-so-just-do-it-20260827.md: owner quotation recorded on card (original session not independently verified)"
+    },
+    {
+      "id": "v4-05",
+      "vault_id": "V4",
+      "prompt": "一定要符合手冊標準，找不到品牌就不應該亂自創",
+      "expect": [
+        "decision-never-invent-a-brand-20260825.md"
+      ],
+      "source": "decision-never-invent-a-brand-20260825.md: owner quotation recorded on card (original session not independently verified)"
+    },
+    {
+      "id": "v4-06",
+      "vault_id": "V4",
+      "prompt": "**我要裁示什麼，所有都是應該以手冊PDF為最高規則，我根本沒有能裁示部分才對**",
+      "expect": [
+        "feedback_derived_rule_vs_manual.md"
+      ],
+      "source": "feedback_derived_rule_vs_manual.md: owner quotation recorded on card (original session not independently verified)"
+    },
+    {
+      "id": "v4-07",
+      "vault_id": "V4",
+      "prompt": "我有明確說過**prompt盡量不要放在檔案，我很難複製**",
+      "expect": [
+        "feedback_prompt_in_chat_not_file.md"
+      ],
+      "source": "feedback_prompt_in_chat_not_file.md: owner quotation recorded on card (original session not independently verified)"
+    },
+    {
+      "id": "v4-08",
+      "vault_id": "V4",
+      "prompt": "**明明就有很多方式去查找，為什麼執著在單一種查找方式，而且如果就是沒辦法依手冊規定處理就好了**",
+      "expect": [
+        "feedback_search_tool_discipline.md"
+      ],
+      "source": "feedback_search_tool_discipline.md: owner quotation recorded on card (original session not independently verified)"
+    },
+    {
+      "id": "today-codex",
+      "vault_id": "V1",
+      "prompt": "記得多用codex",
+      "expect": [
+        "feedback-dispatch-prefer-codex-implementer-20261027.md"
+      ],
+      "source": "EOPT4 owner ticket, 2026-10-29"
+    },
+    {
+      "id": "today-antigravity",
+      "vault_id": "V1",
+      "prompt": "記得多用codex",
+      "expect": [
+        "feedback_agy_print_mode_is_autonomous_agent.md"
+      ],
+      "source": "EOPT4 owner ticket, 2026-10-29; existing Antigravity usage card"
+    },
+    {
+      "id": "today-graphify",
+      "vault_id": "V1",
+      "prompt": "graphify 要不要參考",
+      "expect": [
+        "project_epitype_optimization_plan_20261029.md"
+      ],
+      "source": "EOPT4 owner ticket, 2026-10-29"
+    },
+    {
+      "id": "dispatch-1",
+      "vault_id": "V1",
+      "prompt": "能用CODEX盡量用CODEX，懂?",
+      "expect": [
+        "feedback-dispatch-prefer-codex-implementer-20261027.md"
+      ],
+      "source": "feedback-dispatch-prefer-codex-implementer-20261027.md: recorded verbatim owner quotation"
+    },
+    {
+      "id": "dispatch-2",
+      "vault_id": "V1",
+      "prompt": "補充!用內部瀏覽器，另外派工以CODEX為主",
+      "expect": [
+        "feedback-dispatch-prefer-codex-implementer-20261027.md"
+      ],
+      "source": "feedback-dispatch-prefer-codex-implementer-20261027.md: recorded verbatim owner quotation"
+    },
+    {
+      "id": "dispatch-3",
+      "vault_id": "V1",
+      "prompt": "盡量利用codex額度，但是你判定需要用你自己還是要用，懂?",
+      "expect": [
+        "feedback-dispatch-prefer-codex-implementer-20261027.md"
+      ],
+      "source": "feedback-dispatch-prefer-codex-implementer-20261027.md: recorded verbatim owner quotation"
+    },
+    {
+      "id": "resources-1",
+      "vault_id": "V3",
+      "prompt": "把系統資源讓出給我，我要用電腦",
+      "expect": [
+        "decision_resource_controller_moved_to_clock_20261028.md"
+      ],
+      "source": "expected card: recorded verbatim owner quotation"
+    },
+    {
+      "id": "resources-2",
+      "vault_id": "V1",
+      "prompt": "我是要你管好自己專案就好，該釋放的系統資源就釋放，不要無故佔著，或者用更好的方式處理，懂？",
+      "expect": [
+        "feedback-dispatch-prefer-codex-implementer-20261027.md"
+      ],
+      "source": "expected card: recorded verbatim owner quotation"
+    }
+  ]
+}

@@ -141,9 +141,10 @@ class CaptureRecallRegression(unittest.TestCase):
         # The current source contract requires the original, AI author and full
         # scope together; the former quote-hiding expectation is superseded.
         self.assertIn('原始 Owner 引句：fixturehistory 一律照這條走', context)
-        self.assertIn('作者分類：AI 整理：synthetic-test-ai', context)
+        self.assertIn(memspec.RECALL_SOURCE_AI.format(author='synthetic-test-ai'), context)
         document = json.loads(memspec.frontmatter_fields(path)[0][rule_provenance.FIELD])
-        self.assertIn('適用範圍：' + rule_provenance.serialize(document['scope']), context)
+        self.assertIn('適用範圍＝' + rule_provenance.serialize(document['scope']), context)
+        self.assertEqual(context.count(rule_provenance.serialize(document['scope'])), 1)
 
     def test_budget_preserves_pointer_then_drops_whole_card_without_marker(self):
         path = self.plain_card()
