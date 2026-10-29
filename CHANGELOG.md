@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 1.10.1 (2026-10-29)
+
+- Link the changelog and release notes from the PyPI project page, and ship `CHANGELOG.md`, homepage and issue links with the npm package. No code changes.
+
 ## 1.10.0 (2026-10-29)
 
 - Isolate host sync failures per card so other cards keep syncing; bind generated rules to their rule text and scope while allowing descriptive metadata to change.
