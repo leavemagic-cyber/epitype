@@ -475,6 +475,8 @@ def prepare_authorship(vault, cache_path):
             if not isinstance(quote, str) or not quote:
                 continue
             for source in document.get('sources', ()):
+                if not isinstance(source, dict):
+                    continue
                 try:
                     role, body, _digest = _original(source, path.parent, None,
                                                    _ReadBudget(float('inf'), float('inf')))

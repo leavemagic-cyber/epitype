@@ -502,7 +502,7 @@ def _stable_card(path):
     return None
 
 
-def build_index(vault, lock_timeout=0.0, *, prepare_sources=True):
+def build_index(vault, lock_timeout=0.0, *, prepare_sources=False):
     vault = _resolve_vault(vault)
     migrated_from = _migrate_legacy_index(vault)
     db_path = _db_path(vault)
@@ -2330,7 +2330,7 @@ def main(argv=None):
         return _selftest()
     try:
         if args.command == "build":
-            payload = build_index(args.vault)
+            payload = build_index(args.vault, prepare_sources=True)
             exit_code = 0 if payload["status"] == "built" else 3
         elif args.command == "query":
             payload = query_index(

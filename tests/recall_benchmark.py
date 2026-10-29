@@ -5,6 +5,7 @@ import argparse
 import contextlib
 import hashlib
 import io
+import inspect
 import json
 import os
 from pathlib import Path
@@ -67,8 +68,10 @@ def measure(root, corpus, repeats, scope='all', cold=False, process=False):
     source_hashes = {path: hashlib.sha256((ROOT / path).read_bytes()).hexdigest()
                      for path in ('epitype/memsearch.py', 'epitype/memspec.py', 'epitype/rule_provenance.py', 'adapters/claude/recall_hook.py')}
     vaults = [root / f'V{index}' for index in range(1, 5)]
+    build_options = ({'prepare_sources': True}
+                     if 'prepare_sources' in inspect.signature(memsearch.build_index).parameters else {})
     for vault in vaults:
-        memsearch.build_index(vault)
+        memsearch.build_index(vault, **build_options)
     config_path = root / 'config.json'
     common.write_config(config_path, vaults)
     outcomes, durations, sizes = [], [], []
