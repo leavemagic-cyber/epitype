@@ -4206,6 +4206,13 @@ def _main(argv, output):
                     views.generate(vault)
                 except Exception:
                     continue
+            # Hook-time refreshes skip source preparation; without this nightly pass, new or
+            # edited cards fall back to the slow transcript scan inside the recall hook.
+            for vault in vaults:
+                try:
+                    memsearch.build_index(vault, prepare_sources=True)
+                except Exception:
+                    continue
         # Duplicate settlement belongs to the lead AI; the nightly job only reports.
         try:
             from epitype import dupes
