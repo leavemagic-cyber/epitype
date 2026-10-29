@@ -31,9 +31,6 @@ READ_ERRORS = (OSError, EOFError, ValueError, zipfile.BadZipFile, RuntimeError,
 VERSION = 1
 CONTEXT_CHARS = 500
 CHUNK_BYTES = 1024 * 1024
-_TYPE = re.compile(rb'"(?:type|role)"\s*:\s*"([^"]+)"')
-_TEXT = re.compile(rb'"type"\s*:\s*"(?:text|output_text)"')
-_MESSAGE = re.compile(rb'"type"\s*:\s*"message"')
 _ARGS = re.compile(r'<command-args>(.*?)</command-args>', re.S)
 _WRAPPER = re.compile(r'^<([\w:-]+)(?:\s[^>]*)?>.*?</\1>\s*', re.S)
 
@@ -171,20 +168,6 @@ def _question(item, asked):
     return '\n'.join(questions)
 
 
-def _wanted(raw):
-    kinds = set(_TYPE.findall(raw))
-    if not kinds:
-        return True  # malformed rows must be reported
-    if b'session_meta' in kinds or b'attachment' in kinds or b'AskUserQuestion' in raw:
-        return True
-    if b'response_item' in kinds:
-        return bool(_MESSAGE.search(raw))
-    if b'user' in kinds and b'"tool_result"' in raw and b'"answers"' not in raw:
-        return False
-    return b'user' in kinds or b'assistant' in kinds and (
-        bool(_TEXT.search(raw)) or bool(re.search(rb'"content"\s*:\s*"', raw)))
-
-
 def _consume(db, stream, source, state, offset, size, digest, immutable, report):
     asked = state.setdefault('asked', {})
     position = offset
@@ -198,11 +181,9 @@ def _consume(db, stream, source, state, offset, size, digest, immutable, report)
         position += len(raw)
         digest.update(raw)
         report['bytes_parsed'] += len(raw)
-        if not _wanted(raw):
-            continue
         try:
             item = json.loads(raw.decode('utf-8-sig'))
-        except (UnicodeError, ValueError):
+        except (UnicodeError, ValueError, RecursionError):
             report['unreadable_rows'].append({'source': source, 'byte_offset': start})
             continue
         if not isinstance(item, dict):

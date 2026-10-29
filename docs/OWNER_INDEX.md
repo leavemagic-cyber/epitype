@@ -60,7 +60,9 @@ offsets refer to decompressed bytes, and zip locators use `archive.zip!member`.
 network or model calls and no required third-party packages.
 
 Each source is committed independently. Unreadable archives/files are listed in
-`errors`, malformed message rows in `unreadable_rows`; other sources continue.
+`errors`, malformed rows (including non-message records) in `unreadable_rows`;
+other sources continue. Full builds validate every JSON row before role filtering
+so a corrupt tool/event row cannot silently make a broken source look clean.
 A failed source rolls back its new rows and retains its previous snapshot for
 retry. Existing rows for sources absent from the supplied roots remain until a
 full build, so an index can retain historical locators to moved files.

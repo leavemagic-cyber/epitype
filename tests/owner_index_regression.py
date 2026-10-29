@@ -185,9 +185,10 @@ class OwnerIndexTests(unittest.TestCase):
     def test_broken_sources_are_reported_without_losing_good_sources(self):
         broken = self.root / 'broken.zip'
         broken.write_bytes(b'not zip')
-        self.source.write_bytes(b'not json\n' + encode([None, message('繼續索引')]))
+        self.source.write_bytes(b'not json\n' + b'{"type":"event_msg",broken}\n'
+                                + encode([None, message('繼續索引')]))
         report = owner.update(self.index, [broken, self.root / 'missing.jsonl', self.source])
-        self.assertEqual((1, 2, 2), (report['messages'], len(report['errors']), len(report['unreadable_rows'])))
+        self.assertEqual((1, 2, 3), (report['messages'], len(report['errors']), len(report['unreadable_rows'])))
         self.assertEqual(1, len(self.find('繼續索引')))
 
     def test_failed_read_rolls_back_source_and_retries(self):
