@@ -29,9 +29,20 @@ except ImportError:
 READ_ERRORS = (OSError, EOFError, ValueError, zipfile.BadZipFile, RuntimeError,
                NotImplementedError, zlib.error) + ((zstandard.ZstdError,) if zstandard else ())
 
-VERSION = 1
+VERSION = 2
 CONTEXT_CHARS = 500
-CHUNK_BYTES = 1024 * 1024
+WINDOW_BYTES = 4096
+REPLAY_HEADERS = (
+    'The following is the Codex agent history whose request action you are assessing.',
+    'The following is the Codex agent history added since your last approval assessment.',
+)
+CONTEXT_TAGS = (
+    'in-app-browser-context', 'environment_context', 'system-reminder',
+    'pasted_content', 'codex_internal_context', 'image',
+)
+CONTEXT_BLOCK = re.compile(
+    r'<(' + '|'.join(CONTEXT_TAGS) + r')\b[^>]*>.*?(?:</\1(?:\s[^>]*)?>|&lt;/\1(?:\s.*?)?&gt;)'
+    r'|<image\b[^>]*>', re.DOTALL | re.IGNORECASE)
 
 
 def default_path():
@@ -44,19 +55,55 @@ def normalize(text):
 
 def owner_text(text, *, queued=False):
     text = text.strip()
-    if queued:
-        return capture.owner_reply(text).strip()
     if text.startswith(('Caveat: The messages below', '# AGENTS.md',
-                        'This session is being continued')):
+                        'This session is being continued', *REPLAY_HEADERS,
+                        '>>> SENDER USER MESSAGES START',
+                        '>>> RETAINED USER INSTRUCTIONS START')):
         return ''
-    text = memspec.owner_typed_text(text)
+    text = CONTEXT_BLOCK.sub('', text).strip()
+    # A file list is host context only when paired with its request delimiter.
+    text = re.sub(r'(?ms)^# Files mentioned by the user:\s*.*?(?:^## My request:[ \t]*\n?|\Z)', '', text)
+    text = re.sub(r'(?m)^## My request:[ \t]*\n?', '', text).strip()
+    if text.casefold().startswith(memspec.MACHINE_TURN_PREFIXES):
+        return ''
+    if re.match(r'<(?:' + '|'.join(memspec.MACHINE_TURN_HARD_TAGS) + r')\b', text, re.I):
+        return ''
+    if text.startswith(('<command-name>', '<command-args>')):
+        text = memspec.owner_typed_text(text)
     while text.startswith('《') and '》' in text:
         text = text[text.index('》') + 1:].strip()
     return capture.owner_reply(text).strip()
 
 
+def _owner_record(item, asked):
+    if item.get('type') == 'response_item':
+        payload = item.get('payload')
+        if isinstance(payload, dict) and payload.get('role') == 'user':
+            content = payload.get('content')
+            if isinstance(content, list):
+                texts = [b.get('text', '') for b in content if isinstance(b, dict)
+                         and b.get('type') in ('text', 'input_text')]
+                # Guardian requests replay past turns as many separate input_text blocks.
+                if (any(isinstance(t, str) and t.lstrip().startswith(REPLAY_HEADERS) for t in texts)
+                        or any(isinstance(t, str) and t.strip() == '>>> APPROVAL REQUEST END' for t in texts)):
+                    return None
+                content = [dict(b, text=owner_text(b['text']))
+                           if isinstance(b, dict) and isinstance(b.get('text'), str)
+                           else b for b in content]
+                item = dict(item, payload=dict(payload, content=content))
+    return transcript.source_record(item, asked)
+
+
 def _script(origin):
     return isinstance(origin, str) and (origin == 'codex_exec' or origin.startswith('sdk-'))
+
+
+def _guardian(payload):
+    source = payload.get('source')
+    subagent = source.get('subagent') if isinstance(source, dict) else None
+    return (payload.get('thread_source') == 'guardian_review'
+            or subagent == 'guardian'
+            or isinstance(subagent, dict) and subagent.get('other') == 'guardian')
 
 
 def _connect(path, readonly=False):
@@ -70,8 +117,15 @@ def _connect(path, readonly=False):
     return connection
 
 
-def _schema(db):
+def _schema(db, rebuild=False):
     version = db.execute('PRAGMA user_version').fetchone()[0]
+    if version == 1 and rebuild:
+        db.executescript('''DROP TRIGGER IF EXISTS messages_insert;
+            DROP TRIGGER IF EXISTS messages_delete;
+            DROP TABLE IF EXISTS owner_fts;
+            DROP TABLE IF EXISTS messages;
+            DROP TABLE IF EXISTS sources;''')
+        version = 0
     if version not in (0, VERSION):
         raise ValueError('unsupported owner index version; build a new index')
     db.executescript("""
@@ -79,23 +133,27 @@ def _schema(db):
             path TEXT PRIMARY KEY, size INTEGER NOT NULL, mtime INTEGER NOT NULL,
             offset INTEGER NOT NULL, digest TEXT NOT NULL, state TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS messages (
-            id INTEGER PRIMARY KEY, source TEXT NOT NULL, byte_offset INTEGER NOT NULL,
+            id INTEGER PRIMARY KEY, text TEXT NOT NULL UNIQUE, search_text TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS locators (
+            id INTEGER PRIMARY KEY, message_id INTEGER NOT NULL REFERENCES messages(id),
+            source TEXT NOT NULL, byte_offset INTEGER NOT NULL,
             role TEXT NOT NULL, timestamp TEXT NOT NULL, session_id TEXT NOT NULL,
-            message_uuid TEXT NOT NULL, text TEXT NOT NULL, question TEXT NOT NULL,
+            message_uuid TEXT NOT NULL, question TEXT NOT NULL,
             previous TEXT NOT NULL, record_sha256 TEXT NOT NULL,
-            search_text TEXT NOT NULL, search_question TEXT NOT NULL);
-        CREATE INDEX IF NOT EXISTS messages_source ON messages(source);
-        CREATE INDEX IF NOT EXISTS messages_time ON messages(timestamp);
+            search_question TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS locators_source ON locators(source);
+        CREATE INDEX IF NOT EXISTS locators_time ON locators(timestamp);
+        CREATE INDEX IF NOT EXISTS locators_message ON locators(message_id);
         CREATE VIRTUAL TABLE IF NOT EXISTS owner_fts USING fts5(
-            search_text, search_question, content='messages', content_rowid='id',
+            search_text, content='messages', content_rowid='id',
             tokenize='trigram');
         CREATE TRIGGER IF NOT EXISTS messages_insert AFTER INSERT ON messages BEGIN
-            INSERT INTO owner_fts(rowid, search_text, search_question)
-            VALUES (new.id, new.search_text, new.search_question);
+            INSERT INTO owner_fts(rowid, search_text)
+            VALUES (new.id, new.search_text);
         END;
         CREATE TRIGGER IF NOT EXISTS messages_delete AFTER DELETE ON messages BEGIN
-            INSERT INTO owner_fts(owner_fts, rowid, search_text, search_question)
-            VALUES ('delete', old.id, old.search_text, old.search_question);
+            INSERT INTO owner_fts(owner_fts, rowid, search_text)
+            VALUES ('delete', old.id, old.search_text);
         END;
     """)
     db.execute(f'PRAGMA user_version={VERSION}')
@@ -131,17 +189,14 @@ def _files(roots, errors):
             errors.append({'source': str(root), 'error': str(exc)})
 
 
-def _fingerprint(stream, length):
-    digest = hashlib.sha256()
-    remaining = length
-    stream.seek(0)
-    while remaining:
-        raw = stream.read(min(CHUNK_BYTES, remaining))
-        if not raw:
-            raise OSError('source shrank while its prefix was checked')
-        digest.update(raw)
-        remaining -= len(raw)
-    return digest
+def _fingerprint(stream, offset, report):
+    length = min(offset, WINDOW_BYTES)
+    stream.seek(offset - length)
+    raw = stream.read(length)
+    report['bytes_verified'] += len(raw)
+    if len(raw) != length:
+        raise OSError('source shrank while its boundary was checked')
+    return hashlib.sha256(raw).hexdigest()
 
 
 def _question(item, asked):
@@ -158,19 +213,18 @@ def _question(item, asked):
     return '\n'.join(questions)
 
 
-def _consume(db, stream, source, state, offset, size, digest, immutable, report):
+def _consume(db, stream, source, state, offset, size, immutable, report):
     asked = state.setdefault('asked', {})
     position = offset
     while size is None or position < size:
         raw = stream.readline() if size is None else stream.readline(size - position)
         if not raw:
             break
+        report['bytes_parsed'] += len(raw)
         if not raw.endswith(b'\n') and not immutable:
             break  # live writers may not have finished this physical row yet
         start = position
         position += len(raw)
-        digest.update(raw)
-        report['bytes_parsed'] += len(raw)
         try:
             item = json.loads(raw.decode('utf-8-sig'))
         except (UnicodeError, ValueError, RecursionError):
@@ -184,9 +238,12 @@ def _consume(db, stream, source, state, offset, size, digest, immutable, report)
             if isinstance(payload, dict):
                 state['origin'] = payload.get('originator', '')
                 state['session'] = payload.get('id', '')
+                state['machine'] = _guardian(payload)
+            continue
+        if state.get('machine'):
             continue
         asked.update(transcript.ask_tool_uses(item))
-        record = transcript.source_record(item, asked)
+        record = _owner_record(item, asked)
         if record:
             role, text = record
             if role == 'A':
@@ -200,16 +257,20 @@ def _consume(db, stream, source, state, offset, size, digest, immutable, report)
                     payload = item.get('payload')
                     message_id = item.get('uuid') or item.get('id') or (
                         payload.get('id') if isinstance(payload, dict) else '')
-                    db.execute('''INSERT INTO messages
-                        (source, byte_offset, role, timestamp, session_id, message_uuid,
-                         text, question, previous, record_sha256, search_text, search_question)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-                        (source, start, role, str(item.get('timestamp') or ''),
+                    inserted = db.execute('INSERT OR IGNORE INTO messages (text,search_text) VALUES (?,?)',
+                                          (text, normalize(text))).rowcount
+                    message_id_row = db.execute('SELECT id FROM messages WHERE text=?', (text,)).fetchone()[0]
+                    db.execute('''INSERT INTO locators
+                        (message_id, source, byte_offset, role, timestamp, session_id, message_uuid,
+                         question, previous, record_sha256, search_question)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                        (message_id_row, source, start, role, str(item.get('timestamp') or ''),
                          str(item.get('sessionId') or state.get('session') or ''),
-                         str(message_id or ''), text, question,
+                         str(message_id or ''), question,
                          state.get('previous', ''), hashlib.sha256(raw).hexdigest(),
-                         normalize(text), normalize(question)))
-                    report['messages_added'] += 1
+                         normalize(question)))
+                    report['messages_added'] += inserted
+                    report['locators_added'] += 1
         # Answered prompts no longer need to occupy the resumable parser state.
         for tool_id in transcript.tool_result_ids(item):
             asked.pop(tool_id, None)
@@ -221,39 +282,38 @@ def _index_stream(db, stream, source, size, mtime, immutable, report, source_siz
     if old and (immutable or (old['size'], old['mtime']) == (size, mtime)):
         report['unchanged'] += 1
         return
-    offset, state, digest = 0, {}, hashlib.sha256()
-    if old and not immutable and size >= old['size'] and size > old['offset']:
-        # Metadata cannot distinguish an append from an append plus an earlier edit.
-        digest = _fingerprint(stream, old['offset'])
-        report['bytes_verified'] += old['offset']
-        if digest.hexdigest() == old['digest']:
+    offset, state = 0, {}
+    if old and not immutable and size > old['size']:
+        # Transcripts are append-only; only the last small boundary is checked.
+        if _fingerprint(stream, old['offset'], report) == old['digest']:
             offset, state = old['offset'], json.loads(old['state'])
-        else:
-            digest = hashlib.sha256()
     if not offset:
         if old and not immutable:
             stream.seek(0)
-        db.execute('DELETE FROM messages WHERE source=?', (source,))
+        db.execute('DELETE FROM locators WHERE source=?', (source,))
         report['reread' if old else 'new'] += 1
     else:
         report['appended'] += 1
-    position = _consume(db, stream, source, state, offset, size, digest, immutable, report)
+        stream.seek(offset)
+    position = _consume(db, stream, source, state, offset, size, immutable, report)
+    digest = '' if immutable else _fingerprint(stream, position, report)
     stored_size = source_size if source_size is not None else (position if size is None else size)
     db.execute('INSERT OR REPLACE INTO sources VALUES (?, ?, ?, ?, ?, ?)',
                (source, stored_size, mtime, position,
-                digest.hexdigest(), json.dumps(state, ensure_ascii=False)))
+                digest, json.dumps(state, ensure_ascii=False)))
 
 
 def update(path=None, roots=None, *, rebuild=False):
     """Commit each readable source separately; a failed source rolls back its rows."""
     started = time.monotonic()
     path = Path(path) if path is not None else default_path()
-    report = dict(new=0, reread=0, appended=0, unchanged=0, messages_added=0,
+    report = dict(new=0, reread=0, appended=0, unchanged=0, messages_added=0, locators_added=0,
                   bytes_parsed=0, bytes_verified=0, skipped_zst=0,
                   errors=[], unreadable_rows=[])
     with closing(_connect(path)) as db:
-        _schema(db)
+        _schema(db, rebuild)
         if rebuild:
+            db.execute('DELETE FROM locators')
             db.execute('DELETE FROM messages')
             db.execute('DELETE FROM sources')
         db.commit()
@@ -278,6 +338,7 @@ def update(path=None, roots=None, *, rebuild=False):
                             report['unchanged'] += 1
                             continue
                         added_before = report['messages_added']
+                        locators_before = report['locators_added']
                         try:
                             with ExitStack() as streams:
                                 raw = streams.enter_context(bundle.open(member) if bundle else file.open('rb'))
@@ -292,12 +353,18 @@ def update(path=None, roots=None, *, rebuild=False):
                                                   immutable, report, source_size)
                         except READ_ERRORS as exc:
                             report['messages_added'] = added_before
+                            report['locators_added'] = locators_before
                             report['errors'].append({'source': source, 'error': f'{type(exc).__name__}: {exc}'})
             except READ_ERRORS as exc:
                 report['errors'].append({'source': str(file), 'error': f'{type(exc).__name__}: {exc}'})
-        report['messages'] = db.execute('SELECT count(*) FROM messages').fetchone()[0]
+        db.execute('DELETE FROM messages WHERE NOT EXISTS (SELECT 1 FROM locators WHERE message_id=messages.id)')
+        db.commit()
+        report['messages'], report['text_characters'] = db.execute(
+            'SELECT count(*),coalesce(sum(length(text)),0) FROM messages').fetchone()
+        report['locators'] = db.execute('SELECT count(*) FROM locators').fetchone()[0]
         report['sources'] = db.execute('SELECT count(*) FROM sources').fetchone()[0]
     report.update(index=str(path.resolve()), seconds=round(time.monotonic() - started, 3),
+                  bytes_read=report['bytes_parsed'] + report['bytes_verified'],
                   size_bytes=path.stat().st_size)
     return report
 
@@ -310,19 +377,26 @@ def find(words, *, path=None, after='', roles=('U', 'Q', 'S'), limit=15):
     needles = [normalize(word) for word in words if normalize(word)]
     if not needles:
         raise ValueError('supply searchable words')
-    clauses, params = ['timestamp >= ?', 'role IN (' + ','.join('?' for _ in roles) + ')'], [after, *roles]
-    long = [needle for needle in needles if len(needle) >= 3]
-    if long:
-        clauses.append('id IN (SELECT rowid FROM owner_fts WHERE owner_fts MATCH ?)')
-        params.append(' AND '.join('"' + needle + '"' for needle in long))
+    clauses, params = ['l.timestamp >= ?', 'l.role IN (' + ','.join('?' for _ in roles) + ')'], [after, *roles]
     for needle in needles:
-        clauses.append('(instr(search_text, ?) > 0 OR instr(search_question, ?) > 0)')
+        if len(needle) >= 3:
+            clauses.append('(m.id IN (SELECT rowid FROM owner_fts WHERE owner_fts MATCH ?) '
+                           'OR instr(l.search_question, ?) > 0)')
+            params.extend(('"' + needle + '"', needle))
+            continue
+        clauses.append('(instr(m.search_text, ?) > 0 OR instr(l.search_question, ?) > 0)')
         params.extend((needle, needle))
     params.append(limit)
     with closing(_connect(path if path is not None else default_path(), readonly=True)) as db:
-        rows = db.execute('''SELECT source, byte_offset, role, timestamp, session_id,
-            message_uuid, text, question, previous, record_sha256 FROM messages WHERE '''
-            + ' AND '.join(clauses) + ' ORDER BY timestamp DESC, id DESC LIMIT ?', params)
+        rows = db.execute('''WITH matches AS (
+            SELECT l.*, m.text, row_number() OVER (
+                PARTITION BY m.id ORDER BY l.timestamp DESC,l.id DESC) AS rank
+            FROM locators l JOIN messages m ON m.id=l.message_id WHERE '''
+            + ' AND '.join(clauses) + ''')
+            SELECT source,byte_offset,role,timestamp,session_id,message_uuid,text,
+                question,previous,record_sha256,
+                (SELECT count(*) FROM locators WHERE message_id=matches.message_id) AS locator_count
+            FROM matches WHERE rank=1 ORDER BY timestamp DESC,id DESC LIMIT ?''', params)
         records = [dict(row, verified=False) for row in rows]
     return {'records': records, 'scope': memspec.OWNER_INDEX_SCOPE}
 

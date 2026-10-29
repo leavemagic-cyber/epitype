@@ -108,9 +108,68 @@ class OwnerIndexTests(unittest.TestCase):
                 'type': 'queued_command', 'origin': {'kind': 'human'}, 'prompt': text}}])
         self.build(rows)
         self.assertEqual([], self.find('貼回來的助理文字'))
-        self.assertEqual(8, len(self.find('自己的回覆')))
+        self.assertEqual(1, len(self.find('自己的回覆')))
+        self.assertEqual(8, self.find('自己的回覆')[0]['locator_count'])
         self.assertTrue(all(row['text'] == '只留下我自己的回覆' for row in self.find('自己的回覆')))
         self.assertEqual('直接回覆', owner.owner_text('《直接回覆'))
+
+    def test_codex_guardian_replay_is_not_a_new_owner_turn(self):
+        records = [{'type': 'response_item', 'payload': {
+            'type': 'message', 'role': 'user', 'content': [
+                {'type': 'input_text', 'text': header},
+                {'type': 'input_text', 'text': '[25] user: replayed words'},
+                {'type': 'input_text', 'text': '[27] user: more old words'}]}}
+                   for header in owner.REPLAY_HEADERS]
+        self.build(records)
+        self.assertEqual([], self.find('words'))
+        self.build([{'type': 'session_meta', 'payload': {
+            'thread_source': 'guardian_review', 'originator': 'codex_work_desktop'}},
+                    message('history without its introductory header')])
+        self.assertEqual([], self.find('history'))
+        records[0]['payload']['content'] = [
+            {'type': 'input_text', 'text': '[358] tool wait_agent result: old tool output'},
+            {'type': 'input_text', 'text': '>>> APPROVAL REQUEST END\n'}]
+        self.build(records[:1])
+        self.assertEqual([], self.find('output'))
+
+    def test_embedded_host_blocks_and_repeated_request_markers(self):
+        wrapped = ('first new words\n<in-app-browser-context>ambient state</in-app-browser-context>\n'
+                   '# Files mentioned by the user:\n## attached.png: /local/path\n'
+                   '## My request:\nsecond new words\n<image src="attachment"/>\n'
+                   '## My request:\nthird new words')
+        self.build([message(wrapped), message('<sample>long real paste</sample>' * 1000)])
+        row = self.find('first')[0]
+        self.assertEqual('first new words\n\nsecond new words\n\nthird new words', row['text'])
+        self.assertEqual([], self.find('ambient'))
+        self.assertEqual([], self.find('attached'))
+        self.assertEqual('<sample>long real paste</sample>' * 1000, self.find('long real paste')[0]['text'])
+
+    def test_identical_text_across_archive_and_original_has_distinct_locators(self):
+        self.build([message('identical owner words')])
+        archive = self.root / 'copy.zip'
+        with zipfile.ZipFile(archive, 'w') as bundle:
+            bundle.writestr('copy.jsonl', self.source.read_bytes())
+        report = owner.update(self.index, [archive])
+        self.assertEqual((1, 2), (report['messages'], report['locators']))
+        self.source.write_bytes(encode([message('replacement owner words')]))
+        owner.update(self.index, [self.source])
+        self.assertEqual(1, self.find('identical')[0]['locator_count'])
+        self.assertTrue(self.find('identical')[0]['source'].endswith('copy.zip!copy.jsonl'))
+
+    def test_append_checks_only_a_small_boundary_and_rereads_on_mismatch(self):
+        self.build([message('original'), message('padding' * owner.WINDOW_BYTES)])
+        original = self.source.read_bytes()
+        self.source.write_bytes(original.replace(b'original', b'replaced') + encode([message('new tail')]))
+        report = owner.update(self.index, [self.source])
+        self.assertEqual((1, 0, 2 * owner.WINDOW_BYTES),
+                         (report['appended'], report['reread'], report['bytes_verified']))
+        self.assertEqual('original', self.find('original')[0]['text'])
+        modified = self.source.read_bytes().replace(b'new tail', b'bad tail')
+        self.source.write_bytes(modified + encode([message('more tail')]))
+        report = owner.update(self.index, [self.source])
+        self.assertEqual(1, report['reread'])
+        self.assertEqual([], self.find('original'))
+        self.assertEqual('replaced', self.find('replaced')[0]['text'])
 
     def test_append_resumes_question_and_previous_without_parsing_prefix(self):
         prompt, answer = prompt_and_answer()
@@ -119,7 +178,8 @@ class OwnerIndexTests(unittest.TestCase):
         with self.source.open('ab') as stream:
             stream.write(encode([answer]))
         report = owner.update(self.index, [self.source])
-        self.assertEqual((1, len(encode([answer])), previous_size),
+        verified = min(previous_size, owner.WINDOW_BYTES) + min(self.source.stat().st_size, owner.WINDOW_BYTES)
+        self.assertEqual((1, len(encode([answer])), verified),
                          (report['appended'], report['bytes_parsed'], report['bytes_verified']))
         row = self.find('希望收哪些')[0]
         self.assertEqual(('S', '您希望收哪些內容？', '請選一個'),
@@ -197,7 +257,7 @@ class OwnerIndexTests(unittest.TestCase):
         with zipfile.ZipFile(archive, 'w') as bundle:
             bundle.writestr('inside.jsonl.zst', compressed)
         report = owner.update(self.index, [standalone, broken, archive])
-        self.assertEqual((2, 1), (report['messages'], len(report['errors'])))
+        self.assertEqual((1, 2, 1), (report['messages'], report['locators'], len(report['errors'])))
         with closing(sqlite3.connect(self.index)) as db:
             sizes = db.execute('SELECT size,offset FROM sources').fetchall()
         self.assertEqual([(len(compressed), len(encode([message('壓縮原話')]))) ] * 2, sizes)

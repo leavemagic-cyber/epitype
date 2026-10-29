@@ -27,7 +27,15 @@ not a verbatim utterance. Typed question-box answers retain U. Script origins
 `codex_exec` and `sdk-*`, meta records, sidechains, compact summaries and duplicate
 Codex event records are excluded. Leading quoted `《…》` or XML context is removed
 from typed input; a command's `<command-args>` carries its typed arguments.
-Host instruction and continuation boilerplate is excluded. For U and Q, copied
+Host instruction and continuation boilerplate is excluded. Codex guardian
+approval requests (both initial history and subsequent history deltas) are
+machine replay envelopes, even though the transcript assigns them a user role.
+They are rejected before their numbered `[N] user:` blocks are joined. Those
+blocks are old turns, not new input. Browser/environment context, system
+reminders, pasted context, internal context, file-mention lists and image tags
+are removed; repeated `## My request:` delimiters carry no owner words.
+Other long pasted text has no length limit and remains searchable, including
+ordinary XML that is not a host context tag. For U and Q, copied
 assistant text before inline `《`, `<`, `<-` or `<=` reply markers is removed using
 the existing `capture.owner_reply` rule. Only the following human annotations
 are indexed; S continues to retain the selected AI option's distinct role.
@@ -36,8 +44,14 @@ Rows retain full owner text, role, timestamp, session ID, message UUID when the
 host provides one, source path, physical byte offset and the original row's
 SHA-256. Matched question text is stored separately, including for typed answers.
 The preceding assistant text is limited to its last 500 characters. Assistant
-context is never indexed as owner text. Every physical occurrence is retained:
-an archive and its original can produce separate hits with separate locators.
+context is never indexed as owner text. Schema v2 stores each exact extracted
+text once in `messages`, with physical occurrences in `locators`. Backup and
+archive copies share the same text and FTS entry. `find` returns the newest
+matching locator for each text plus its total `locator_count`; role/date and
+question matching apply to individual locators before deduplication. A source
+reread replaces only its locators; text still referenced elsewhere survives.
+Use `build` once to replace a schema-v1 index; `update` rejects incompatible
+versions rather than silently mixing old extraction and new source offsets.
 
 Search uses SQLite FTS5 with its trigram tokenizer. NFKC, case folding and
 punctuation/whitespace removal follow the reference finder; every search word
@@ -45,15 +59,26 @@ must occur in the owner text or its question. One- and two-character searches
 use literal normalized substring checks because trigrams cannot index them.
 Results are newest first, with optional inclusive ISO date and role filters.
 
-Each source stores size, nanosecond mtime, last complete byte offset, prefix
+Each source stores size, nanosecond mtime, last complete byte offset, boundary
 SHA-256 and resumable parser state (session origin, pending questions, previous
 assistant context). Unchanged files require metadata checks only. For a changed,
-growing file, update hashes the old prefix and parses only new complete JSONL
-rows when it matches. The prefix read is necessary to detect an earlier edit
-combined with growth; size and mtime alone cannot prove an append. A shrink,
-same-size modification or changed prefix replaces that source's indexed rows.
+growing file, update hashes at most 4 KiB immediately before the old offset and
+parses only new complete JSONL rows when it matches. It saves another small
+window at the new offset. A shrink, same-size modification or changed boundary
+replaces that source's locators by rereading only that file. This follows the
+append-only transcript contract: a simultaneous edit outside that boundary
+window and append can go unnoticed. Use `build` after editing historical bytes.
 An unfinished final row waits for its newline. Metadata-preserving edits cannot
 be detected by metadata-only unchanged checks; use `build` after such edits.
+`bytes_read` counts transcript bytes returned to the parser plus boundary reads,
+including an unfinished row; archive values are decompressed bytes, not OS disk
+traffic or zip directory metadata. `messages`/`text_characters` count unique
+extracted text; `locators` counts its original physical occurrences.
+
+The nightly dream calls `owner_index.update()` after regenerating views, using
+the default index beside the selected configuration and its configured source
+roots. Its result is included in the pack; failures mark the run incomplete.
+`--dry-run` does not update the owner index.
 
 Zip members and standalone zstd archives are treated as immutable and indexed
 once per source path. Replacing an immutable archive requires `build`. Archive
