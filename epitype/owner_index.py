@@ -46,6 +46,8 @@ CONTEXT_TAGS = (
     'turn_aborted', 'create-pr-command', 'command-message',
 )
 CONTEXT_BLOCK = re.compile(
+    # A self-closing image must not consume new input up to a later closing tag.
+    r'<image\b[^>]*?/\s*>|'
     # Escaped nested examples must not close the actual outer host block.
     r'<(' + '|'.join(CONTEXT_TAGS) + r')\b[^>]*>(?:.*?</\1(?:\s[^>]*)?>|.*?&lt;/\1(?:\s.*?)?&gt;)'
     r'|</?image\b[^>]*>', re.DOTALL | re.IGNORECASE)
