@@ -210,9 +210,22 @@ def _merge_ordinary(groups):
 def _recall_candidates(result):
     ranked = result.get('results', ())
     replacements = result.get('replacement_results', ())
+    pinned_paths = set()
+    for hit in (*replacements, *ranked):
+        if _one_line(hit.get(memspec.DECISION_STATUS_FIELD)) != memspec.ACTIVE_DECISION_STATUS:
+            continue
+        path = _one_line(hit.get('path'))
+        try:
+            fields = _frontmatter_fields(Path(path))
+        except (OSError, ValueError):
+            continue
+        # Active project records are ordinary cards unless they have a decision key.
+        if (fields.get(memspec.DECISION_KEY_FIELD, '').strip()
+                and fields.get(memspec.DECISION_STATUS_FIELD) == memspec.ACTIVE_DECISION_STATUS):
+            pinned_paths.add(path)
 
     def pinned(hit):
-        return _one_line(hit.get(memspec.DECISION_STATUS_FIELD)) == memspec.ACTIVE_DECISION_STATUS
+        return _one_line(hit.get('path')) in pinned_paths
 
     # Successor hints must not consume ordinary slots before the search winner.
     # Active decisions retain their existing successor-first priority and order.

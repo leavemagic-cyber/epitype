@@ -377,8 +377,15 @@ class RecallSelectionRegression(unittest.TestCase):
             return {'path': path, 'status': 'active' if active else ''}
         result = {'results': [hit('winner'), hit('ranked-pin', True), hit('runner-up')],
                   'replacement_results': [hit('hint'), hit('successor-pin', True)]}
-        self.assertEqual([value['path'] for value in recall._recall_candidates(result)],
-                         ['successor-pin', 'ranked-pin', 'winner', 'runner-up', 'hint'])
+        with patch.object(recall, '_frontmatter_fields', return_value={'status': 'active', 'decision_key': 'pin'}):
+            self.assertEqual([value['path'] for value in recall._recall_candidates(result)],
+                             ['successor-pin', 'ranked-pin', 'winner', 'runner-up', 'hint'])
+
+    def test_active_project_record_does_not_jump_ahead_of_search_winner(self):
+        result = {'results': [{'path': 'winner'}],
+                  'replacement_results': [{'path': 'project', 'status': 'active'}]}
+        with patch.object(recall, '_frontmatter_fields', return_value={'status': 'active', 'type': 'project'}):
+            self.assertEqual([value['path'] for value in recall._recall_candidates(result)], ['winner', 'project'])
 
     def test_budget_sweep_keeps_whole_cards_header_and_authority_prefix(self):
         header = memspec.UNTRUSTED_ADVISORY + "\nvaults: V1=synthetic"
