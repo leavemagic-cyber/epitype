@@ -90,6 +90,7 @@ SELFTESTS = (
     Path("tests") / "stop_freshness_regression.py",
     Path("tests") / "transcript_provenance_regression.py",
     Path("tests") / "source_lookup_regression.py",
+    Path("tests") / "owner_index_regression.py",
     Path("tests") / "compact_map_destination_regression.py",
     Path("tests") / "hook_input_bom_regression.py",
     Path("tests") / "action_guard_regression.py",
