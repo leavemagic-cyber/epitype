@@ -279,9 +279,9 @@ def update(path=None, roots=None, *, rebuild=False):
                         if source.endswith('.zst') and zstandard is None:
                             report['skipped_zst'] += 1
                             continue
-                        old = db.execute('SELECT 1 FROM sources WHERE path=?', (source,)).fetchone()
+                        old = db.execute('SELECT size,mtime FROM sources WHERE path=?', (source,)).fetchone()
                         immutable = bundle is not None or file.suffix == '.zst'
-                        if immutable and old:
+                        if old and (immutable or (old['size'], old['mtime']) == (stat.st_size, stat.st_mtime_ns)):
                             report['unchanged'] += 1
                             continue
                         added_before = report['messages_added']

@@ -113,8 +113,16 @@ class OwnerIndexTests(unittest.TestCase):
                          (row['role'], row['question'], row['previous']))
         self.assertEqual(previous_size, row['byte_offset'])
         # An unchanged source is never read, even for prefix verification.
+        real_open = Path.open
+
+        def unchanged_not_opened(path, *args, **kwargs):
+            if path == self.source:
+                raise AssertionError('opened an unchanged transcript')
+            return real_open(path, *args, **kwargs)
+
         with patch.object(owner, '_consume', side_effect=AssertionError('reread')), \
-                patch.object(owner, '_fingerprint', side_effect=AssertionError('rehash')):
+                patch.object(owner, '_fingerprint', side_effect=AssertionError('rehash')), \
+                patch.object(Path, 'open', unchanged_not_opened):
             unchanged = owner.update(self.index, [self.source])
         self.assertEqual((1, 0, 0), (unchanged['unchanged'], unchanged['bytes_parsed'], unchanged['bytes_verified']))
 
