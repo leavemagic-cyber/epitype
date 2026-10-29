@@ -24,7 +24,9 @@ The index consumes `transcript.source_record` and `ask_tool_uses`. It preserves
 typed messages (U), human queued messages (Q), and structurally matched
 question-box selections (S). S text is an AI-written option the owner selected,
 not a verbatim utterance. Typed question-box answers retain U. Script origins
-`codex_exec` and `sdk-*`, meta records, sidechains, compact summaries and duplicate
+`codex_exec` and `sdk-*`, Codex `session_meta.source=exec` (including older
+Desktop sessions whose originator alone does not identify the script), meta
+records, sidechains, compact summaries and duplicate
 Codex event records are excluded. Leading quoted `《…》` or XML context is removed
 from typed input; a command's `<command-args>` carries its typed arguments.
 Host instruction and continuation boilerplate is excluded. Codex guardian

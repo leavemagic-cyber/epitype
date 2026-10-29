@@ -106,6 +106,11 @@ def _guardian(payload):
             or isinstance(subagent, dict) and subagent.get('other') == 'guardian')
 
 
+def _machine_session(payload):
+    return (_guardian(payload) or _script(payload.get('originator'))
+            or _script(payload.get('source')) or payload.get('source') == 'exec')
+
+
 def _connect(path, readonly=False):
     path = Path(path).resolve()
     if readonly:
@@ -238,7 +243,7 @@ def _consume(db, stream, source, state, offset, size, immutable, report):
             if isinstance(payload, dict):
                 state['origin'] = payload.get('originator', '')
                 state['session'] = payload.get('id', '')
-                state['machine'] = _guardian(payload)
+                state['machine'] = _machine_session(payload)
             continue
         if state.get('machine'):
             continue

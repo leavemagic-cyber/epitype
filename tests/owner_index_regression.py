@@ -84,6 +84,9 @@ class OwnerIndexTests(unittest.TestCase):
                             {'type': 'input_text', 'text': '真的輸入'}]}}]
         for origin in ('codex_exec', 'sdk-typescript'):
             self.assertEqual(0, self.build(codex(origin))['messages'])
+        execution = codex('Codex Desktop')
+        execution[0]['payload']['source'] = 'exec'
+        self.assertEqual(0, self.build(execution)['messages'])
         self.assertEqual(1, self.build(codex('codex_cli_rs'))['messages'])
         self.assertEqual('session', self.find('真的輸入')[0]['session_id'])
         self.assertEqual('message-id', self.find('真的輸入')[0]['message_uuid'])
