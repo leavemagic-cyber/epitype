@@ -21,7 +21,8 @@ class VaultSnapshot(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="epitype-snapshot-")
         self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        # The CLI resolves vaults, including Windows temp paths with 8.3 aliases.
+        self.root = Path(temporary.name).resolve()
         self.vault = self.root / "vault"
         self.vault.mkdir()
         self.today = date(2026, 10, 28)
@@ -187,6 +188,7 @@ class VaultSnapshot(unittest.TestCase):
              patch.object(dream, "_views_module") as view_module, \
              patch.object(dream, "shape_index", return_value={}), \
              patch.object(dream, "build_report", return_value=report), \
+             patch("epitype.owner_index.update", return_value={}), \
              patch.object(dream, "_write_run_state"):
             view_module.return_value.generate.side_effect = views
             code = dream.main(["--json", "--out", str(pack), "--today", "2026-10-28",

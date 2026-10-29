@@ -38,7 +38,10 @@ class RulePipeline(unittest.TestCase):
         fields.update(updates)
         unbound = "---\n" + "\n".join(f"{key}: {value}" for key, value in fields.items()) + "\n---\n來源測試。\n"
         if fields.get("rule_provenance"):
-            document = rule_pipeline.bind_payload(document, unbound, reviewer="synthetic-reviewer")
+            # Repeated reviews can share a clock tick; metadata validation must
+            # not depend on a freshly generated timestamp changing the envelope.
+            document = rule_pipeline.bind_payload(document, unbound, reviewer="synthetic-reviewer",
+                                                 reviewed_at="2026-10-03T00:00:00+00:00")
             fields["rule_provenance"] = json.dumps(json.dumps(document, ensure_ascii=False), ensure_ascii=False)
         return "---\n" + "\n".join(f"{key}: {value}" for key, value in fields.items()) + "\n---\n來源測試。\n"
 
@@ -310,6 +313,23 @@ class RulePipeline(unittest.TestCase):
         rules, errors = core_gen.collect_rules([self.vault])
         self.assertFalse(rules)
         self.assertTrue(errors)
+
+    def test_same_review_valid_supersession_and_invalid_retarget(self):
+        before = self.card()
+        successor = self.vault / "rule-source-successor.md"
+        document = copy.deepcopy(self.document)
+        document["supersedes"] = [self.target.name]
+        successor.write_text(self.card(document), encoding="utf-8")
+        after = self.card(status="superseded", superseded_by=successor.name)
+        self.assertEqual(rule_pipeline.admission(before, after, "rule", self.target), [])
+        self.target.write_text(after, encoding="utf-8")
+        rules, errors = core_gen.collect_rules([self.vault])
+        self.assertFalse(errors)
+        self.assertEqual([row["path"] for row in rules], [successor.name])
+        retargeted = after.replace(successor.name, "does-not-exist.md")
+        self.assertTrue(rule_pipeline.admission(after, retargeted, "rule", self.target))
+        active_with_successor = self.card(superseded_by=successor.name)
+        self.assertTrue(rule_pipeline.admission(before, active_with_successor, "rule", self.target))
 
     def test_explicit_expiry_and_scoped_authorship_reach_both_generated_hosts(self):
         document = copy.deepcopy(self.document)

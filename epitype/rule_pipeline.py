@@ -286,8 +286,12 @@ def admission(before, after, card_type, card_path):
     if (not is_rule(fields, card_type, after)
             and not (before and is_rule(old_fields, old_fields.get("type", card_type), before))):
         return []
-    if before and _payload_meaning(before) == _payload_meaning(after):
+    if (before and _payload_meaning(before) == _payload_meaning(after)
+            and all(old_fields.get(key) == fields.get(key)
+                    for key in ("status", "superseded_by"))):
         # Source envelope edits still need validation, even with identical text.
+        # Status and successor edits must also verify the reciprocal graph, even
+        # though generated payload bindings exclude this auxiliary metadata.
         if old_fields.get(rule_provenance.FIELD) == fields.get(rule_provenance.FIELD):
             return []
     result = rule_provenance.validate(fields, card_path)
