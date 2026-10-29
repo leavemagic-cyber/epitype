@@ -27,8 +27,10 @@ not a verbatim utterance. Typed question-box answers retain U. Script origins
 `codex_exec` and `sdk-*`, meta records, sidechains, compact summaries and duplicate
 Codex event records are excluded. Leading quoted `《…》` or XML context is removed
 from typed input; a command's `<command-args>` carries its typed arguments.
-Host instruction and continuation boilerplate is excluded. Human queues retain
-the host's queued prompt, following the existing queue attribution rule.
+Host instruction and continuation boilerplate is excluded. For U and Q, copied
+assistant text before inline `《`, `<`, `<-` or `<=` reply markers is removed using
+the existing `capture.owner_reply` rule. Only the following human annotations
+are indexed; S continues to retain the selected AI option's distinct role.
 
 Rows retain full owner text, role, timestamp, session ID, message UUID when the
 host provides one, source path, physical byte offset and the original row's

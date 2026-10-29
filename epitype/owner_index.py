@@ -15,8 +15,9 @@ import zipfile
 import zlib
 
 try:
-    from . import memspec, transcript
+    from . import capture, memspec, transcript
 except ImportError:
+    import capture
     import memspec
     import transcript
 
@@ -31,8 +32,6 @@ READ_ERRORS = (OSError, EOFError, ValueError, zipfile.BadZipFile, RuntimeError,
 VERSION = 1
 CONTEXT_CHARS = 500
 CHUNK_BYTES = 1024 * 1024
-_ARGS = re.compile(r'<command-args>(.*?)</command-args>', re.S)
-_WRAPPER = re.compile(r'^<([\w:-]+)(?:\s[^>]*)?>.*?</\1>\s*', re.S)
 
 
 def default_path():
@@ -43,26 +42,17 @@ def normalize(text):
     return re.sub(r'[\W_]+', '', unicodedata.normalize('NFKC', text)).casefold()
 
 
-def owner_text(text):
+def owner_text(text, *, queued=False):
     text = text.strip()
+    if queued:
+        return capture.owner_reply(text).strip()
     if text.startswith(('Caveat: The messages below', '# AGENTS.md',
                         'This session is being continued')):
         return ''
-    while text.startswith(('《', '<')):
-        if text.startswith('《'):
-            end = text.find('》')
-            if end < 0:
-                return ''
-            text = text[end + 1:].strip()
-        else:
-            args = _ARGS.search(text)
-            if args:
-                return args.group(1).strip()
-            wrapper = _WRAPPER.match(text)
-            if not wrapper:
-                return ''
-            text = text[wrapper.end():].strip()
-    return text
+    text = memspec.owner_typed_text(text)
+    while text.startswith('《') and '》' in text:
+        text = text[text.index('》') + 1:].strip()
+    return capture.owner_reply(text).strip()
 
 
 def _script(origin):
@@ -204,7 +194,7 @@ def _consume(db, stream, source, state, offset, size, digest, immutable, report)
             elif not _script(state.get('origin')) and not any(
                     _script(item.get(field)) for field in ('entrypoint', 'origin', 'originator')):
                 # S is the selected AI-written option, not a verbatim owner utterance.
-                text = text.strip() if role in ('S', 'Q') else owner_text(text)
+                text = text.strip() if role == 'S' else owner_text(text, queued=role == 'Q')
                 if text:
                     question = _question(item, asked)
                     db.execute('''INSERT INTO messages

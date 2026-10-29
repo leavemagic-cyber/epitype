@@ -99,6 +99,18 @@ class OwnerIndexTests(unittest.TestCase):
         self.assertEqual([], self.find('只有注入'))
         self.assertEqual(24000, len(self.find('長文')[0]['text']))
 
+    def test_inline_owner_reply_markers_exclude_the_copied_prefix_for_u_and_q(self):
+        rows = []
+        for marker in ('《', '<', '<-', '<='):
+            text = '這是貼回來的助理文字' + marker + '只留下我自己的回覆'
+            rows.extend([message(text), {'type': 'attachment', 'attachment': {
+                'type': 'queued_command', 'origin': {'kind': 'human'}, 'prompt': text}}])
+        self.build(rows)
+        self.assertEqual([], self.find('貼回來的助理文字'))
+        self.assertEqual(8, len(self.find('自己的回覆')))
+        self.assertTrue(all(row['text'] == '只留下我自己的回覆' for row in self.find('自己的回覆')))
+        self.assertEqual('直接回覆', owner.owner_text('《直接回覆'))
+
     def test_append_resumes_question_and_previous_without_parsing_prefix(self):
         prompt, answer = prompt_and_answer()
         self.build([message('請選一個', 'assistant'), prompt])
