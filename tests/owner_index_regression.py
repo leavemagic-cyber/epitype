@@ -177,6 +177,9 @@ class OwnerIndexTests(unittest.TestCase):
             bundle.writestr('inside.jsonl.zst', compressed)
         report = owner.update(self.index, [standalone, broken, archive])
         self.assertEqual((2, 1), (report['messages'], len(report['errors'])))
+        with closing(sqlite3.connect(self.index)) as db:
+            sizes = db.execute('SELECT size,offset FROM sources').fetchall()
+        self.assertEqual([(len(compressed), len(encode([message('壓縮原話')]))) ] * 2, sizes)
         self.assertEqual(2, owner.update(self.index, [standalone, archive])['unchanged'])
 
     def test_broken_sources_are_reported_without_losing_good_sources(self):

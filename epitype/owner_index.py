@@ -242,7 +242,7 @@ def _consume(db, stream, source, state, offset, size, digest, immutable, report)
     return position
 
 
-def _index_stream(db, stream, source, size, mtime, immutable, report):
+def _index_stream(db, stream, source, size, mtime, immutable, report, source_size=None):
     old = db.execute('SELECT * FROM sources WHERE path=?', (source,)).fetchone()
     if old and (immutable or (old['size'], old['mtime']) == (size, mtime)):
         report['unchanged'] += 1
@@ -264,8 +264,9 @@ def _index_stream(db, stream, source, size, mtime, immutable, report):
     else:
         report['appended'] += 1
     position = _consume(db, stream, source, state, offset, size, digest, immutable, report)
+    stored_size = source_size if source_size is not None else (position if size is None else size)
     db.execute('INSERT OR REPLACE INTO sources VALUES (?, ?, ?, ?, ?, ?)',
-               (source, position if size is None else size, mtime, position,
+               (source, stored_size, mtime, position,
                 digest.hexdigest(), json.dumps(state, ensure_ascii=False)))
 
 
@@ -307,12 +308,14 @@ def update(path=None, roots=None, *, rebuild=False):
                             with ExitStack() as streams:
                                 raw = streams.enter_context(bundle.open(member) if bundle else file.open('rb'))
                                 size = member.file_size if member else stat.st_size
+                                source_size = size
                                 if source.endswith('.zst'):
                                     raw = streams.enter_context(zstandard.ZstdDecompressor().stream_reader(raw))
                                     raw = streams.enter_context(io.BufferedReader(raw))
                                     size = None
                                 with db:
-                                    _index_stream(db, raw, source, size, stat.st_mtime_ns, immutable, report)
+                                    _index_stream(db, raw, source, size, stat.st_mtime_ns,
+                                                  immutable, report, source_size)
                         except READ_ERRORS as exc:
                             report['messages_added'] = added_before
                             report['errors'].append({'source': source, 'error': f'{type(exc).__name__}: {exc}'})
