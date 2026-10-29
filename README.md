@@ -249,6 +249,8 @@ The database lives at `<vault>/.epitype/memory_fts.sqlite3` and Git ignores it. 
 | `epitype scar-census build` | Builds the machine-generated view of the four-layer scar census. |
 | `epitype compact-map build` | Builds a bounded compact-recovery map, the same kind `PreCompact` writes per session. |
 | `epitype source SOURCE.jsonl [--find TEXT] [--role user\|assistant\|all] [--line N] [--offset BYTES] [--limit 1..8]` | Reads original messages back with roles, physical lines, hashes and explicit truncation and coverage. Line numbers are relative when you supply an offset. Finding a sentence is not proof that it is the current decision. |
+| `epitype owner-index build\|update\|find [WORDS ...] [--index PATH] [--root PATH] [--after DATE] [--role U,Q,S] [--limit N]` | Incremental SQLite trigram search of owner input, human queues and question-box answers, including their question context. See [owner index](docs/OWNER_INDEX.md) for archive sources and integrity checks. |
+| `epitype source --find TEXT [--index PATH]` | Searches the owner index for unverified locators; supply a source file and byte offset to read original evidence. Does not build or update the index. |
 | `epitype pending <vault> [--max-age-days N] [--strict] [--json]` | Lints for zombie pending lines: a todo marker with no closing text, no runnable `verify:`, and past the age threshold. |
 | `epitype exam [corpus] [--strict] [--selftest]` | Runs the exam engine against a behavior-question corpus. |
 | `epitype trust [--home HOME]` | Checks Codex's real hook trust state; see [Approve Codex hooks](#approve-codex-hooks). |
