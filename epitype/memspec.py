@@ -160,8 +160,8 @@ RAMGUARD_ACK_UNSET = "設定檔沒有 {field}"
 RAMGUARD_ACK_MISSING = "{path} 不存在"
 RAMGUARD_ACK_EMPTY = "{path} 檔尾沒有撞上限的告警"
 # 2026-09-09 owner 裁定（U-K；FAILURE_MODES §36）：上限是設定值，不是產品猜的。三個
-# 鍵都選填——缺鍵時夢寫一行「未設定」跳過，絕不拿內建數字當成 owner 的門檻，因為
-# 「超上限」會被讀成 owner 的判斷。core_files 是絕對路徑清單（契約正本那一類檔案）。
+# core 鍵仍選填；索引依 2026-11-08 owner 要求改成全庫同一預設，見 memory_index.cap_of。
+# core_files 是絕對路徑清單（契約正本那一類檔案）。
 CONFIG_INDEX_CAP_BYTES_FIELD = "index_cap_bytes"
 CONFIG_SHARED_INDEX_CAP_BYTES_FIELD = "shared_index_cap_bytes"
 CONFIG_CORE_FILES_FIELD = "core_files"

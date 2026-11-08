@@ -7,10 +7,12 @@ from . import __version__
 
 
 _COMMANDS = {
+    "fixed-load": ("epitype.fixed_load", "main", ()),
     "search": ("epitype.memsearch", "main", ()),
     "cards": ("epitype.card_lint", "main", ()),
     "dupes": ("epitype.dupes", "main", ()),
     "views": ("epitype.views", "main", ()),
+    "memory-index": ("epitype.memory_index", "main", ()),
     "core-gen": ("epitype.core_gen", "main", ()),
     "sync": ("epitype.host_sync", "main", ()),
     "decisions": ("epitype.decision_lint", "main", ()),

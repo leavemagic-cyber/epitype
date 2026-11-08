@@ -14,6 +14,9 @@ Epitype is the small layer I built for that. It runs on the hooks Claude Code an
 
 It is Python standard library only. No service to sign up for, no model calls of its own, nothing to pay for.
 
+Keep every vault's always-loaded index short with [`epitype memory-index`](docs/memory-index.md):
+preview or apply lossless overflow into a full index, using one configurable byte budget.
+
 ## Thirty seconds to see it work
 
 Install, then put five general rules in your vault:
