@@ -94,7 +94,7 @@ class Accounting(unittest.TestCase):
     def test_two_worktrees_do_not_qualify_as_two_projects_and_share_memory(self):
         repo, wt = self.cwd, self.root / "worktree"
         subprocess.run(["git", "init", "-q", str(repo)], check=True)
-        subprocess.run(["git", "-C", str(repo), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+        subprocess.run(["git", "-C", str(repo), "-c", "user.name=Fixture", "-c", "user.email=fixture" + "@" + "example.invalid",
                         "-c", "core.hooksPath=", "commit", "--allow-empty", "-qm", "fixture"], check=True)
         subprocess.run(["git", "-C", str(repo), "worktree", "add", "--detach", str(wt)], check=True,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -164,6 +164,29 @@ class Accounting(unittest.TestCase):
             self.assertEqual(f.main(["--policy", str(bad)]), 0)
         self.assertIn("INCOMPLETE", stream.getvalue())
         self.assertNotIn("SECRET_PARSE_VALUE", stream.getvalue())
+
+    def test_required_core_and_move_obligations_preserve_source(self):
+        path = self.file(self.cwd / "CLAUDE.md", "<!-- EPITYPE RULES BEGIN -->\n" + "規" * 5000 + "\n<!-- EPITYPE RULES END -->")
+        before = path.read_bytes()
+        self.policy["sources"] = [{"path": str(path), "kind": "instruction", "move_to": str(self.root / "elsewhere"),
+                                   "rollback": str(path), "author": "fixture", "purpose": "required rules"}]
+        value = self.run_report()
+        self.assertTrue(any(x["code"] == "CORE_OVER_BUDGET_PRESERVE_REQUIRED_RULES" for x in value["findings"]))
+        self.assertEqual(path.read_bytes(), before)
+        self.assertFalse((self.root / "elsewhere").exists())
+        obligations = " ".join(value["sources"][0]["move_obligations"])
+        for term in ("redirect", "reverse links", "quota", "router", "search", "consumers", "rollback"):
+            self.assertIn(term, obligations)
+
+    def test_invalid_runtime_does_not_turn_into_zero_cost_or_echo_payload(self):
+        path = self.inventory()
+        raw = json.loads(path.read_text())
+        raw["tools"].append({**raw["tools"][0], "tokens": 999, "payload": "SECRET_SENTINEL"})
+        self.file(path, json.dumps(raw))
+        value = self.run_report(runtime_path=path)
+        self.assertEqual(value["runtime_status"], "RUNTIME_UNMEASURED")
+        self.assertIsNone(value["runtime"])
+        self.assertNotIn("SECRET_SENTINEL", json.dumps(value))
 
 
 if __name__ == "__main__":

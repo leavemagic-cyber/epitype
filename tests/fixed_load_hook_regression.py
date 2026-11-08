@@ -112,6 +112,9 @@ def main(stdin_raw, argv, mem_dir, strict=False, budget=None, full=False):
              patch.object(module, "expired", return_value=False):
             import time
             event = {"cwd": str(self.cwd), "source": "startup"}
+            with patch.object(module, "bounded_context", return_value=""):
+                self.assertIsNone(module._handle(event, started_at=time.monotonic()))
+            self.assertFalse(self.receipt.exists())
             first = module._handle(event, started_at=time.monotonic())
             context = first["hookSpecificOutput"]["additionalContext"]
             self.assertIn("RUNTIME_UNMEASURED", context)
