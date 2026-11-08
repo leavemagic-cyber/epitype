@@ -7,6 +7,7 @@ from . import __version__
 
 
 _COMMANDS = {
+    "fixed-load": ("epitype.fixed_load", "main", ()),
     "search": ("epitype.memsearch", "main", ()),
     "cards": ("epitype.card_lint", "main", ()),
     "dupes": ("epitype.dupes", "main", ()),

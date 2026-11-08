@@ -422,6 +422,19 @@ def _handle(event, started_at, deliveries=None, trace=None):
         return None
     budget = config[memspec.CONFIG_BUDGET_BYTES_FIELD]
     pieces = []
+    # Cached accounting only; acknowledge after bounded_context actually delivers it.
+    fixed_line, fixed_state = None, None
+    fixed_receipt = Path.home() / ".epitype/fixed_load_reports/notified.json"
+    try:
+        from epitype import fixed_load
+        fixed_line, fixed_state = fixed_load.notice(
+            Path.home() / ".epitype/fixed_load_reports/current.json", fixed_receipt,
+            event.get("cwd") or Path.cwd())
+        if fixed_line:
+            pieces.append(fixed_line)
+    except Exception:
+        # Advisory accounting must never alter the existing hook's exit behavior.
+        pass
     # 開場只看這場真的碰得到的庫：cwd 自己的庫加上治理庫。別的專案的卡不是這場的事，
     # 掃它只是替這場的預算多付一次。喚回仍然按內容找得到那些卡。
     # 治理庫＝拿著工作帳本的那一個，不是排序第一的那一個：安裝器按字母排，位置不帶
@@ -516,6 +529,11 @@ def _handle(event, started_at, deliveries=None, trace=None):
         trace["outcome"] = "budget-expired"
         return None
     context = bounded_context("SessionStart", pieces, budget)
+    if fixed_line and context and fixed_line in context.splitlines():
+        try:
+            fixed_load.publish(fixed_state, fixed_receipt)
+        except Exception:
+            pass
     for notice, destination, state, completed in notice_deliveries:
         if context and notice in context.splitlines():
             _dream_mark_notified(destination, state, completed)
