@@ -21,6 +21,7 @@ sys.path[:0] = [str(ROOT), str(ROOT / "adapters" / "claude")]
 
 import io
 import json
+import tomllib
 import os
 import tempfile
 import time
@@ -371,9 +372,11 @@ class StarterShipsInTheWheel(unittest.TestCase):
 
     def test_package_data_covers_every_shipped_card(self):
         text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-        self.assertIn(f'epitype = ["{memspec.STARTER_DIRECTORY}/*.md"]', text,
+        packaging = tomllib.loads(text)["tool"]["setuptools"]
+        self.assertIn(f"{memspec.STARTER_DIRECTORY}/*.md", packaging["package-data"]["epitype"],
                       "pyproject 的 package-data 沒有把 starter 卡納進輪子")
-        self.assertIn('"epitype",', text, "epitype 套件本身要在 packages 清單裡")
+        self.assertIn("fixed_load_budget.json", packaging["package-data"]["epitype"])
+        self.assertIn("epitype", packaging["packages"], "epitype 套件本身要在 packages 清單裡")
         for card in starter.shipped_cards():
             self.assertEqual(card.suffix, ".md",
                              f"{card.name} 不是 .md，那一行 glob 帶不走它")

@@ -286,6 +286,7 @@ def report(*, home=None, cwd=None, vaults=(), policy=None, runtime_path=None):
     # Declared metadata overrides discovered defaults; physical scope remains observed.
     declared = {str(Path(r["path"]).resolve()): r for r in policy["sources"]}
     rows = [{**r, **declared.get(str(Path(r["path"]).resolve()), {}),
+             "path": r["path"],
              "physical_scope": r["physical_scope"]} for r in rows]
     rows += [r for p, r in declared.items() if p not in {str(Path(x["path"]).resolve()) for x in rows}]
     sources = {}
