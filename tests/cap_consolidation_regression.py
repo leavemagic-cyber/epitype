@@ -85,12 +85,11 @@ class CapConsolidation(unittest.TestCase):
         for rule in ranked:
             self.assertEqual(rule["bytes"], len((rule["text"] + "\n").encode("utf-8")))
 
-    def test_short_index_material_uses_normalised_loaded_payload(self):
-        entry = next(e for e in self.section()["examples"] if e.get("kind") == "shared-index-payload")
-        size = len(host_sync.index_text([self.vault]).encode("utf-8"))
+    def test_short_index_material_uses_raw_file_budget(self):
+        entry = next(e for e in self.section()["examples"] if e.get("kind") == "index-file")
+        size = self.index.stat().st_size
         self.assertEqual(entry["bytes"], size)
         self.assertEqual(entry["reduce_bytes"], size - 10)
-        self.assertEqual(entry["hosts"], ["claude", "codex"])
         self.assertEqual(entry["items"][0]["text"], "這是比較長的索引條目")
         self.assertEqual(entry["items"][0]["line"], 4)
         self.assertEqual(len(entry["items"]), 2)
@@ -197,7 +196,7 @@ class CapConsolidation(unittest.TestCase):
 
     def test_under_or_exact_cap_has_no_material_or_notice(self):
         self.config["core_cap_bytes"] = max(self.loads.values())
-        self.config["shared_index_cap_bytes"] = len(host_sync.index_text([self.vault]).encode("utf-8"))
+        self.config["index_cap_bytes"] = self.index.stat().st_size
         self.save_config()
         section = self.section()
         self.assertEqual(section["counts"]["over_cap"], 0)

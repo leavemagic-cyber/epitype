@@ -14,6 +14,9 @@ Epitype 就是為了這件事做的一層小東西。它接 Claude Code 和 Code
 
 只用 Python 標準函式庫。不必註冊服務，自己不呼叫模型，也不用付錢。
 
+[`epitype memory-index`](docs/memory-index.md) 讓每個 vault 的常駐索引使用同一個可設定的大小目標，
+可先預覽，再把超量內容逐字保留到完整索引。
+
 ## 三十秒看到它動起來
 
 裝好之後，放五張通用規則進你的記憶庫：

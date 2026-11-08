@@ -1244,12 +1244,22 @@ def _vault_findings(vault, relatives):
     兩個漏卡是 WARN 不是 FAIL：修法是機械重生，不是「這張卡不能收」。
     """
     try:  # lazy import：hook 熱路徑（scan_vaults）不走這條，不為它付 import
-        from . import decision_lint, views
+        from . import decision_lint, views, memory_index
     except ImportError:  # Direct script execution keeps the CLI contract.
         import decision_lint
         import views
+        import memory_index
 
     findings = []
+    if (Path(vault) / memspec.MEMORY_INDEX_FILENAME).exists():
+        try:
+            index = memory_index.lint(vault)
+            if index["status"] == "over-cap":
+                findings.append((FAIL, "memory-index-cap",
+                                 f"MEMORY.md {index['before_bytes']} bytes > index_cap_bytes "
+                                 f"{index['cap_bytes']}; run epitype memory-index {vault} --apply"))
+        except (OSError, ValueError) as exc:
+            findings.append((FAIL, "memory-index-cap", str(exc)))
     try:
         decisions = decision_lint.lint_vault(vault)
     except Exception as exc:

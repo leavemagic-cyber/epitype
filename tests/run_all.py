@@ -8,6 +8,7 @@ import tempfile
 
 
 SELFTESTS = (
+    Path("tests") / "memory_index_regression.py",
     Path("tests") / "rule_binding_regression.py",
     Path("tests") / "rule_sync_dedup_regression.py",
     Path("tests") / "dupes_regression.py",
