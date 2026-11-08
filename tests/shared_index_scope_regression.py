@@ -36,16 +36,18 @@ class SharedIndexScope(unittest.TestCase):
                 self.assertTrue(any("shared_index_cap_bytes" in p for p in self.plan(host).problems))
                 self.assertFalse(self.plan(host, project=True).problems)
 
-    def test_nightly_measures_same_normalised_shared_payload_and_not_raw_project_file(self):
+    def test_nightly_measures_every_raw_file_with_one_cap(self):
         with patch.object(memspec, "config_options", return_value=self.config):
             result = dream._section_caps([self.project, self.shared], date.today(), None, self.config)
-            entries = [e for e in result["examples"] if e.get("kind") == "shared-index-payload"]
-            self.assertEqual(len(entries), 1)
-            self.assertEqual(entries[0]["bytes"], len(host_sync.index_text([self.project, self.shared]).encode()))
-            self.assertEqual(Path(entries[0]["path"]).parent, self.shared)
+            entries = [e for e in result["examples"] if e.get("kind") == "index-file"]
+            self.assertEqual(len(entries), 2)
+            self.assertEqual({Path(e["path"]).parent for e in entries}, {self.shared, self.project})
+            for entry in entries:
+                self.assertEqual(entry["bytes"], Path(entry["path"]).stat().st_size)
+                self.assertEqual(entry["cap"], 250)
             self.assertFalse(result["errors"])
 
-    def test_omitted_cap_adds_no_invented_limit_and_large_header_is_not_loaded(self):
+    def test_default_cap_and_raw_header_cost_are_reported(self):
         self.config.pop("shared_index_cap_bytes")
         with patch.object(memspec, "config_options", return_value=self.config):
             self.assertFalse(self.plan("codex").problems)
@@ -54,7 +56,10 @@ class SharedIndexScope(unittest.TestCase):
         with patch.object(memspec, "config_options", return_value=self.config):
             self.assertFalse(self.plan("claude").problems)
             result = dream._section_caps([self.project, self.shared], date.today(), None, self.config)
-            self.assertEqual(result["counts"]["over_cap"], 0)
+            entries = [e for e in result["examples"] if e.get("kind") == "index-file"]
+            self.assertEqual(len(entries), 2)
+            shared = next(e for e in entries if Path(e["path"]).parent == self.shared)
+            self.assertEqual(shared["bytes"], self.shared.joinpath("MEMORY.md").stat().st_size)
 
 
 if __name__ == "__main__":

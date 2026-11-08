@@ -418,9 +418,11 @@ def _plan(host, label, key, path, wanted_of, home=None, over_cap=None, contextua
     # 自訂 core 預算只提醒，不能因此漏掉已授權的新指示；宿主載入與標記完整性另查。
     configured = memspec.config_options()
     rules_cap = core_gen._cap_of(None, configured)
-    shared_index_cap = configured.get(memspec.CONFIG_SHARED_INDEX_CAP_BYTES_FIELD)
-    if isinstance(shared_index_cap, bool) or not isinstance(shared_index_cap, int) or shared_index_cap <= 0:
-        shared_index_cap = None
+    try:
+        from . import memory_index
+    except ImportError:
+        import memory_index
+    shared_index_cap = memory_index.cap_of(configured)
     for name, text in wanted.items():
         size = len(text.encode("utf-8"))
         if size > memspec.HOST_SYNC_REGION_CAP_BYTES and (over_cap or {}).get(name):
@@ -453,7 +455,8 @@ def _plan(host, label, key, path, wanted_of, home=None, over_cap=None, contextua
                 and shared_index_cap is not None and size > shared_index_cap):
             problems.append(
                 f"{name} 有 {size} 位元組，超過設定的 "
-                f"{memspec.CONFIG_SHARED_INDEX_CAP_BYTES_FIELD} {shared_index_cap}；"
+                f"{memspec.CONFIG_INDEX_CAP_BYTES_FIELD} {shared_index_cap} "
+                f"({memspec.CONFIG_SHARED_INDEX_CAP_BYTES_FIELD} is a legacy alias)；"
                 "請縮短共用索引或調整其上限"
             )
             continue
