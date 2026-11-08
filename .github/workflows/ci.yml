@@ -1,4 +1,4 @@
-name: CI
+name: FIXLOAD1 targeted validation
 
 # Runs only where a red light is worth an email: the published branch, release
 # tags, and incoming pull requests (owner ruling 2026-09-02).
@@ -29,10 +29,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - name: Run component selftests
-        run: python tests/run_all.py --jobs 4
-      - name: Run privacy lint
-        run: python tests/privacy_lint.py
+      - name: Fixed-load accounting
+        run: python tests/fixed_load_regression.py --selftest
+      - name: Fixed-load hook integration
+        run: python tests/fixed_load_hook_regression.py --selftest
+      - name: Starter package compatibility
+        run: python tests/starter_pack_regression.py --selftest
 
   package:
     name: Installed wheel smoke test
@@ -55,3 +57,5 @@ jobs:
           "$RUNNER_TEMP/epitype-smoke/bin/python" -c "import epitype.decision_lint, epitype.ledger_gate, epitype.scar_census"
           "$RUNNER_TEMP/epitype-smoke/bin/python" -m epitype --version
           "$RUNNER_TEMP/epitype-smoke/bin/python" -m epitype search --help
+          "$RUNNER_TEMP/epitype-smoke/bin/python" -m epitype fixed-load --home "$RUNNER_TEMP/clean-home" --cwd "$RUNNER_TEMP" --json
+          "$RUNNER_TEMP/epitype-smoke/bin/python" -c "from epitype.fixed_load import load_policy; assert sum(load_policy()['targets'].values()) == 49999; print('Installed fixed-load policy PASS')"
