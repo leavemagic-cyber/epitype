@@ -200,6 +200,8 @@ def apply_plan(proposed):
             card_io.publish(backup, proposed.original)
         except FileExistsError:
             pass
+    if previous is None and backup.read_bytes() != proposed.original:
+        raise ValueError(f"{BACKUP_FILENAME} already exists and is not this index's first backup")
     if previous is None:
         card_io.publish(full, payload)
     elif payload != previous:
@@ -217,7 +219,7 @@ def discover(projects):
         raise NotADirectoryError(root)
     found = []
     for project in sorted(root.iterdir(), key=lambda p: p.name.casefold()):
-        if _is_link(project):
+        if _is_link(project) or not project.is_dir():
             continue
         memory = project / "memory"
         if _is_link(memory):

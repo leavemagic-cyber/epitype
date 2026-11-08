@@ -118,6 +118,23 @@ class IndexTests(unittest.TestCase):
         self.assertEqual(full.read_bytes(), b"handwritten existing file")
         self.assertEqual(self.memory.read_bytes(), self.raw)
 
+    def test_foreign_first_backup_is_not_silently_accepted(self):
+        backup = self.vault / index.BACKUP_FILENAME
+        backup.write_bytes(b"unrelated existing backup")
+        with self.assertRaises(ValueError):
+            index.apply_plan(self.plan())
+        self.assertEqual(backup.read_bytes(), b"unrelated existing backup")
+        self.assertEqual(self.memory.read_bytes(), self.raw)
+        self.assertFalse((self.vault / index.FULL_FILENAME).exists())
+
+    def test_discover_ignores_files_and_includes_empty_vaults(self):
+        projects = self.vault / "projects"
+        projects.mkdir()
+        (projects / "metadata.json").write_text("{}", encoding="utf-8")
+        memory = projects / "project" / "memory"
+        memory.mkdir(parents=True)
+        self.assertEqual(index.discover(projects), [memory])
+
     def test_cap_default_alias_override_and_invalid_values(self):
         self.assertEqual(index.cap_of({}), 1526)
         self.assertEqual(index.cap_of({"shared_index_cap_bytes": 300}), 300)
@@ -172,6 +189,7 @@ class IndexTests(unittest.TestCase):
     def test_windows_junction_discovery_is_not_followed(self):
         projects = self.vault / "projects"
         projects.mkdir()
+        (projects / "metadata.json").write_text("{}", encoding="utf-8")
         real = projects / "real"
         memory = real / "memory"
         memory.mkdir(parents=True)

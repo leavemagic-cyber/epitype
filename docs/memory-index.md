@@ -60,6 +60,9 @@ not just the moved subset, so its original headings and reference definitions
 also accompany all moved lines. Both are siblings of `MEMORY.md`; relative links
 retain their base, and their underscore names keep them out of card/recall scans.
 Cards and `_views/` are never modified by this command.
+An unrelated existing first-backup file is reported instead of silently accepting
+it as a backup of the index being rewritten. Files beside project directories
+are skipped during project discovery.
 
 On later runs the full index preserves its existing text and appends any new
 line occurrences from the current index (including duplicates). Managed pointer
