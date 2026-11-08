@@ -8,6 +8,7 @@ import io
 import json
 import os
 import re
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -154,6 +155,35 @@ class IndexTests(unittest.TestCase):
         self.assertIn(b"\r\n", self.memory.read_bytes())
         self.assertFalse(list(self.vault.glob("*.lock")))
         self.assertFalse(list(self.vault.glob("*.tmp")))
+
+    @unittest.skipUnless(os.name == "nt", "Windows native editor line endings")
+    def test_windows_native_crlf_pointer_rewrite(self):
+        index.apply_plan(self.plan())
+        normalised = self.memory.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
+        self.memory.write_bytes(normalised + b"- native appended 2026-12-01\r\n" * 12)
+        index.apply_plan(self.plan())
+        short = self.memory.read_bytes()
+        full = (self.vault / index.FULL_FILENAME).read_bytes()
+        self.assertEqual(short.count(b"<!-- epitype:index -->"), 1)
+        self.assertNotIn(b"<!-- epitype:index -->", full)
+        self.assertEqual(full.count(b"- native appended 2026-12-01\r\n"), 12)
+
+    @unittest.skipUnless(os.name == "nt", "Windows junction privacy boundary")
+    def test_windows_junction_discovery_is_not_followed(self):
+        projects = self.vault / "projects"
+        projects.mkdir()
+        real = projects / "real"
+        memory = real / "memory"
+        memory.mkdir(parents=True)
+        alias = projects / "linked-project"
+        linked_memory = projects / "linked-memory" / "memory"
+        linked_memory.parent.mkdir()
+        for link, target in ((alias, real), (linked_memory, memory)):
+            made = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)],
+                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            self.assertEqual(made.returncode, 0, made.stdout.decode(errors="replace"))
+            self.addCleanup(os.rmdir, link)
+        self.assertEqual(index.discover(projects), [memory])
 
 
 if __name__ == "__main__":

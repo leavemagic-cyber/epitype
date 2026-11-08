@@ -10,6 +10,7 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 import re
+import stat
 import sys
 
 try:
@@ -40,7 +41,17 @@ def cap_of(config=None):
 
 def _without_pointer(raw):
     # Native memory writers commonly append after our pointer.
-    return raw.replace(POINTER, b"")
+    return raw.replace(POINTER.replace(b"\n", b"\r\n"), b"").replace(POINTER, b"")
+
+
+def _is_link(path):
+    """lstat also sees Windows junctions on Python 3.11 (no Path.is_junction)."""
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return False
+    return stat.S_ISLNK(info.st_mode) or bool(
+        getattr(info, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
 
 
 def _units(lines):
@@ -108,7 +119,10 @@ class Plan:
 
 def plan(vault, config=None):
     vault = Path(vault).expanduser().resolve()
-    raw = (vault / memspec.MEMORY_INDEX_FILENAME).read_bytes()
+    index = vault / memspec.MEMORY_INDEX_FILENAME
+    if _is_link(index):
+        raise ValueError(f"index input must not be a link: {index}")
+    raw = index.read_bytes()
     raw.decode("utf-8")  # Reject invalid encoding before any file is written.
     cap = cap_of(config)
     source = _without_pointer(raw)
@@ -169,15 +183,15 @@ def apply_plan(proposed):
     """Archive first, then compare/replace the short index; never touch a card."""
     vault = proposed.vault
     index = vault / memspec.MEMORY_INDEX_FILENAME
-    if index.read_bytes() != proposed.original:
-        raise card_io.CardConflict(f"index changed: {index}")
     backup = vault / BACKUP_FILENAME
     full = vault / FULL_FILENAME
+    for target in (index, backup, full):
+        if _is_link(target):
+            raise ValueError(f"index output must not be a link: {target}")
+    if index.read_bytes() != proposed.original:
+        raise card_io.CardConflict(f"index changed: {index}")
     if proposed.short == proposed.original and not full.exists():
         return
-    for target in (index, backup, full):
-        if target.is_symlink() or (hasattr(target, "is_junction") and target.is_junction()):
-            raise ValueError(f"index output must not be a link: {target}")
     previous = full.read_bytes() if full.exists() else None
     payload = _full_payload(previous, _without_pointer(proposed.original))
     # publish never overwrites even if another process wins the first-backup race.
@@ -203,10 +217,10 @@ def discover(projects):
         raise NotADirectoryError(root)
     found = []
     for project in sorted(root.iterdir(), key=lambda p: p.name.casefold()):
-        if project.is_symlink() or (hasattr(project, "is_junction") and project.is_junction()):
+        if _is_link(project):
             continue
         memory = project / "memory"
-        if memory.is_symlink() or (hasattr(memory, "is_junction") and memory.is_junction()):
+        if _is_link(memory):
             continue
         if memory.is_dir():
             found.append(memory)

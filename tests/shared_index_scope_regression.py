@@ -47,7 +47,7 @@ class SharedIndexScope(unittest.TestCase):
                 self.assertEqual(entry["cap"], 250)
             self.assertFalse(result["errors"])
 
-    def test_default_cap_and_raw_header_cost_are_reported(self):
+    def test_optional_host_region_budget_and_raw_file_budget_are_distinct(self):
         self.config.pop("shared_index_cap_bytes")
         with patch.object(memspec, "config_options", return_value=self.config):
             self.assertFalse(self.plan("codex").problems)

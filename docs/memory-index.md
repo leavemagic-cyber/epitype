@@ -35,9 +35,10 @@ are reported as `no-index`; they are not created. Without paths, the command use
 the configured `vaults`. `--projects` includes every direct `*/memory` directory,
 including ones with no index, and does not enter linked project/memory directories.
 `epitype cards <vault> --deep` and the nightly cap report use the same raw-file
-budget. The pre-existing host sync still checks its loaded global index region
-against this same setting; that region excludes the title, so a raw-file check
-can report an overage even when the host region is within budget.
+budget. The pre-existing host sync's explicit `shared_index_cap_bytes` check
+still applies separately to the loaded global host region, which excludes the
+title. This command does not add a default refusal to host sync: file shortening
+and syncing resident host regions are separate operations.
 
 ## Selection and preservation
 
@@ -63,7 +64,9 @@ Cards and `_views/` are never modified by this command.
 On later runs the full index preserves its existing text and appends any new
 line occurrences from the current index (including duplicates). Managed pointer
 text is excluded from that archive. Native writers may append before or after
-the pointer. An unchanged rerun does not rewrite the index, backup or archive.
+the pointer, or change it to Windows CRLF. An unchanged rerun does not rewrite
+the index, backup or archive. Discovery excludes Windows junctions on Python
+3.11 as well as newer runtimes.
 This archive is deliberately additive: obsolete or repeated historic entries
 are retained rather than silently removed or reconciled as current decisions.
 
