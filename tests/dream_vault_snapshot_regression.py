@@ -21,7 +21,7 @@ class VaultSnapshot(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="epitype-snapshot-")
         self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        self.root = Path(temporary.name).resolve()
         self.vault = self.root / "vault"
         self.vault.mkdir()
         self.today = date(2026, 10, 28)

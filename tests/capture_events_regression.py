@@ -47,7 +47,7 @@ class CaptureEventsRegression(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="epitype-owner-events-")
         self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        self.root = Path(temporary.name).resolve()
         environment = patch.dict(os.environ, {
             "HOME": str(self.root / "home"), "USERPROFILE": str(self.root / "home"),
             "CODEX_HOME": str(self.root / "home/.codex"),

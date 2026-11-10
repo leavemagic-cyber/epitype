@@ -61,11 +61,15 @@ class ChainReceiptRegression(unittest.TestCase):
         self.assertEqual(self.checked(text).status, 'REVIEWED')
         old = self.vault/'rule-prior.md'
         read = Path.read_text
+        unreadable_paths = []
         def unreadable(path, *args, **kwargs):
-            if path == old: raise PermissionError('fixture temporarily locked')
+            if path.resolve() == old.resolve():
+                unreadable_paths.append(path)
+                raise PermissionError('fixture temporarily locked')
             return read(path, *args, **kwargs)
         with patch.object(Path,'read_text',unreadable):
             self.assertEqual(self.checked(text).status, 'UNVERIFIED')
+        self.assertTrue(unreadable_paths)
         with rule_provenance.verification_window(time.monotonic()-1):
             self.assertEqual(self.checked(text).status, 'REVIEWED')
 

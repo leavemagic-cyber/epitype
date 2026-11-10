@@ -18,7 +18,7 @@ class CurrentContent(unittest.TestCase):
     def setUp(self):
         temp=tempfile.TemporaryDirectory(prefix='epitype-current-content-')
         self.addCleanup(temp.cleanup)
-        self.vault=Path(temp.name)
+        self.vault=Path(temp.name).resolve()
         self.path=self.vault/'rule-current.md'
         self.doc={'version':1,'key':'current-rule','kind':'ai-derived','author':'codex',
             'text':'在相關工作前核對現行要求，保留明列例外。',
