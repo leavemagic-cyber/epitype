@@ -57,6 +57,24 @@ class ToolSequenceRegression(unittest.TestCase):
                                                session_id='seq-sub-' + self.root.name)), [])
         self.assertFalse(tool_sequence.applies('sub', {}))
 
+    def test_child_transcript_excludes_root_audience_without_agent_field(self):
+        event = {'transcript_path': str(self.root/'subagents/agent-A.jsonl')}
+        self.assertFalse(tool_sequence.applies('root', event))
+        self.assertTrue(tool_sequence.applies('sub', event))
+        self.assertTrue(tool_sequence.applies('all', event))
+
+    def test_child_reports_skip_owner_format_but_keep_shared_checks(self):
+        self.write_card('owner-format.md', name='owner-format', forbidden=['internal-token'],
+                        audience='root', on_hit='note')
+        self.write_card('shared-check.md', name='shared-check', forbidden=['safety-token'],
+                        audience='all', on_hit='note')
+        parent = self.event('Claude', [], last_assistant_message='internal-token')
+        self.assertEqual(self.noted(parent), [('owner-format', 'forbidden')])
+        child = self.event('Claude', [], session_id='child-'+self.root.name,
+                           transcript_path=str(self.root/'subagents/agent-A.jsonl'),
+                           last_assistant_message='internal-token safety-token')
+        self.assertEqual(self.noted(child), [('shared-check', 'forbidden')])
+
     def test_same_call_is_not_sequence_and_malformed_rejected(self):
         self.assertIsNotNone(tool_sequence.gap(['Bash::inspect => Bash::mutate'], (),
                                              [('Bash', {'command': 'inspect; mutate'})]))

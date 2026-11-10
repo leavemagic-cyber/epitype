@@ -13,7 +13,7 @@ if str(_REPO_ROOT) not in sys.path:
 # context_meter 與 tempfile 用到才載入：Codex 的壓縮（--codex）不學門檻，而 hook 每一次
 # 都要重新編譯載入的模組（dont_write_bytecode）；Codex 在 10 秒硬逾時砍掉 PreCompact 時，
 # 還沒跑到清標記那一步，下一個壓縮週期的交接提醒就不會重新武裝。
-from epitype import compact_map, memspec
+from epitype import compact_map, hook_context, memspec
 from _hook_common import (
     isolated_temp_root,
     clear_recall_markers,
@@ -74,8 +74,7 @@ def _sweep_maps(directory, keep):
 
 
 def _is_subagent(event):
-    """官方文件：agent_id「Present only when the hook fires inside a subagent call」。"""
-    return bool(event.get("agent_id") or event.get("agentId"))
+    return hook_context.is_subagent(event)
 
 
 def _learn_threshold(event, vault, transcript):
@@ -101,6 +100,9 @@ def _handle(event, started_at, learn=True, trace=None):
     """寫地圖、清標記。`trace` 是給追蹤的一個 dict：提早結束的原因、標記清了沒、地圖寫了沒。"""
     trace = {} if trace is None else trace
     transcript_value = event.get("transcript_path")
+    if _is_subagent(event) and not hook_context.is_subagent_transcript(transcript_value):
+        trace['outcome'] = 'subagent-transcript-unconfirmed'
+        return None
     if not isinstance(transcript_value, str) or not transcript_value.strip():
         trace["outcome"] = "no-transcript"
         return None
@@ -114,14 +116,13 @@ def _handle(event, started_at, learn=True, trace=None):
         trace["outcome"] = "transcript-missing"
         return None
     session_id = event.get("session_id", event.get("sessionId", ""))
-    # 子代理跟主線共用 session_id：它自己的壓縮不代表主線的 context 變小了，所以主線
-    # 已經說過的用量計那一行要留著——清喚回標記時直接跳過它，不先清再補。
-    # Compaction invalidates recall dedupe even if the recovery-map write fails.
-    if _is_subagent(event):
-        clear_recall_markers(session_id, keep=(memspec.CONTEXT_METER_MARKER,))
+    # Only this model context loses its receipts; a shared parent ID proves nothing.
+    context_id = hook_context.identity(event)
+    if context_id:
+        clear_recall_markers(context_id)
+        trace["cleared"] = True
     else:
-        clear_recall_markers(session_id)
-    trace["cleared"] = True
+        trace["cleared"] = False
     vault = governance_vault(config, for_write=True)
     # 只有 Claude 側要學門檻：Codex 的壓縮點從它自己的設定算（context_meter.codex_limit），
     # 學進來反而會把 Codex 的數字混進 Claude 的門檻。
@@ -131,9 +132,6 @@ def _handle(event, started_at, learn=True, trace=None):
     # 地圖檔名（session＋transcript 路徑雜湊）：跟 SessionStart 找的那個對不上，追蹤裡一眼看得出來。
     trace["stem"] = destination.stem
     handoff = compact_map.handoff_destination(vault, session_id, transcript)
-    from epitype import rule_context
-    from _hook_common import resolve_vaults
-    rule_context.snapshot(resolve_vaults(config, event), session_id, handoff)
     compact_map.build_map(
         transcript,
         destination,
@@ -220,7 +218,7 @@ def _selftest():
                 "transcript_path": str(second_transcript),
                 "session_id": "session-b",
             }
-            marker_directory = recall_marker_directory("session-b")
+            marker_directory = recall_marker_directory(hook_context.identity(second_event))
             marker_directory.mkdir(parents=True, exist_ok=True)
             (marker_directory / "digest").write_text("digest\n", encoding="ascii")
             second_result = run_synthetic(Path(__file__), second_event, config)
@@ -321,12 +319,12 @@ def _selftest():
             state = context_meter.state_path(vault)
             state.parent.mkdir(parents=True, exist_ok=True)
             state.write_text("{broken", encoding="utf-8")
-            auto_markers = recall_marker_directory("session-auto")
+            auto_event = {"transcript_path": str(auto_transcript), "session_id": "session-auto"}
+            auto_markers = recall_marker_directory(hook_context.identity(auto_event))
             auto_markers.mkdir(parents=True, exist_ok=True)
             for name in (memspec.CONTEXT_METER_MARKER,):
                 (auto_markers / name).write_text(name + "\n", encoding="ascii")
             pct_env = {memspec.CONTEXT_METER_PCT_ENV: "92"}
-            auto_event = {"transcript_path": str(auto_transcript), "session_id": "session-auto"}
             auto_result = run_synthetic(
                 Path(__file__), {**auto_event, "trigger": "auto"}, config, environment=pct_env)
             learned = context_meter.read_samples(state)
@@ -396,7 +394,7 @@ def _selftest():
                 and not (maps_dir / f"other-000{memspec.COMPACT_HANDOFF_SUFFIX}").exists(),
             ))
 
-            # 子代理的自動壓縮：不學、不清主線的用量計標記；喚回標記照舊清。
+            # 子代理自己的壓縮不改主線已收到的內容，所以主線的收據和用量計都保留。
             (auto_markers).mkdir(parents=True, exist_ok=True)
             for name in (memspec.CONTEXT_METER_MARKER, "digest"):
                 (auto_markers / name).write_text(name + "\n", encoding="ascii")
@@ -405,17 +403,17 @@ def _selftest():
                 Path(__file__), {**auto_event, "trigger": "auto", "agent_id": "agent-1"}, config,
                 environment=pct_env)
             checks.append((
-                "a subagent's auto compaction learns nothing and keeps the main thread's meter markers",
+                "a subagent's auto compaction preserves the main thread's meter and recall receipts",
                 subagent_run.returncode == 0
                 and len(context_meter.read_samples(state)) == before_subagent
                 and (auto_markers / memspec.CONTEXT_METER_MARKER).is_file()
-                and not (auto_markers / "digest").exists(),
+                and (auto_markers / "digest").is_file(),
             ))
 
             # Codex（--codex）的自動壓縮：清掉這一場的用量計標記與壓縮點快取（下一個週期重新
             # 武裝），而且一筆都不學——Codex 的數字不能變成 Claude 的門檻。
             codex_rollout, codex_env = write_codex_fixture(root, "codex-pc", 205000)
-            codex_markers = recall_marker_directory("codex-pc")
+            codex_markers = recall_marker_directory(hook_context.identity({"session_id": "codex-pc", "transcript_path": os.fspath(codex_rollout)}))
             codex_markers.mkdir(parents=True, exist_ok=True)
             for name in (memspec.CONTEXT_METER_MARKER, memspec.CONTEXT_METER_CODEX_LIMIT_CACHE):
                 (codex_markers / name).write_text("x\n", encoding="ascii")
@@ -585,7 +583,10 @@ def main():
         # 只寫檔，永遠不輸出：`--codex` 仍被接受（Codex 的 hooks.json 這樣掛），
         # 但兩邊宿主的輸出路徑都已經退役，所以兩條路徑跑的是同一段程式。
         event = read_event(sys.stdin)
-        trace_hook("PreCompact", event, _STARTED_AT, codex=codex, phase="start", run=run)
+        trace['event_fields'] = sorted(event) if isinstance(event, dict) else []
+        trace['child'] = hook_context.is_subagent(event)
+        trace_hook("PreCompact", event, _STARTED_AT, codex=codex, phase="start", run=run,
+                   event_fields=trace['event_fields'], child=trace['child'])
         _handle(event, _STARTED_AT, learn=not codex, trace=trace)
     except Exception as exc:
         trace["outcome"] = failure_reason(exc)

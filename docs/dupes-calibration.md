@@ -2,7 +2,8 @@
 
 `epitype dupes [vaults...] [--json] [--threshold N]` only writes a report.
 It never calls a model or edits, merges, or retires a card. Review candidates
-against their original sources and scopes before making any changes.
+against their current meaning, scope and status before making changes. Consult
+original sources only for a material ambiguity, conflict or explicit audit.
 
 The default threshold is **0.35**. This is a lexical candidate detector with
 low recall on the human semantic-merge benchmark, not a complete duplicate audit.

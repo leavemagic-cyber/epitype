@@ -15,10 +15,11 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from epitype import compact_map, memspec
+from epitype import capture_route, compact_map, hook_context, memspec
 from _hook_common import (
     isolated_temp_root,
     bounded_context,
+    clear_recall_markers,
     config_path,
     emit,
     expired,
@@ -27,8 +28,10 @@ from _hook_common import (
     load_config,
     native_cwd_vaults,
     payload,
+    payload_fits,
     read_event,
     resolve_vaults,
+    scoped_vaults,
     run_synthetic,
     trace_hook,
     trace_run,
@@ -341,12 +344,19 @@ def _handoff_line(event, governance):
             delivered = int(record.read_text(encoding="ascii").strip())
         except (OSError, ValueError):
             delivered = None
-        if delivered == info.st_mtime_ns:
+        # Explicit working state must survive each compaction even when unchanged.
+        # Legacy narrative handoffs retain their existing stale-next-step dedupe.
+        if delivered == info.st_mtime_ns and not (
+            event.get("source") == "compact" and compact_map.handoff_resume(destination)
+        ):
             return None
     except (OSError, RuntimeError, ValueError):
         return None
-    line = compact_map.handoff_notice(destination)
-    return (line, record, info.st_mtime_ns) if line else None
+    # Final output budgeting can admit a necessary handoff even when its path
+    # exceeds the optional single-line notice cap. Never truncate the path.
+    line = compact_map.handoff_notice(destination) or memspec.CONTEXT_METER_HANDOFF_NOTICE.format(
+        path=os.fspath(destination))
+    return line, record, info.st_mtime_ns
 
 
 def _record_deliveries(deliveries):
@@ -358,44 +368,72 @@ def _record_deliveries(deliveries):
             pass
 
 
-def _startup_segments(pieces, vaults, resolved, governance, started_at, *, event=None):
-    """開場（非壓縮續場）才跑的三段：卡片檢查、守衛快取暖機、重複擋人提醒。
-
-    每段各拿自己的時間預算，撥不到就整段省略。card_lint 用到才載入：光載入就要 0.3 s，
-    壓縮續場走不到這裡就不該付。"""
-    # A card missing its type's required fields is a card the recall side will
-    # hand over half-true. One line, only when something actually FAILs, and only
-    # when the scan finished inside its own budget: half a vault's numbers are
-    # worse than no numbers.
-    # 同一趟掃描也餵下面那行順手任務：掃兩次就是同一份預算付兩次。
-    seconds = _segment_budget(started_at, memspec.CARD_LINT_HOOK_BUDGET_SECONDS)
-    if seconds is not None:
-        from epitype import card_lint
-
-        reports = card_lint.scan_vaults(vaults, time_budget=seconds)
-        malformed = card_lint.summary_line(vaults, reports=reports)
-        if malformed:
-            pieces.append(malformed)
-
+def _record_notices(notices):
+    """Acknowledge advisory notices only after the final output was flushed."""
+    for kind, args in notices:
         try:
-            translate = card_lint.no_chinese_line(reports, governance)
+            if kind == 'dream':
+                _dream_mark_notified(*args)
         except Exception:
-            translate = None
-        if translate:
-            pieces.append(translate)
+            pass
 
-    # 動作閘的守衛快取在這裡暖：工具呼叫每次只讀得動一小片，冷快取時排在後面的守衛
-    # 卡等於還沒生效，而閘少擋是不會出聲的。開場付一次，之後每次呼叫都讀暖的。
-    # 純副作用：暖不起來就算了，不影響這場要注入什麼——所以它只拿固定的一小段，撥不到
-    # 就整段省略；被截斷的部分照樣由工具呼叫的逐次補讀收斂，擋不擋得住不因此改變。
+
+def _compact_context(pieces, budget, *, preserve=(), selected_out=None, trace=None):
+    """Keep complete state first; optional pointers must not evict it for a suffix."""
+    pieces = [piece for piece in pieces if isinstance(piece, str) and piece]
+    selected = []
+    for piece in pieces:
+        candidate = '\n'.join([*selected, piece])
+        if payload_fits('SessionStart', candidate, budget):
+            selected.append(piece)
+    omitted = len(pieces) - len(selected)
+    suffix = None
+    if omitted:
+        suffix = memspec.CONTEXT_TRUNCATED_SUFFIX.format(dropped=omitted)
+        # Prefer the omission notice over optional pointers/diagnostics, but not
+        # over the working state or a necessary fallback handoff.
+        for index in range(len(selected)-1, -1, -1):
+            if payload_fits('SessionStart', '\n'.join([*selected, suffix]), budget):
+                break
+            if selected[index] not in preserve:
+                selected.pop(index)
+                omitted += 1
+                suffix = memspec.CONTEXT_TRUNCATED_SUFFIX.format(dropped=omitted)
+        if not payload_fits('SessionStart', '\n'.join([*selected, suffix]), budget):
+            suffix = None
+    if selected_out is not None:
+        selected_out.extend(selected)
+    if trace is not None:
+        trace['omitted_segments'] = omitted
+        trace['omission_notice_sent'] = bool(suffix)
+    return '\n'.join([*selected, *([suffix] if suffix else [])]) or None
+
+
+def _startup_segments(pieces, vaults, config, started_at, *, event=None, trace=None):
+    """Read lint accounting, incrementally warm scoped guards, then report repeats."""
+    from epitype import lint_result
+    resolved = scoped_vaults(config, event or {})
+
+    # Maintenance owns full lint/example checks. Unknown/stale results stay
+    # explicit in diagnostics; none of these states inject maintenance tasks.
+    states = []
+    for vault in vaults:
+        if _soft_remaining(started_at) <= 0:
+            states.append('unchecked')
+            continue
+        states.append(lint_result.read(vault)['status'])
+    if trace is not None:
+        trace['card_lint'] = states
+
+    # Discover changed guard declarations in the tool gate's own scope. A warm
+    # locator never replaces the tool call's current card/source verification.
     warm_seconds = _segment_budget(started_at, memspec.SESSIONSTART_WARM_GUARD_BUDGET_SECONDS)
     if warm_seconds is not None:
         try:
             import pretooluse_gate
 
             pretooluse_gate.warm_guard_cache(
-                resolved, started_at, deadline=time.monotonic() + warm_seconds
-            )
+                resolved, started_at, deadline=time.monotonic() + warm_seconds)
         except Exception:
             pass
 
@@ -410,16 +448,42 @@ def _startup_segments(pieces, vaults, resolved, governance, started_at, *, event
             pass
 
 
-def _handle(event, started_at, deliveries=None, trace=None):
+@capture_route.observation_window()
+def _handle(event, started_at, deliveries=None, trace=None, notice_claims=None):
     """`trace` 是給追蹤的一個 dict：source、地圖在不在、交接有沒有、哪幾行進了輸出、提早結束的原因。"""
     trace = {} if trace is None else trace
     trace["source"] = event.get("source") if isinstance(event, dict) else None
+    child = hook_context.is_subagent(event)
+    if child and (event.get('source') != 'compact'
+                  or not hook_context.is_subagent_transcript(event.get('transcript_path'))):
+        # A fresh worker has its own brief. A parent transcript is not its recovery state.
+        trace['outcome'] = 'subagent-startup'
+        return None
+    if isinstance(event, dict) and event.get('source') == 'compact':
+        # Recovery must not depend on PreCompact reaching its reset, or config/map availability.
+        session = hook_context.identity(event)
+        if session:
+            clear_recall_markers(session)
+            trace['receipt_reset'] = True
     config = load_config(started_at)
     if config is None:
         trace["outcome"] = "budget-expired"
         return None
     budget = config[memspec.CONFIG_BUDGET_BYTES_FIELD]
     pieces = []
+    # Maintenance accounting stays on disk, outside both hosts' working context.
+    # Its receipt records the observed cache state, independent of hook delivery.
+    try:
+        if not child:
+            from epitype import fixed_load
+            fixed_cwd = event.get("cwd") or Path.cwd()
+            fixed_report, fixed_receipt = fixed_load.cache_paths(Path.home(), fixed_cwd, legacy=True)
+            _, fixed_state = fixed_load.notice(fixed_report, fixed_receipt, fixed_cwd)
+            if fixed_state is not None:
+                fixed_load.publish(fixed_state, fixed_receipt)
+    except Exception:
+        # Advisory accounting must never alter the existing hook's exit behavior.
+        pass
     # 開場只看這場真的碰得到的庫：cwd 自己的庫加上治理庫。別的專案的卡不是這場的事，
     # 掃它只是替這場的預算多付一次。喚回仍然按內容找得到那些卡。
     # 治理庫＝拿著工作帳本的那一個，不是排序第一的那一個：安裝器按字母排，位置不帶
@@ -435,41 +499,45 @@ def _handle(event, started_at, deliveries=None, trace=None):
 
     source = event.get("source") if isinstance(event, dict) else None
     handoff = None
+    handoff_content = None
+    resume = None
     map_line = None
     dream = config.get(memspec.DREAM_CONFIG_FIELD) or {}
 
-    # 壓縮續場先放地圖那一行：續場丟掉的是原文，而其餘幾行在別的場次還會再出現一次；
-    # 預算裁不下時，先保住唯一一份回得去原文的指標。其他 source 一個字都不加。
-    # 交接檔那一行排在地圖之後：預算只裁得下一行時，留下的必須是地圖——它是唯一回得去
-    # 原文的指標；交接是模型自己整理過的接續點，可以從地圖回撈的原文重建。
+    # Effective working state comes before optional historical source pointers.
     if source == "compact":
         try:
             map_line = _compact_map_line(event, governance, trace)
         except Exception:
             map_line = None
-        if map_line:
-            pieces.append(map_line)
         try:
             handoff = _handoff_line(event, governance)
         except Exception:
             handoff = None
         trace["handoff"] = bool(handoff)
         if handoff:
-            pieces.append(handoff[0])
-        from epitype import rule_context
-        transcript_value = event.get("transcript_path")
-        if isinstance(transcript_value, str) and transcript_value:
             destination = compact_map.handoff_destination(
                 governance, event.get("session_id", event.get("sessionId", "")),
-                Path(transcript_value).expanduser().resolve())
-            rule_diagnostics = []
-            restored = rule_context.restore(
-                destination, resolved, event=event, diagnostics=rule_diagnostics)
-            if rule_diagnostics:
-                trace["rule_context_diagnostics"] = rule_diagnostics
-            if restored:
-                pieces.append(restored)
-    if _soft_remaining(started_at) > 0:
+                event["transcript_path"])
+            resume = compact_map.handoff_resume(destination)
+            notice = compact_map.resume_notice(destination) if resume else None
+            if resume:
+                pieces.append(resume)
+                if payload_fits('SessionStart', resume, budget):
+                    handoff_content = resume
+                    handoff = (notice, *handoff[1:])
+                else:
+                    # The model still needs to read its working state if we
+                    # cannot carry the complete state in this output.
+                    handoff_content = handoff[0]
+            else:
+                handoff_content = handoff[0]
+            if handoff_content != resume:
+                # Recovery must remain reachable when the complete state does not fit.
+                pieces.append(handoff_content)
+        pieces.extend([map_line,
+                       handoff[0] if handoff and handoff_content == resume else None])
+    if not child and _soft_remaining(started_at) > 0:
         try:
             _dream_spawn(dream, governance_vault(config, for_write=True), started_at, source=source)
         except Exception:
@@ -494,11 +562,11 @@ def _handle(event, started_at, deliveries=None, trace=None):
             pieces.append(ramguard_line)
 
     if source != "compact":
-        _startup_segments(pieces, vaults, resolved, governance, started_at, event=event)
+        _startup_segments(pieces, vaults, config, started_at, event=event, trace=trace)
 
     # 夢的一行跟其他一行摘要放在一起：它是狀態，不是規則。
     notice_deliveries = []
-    if _soft_remaining(started_at) > 0:
+    if not child and _soft_remaining(started_at) > 0:
         try:
             notice = _dream_notice(governance_vault(config, for_write=True), source, dream,
                                    deliveries=notice_deliveries)
@@ -510,15 +578,25 @@ def _handle(event, started_at, deliveries=None, trace=None):
     if expired(started_at):
         trace["outcome"] = "budget-expired"
         return None
-    context = bounded_context("SessionStart", pieces, budget)
+    selected = []
+    if source == 'compact':
+        context = _compact_context(pieces, budget,
+            preserve=(resume, handoff_content), selected_out=selected, trace=trace)
+    else:
+        context = bounded_context("SessionStart", pieces, budget)
+        selected = context.splitlines() if context else []
     for notice, destination, state, completed in notice_deliveries:
-        if context and notice in context.splitlines():
-            _dream_mark_notified(destination, state, completed)
-    if context and handoff and deliveries is not None and handoff[0] in context.splitlines():
+        if notice in selected:
+            if notice_claims is not None:
+                notice_claims.append(('dream', (destination, state, completed)))
+    if handoff and deliveries is not None and handoff_content in selected:
         deliveries.append(handoff[1:])
-    sent = context.splitlines() if context else []
-    trace["lines"] = [name for name, line in (("map", map_line), ("handoff", handoff[0] if handoff else None))
-                      if line and line in sent]
+    trace['resume'] = bool(resume and resume in selected)
+    sent = selected
+    trace["lines"] = [name for line in sent
+                      for name, pointer in (("map", map_line),
+                                            ("handoff", handoff[0] if handoff else None))
+                      if pointer and line == pointer]
     trace["outcome"] = "ok" if context else "empty"
     return payload("SessionStart", context) if context else None
 
@@ -532,9 +610,15 @@ def _selftest():
     try:
         import tempfile
         from contextlib import ExitStack
+        from unittest.mock import patch
 
         with ExitStack() as fixtures, tempfile.TemporaryDirectory(prefix="epitype-sessionstart-") as temp_dir:
             root = Path(temp_dir).resolve()
+            fixtures.enter_context(patch.dict(os.environ, {
+                "HOME": os.fspath(root), "USERPROFILE": os.fspath(root),
+                "CODEX_HOME": os.fspath(root / ".codex"),
+                memspec.EPITYPE_CONFIG_ENV: os.fspath(root / "config.json"),
+            }))
             # 卡片檢查與翻譯可因啟動預算省略；行為題固定時鐘，計時題仍跑真正入口。
             frozen_start = root / "sessionstart-frozen.py"
             frozen_start.write_text(
@@ -566,7 +650,7 @@ def _selftest():
                 (
                     "§40：短入口索引一個字都不回音，檔案在不在都一樣",
                     result.returncode == 0
-                    and "🧾" in context
+                    and context == ""
                     and (vault / memspec.MEMORY_INDEX_FILENAME).is_file()
                     and "# Synthetic Index" not in context
                     and "index detail" not in context
@@ -579,7 +663,7 @@ def _selftest():
             checks.append(
                 (
                     "the work ledger is never injected, however present the file is",
-                    "🧾" in context  # 空 context 會讓下面兩條「不在裡面」恆真
+                    context == ""
                     and (vault / memspec.WORK_LEDGER_FILENAME).is_file()
                     and "ledger detail" not in context
                     and memspec.WORK_LEDGER_FILENAME not in context,
@@ -629,7 +713,7 @@ def _selftest():
                         for _code, text in shapes.values()
                     )
                     and shapes["codex"][1] == shapes["claude"][1]
-                    and "🧾" in shapes["claude"][1],
+                    and shapes["claude"][1] == "",
                 )
             )
 
@@ -646,7 +730,7 @@ def _selftest():
                     overdue_result.returncode == 0
                     and "⏳" not in overdue_context
                     and "殭屍待辦" not in overdue_context
-                    and "🧾" in overdue_context,
+                    and overdue_context == "",
                 )
             )
 
@@ -671,11 +755,10 @@ def _selftest():
             clean_context = clean_value.get("hookSpecificOutput", {}).get("additionalContext", "")
             checks.append(
                 (
-                    "card-type lint adds one line when a card FAILs; a vault with nothing to do injects nothing at all",
+                    "card lint maintenance stays outside startup for both broken and clean cards",
                     broken_result.returncode == 0
                     and clean_result.returncode == 0
-                    and "🧾 卡片型別檢查：FAIL 1" in broken_context
-                    and broken_context.count("🧾") == 1
+                    and broken_context == ""
                     and "card index detail" not in broken_context
                     and clean_context == ""
                     and not clean_result.stdout.strip(),
@@ -708,21 +791,18 @@ def _selftest():
             _compact_run, compact_translate_context = translate_run("compact")
             checks.append(
                 (
-                    "沒中文的卡列成一行順手任務（本場 ≤3 張），不是 WARN，也不佔卡片檢查那一行",
+                    "startup does not assign alias maintenance from English-only cards",
                     first_run.returncode == 0
-                    and "🈳 順手補中文別名（本場 ≤3 張）：" in first_context
-                    and all(f"english-{letter}.md" in first_context for letter in "abc")
-                    and "english-d.md" not in first_context
+                    and first_context == ""
                     and "🧾" not in first_context
                     and "translate index detail" not in first_context,
                 )
             )
             checks.append(
                 (
-                    "游標讓每場輪替：下一場從上次列到的那張之後接下去；壓縮續場不派翻譯",
+                    "repeated startup and compact do not assign translation maintenance",
                     second_run.returncode == 0
-                    and "english-d.md" in second_context
-                    and "english-c.md" not in second_context
+                    and second_context == ""
                     and "🈳" not in compact_translate_context,
                 )
             )
@@ -749,10 +829,9 @@ def _selftest():
             two_context = two_value.get("hookSpecificOutput", {}).get("additionalContext", "")
             checks.append(
                 (
-                    "only the governance vault is scanned, not another project's",
+                    "startup does not inject maintenance details from either configured vault",
                     two_result.returncode == 0
-                    and os.fspath(vault) in two_context
-                    and "anchor-card.md" in two_context
+                    and two_context == ""
                     and os.fspath(second) not in two_context
                     and "second-card.md" not in two_context
                     and "second index detail" not in two_context
@@ -796,11 +875,11 @@ def _selftest():
             both_context = both_value.get("hookSpecificOutput", {}).get("additionalContext", "")
             checks.append(
                 (
-                    "cwd vault survives being configured too; governance is the ledger holder",
+                    "configured native and governance cards stay on disk without startup maintenance",
                     both_result.returncode == 0
-                    and "🧾 卡片型別檢查：FAIL 2" in both_context
-                    and "both-native-card.md" in both_context
-                    and "gov-card.md" in both_context
+                    and both_context == ""
+                    and (both_native / 'both-native-card.md').is_file()
+                    and (gov / 'gov-card.md').is_file()
                     and "other-card.md" not in both_context
                     and "both native detail" not in both_context
                     and "gov index detail" not in both_context
@@ -891,9 +970,8 @@ def _selftest():
                         and "我等一下會補上" not in promise_context
                         and "殭屍待辦" not in promise_context
                         and "promise index detail" not in promise_context
-                        # 壓縮續場不跑卡片檢查（地圖與交接不能等它），所以 🧾 只在開場出現。
-                        and (("🧾" in promise_context) if promise_source == "startup"
-                             else ("🧾" not in promise_context)),
+                        # Lint maintenance is absent from both startup and compact.
+                        and "🧾" not in promise_context,
                     )
                 )
 
@@ -1220,7 +1298,7 @@ def _selftest():
                 and "壓縮前原文地圖" not in resume_context,
             ))
 
-            # 用量計：壓縮前交接檔存在且非空，壓縮續場就在地圖那行之後交回；不在或空的就不加。
+            # 沒有完整短狀態時，必要交接先於原文備查地圖；不在或空的就不加。
             handoff_file = compact_map.handoff_destination(map_vault, map_session, map_transcript)
             handoff_expected = compact_map.handoff_notice(handoff_file)
             handoff_file.write_text("使用者原話：…\n下一步：…\n", encoding="utf-8")
@@ -1228,12 +1306,12 @@ def _selftest():
             handoff_startup, handoff_startup_context = map_run({**claude_shape, "source": "startup"})
             handoff_lines = handoff_context.splitlines()
             checks.append((
-                "交接檔存在且非空：壓縮續場多一行、排在地圖那行之後；startup 不加",
+                "交接檔存在且非空：必要交接先於原文備查地圖；startup 不加",
                 handoff_run.returncode == 0
                 and bool(handoff_expected)
                 and handoff_lines.count(handoff_expected) == 1
                 and expected_line in handoff_lines
-                and handoff_lines.index(expected_line) < handoff_lines.index(handoff_expected)
+                and handoff_lines.index(handoff_expected) < handoff_lines.index(expected_line)
                 and handoff_startup.returncode == 0
                 and handoff_expected not in handoff_startup_context,
             ))
@@ -1266,31 +1344,39 @@ def _selftest():
                 and handoff_record.read_text(encoding="ascii").strip() == str(rewritten_mtime),
             ))
 
-            # 預算只放得下一行：留地圖、丟交接（先重寫一次，讓交接確實有資格被交回）。
+            # 預算只放得下一行：先保必要交接，不讓原文備查指標取代接續入口。
             cut_mtime = rewrite_handoff(10)
-            one_line_budget = (len(expected_line.encode("utf-8"))
-                               + len(memspec.CONTEXT_TRUNCATED_SUFFIX.format(dropped=1).encode("utf-8"))
-                               + 8)
+            one_line_budget = next(n for n in range(100, 2000)
+                if payload_fits("SessionStart", handoff_expected + "\n"
+                    + memspec.CONTEXT_TRUNCATED_SUFFIX.format(dropped=1), n))
             one_line_config = root / "one-line-config.json"
             write_config(one_line_config, [map_vault], budget=one_line_budget)
             one_line_run, one_line_context = map_run(claude_shape, one_line_config)
             checks.append((
-                "預算只放得下一行時，留下的是地圖那一行，被裁掉的是交接",
+                "預算只放得下一行時，保留必要交接並記帳，原文備查地圖被省略",
                 one_line_run.returncode == 0
-                and one_line_budget < len(expected_line.encode("utf-8"))
-                + len(handoff_expected.encode("utf-8")) + 1
-                and expected_line in one_line_context.splitlines()
-                and handoff_expected not in one_line_context,
+                and not payload_fits("SessionStart", expected_line + "\n" + handoff_expected, one_line_budget)
+                and expected_line not in one_line_context
+                and handoff_expected in one_line_context.splitlines()
+                and handoff_record.read_text(encoding="ascii").strip() == str(cut_mtime),
             ))
             # 被預算裁掉的不算交付：紀錄不動，下一次壓縮續場照樣交回。
-            cut_left_record = handoff_record.read_text(encoding="ascii").strip() == str(rewritten_mtime)
+            retry_mtime = rewrite_handoff(10)
+            no_handoff_budget = next(n for n in range(100, 2000)
+                if payload_fits("SessionStart", handoff_expected, n)) - 1
+            no_handoff_config = root / "no-handoff-config.json"
+            write_config(no_handoff_config, [map_vault], budget=no_handoff_budget)
+            cut_run, cut_context = map_run(claude_shape, no_handoff_config)
+            cut_left_record = handoff_record.read_text(encoding="ascii").strip() == str(cut_mtime)
             retry_run, retry_context = map_run(claude_shape)
             checks.append((
                 "第一次因預算被裁掉的交接不記為已交付，下一次仍會交回",
-                cut_left_record
+                cut_run.returncode == 0
+                and handoff_expected not in cut_context
+                and cut_left_record
                 and retry_run.returncode == 0
                 and handoff_expected in retry_context.splitlines()
-                and handoff_record.read_text(encoding="ascii").strip() == str(cut_mtime),
+                and handoff_record.read_text(encoding="ascii").strip() == str(retry_mtime),
             ))
             handoff_file.write_text("", encoding="utf-8")
             empty_run, empty_context = map_run(claude_shape)
@@ -1346,10 +1432,10 @@ def _selftest():
                 and codex_map.is_file()
                 and bool(codex_map_line) and bool(codex_handoff_line)
                 and codex_run.returncode == 0
-                and codex_context.splitlines() == [codex_map_line, codex_handoff_line],
+                and codex_context.splitlines() == [codex_handoff_line, codex_map_line],
             ))
 
-            # 追蹤：壓縮續場每次一行（地圖在不在、交接有沒有、哪幾行真的出去）；開場不記。
+            # Both startup and compact have paired traces; compact records recovery delivery.
             map_run({**codex_event, "session_id": "trace-startup", "source": "startup"})
             map_run({**codex_event, "session_id": "trace-no-map"})
             trace_file = root / memspec.CONTEXT_METER_TRACE_FILENAME
@@ -1361,26 +1447,26 @@ def _selftest():
                           if row.get("event") == "SessionStart" and row.get("phase") == "start"]
             checks.append((
                 "a compact resume traces map found (same file name PreCompact wrote), handoff found and the "
-                "lines that went out; startup is not traced",
+                "lines that went out; startup also has paired traces",
                 any(row["host"] == "codex" and row["session"] == codex_session and row["outcome"] == "ok"
                     and row["map"] is True and row["handoff"] is True and row["stem"] == codex_map.stem
-                    and row["lines"] == ["map", "handoff"] and isinstance(row["ms"], int)
+                    and row["lines"] == ["handoff", "map"] and isinstance(row["ms"], int)
                     for row in trace_rows)
                 and any(row.get("event") == "PreCompact" and row.get("host") == "codex"
                         and row.get("stem") == codex_map.stem and row.get("map") is True for row in all_rows)
                 and any(row["session"] == "trace-no-map" and row["map"] is False and row["lines"] == []
                         for row in trace_rows)
-                and not any(row["session"] == "trace-startup" for row in trace_rows)
-                and not any(row.get("session") == "trace-startup" for row in all_rows)
+                and any(row["session"] == "trace-startup" and row.get('source') == 'startup'
+                        for row in trace_rows)
                 and len(start_runs) == len(trace_rows)
                 and set(start_runs) == {row["run"] for row in trace_rows}
-                and all("source" not in row for row in trace_rows),
+                and all(row.get('source') in ('compact', 'startup', 'resume') for row in trace_rows),
             ))
 
             # 壓縮續場不跑卡片檢查、守衛快取暖機與重複擋人提醒：宿主有硬逾時，這三段曾占掉
             # 壓縮續場 2 s 以上，整段被砍時地圖那行跟著消失。開場照跑（同一個呼叫端對照）。
             import pretooluse_gate as _gate
-            from epitype import card_lint as _card_lint
+            from epitype import lint_result as _lint_result
 
             spied = []
 
@@ -1390,7 +1476,7 @@ def _selftest():
                     return original(*args, **kwargs)
                 return wrapper
 
-            originals = (_card_lint.scan_vaults, _gate.warm_guard_cache, _repeat_guard_notices)
+            originals = (_lint_result.read, _gate.warm_guard_cache, _repeat_guard_notices)
             saved_env = {name: os.environ.get(name)
                          for name in (memspec.EPITYPE_CONFIG_ENV, memspec.DREAM_MODE_ENV)}
             stamp = codex_handoff.stat().st_mtime_ns + 10 * 1_000_000_000
@@ -1398,7 +1484,7 @@ def _selftest():
             try:
                 os.environ[memspec.EPITYPE_CONFIG_ENV] = os.fspath(map_config)
                 os.environ[memspec.DREAM_MODE_ENV] = memspec.DREAM_MODE_OFF
-                _card_lint.scan_vaults = spy("lint", originals[0])
+                _lint_result.read = spy("lint-result", originals[0])
                 _gate.warm_guard_cache = spy("warm", originals[1])
                 globals()["_repeat_guard_notices"] = spy("notices", originals[2])
                 compact_value = _handle(codex_event, time.monotonic())
@@ -1407,7 +1493,7 @@ def _selftest():
                 _handle({**codex_event, "source": "startup"}, time.monotonic())
                 startup_spied = list(spied)
             finally:
-                _card_lint.scan_vaults, _gate.warm_guard_cache = originals[0], originals[1]
+                _lint_result.read, _gate.warm_guard_cache = originals[0], originals[1]
                 globals()["_repeat_guard_notices"] = originals[2]
                 for name, value in saved_env.items():
                     if value is None:
@@ -1416,10 +1502,10 @@ def _selftest():
                         os.environ[name] = value
             compact_text = (compact_value or {}).get("hookSpecificOutput", {}).get("additionalContext", "")
             checks.append((
-                "壓縮續場不呼叫卡片檢查、守衛快取暖機、重複擋人提醒，地圖與交接照樣交回；開場三段都跑",
+                "compact preserves recovery without maintenance; startup reads lint results and warms guards",
                 compact_spied == []
-                and compact_text.splitlines() == [codex_map_line, codex_handoff_line]
-                and {"lint", "warm", "notices"} <= set(startup_spied),
+                and compact_text.splitlines() == [codex_handoff_line, codex_map_line]
+                and {"lint-result", "warm", "notices"} <= set(startup_spied),
             ))
 
             # 240 B（UTF-8）是整行的上限：超限整行不注，路徑一個字元都不截。
@@ -1618,29 +1704,32 @@ def main():
         with isolated_temp_root():
             return _selftest()
     event = None
-    # 追蹤只記壓縮續場：地圖與交接沒交回來的原因還沒查明（2026-09-25 Codex App 兩次）。開始先記
-    # 一行（讀完事件、還沒讀設定），結束再記一行，兩行同一個 run：只有開始＝被砍或當掉。
+    # Paired traces distinguish a completed hook from termination before output.
     run = trace_run()
     trace = {"outcome": "unknown", "map": False, "handoff": False, "lines": []}
     try:
         event = read_event(sys.stdin)
+        trace['event_fields'] = sorted(event) if isinstance(event, dict) else []
+        trace['child'] = hook_context.is_subagent(event)
+        trace_hook("SessionStart", event, _STARTED_AT, phase="start", run=run,
+                   event_fields=trace['event_fields'], child=trace['child'])
         if config_path().exists():
             from epitype import action_receipts
             action_receipts.initialize(event, action_receipts.database_path(config_path()))
-        if isinstance(event, dict) and event.get("source") == "compact":
-            trace_hook("SessionStart", event, _STARTED_AT, phase="start", run=run)
         deliveries = []
-        value = _handle(event, _STARTED_AT, deliveries, trace)
+        notices = []
+        value = _handle(event, _STARTED_AT, deliveries, trace, notices)
         if value is not None and not expired(_STARTED_AT):
             emit(value)
             sys.stdout.flush()
             _record_deliveries(deliveries)
+            _record_notices(notices)
         elif value is not None:
             trace["outcome"], trace["lines"] = "budget-expired-before-output", []
     except Exception as exc:
         trace["outcome"], trace["lines"] = failure_reason(exc), []
-    if trace.pop("source", None) == "compact":
-        trace_hook("SessionStart", event, _STARTED_AT, phase="exit", run=run, **trace)
+    source = trace.pop("source", None)
+    trace_hook("SessionStart", event, _STARTED_AT, phase="exit", run=run, source=source, **trace)
     return 0
 
 

@@ -64,6 +64,18 @@ class HostFieldLint(_TempVault):
         return [(level, reason) for level, rule, reason in self._findings(f"{stem}.md", text)
                 if rule == "host-field"], self._findings(f"{stem}.md", text)
 
+    def test_autocompact_window_accepts_only_integer_tokens_in_range(self):
+        key = "CLAUDE_CODE_AUTO_COMPACT_WINDOW"
+        for value in ("100000", "300000", "1000000"):
+            with self.subTest(value=value):
+                host, _ = self._host_findings(f"host_claude_env:\n  {key}: '{value}'\n")
+                self.assertEqual(host, [])
+        for value in ("99999", "1000001", "-300000", "300000.0", "300k", "true"):
+            with self.subTest(value=value):
+                host, _ = self._host_findings(f"host_claude_env:\n  {key}: '{value}'\n")
+                self.assertEqual(len(host), 1, host)
+                self.assertIn("100000-1000000 的整數 token", host[0][1])
+
     def test_well_formed_fields_pass_and_count_as_armed(self):
         extra = (
             "host_claude_env:\n  CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS: \"4\"\n"
@@ -390,6 +402,36 @@ class _NativeFixture(_TempVault):
 
 class NativeSync(_NativeFixture):
     """D3／D4／D6：卡片→兩邊設定，只動自己寫的鍵，漂移點名到卡片與鍵，拿得回來。"""
+
+    def test_pct_to_window_removes_only_the_card_owned_old_key(self):
+        pct, window = "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", "CLAUDE_CODE_AUTO_COMPACT_WINDOW"
+        for key, value in ((pct, "40"), (window, "300000")):
+            self.global_card.write_text(_card(FEEDBACK_HEAD.format(stem="fb-native")
+                + f"host_claude_env:\n  {key}: '{value}'\n"
+                + "host_source: https://code.claude.com/docs/en/env-vars\n"), encoding="utf-8")
+            code, report = self._run(host_sync.apply)
+            self.assertEqual(code, host_sync.EXIT_OK, report)
+            settings = json.loads(self.settings.read_text(encoding="utf-8"))
+            self.assertEqual(settings["env"], {"USER_KEY": "1", key: value})
+        remembered = host_native.load_state(self.home)[host_native._key(self.settings)]["env"]
+        self.assertNotIn(pct, remembered)
+        self.assertEqual(remembered[window]["card"], "fb-native.md")
+        self.assertIn(HOOKS_BLOCK, self.settings.read_text(encoding="utf-8"))
+        code, report = self._run(host_sync.check)
+        self.assertEqual(code, host_sync.EXIT_OK, report)
+
+    def test_pct_to_window_preserves_an_unowned_old_key(self):
+        pct, window = "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", "CLAUDE_CODE_AUTO_COMPACT_WINDOW"
+        settings = json.loads(USER_SETTINGS)
+        settings["env"][pct] = "40"
+        self.settings.write_text(json.dumps(settings), encoding="utf-8")
+        self.global_card.write_text(_card(FEEDBACK_HEAD.format(stem="fb-native")
+            + f"host_claude_env:\n  {window}: '300000'\n"
+            + "host_source: https://code.claude.com/docs/en/env-vars\n"), encoding="utf-8")
+        code, report = self._run(host_sync.apply)
+        self.assertEqual(code, host_sync.EXIT_OK, report)
+        self.assertEqual(json.loads(self.settings.read_text(encoding="utf-8"))["env"],
+                         {"USER_KEY": "1", pct: "40", window: "300000"})
 
     def test_root_official_key_sync_and_removal(self):
         self.global_card.write_text(_card(FEEDBACK_HEAD.format(stem='fb-native')

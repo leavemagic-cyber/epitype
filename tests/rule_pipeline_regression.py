@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 import action_guard_regression as guard
 import rule_provenance_regression as source_fixture
-from epitype import card_lint, core_gen, host_sync, memspec, owner_rules, rule_pipeline
+from epitype import rule_provenance, card_lint, core_gen, host_sync, memspec, owner_rules, rule_pipeline
 import pretooluse_gate as gate
 
 
@@ -56,19 +56,13 @@ class RulePipeline(unittest.TestCase):
         return gate._handle(event, time.monotonic(), [])
 
     def test_real_write_gate_both_payloads_warn_for_invalid_source_without_denial(self):
-        false = copy.deepcopy(self.document)
-        false["quote"] = false["text"] = "Owner 從未說過的限制。"
-        for host in ("claude", "codex"):
-            for text in (self.card(false), self.card(rule_provenance="")):
-                with self.subTest(host=host):
-                    value = self.write_call(text, host)
-                    self.assertNotEqual((value or {}).get("hookSpecificOutput", {}).get(
-                        "permissionDecision"), "deny")
-                    # Write warnings may be deduplicated, but source validity must
-                    # still reject false authority before a rule is projected.
-                    issues = rule_pipeline.admission("", text, "rule", self.target)
-                    self.assertTrue(issues)
-                    self.assertIn("來源", "\n".join(issues))
+        for host in ('claude', 'codex'):
+            for text in (self.card(), self.card(rule_provenance='')):
+                value = self.write_call(text, host)
+                self.assertNotEqual((value or {}).get('hookSpecificOutput', {}).get('permissionDecision'), 'deny')
+                issues = rule_pipeline.admission('', text, 'rule', self.target)
+                fields, _ = memspec.frontmatter_text(text)
+                self.assertEqual(bool(issues), not bool(fields.get('rule_provenance')))
 
     def test_real_write_gate_both_payloads_accept_source_bound_rule(self):
         for host in ("claude", "codex"):
@@ -123,8 +117,8 @@ class RulePipeline(unittest.TestCase):
         document.update(kind="ai-derived", author="synthetic-ai", text="依原文核對這個案子的規則。")
         self.target.write_text(self.card(document, handoff_rule="true", status="active"), encoding="utf-8")
         block = owner_rules.render([self.vault])
-        self.assertIn("AI 執行整理（作者：synthetic-ai", block)
-        self.assertIn(document["quote"], block)
+        self.assertIn("卡片記載作者：synthetic-ai", block)
+        self.assertNotIn(document["quote"], block)
         self.assertIn(document["text"], block)
         self.assertNotIn("原始來源尚未驗證", block)
 
@@ -134,7 +128,7 @@ class RulePipeline(unittest.TestCase):
         self.assertFalse(errors)
         self.assertEqual(rules[0]["text"], self.document["text"])
         self.assertEqual(rules[0]["authorship"], "owner")
-        self.assertEqual(rules[0]["provenance"]["status"], "VERIFIED")
+        self.assertEqual(rules[0]["provenance"]["status"], "REVIEWED")
         out = self.root / "core.md"
         result = core_gen.generate([self.vault], out, config={})
         self.assertIn(result["status"], ("written", "unchanged"))
@@ -148,35 +142,31 @@ class RulePipeline(unittest.TestCase):
                                  host_sync.project_rules_text(self.vault, host))
 
     def test_missing_original_is_advisory_in_core_and_both_host_views(self):
-        self.target.write_text(self.card(), encoding="utf-8")
-        out = self.root / "core.md"
+        self.target.write_text(self.card(), encoding='utf-8')
+        out = self.root / 'core.md'
         core_gen.generate([self.vault], out, config={})
+        previous = out.read_bytes()
         self.original.path.unlink()
         result = core_gen.generate([self.vault], out, config={})
-        self.assertEqual(result["status"], "written", result)
-        rendered = out.read_text(encoding="utf-8")
-        self.assertIn(self.document["text"], rendered)
-        self.assertIn("原始對話無法讀取", rendered)
-        pack = json.loads(Path(result["pack"]).read_text(encoding="utf-8"))
-        evidence = pack["cards"][0]["provenance"]
-        self.assertEqual(evidence["status"], "UNVERIFIED")
-        self.assertTrue(evidence["source_unavailable"])
-        self.assertFalse(evidence["action_authorization"])
-        self.assertNotEqual(core_gen.check([self.vault], out)["status"], core_gen.STATUS_UNREADABLE)
-        for host in ("codex", "claude"):
+        self.assertEqual(result['status'], 'unchanged')
+        self.assertEqual(out.read_bytes(), previous)
+        for host in ('codex', 'claude'):
             self.assertEqual(host_sync.project_rules_text(self.vault, host),
-                             core_gen.host_view(rendered, host).rstrip())
+                core_gen.host_view(out.read_text(encoding='utf-8'), host).rstrip())
         fields, _ = memspec.frontmatter_fields(self.target)
-        with self.assertRaises(ValueError):
-            rule_pipeline.projection(fields, self.target)
+        projected = rule_pipeline.projection(fields, self.target)
+        self.assertEqual(projected['provenance']['status'], 'REVIEWED')
+        self.assertEqual(projected['provenance']['source_audit_status'], 'NOT_REQUESTED')
+        self.assertFalse(projected['provenance']['action_authorization'])
+        self.assertFalse(rule_pipeline.inspect_card(fields,self.target,audit_originals=True).verified)
 
     def test_invalid_projection_preserves_prior_output_no_silent_partial_success(self):
         self.target.write_text(self.card(), encoding="utf-8")
         out = self.root / "core.md"
         core_gen.generate([self.vault], out, config={})
         previous = out.read_bytes()
-        self.original.path.write_bytes(self.original.path.read_bytes().replace(
-            self.original.quote.encode(), b"fabricated directive"))
+        self.target.write_text(self.target.read_text(encoding='utf-8').replace('---\n',
+            '---\nguard_tool: Bash\nguard_all_of: [unsafe]\non_hit: block\n',1),encoding='utf-8')
         result = core_gen.generate([self.vault], out, config={})
         self.assertEqual(result["status"], core_gen.STATUS_UNREADABLE)
         self.assertEqual(out.read_bytes(), previous)
@@ -206,10 +196,16 @@ class RulePipeline(unittest.TestCase):
         missing['path'] = str(self.root / 'missing-original.jsonl')
         document['sources'][0]['record_sha256'] = '0' * 64
         document['sources'].append(missing)
-        self.target.write_text(self.card(document), encoding='utf-8')
+        text = self.card(document)
+        self.target.write_text(text, encoding='utf-8')
         rules, errors = core_gen.collect_rules([self.vault])
-        self.assertFalse(rules)
-        self.assertTrue(any('INVALID' in error and 'identity' in error for error in errors))
+        self.assertFalse(errors)
+        self.assertEqual(len(rules), 1)
+        fields, _ = memspec.frontmatter_text(text)
+        audit = rule_pipeline.inspect_card(fields,self.target,audit_originals=True)
+        self.assertFalse(audit.verified)
+        self.assertEqual(audit.status,'INVALID')
+        self.assertTrue(any('identity' in issue for issue in audit.issues))
 
     def test_missing_original_keeps_reciprocal_successor_without_reviving_predecessor(self):
         successor = self.vault / 'rule-source-successor.md'
@@ -221,7 +217,7 @@ class RulePipeline(unittest.TestCase):
         rules, errors = core_gen.collect_rules([self.vault])
         self.assertFalse(errors)
         self.assertEqual([row['path'] for row in rules], [successor.name])
-        self.assertEqual(rules[0]['provenance']['status'], 'UNVERIFIED')
+        self.assertEqual(rules[0]['provenance']['status'], 'REVIEWED')
         self.target.write_text(self.card(status='active'), encoding='utf-8')
         rules, errors = core_gen.collect_rules([self.vault])
         self.assertTrue(any('predecessor is still active' in error for error in errors))
@@ -338,14 +334,43 @@ class RulePipeline(unittest.TestCase):
         for host in ("claude", "codex"):
             block = host_sync.project_rules_text(self.vault, host)
             self.assertIn("synthetic-project", block)
-            self.assertIn('"case":"A"', block)
-            self.assertIn("AI 整理：synthetic-ai", block)
+            self.assertIn('案例 A', block)
+            self.assertEqual(block.count(memspec.CORE_GEN_HISTORY_ON_DEMAND.format(author="synthetic-ai")), 1)
+            self.assertNotIn("AI 整理：synthetic-ai", block)
+            self.assertNotIn(document["quote"], block)
         document["scope"]["expiry"] = "2000-01-01"
         self.target.write_text(self.card(document, handoff_rule="true", status="active"), encoding="utf-8")
         rules, errors = core_gen.collect_rules([self.vault])
         self.assertFalse(errors)
         self.assertFalse(rules)
         self.assertNotIn(document["text"], owner_rules.render([self.vault]))
+
+    def test_expiry_and_different_author_remain_per_rule_in_both_generated_hosts(self):
+        # A majority author/scope belongs in the header; exceptions must stay
+        # attached to their own rule in each real host projection.
+        documents = []
+        for number in range(1, 4):
+            document = copy.deepcopy(self.document)
+            document.update(key=f"synthetic-metadata-{number}", kind="ai-derived",
+                            author="synthetic-main-ai", text=f"Synthetic current rule {number}.")
+            if number == 3:
+                document["author"] = "synthetic-other-ai"
+                document["scope"]["expiry"] = "2999-01-01"
+            path = self.vault / f"rule-metadata-{number}.md"
+            path.write_text(self.card(document, order=str(number), handoff_rule="true", status="active"),
+                            encoding="utf-8")
+            documents.append(document)
+        for host in ("claude", "codex"):
+            with self.subTest(host=host):
+                block = host_sync.project_rules_text(self.vault, host)
+                self.assertEqual(block.count(memspec.CORE_GEN_HISTORY_ON_DEMAND.format(
+                    author="synthetic-main-ai")), 1)
+                self.assertIn('- Synthetic current rule 3.\nAI 整理：synthetic-other-ai\n', block)
+                self.assertIn('期限 2999-01-01', block)
+                self.assertNotIn('範圍覆寫：', block)
+                for document in documents:
+                    self.assertEqual(block.count(document["text"]), 1)
+                    self.assertNotIn(document["quote"], block)
 
 
 if __name__ == "__main__":

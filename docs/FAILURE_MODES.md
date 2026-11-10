@@ -203,3 +203,7 @@ An unavailable original conversation leaves the card UNVERIFIED without blocking
 ## 50. Bash ran Markdown text as commands and froze the machine (2026-10-12)
 
 Shell examples and embedded Markdown require literal-safe quoting. Validate the actual shell path and proposed artifact; a successful parser invocation alone does not prove the command's intended effect.
+
+## Changes in 1.11.0
+
+Automatic prompt matching is now opt-in (`proactive_recall: true`). Compaction recovery prioritizes current working state. Routine rule maintenance checks current content and scope; historical source audits remain explicit. See [release notes](releases/v1.11.0.md) for behavior changes and known limits.

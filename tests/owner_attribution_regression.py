@@ -1,5 +1,5 @@
 import sys; sys.dont_write_bytecode = True
-"""Replay the incident's exact sentences and authority-admission boundaries."""
+"""Synthetic attribution audit and hook delivery boundaries; no private conversations."""
 import copy
 import hashlib
 from datetime import datetime, timedelta, timezone
@@ -15,13 +15,13 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / 'adapters' / 'claude')]
-from epitype import capture, compact_map, memspec, rule_provenance as provenance
+from epitype import capture, compact_map, hook_context, memspec, rule_provenance as provenance
 import _hook_common as common
 import pretooluse_gate as pretool
 import stop_gate as stop
 
-ASSISTANT_WORDS = '大量重掃照原計畫做成 Colab 工作，由我來跑，所以校準資料不用放到 lobshsu'
-OWNER_WORDS = '能用dot就用dot'
+ASSISTANT_WORDS = '批次檢查照預定方案交給測試機執行，由我負責，所以樣本不用放到另一個資料夾'
+OWNER_WORDS = '能用離線工具就用離線工具'
 REAL_TRANSCRIPT = None
 ADMISSION_SECONDS = 5.0
 if '--admission-seconds' in sys.argv:
@@ -58,6 +58,12 @@ def attribution_finding(lines):
 
 class OwnerAttributionRegression(unittest.TestCase):
     def setUp(self):
+        # These retained forensic tests explicitly request original-source
+        # auditing. Normal hooks use the reference-only default, covered by
+        # current_content_review_regression without any transcript IO.
+        audit = patch.object(provenance, 'claim_violation', provenance.audit_claim_violation)
+        audit.start()
+        self.addCleanup(audit.stop)
         temporary = tempfile.TemporaryDirectory(prefix='epitype-attribution-')
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name).resolve()
@@ -69,6 +75,21 @@ class OwnerAttributionRegression(unittest.TestCase):
              'message': {'content': ASSISTANT_WORDS + '；《' + OWNER_WORDS}},
         ]
         self.write_rows()
+        # Only this forensic suite opts the real hook entrypoints into original-source
+        # audits. Normal no-transcript-IO behavior is covered by current_content_review.
+        original_run = common.run_synthetic
+        def audited_run(script, *args, **kwargs):
+            wrapper = self.root / ('audit-' + Path(script).name)
+            wrapper.write_text(
+                'import runpy, sys\n'
+                + f'sys.path[:0] = {[str(ROOT), str(ROOT / "adapters" / "claude")]!r}\n'
+                + 'from epitype import rule_provenance as provenance\n'
+                + 'provenance.claim_violation = provenance.audit_claim_violation\n'
+                + f'runpy.run_path({str(script)!r}, run_name="__main__")\n', encoding='utf-8')
+            return original_run(wrapper, *args, **kwargs)
+        surfaces = patch.object(common, 'run_synthetic', side_effect=audited_run)
+        surfaces.start()
+        self.addCleanup(surfaces.stop)
         self.vault = self.root / 'vault'
         self.vault.mkdir()
         self.config = self.root / 'config.json'
@@ -102,7 +123,7 @@ class OwnerAttributionRegression(unittest.TestCase):
         output = json.loads(result.stdout) if result.stdout.strip() else {}
         self.assertNotEqual(output.get('decision'), 'block', output)
         self.assertNotEqual(output.get('hookSpecificOutput', {}).get('permissionDecision'), 'deny', output)
-        notes = common.take_notes(common.load_config(time.monotonic()), event['session_id'])
+        notes = common.take_notes(common.load_config(time.monotonic()), hook_context.notification_identity(event))
         diagnostic = '\n'.join([result.stderr, *notes])
         lines = (output.get('hookSpecificOutput', {}).get('additionalContext', '').splitlines()
                  + diagnostic.splitlines())
@@ -116,7 +137,8 @@ class OwnerAttributionRegression(unittest.TestCase):
         output = (value or {}).get('hookSpecificOutput', {})
         self.assertNotEqual((value or {}).get('decision'), 'block', value)
         self.assertNotEqual(output.get('permissionDecision'), 'deny', value)
-        notes = common.take_notes(common.load_config(time.monotonic()), session)
+        notes = common.take_notes(common.load_config(time.monotonic()),
+                                  hook_context.notification_identity({**event, "session_id": session}))
         return attribution_finding(output.get('additionalContext', '').splitlines() + notes
                                    + [line for item in defects for line in str(item).splitlines()])
 
@@ -167,7 +189,7 @@ class OwnerAttributionRegression(unittest.TestCase):
                     self.assertEqual(result.returncode, 0, result.stderr)
                     output = json.loads(result.stdout) if result.stdout.strip() else {}
                     context = output.get('hookSpecificOutput', {}).get('additionalContext', '')
-                    notes = common.take_notes(common.load_config(time.monotonic()), session)
+                    notes = common.take_notes(common.load_config(time.monotonic()), hook_context.notification_identity(event))
                     if tool == 'Task':
                         reached = context.splitlines()
                         self.assertTrue(any(line.startswith(DISPATCH_NOTE + '[owner-attribution]')
@@ -508,6 +530,7 @@ class OwnerAttributionRegression(unittest.TestCase):
             return result
         with patch.object(provenance._ReadBudget, 'read', append_after_read):
             result = provenance.claim_violation(f'owner 原話：「{OWNER_WORDS}」', self.path)
+        self.assertTrue(appended)
         self.assertIsNone(result)
 
     def test_source_prefix_rewrite_during_admission_still_blocks(self):
@@ -518,11 +541,16 @@ class OwnerAttributionRegression(unittest.TestCase):
             result = read(budget, stream, size, **kwargs)
             if not rewritten:
                 rewritten = True
-                raw = self.path.read_bytes().replace(b'Colab', b'XXXXX')
+                previous = self.path.read_bytes()
+                needle = ASSISTANT_WORDS.encode('utf-8')
+                raw = previous.replace(needle, b'X' * len(needle), 1)
+                self.assertNotEqual(raw, previous)
+                self.assertEqual(len(raw), len(previous))
                 self.path.write_bytes(raw)
             return result
         with patch.object(provenance._ReadBudget, 'read', rewrite_after_read):
             result = provenance.claim_violation(f'owner 原話：「{OWNER_WORDS}」', self.path)
+        self.assertTrue(rewritten)
         self.assertIn('source-changed', result)
 
     def test_incomplete_snapshot_tail_is_not_positive_evidence(self):

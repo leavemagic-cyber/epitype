@@ -99,7 +99,9 @@ class FrameworkClosure(unittest.TestCase):
                 self.assertEqual(self.issues(old), [])
                 self.assertEqual(self.issues(new), [])
                 self.assertEqual(rule_pipeline.inspect_card(memspec.frontmatter_fields(new)[0], new).status,
-                                 "VERIFIED")
+                                 "REVIEWED")
+                self.assertEqual(rule_pipeline.inspect_card(memspec.frontmatter_fields(new)[0], new,
+                                 audit_originals=True).status, "VERIFIED")
 
     def test_predecessor_payload_and_original_source_are_checked(self):
         for invalid in ("text", "source"):
@@ -115,7 +117,8 @@ class FrameworkClosure(unittest.TestCase):
                 else:
                     source = Path(self.documents["old"]["sources"][0]["path"])
                     source.write_bytes(source.read_bytes().replace(b"old", b"bad"))
-                    self.assertIn("provenance", " ".join(self.issues(new)))
+                    self.assertEqual(self.issues(new), [])
+                    self.assertIn("provenance", " ".join(self.issues(new, audit_originals=True)))
 
     def test_reciprocal_identity_mismatch_and_self_edges_rejected(self):
         self.card("old", status="superseded", superseded_by="different.md")
@@ -128,7 +131,10 @@ class FrameworkClosure(unittest.TestCase):
         a, _ = self.card("a", status="superseded", supersedes=["b.md"], superseded_by="b.md")
         self.card("b", status="superseded", supersedes=["a.md"], superseded_by="a.md")
         self.assertIn("cycle", " ".join(self.issues(a)))
-        self.assertIn("budget", " ".join(self.issues(a, seconds=0)))
+        self.assertIn("cycle", " ".join(self.issues(a, seconds=0)))
+        rule_pipeline._chain_cache_path(a).unlink(missing_ok=True)
+        with self.assertRaisesRegex(rule_pipeline.VerificationDeferred, 'budget'):
+            self.issues(a, seconds=0)
         with rule_provenance.unbounded_verification():
             unbounded = " ".join(self.issues(a, seconds=0))
         self.assertIn("cycle", unbounded)
@@ -151,20 +157,27 @@ class FrameworkClosure(unittest.TestCase):
         self.assertFalse(new.exists())
         self.assertEqual(self.issues(new, text), [])
 
-    def test_core_uses_shared_formatter_quote_edges_and_pointer_both_hosts(self):
+    def test_core_keeps_effective_content_and_provenance_is_available_on_demand(self):
         self.card("old", status="superseded", superseded_by="new.md")
         new, _ = self.card("new", kind="ai-derived", supersedes=["old.md"])
         rules, errors = core_gen.collect_rules([self.vault])
         self.assertEqual(errors, [])
         self.assertEqual(len(rules), 1)
-        expected = rule_pipeline.render_projection(rules[0]["projection"], card_path=new)
+        full = rule_pipeline.render_projection(rules[0]["projection"], card_path=new)
         text = core_gen.assemble(rules)
-        self.assertIn(expected, text)
-        self.assertIn(self.documents["new"]["quote"], text)
-        self.assertIn("synthetic-closure-ai", text)
-        self.assertIn("適用範圍：", text)
-        self.assertIn("取代關係：old.md", text)
-        self.assertIn("來源卡：" + str(new), text)
+        self.assertIn(self.documents['new']['text'], text)
+        self.assertNotIn(self.documents["new"]["quote"], text)
+        self.assertIn(memspec.CORE_GEN_HISTORY_ON_DEMAND.format(author='synthetic-closure-ai'), text)
+        recovery = {}
+        core_gen.assemble(rules, recovery=recovery)
+        entry = host_sync._previous_rules(text, 'codex', recovery=recovery)[0]
+        self.assertEqual(entry['scope'], self.documents['new']['scope'])
+        self.assertNotIn('來源範圍基底：', text)
+        self.assertEqual(rules[0]['supersedes'], ['old.md'])
+        self.assertIn("取代關係：old.md", full)
+        self.assertIn(str(self.vault), text)
+        self.assertNotIn("來源卡：", text)
+        self.assertIn("來源卡：" + str(new), full)
         for host in ("codex", "claude"):
             self.assertEqual(host_sync.project_rules_text(self.vault, host),
                              core_gen.host_view(text, host).rstrip())

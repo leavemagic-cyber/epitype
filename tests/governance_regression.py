@@ -14,7 +14,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "adapters" / "claude")]
 
-from epitype import memsearch, memspec
+from epitype import hook_context, memsearch, memspec
 import _hook_common as common
 import recall_hook as recall
 import stop_gate as stop
@@ -94,7 +94,8 @@ class GovernanceRegression(unittest.TestCase):
 
     def recall_once(self, session="delivery"):
         output = io.StringIO()
-        event = {"prompt": "fixturedecision", "session_id": session}
+        event = {"prompt": "fixturedecision", "session_id": session,
+                 "transcript_path": str(self.root / "delivery.jsonl")}
         with patch.object(sys, "stdin", io.StringIO(json.dumps(event))), \
              patch.object(sys, "argv", ["recall"]), \
              patch.object(recall, "_STARTED_AT", time.monotonic()), \
@@ -194,12 +195,15 @@ class GovernanceRegression(unittest.TestCase):
                 with self.assertRaises(OSError):
                     compact._handle({"transcript_path": str(transcript), "session_id": "fixture"},
                                     time.monotonic())
-                cleared.assert_called_once_with("fixture")
+                cleared.assert_called_once_with(hook_context.identity(
+                    {"transcript_path": str(transcript), "session_id": "fixture"}))
             with patch.object(start, "_dream_spawn") as spawn, \
                  patch.object(start, "_dream_notice") as notice:
                 value = start._handle({}, time.monotonic())
-                self.assertIsNotNone(value)
-                self.assertIn("🧾", value["hookSpecificOutput"]["additionalContext"])
+                self.assertIsNone(value)
+                from epitype import card_lint
+                _, findings = card_lint.check_card(self.vault / "broken-card.md", "broken-card.md")
+                self.assertTrue(any(level == card_lint.FAIL for level, _field, _reason in findings))
                 spawn.assert_not_called()
                 notice.assert_not_called()
         self.assertFalse((self.vault / memspec.GATE_LOG_FILENAME).exists())

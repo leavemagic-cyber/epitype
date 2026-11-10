@@ -12,9 +12,12 @@ You settled a decision three days ago. Today the agent answers from the version 
 
 Epitype is the small layer I built for that. It runs on the hooks Claude Code and Codex already have, leaves your existing memory files where they are, and adds the part those files cannot do on their own: getting the right note in front of the agent at the moment it matters, and keeping the wrong one out.
 
-It is Python standard library only, with no required service and no model calls of its own. Injected context still uses the host's context budget.
+It uses the Python standard library at runtime, with no required service or model calls of its own. Injected context still uses the host's context budget.
 
-Its focus is instruction lifecycle: bind rules to original sources and scope, keep replaced decisions out of current recall, manage supported native settings across both hosts, and retain transcript pointers after compaction. Native memory remains the underlying store. See [product scope and related work](docs/PRODUCT_SCOPE.md) for the overlap, differences and evidence limits.
+Keep every vault's always-loaded index short with [`epitype memory-index`](docs/memory-index.md):
+preview or apply lossless overflow into a full index, using one configurable byte budget.
+
+Original quotations are optional reference material. Current meaning, scope and actual effects are primary; normal rule and memory maintenance does not rescan conversations. See [current-content review](docs/RULE_PROVENANCE.md).
 
 ## Start with templates for review
 
@@ -26,7 +29,7 @@ epitype starter
 
 The five shipped templates are AI-authored examples without verified original sources.
 `epitype starter` puts them under `_drafts/starter_templates/`; installing them does
-not activate rules. Review any rule you adopt and bind it to its actual source
+not activate rules. Review any rule you adopt and check its current meaning and scope
 before publishing it in your vault. See [rule provenance](docs/RULE_PROVENANCE.md).
 
 Stop findings are reminders for the next prompt in the same session. They do not
@@ -34,11 +37,11 @@ withhold a reply, request a rewrite, or start another model turn.
 
 ## Where you actually notice it
 
-You rejected an approach on Monday. On Thursday the agent proposes it again. Stop records the matching finding and queues a reminder with the relevant card for the next prompt in that session.
+You rejected an approach on Monday. On Thursday the agent proposes it again. The Stop observer records the match and brings the current ruling into that session's next prompt. It does not retract the delivered reply or force a rewrite.
 
-PreToolUse supplies advisory findings about writing and attribution. Explicit action guards and retained safety checks can deny a matching action; those boundaries are distinct from ordinary workflow reminders.
+Before a tool runs, workflow checks provide advice about writing, attribution and cleanup. Explicit action guards and retained safety checks can refuse a matching call.
 
-The context gets compacted in the middle of a task. The next turn opens with the path to a recovery map written just before the compaction, so the agent can go read what was actually said instead of reconstructing it.
+The context gets compacted in the middle of a task. The next turn recovers the current requirements, exceptions, decisions and unfinished work from a short working state. Original messages stay available for a specific dispute; they are not a routine reload or a prerequisite for editing memory.
 
 None of this is a new place to keep things. All three run on notes already sitting in the vault your host reads.
 
@@ -77,16 +80,16 @@ Probably not yet if you are new to CLI agents and have no accumulated rules to g
 
 ## How it works
 
-Epitype reads the same vaults your host already uses, through these host events and the corresponding SubagentStop handler.
+Epitype hangs off six host events and reads the same vaults your host already uses.
 
 | Event | What Epitype does |
 |---|---|
-| `SessionStart` | Injects only what names something to do: a card that fails its type check, the by-the-way alias task, a dream that errored or is overdue. After a compaction it also hands back the path to the map written below, so the agent can go read the original words; if the agent wrote a pre-compaction handoff that has not already been handed back unchanged, that line follows the map's, and it is the one dropped when the budget fits only one. A session with nothing to do gets nothing. Standing material is not re-sent, the memory index included, because the host loads that itself from `CLAUDE.md` / `AGENTS.md`. |
-| `UserPromptSubmit` | Pulls up to five relevant cards from each resolved vault, inside a shared output budget. Cards only. Verbatim capture files stay searchable but are never injected. Short owner statements are stored word for word, deduplicated and indexed; nothing infers what they meant. |
-| `PreToolUse` | Advisory write-format, attribution, cleanup and reading-volume checks; deterministic input repairs and retained action-time safety. Explicit action-card `on_hit` settings remain separate. The context meter reminds the agent to write its handoff before the host's compaction threshold, once per cycle; an unknown threshold produces no reminder. |
+| `SessionStart` | Reads cached maintenance results and incrementally warms action guards without assigning card cleanup or alias work in the task conversation. After compaction, restores short working state; child agents receive their own state instead of a parent handoff. |
+| `UserPromptSubmit` | General prompt matching is off by default. Opt in with `proactive_recall: true`; project scope is checked before ranking and resident rules are excluded. Pending notices, event capture and compaction recovery operate independently. |
+| `PreToolUse` | Advisory write-format, attribution and workflow checks; explicit action guards and retained safety checks can refuse calls. The context meter reminds once per compaction cycle: Claude Code uses a configured token window or compatible observed compactions; Codex uses its own limit with 44k tokens of headroom. Unknown thresholds produce no reminder. |
 | `PreCompact` | Writes a small recovery map from the tail of the transcript before the context is compacted. On an automatic compaction it also records the usage at that moment, which is how the context meter learns the threshold. |
 | `PostToolUse` | Records browser tabs and control sessions created by the agent, plus closures confirmed by successful tool results. A later prompt or non-browser tool call reminds the agent about anything still open. It never closes the resource itself. |
-| `Stop` | Records findings as `stop_note` and queues a reminder for the next prompt in the same session. Never blocks or restarts a reply. `SubagentStop` uses the same advisory path. |
+| `Stop` | Records matches and queues reminders for the next prompt in the same session, without retracting replies. `SubagentStop` uses the same advisory path. Self-completion claims are distinguished from quoted evidence. |
 
 Injected memory is advisory. It cannot override system or developer instructions, bypass host permissions, or hand a tool any authority by itself. Hook output is capped at 10 KiB, and every hook has a ten-second deadline that fails open.
 
@@ -94,9 +97,9 @@ Browser tracking stores resource IDs, not URLs, titles or page content. It only 
 
 ### Capture: filed, or waiting for you
 
-A trigger match proves a sentence *looks like* a ruling, not that anyone checked it. So capture files a sentence only when it fits one of three shapes: an arrow reply whose owner half opens with a short answer, a correction that opens the sentence, or a named first-person authorization. Everything else the rules still catch goes to `<vault>/_drafts/captured_pending/YYYYMMDD/` instead. Not indexed, not recalled, waiting for a person.
+A trigger match identifies a candidate, not a reviewed rule. Unreviewed human statements are saved under `<vault>/_drafts/captured_pending/YYYYMMDD/` with their original wording, source identity, time and scope. Explicit memory search can find them, labelled `capture_review: UNREVIEWED` and `authority: none`; proactive recall and action reminders exclude them.
 
-Both kinds carry `provenance: auto-captured` and `verified: false`. Promotion means editing those fields (`verified: true` plus `verified_by` / `verified_at`) and moving the file, and a replay refuses to do it for you.
+Publication requires the existing content, authorship, scope and payload review. A shape match, a `verified: true` flag or moving a file cannot supply that review. Both hosts capture human transcript messages through the same incremental entry point, including human queued messages; tool outputs and compaction summaries are excluded. Non-interactive Codex exec sessions skip user-event capture. See [rule provenance](docs/RULE_PROVENANCE.md).
 
 A `verified: false` card is authority for nothing. The Stop gate and the write gate both read cards that declare a `decision_key`, which a captured card never has. Recall leaves it alone too: a captured quote sits at the bottom reading level, so `memsearch` finds it when someone goes looking for the exact words, while the prompt hook injects cards only. The measured trade-off is in `docs/FAILURE_MODES.md` §32 and §41.
 
@@ -110,9 +113,9 @@ Decision cards carry a stable `decision_key`, a status of `active` or `supersede
 
 A scar is a rule born from an incident: the `incident` it came from, plus `advice` that names the safer route. Most cards are context read back into a turn and refuse nothing.
 
-A card's `forbidden` patterns identify wording the owner ruled out; `require_when` with `require_text` identifies a claim missing the required evidence. At Stop these findings are advisory. An explicit action guard using `guard_tool` with `guard_all_of` can deny a tool call whose text contains every literal fragment the card names, according to its `on_hit` setting. Literal matching does not parse shell syntax or infer intent.
+A card can also refuse, in three narrow forms. `forbidden` patterns stop a turn from ending when the model has said something the owner ruled out. `require_when` with `require_text` stops a turn whose claim arrives without the evidence the rule asks for. `guard_tool` with `guard_all_of` denies a tool call whose own text contains every literal fragment the card names — no regex, no shell parsing, no guess about what a command means.
 
-`fence_shell` (`powershell`, `bash` or `sh`) checks tagged shell blocks with that shell's parser, without executing them. Syntax findings at Stop are also advisory. `powershell` means Windows PowerShell 5.1 (`powershell.exe`); untagged blocks are not checked. A missing, slow or broken parser does not block the turn.
+A fourth form is structural rather than literal. `fence_shell` (`powershell`, `bash` or `sh`) hands every fenced block tagged as a shell language (`fence_langs`, default bash, sh, shell, zsh, console, powershell, pwsh, ps1, ps, cmd, bat) to that shell's own parser — syntax only, never executed — and stops the turn when a block would fail the moment someone presses Run. `powershell` means Windows PowerShell 5.1 (`powershell.exe`), not `pwsh`. Untagged blocks are not checked; if the parser is missing, slow or broken the turn passes and the gate says so on stderr.
 
 That last one was removed in 2026-09-09 and restored on 2026-09-16, after the premise behind removing it was tested and failed: Claude's Bash permission patterns match positionally and have no AND operator, so four of nine hazard classes moved to the host and five could not be expressed at all. A literal conjunction over-approximates toward denial, which is the safe direction, and it is a guardrail against a mistake someone has already carded — not a security boundary. An equivalent rewrite of the same command gets through, by design.
 
@@ -138,7 +141,7 @@ The last section is the feedback review pack: one row per card that owner events
 
 ```text
 HOSTS: claude, codex
-SHIM RESOLUTION: PASS 5/5 repo_root=C:\path\to\epitype
+SHIM RESOLUTION: PASS 5/5 repo_root=C:\Epitype\repo
 REGISTRATION claude: PASS 6/6
 REGISTRATION codex: PASS 6/6
 HOOK SessionStart: PASS (515 ms)
@@ -218,10 +221,10 @@ The database lives at `<vault>/.epitype/memory_fts.sqlite3` and Git ignores it. 
 | `epitype doctor [--home HOME] [--dry-run] [--clear-shim-status]` | Synthetic health check for hook registration and shim execution. Run it after installing, or whenever something feels off. |
 | `epitype dream [vaults...] [--since SINCE] [--dry-run] [--scheduled] [--json]` | Read-only tidy inventory rendered as a numbered review packet, applying nothing itself: missing aliases, card-lint findings, zombie pending lines, unreviewed drafts, aging event cards, unregistered pocket vaults, draft aging, mixed cards to split, files over their cap, owner quotes no decision card carries, generated core blocks that have drifted from their rule cards, and the review pack. Scheduling is `dream.mode` in config — `piggyback` (default), `nightly` (an OS task) or `off` — switched with `epitype install --dream {piggyback,nightly,off} [--at HH:MM]` (nightly defaults to `03:30`). |
 | `epitype gates <vault> [--since Nd\|YYYY-MM-DD] [--json] [--by kind\|decision\|session\|day]` | Turns `_GATE_LOG.jsonl` into a report of what the gates actually blocked, e.g. `epitype gates C:\path\to\vault --since 2d`. |
-| `epitype cards <vault> [--strict] [--verbose] [--deep] [--json] [--fix-dates [--dry-run]]` | Type-checks cards against their required fields. `--deep` adds vault-level checks: one active card per `decision_key`, valid supersession chains, every managed card present in both the generated views and the search index. `--fix-dates` is the only flag that writes, backfilling a derived `last_verified_at:`; preview it with `--fix-dates --dry-run`. |
+| `epitype cards <vault> [--strict] [--verbose] [--deep] [--json] [--refresh-cache] [--fix-dates [--dry-run]]` | Type-checks cards against their required fields. `--deep` adds vault-level checks: one active card per `decision_key`, valid supersession chains, every managed card present in both the generated views and the search index. `--refresh-cache` runs the complete per-card and example checks and writes `<vault>/.epitype/card-lint-result.json`; it cannot be combined with `--deep` or `--fix-dates`. Startup only reads this accounting, invalidating it on changed inputs, validator versions or UTC dates (at most 24 hours), and injects no lint or alias maintenance tasks. Rule consumers still validate current cards. `--fix-dates` backfills a derived `last_verified_at:`; preview it with `--fix-dates --dry-run`. |
 | `epitype dupes [vaults...] [--json] [--threshold N]` | Cross-vault near-duplicate candidates using character shingles and metadata. Defaults to the shared configured vault list and threshold 0.35. Always writes Markdown and JSON to the governance vault's `_drafts/duplicates/YYYYMMDD.*`; `--json` selects JSON on stdout. Dream writes the same report after regenerating views (except in `--dry-run`). Lists machine-check fields, owner quotes, pair similarities and suggested keep cards. The lead AI settles candidates under the owner's rule; Epitype never edits or retires cards. Lexical detection misses semantic paraphrases; see `docs/dupes-calibration.md`. |
 | `epitype views <vaults...> [--force] [--json]` | Regenerates the browsable catalogue from card fields: `_views/current.md` (cards in use, with every active decision) and `_views/history/closed.md` (closed projects and superseded decisions). Never writes `MEMORY.md`, rewrites nothing when the input fingerprint is unchanged, and takes a lock so two generators cannot overlap. See [Four reading levels](docs/ARCHITECTURE.md#four-reading-levels). |
-| `epitype core-gen <vaults...> --out FILE [--cap-bytes N] [--dry-run] [--check] [--json]` | Assembles the resident core block from `type: rule` cards — `floor` numbered by `order`, `resident` grouped by `section`, host-only cards in their own zone — copying each approved `text` byte for byte and writing an approval pack beside it. Refuses to write when the assembly is over its cap or a card in a generated layer has no `approved_by` / `approved_at`. `--check` compares instead of writing, for drift audits. See [Core generation](docs/ARCHITECTURE.md#core-generation-rule-cards--the-resident-block). |
+| `epitype core-gen <vaults...> --out FILE [--cap-bytes N] [--dry-run] [--check] [--json]` | Assembles the resident core block from `type: rule` cards — `floor` numbered by `order`, `resident` grouped by `section`, host-only cards in their own zone — copying each approved `text` byte for byte and writing an approval pack beside it. Exceeding the size target produces a note while retaining complete rules; a generated-layer card without `approved_by` / `approved_at` still prevents writing. `--check` compares instead of writing. See [Core generation](docs/ARCHITECTURE.md#core-generation-rule-cards--the-resident-block). |
 | `epitype aliases {export,apply}` | `export` lists cards missing aliases as a JSON worklist; `apply` writes reviewed `suggested` aliases back, additive only. |
 | `epitype search {build,query,recall}` | Builds the local index and queries it by keyword or prompt; see [Search the local vault](#search-the-local-vault). |
 
@@ -234,9 +237,9 @@ The database lives at `<vault>/.epitype/memory_fts.sqlite3` and Git ignores it. 
 | `epitype capture-route <vault> [--audit] [--apply] [--home HOME] [--json]` | Audits auto-captured event cards against the routing rule: a card belongs to the project vault its `cwd` names, so anything sitting in the governance vault that belongs elsewhere is listed as `MISROUTED <card> -> <vault>`. `--audit` is read-only; `--apply` moves the cards (`os.replace`, `-2` suffix on a name collision, never a delete) and appends a one-line note. |
 | `epitype harvest [--inventory] [--docs DOCS] [--since SINCE] [--drafts-only] [--reevaluate DIR [--apply]] [--quarantine-drops [DIR]]` | Zero-model replay of the capture rules over old transcripts and documents, for a first backfill. Also re-judges drafts, or a vault's own event cards, against today's rules. `--drafts-only` keeps everything it finds in the pending drafts area. |
 | `epitype token-meter [rollout] [--selftest]` | Reads a Codex rollout JSONL and prints its last current and cumulative token usage against the context window. |
-| `epitype context-meter calibrate [--root DIR]` / `status [--transcript PATH]` | Claude Code context meter. `calibrate` is a read-only report of the last 5 automatic compactions in the past 30 days (median, sample count, time range); it writes nothing, because the threshold is learned only from this machine's own automatic compactions, so the first reminder waits for the first one. `status` prints the threshold, its source and, given a transcript, where the current usage sits (for a Codex rollout: Codex's count, limit and reminder point). `codex-calibrate --limit N --hard-cap N` replays Codex rollouts read-only and reports, per candidate headroom, how many automatic compactions would have been warned at least one model step ahead. |
+| `epitype context-meter calibrate [--root DIR]` / `status [--transcript PATH]` | Claude Code context meter. `calibrate` is a read-only report of the last 5 automatic compactions in the past 30 days (median, sample count, time range); it writes nothing, because without a configured token window the threshold is learned from this machine's own automatic compactions; a configured window can provide a threshold immediately, adjusted by compatible observations. `status` prints the threshold, its source and, given a transcript, where the current usage sits (for a Codex rollout: Codex's count, limit and reminder point). `codex-calibrate --limit N --hard-cap N` replays Codex rollouts read-only and reports, per candidate headroom, how many automatic compactions would have been warned at least one model step ahead. |
 | `epitype lifecycle --session SESSION_ID --json` | Reads the browser-resource ledger for one session. `pending` lists resources whose closure is still unverified. |
-| `epitype starter [--list\|--remove\|--dry-run]` | Adds five general starter cards to your vault, lists them, or removes only untouched cards installed by this command. |
+| `epitype starter [--list\|--remove\|--dry-run]` | Creates five AI starter templates for review, lists them, or removes only untouched cards installed by this command. |
 | `epitype scar-census build` | Builds the machine-generated view of the four-layer scar census. |
 | `epitype compact-map build` | Builds a bounded compact-recovery map, the same kind `PreCompact` writes per session. |
 | `epitype source SOURCE.jsonl [--find TEXT] [--role user\|assistant\|all] [--line N] [--offset BYTES] [--limit 1..8]` | Reads original messages back with roles, physical lines, hashes and explicit truncation and coverage. Line numbers are relative when you supply an offset. Finding a sentence is not proof that it is the current decision. |
@@ -257,7 +260,7 @@ python tests/privacy_lint.py
 python exam/exam_runner.py --strict
 ```
 
-`tests/run_all.py` runs component selftests across the core tools, hook adapters, package surface, installer, exam engine and privacy gate. The exam corpus in this repository is a small synthetic sample. The GitHub release workflow runs the release checks; local measurements and private corpora are not included in the repository.
+`tests/run_all.py` runs component selftests across the core tools, hook adapters, package surface, installer, exam engine and privacy gate. The exam corpus in this repository is a small synthetic sample. Public tests use synthetic data; local field measurements and private corpora are not included.
 
 These checks are regression evidence. They are not proof that every future host version, or every way memory can fail you, is covered.
 
@@ -289,9 +292,10 @@ deleted and rebuilt. The gate log records rule names and timestamps — never me
 ## How it compares
 
 - **[claude-mem](https://github.com/thedotmack/claude-mem)** summarises sessions so the agent
-  remembers more. Epitype keeps source-bound rulings, checks findings and supplies reminders.
+  remembers more. Epitype keeps current rulings, checks writes against them and records
+  matching reply violations for a later reminder.
 - **[claudekit](https://github.com/carlrannaberg/claudekit)** and similar hook toolkits give you
-  building blocks to wire up. Epitype connects cards to recall, advisory checks and explicit action guards.
+  building blocks to wire up. Epitype connects cards to retrieval, write checks and reminders.
 - A **`CLAUDE.md` / `AGENTS.md` kit** gives the agent more text to read. Epitype generates that
   resident block from your rule cards, then checks at the end of the turn whether the rule held.
 
@@ -301,12 +305,14 @@ They compose: nothing here stops you running a memory summariser alongside it.
 
 - Hooks reach only the events and tools the host exposes. A direct file read stays outside the current-decision filter.
 - Time and output ceilings force selection. Epitype never pushes a whole vault into a prompt.
-- Workflow findings and Stop checks are advisory. Explicit action guards and retained safety checks may deny a matching tool call. Epitype is not a complete security boundary; irreversible-action permissions remain the host's responsibility. Malformed cards fail open.
+- Workflow checks are advisory; explicit action guards and retained safety checks can refuse matching tool calls. Stop observations provide later reminders and never veto delivered replies. Equivalent command rewrites can evade literal matching; irreversible actions remain the host's responsibility. A malformed card fails open instead of taking the host with it.
 - Claude Code and Codex are the tested boundary. A host upgrade still needs its own integration test.
 - The bundled tests are synthetic. They exercise behaviour and failure handling, not months in the field.
 
 ## Documentation
 
+- [Documentation index and record status](docs/INDEX.md): current guides, dated evidence and superseded reports.
+- [Repositories evaluated for reuse](docs/REPOSITORY_REFERENCES.md): selected approaches, costs and adoption status.
 - [Architecture](docs/ARCHITECTURE.md): memory blocks, retrieval routes, decision cards, scar lifecycle, authority rules.
 - [Browser resource tracking](docs/CONTROL_LIFECYCLE.md): what Epitype records, reminds about and leaves unverified.
 - [Failure modes](docs/FAILURE_MODES.md): symptoms, countermeasures, verification boundaries.
@@ -314,4 +320,5 @@ They compose: nothing here stops you running a memory summariser alongside it.
 
 ## Status
 
-Source version 1.10.0. Publication status is shown by the GitHub releases and PyPI badges above. Releases are cut when a batch of fixes is ready rather than on a fixed date.
+Published versions are listed in [GitHub Releases](https://github.com/leavemagic-cyber/epitype/releases).
+Unreleased local changes are recorded in [CHANGELOG](CHANGELOG.md) and the dated results above. Local integration and package publication are reported separately.

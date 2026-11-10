@@ -1,8 +1,57 @@
 """Session rule pointers survive compaction without copying card bodies."""
 import hashlib
 import json
+from functools import lru_cache
 from pathlib import Path
+import re
+import subprocess
+import time
 from . import memspec, rule_pipeline, rule_provenance
+
+
+class _GitLookupBudgetExpired(Exception):
+    """No lookup ran; lru_cache must not retain this temporary condition."""
+
+
+@lru_cache(maxsize=128)
+def _git_location(directory):
+    path = Path(directory)
+    if not any((parent / '.git').exists() for parent in (path, *path.parents)):
+        return None
+    remaining = min(0.3, rule_provenance.verification_deadline(0.3) - time.monotonic())
+    if remaining <= 0:
+        raise _GitLookupBudgetExpired
+    try:
+        result = subprocess.run(
+            ['git', '-C', str(path), 'rev-parse', '--path-format=absolute',
+             '--git-common-dir', '--show-toplevel'], capture_output=True, text=True,
+            encoding='utf-8', errors='replace', timeout=remaining,
+            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        rows = result.stdout.strip().splitlines()
+        if result.returncode == 0 and len(rows) == 2:
+            return str(Path(rows[0]).resolve()), path.relative_to(Path(rows[1]).resolve())
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        pass
+    return False  # A failed Git lookup cannot prove a different project.
+
+
+def _path_applicability(project, actual):
+    try:
+        source, current = Path(project).resolve(), Path(actual).resolve()
+        if current.is_relative_to(source):
+            return 'APPLICABLE', ''
+        left, right = _git_location(str(source)), _git_location(str(current))
+        if left is None or right is None:
+            return 'OUTSIDE', 'cwd is outside source project'
+        if left is False or right is False:
+            return 'ADVISORY', 'Git project context is unavailable'
+        if left and right and left[0] == right[0] and right[1].is_relative_to(left[1]):
+            return 'APPLICABLE', ''
+        return 'OUTSIDE', 'cwd is outside source project'
+    except _GitLookupBudgetExpired:
+        return 'ADVISORY', 'Git project context is unavailable'
+    except (OSError, ValueError):
+        return 'ADVISORY', 'project context is unavailable'
 
 
 def applicability(scope, event=None):
@@ -15,14 +64,18 @@ def applicability(scope, event=None):
         explicit = context.get('project') or event.get('project')
         cwd = event.get('cwd')
         if explicit:
-            if str(explicit).casefold() != str(project).casefold():
+            if Path(str(project)).is_absolute() and Path(str(explicit)).is_absolute():
+                state, reason = _path_applicability(project, explicit)
+                if state != 'APPLICABLE':
+                    return state, reason
+            elif str(explicit).casefold() != str(project).casefold():
                 return 'OUTSIDE', 'project does not match'
         elif cwd and Path(project).is_absolute():
-            try:
-                if not Path(cwd).resolve().is_relative_to(Path(project).resolve()):
-                    return 'OUTSIDE', 'cwd is outside source project'
-            except (OSError, ValueError):
+            if not Path(str(cwd)).is_absolute():
                 return 'ADVISORY', 'project context is unavailable'
+            state, reason = _path_applicability(project, cwd)
+            if state != 'APPLICABLE':
+                return state, reason
         else:
             return 'ADVISORY', 'project context is unavailable'
     case = scope.get('case', '')
@@ -38,6 +91,78 @@ def applicability(scope, event=None):
             or any(scope.get(name) for name in ('conditions', 'exceptions'))):
         return 'ADVISORY', 'action/condition/exception clauses require contextual interpretation'
     return 'APPLICABLE', ''
+
+
+def reference_applicability(fields, card, event=None, *, card_text=None):
+    if memspec.is_pending_capture(card):
+        return 'OUTSIDE', 'unreviewed events are explicit-search evidence only'
+    event = event if isinstance(event, dict) else {}
+    # Captures/task references bind to their exact cwd, never another worktree's
+    # task or account merely because it shares a Git common directory.
+    origin = fields.get('cwd')
+    if origin and event.get('cwd'):
+        try:
+            if not Path(event['cwd']).resolve().is_relative_to(Path(origin).resolve()):
+                return 'OUTSIDE', 'cwd differs from captured task origin'
+            return 'APPLICABLE', ''
+        except (OSError, ValueError):
+            return 'ADVISORY', 'captured cwd is unavailable'
+    state, reason = _declared_reference_applicability(fields, card, event, card_text=card_text)
+    if state == 'ADVISORY' and str(fields.get('scope', '')).casefold() != 'global':
+        from . import capture_route
+        path = Path(card).resolve()
+        vault = next((parent for parent in path.parents if parent.name == 'memory'), path.parent)
+        if capture_route.reference_owner_matches(vault, event.get('cwd')) is False:
+            return 'OUTSIDE', 'native collision/ancestor has no per-card project ownership'
+    return state, reason
+
+
+def _declared_reference_applicability(fields, card, event=None, *, card_text=None):
+    """Use declared lookup ownership only; source-bound rules use their reviewed scope."""
+    if str(fields.get('scope', '')).casefold() == 'global':
+        return 'ADVISORY', 'lookup project is not declared'
+    project = fields.get('project')
+    if not project:
+        # Compatibility for explicit legacy declarations, never prose inference.
+        try:
+            if card_text is None:
+                with Path(card).open('rb') as stream:
+                    raw = stream.read(memspec.RECALL_SOURCE_SCAN_BYTES + 1)
+                if len(raw) > memspec.RECALL_SOURCE_SCAN_BYTES:
+                    return 'ADVISORY', 'lookup project declaration exceeds scan window'
+                card_text = raw.decode('utf-8-sig')
+            from . import card_lint
+            card_type, _fields = card_lint.card_type_of(Path(card).name, card_text, Path(card))
+            if card_type not in ('reference', 'project', 'pending'):
+                return 'ADVISORY', 'lookup project is not declared'
+            _, closing = memspec.split_frontmatter(card_text)
+            if closing is None:
+                return 'ADVISORY', 'lookup project is not declared'
+            declarations = []
+            fence = None
+            for line in card_text.lstrip('\ufeff').splitlines()[closing + 1:]:
+                marker = re.match(r'^ {0,3}(`{3,}|~{3,})(.*)$', line)
+                if marker:
+                    run, suffix = marker.groups()
+                    if fence is None:
+                        fence = (run[0], len(run))
+                    elif run[0] == fence[0] and len(run) >= fence[1] and not suffix.strip():
+                        fence = None
+                    continue
+                if fence is not None:
+                    continue
+                if re.match(r'^\*\*(?:適用專案|Applies to project)\*\*\s*[:：]', line):
+                    match = re.match(
+                        r'^\*\*(?:適用專案|Applies to project)\*\*\s*[:：]\s*`([^`]+)`\s*(?:[。.]|$)', line)
+                    declarations.append(match.group(1) if match else None)
+            if len(declarations) != 1 or not declarations[0]:
+                return 'ADVISORY', 'lookup project declaration is absent or ambiguous'
+            project = declarations[0]
+            if not Path(project).is_absolute():
+                return 'ADVISORY', 'lookup project path is not absolute'
+        except (OSError, UnicodeError, ValueError):
+            return 'ADVISORY', 'lookup project context is unavailable'
+    return applicability({'project': project, 'actions': ['*']}, event)
 
 
 def state_path(vault, session):
@@ -70,7 +195,15 @@ def record(vault, session, card):
         path.write_text(json.dumps([*rows[-99:], card_id], ensure_ascii=False), encoding='utf-8')
 
 
-def snapshot(vaults, session, destination):
+def snapshot_path(destination, context_id=None):
+    target = Path(destination).with_suffix('.rules.json')
+    if context_id:
+        key = hashlib.sha256(str(context_id).encode('utf-8')).hexdigest()
+        target = target.with_name(target.name.removesuffix('.rules.json') + '.' + key + '.rules.json')
+    return target
+
+
+def snapshot(vaults, session, destination, *, context_id=None):
     records = []
     for vault in vaults:
         try:
@@ -80,17 +213,35 @@ def snapshot(vaults, session, destination):
         if isinstance(cards, list):
             records.extend({'vault': str(Path(vault).resolve()), 'card': card}
                            for card in cards if isinstance(card, str))
-    target = Path(destination).with_suffix('.rules.json')
-    if records:
+    target = snapshot_path(destination, context_id)
+    if records or context_id:
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(json.dumps(records, ensure_ascii=False), encoding='utf-8')
+        value = ({'schema': 2, 'context_id': context_id, 'records': records}
+                 if context_id else records)
+        target.write_text(json.dumps(value, ensure_ascii=False), encoding='utf-8')
     return records
 
 
-def restore(destination, allowed_vaults, budget=1800, *, event=None, diagnostics=None):
+def restore(destination, allowed_vaults, budget=1800, *, event=None, diagnostics=None,
+            context_id=None):
+    target = snapshot_path(destination, context_id)
     try:
-        records = json.loads(Path(destination).with_suffix('.rules.json').read_text(encoding='utf-8'))
+        if context_id and not target.is_file():
+            # Read old envelopes only through the same identity check below.
+            target = snapshot_path(destination)
+        records = json.loads(target.read_text(encoding='utf-8'))
     except (OSError, ValueError):
+        return ''
+    if isinstance(records, dict):
+        if (not context_id or records.get('schema') != 2
+                or records.get('context_id') != context_id):
+            if diagnostics is not None:
+                diagnostics.append('rule snapshot belongs to a different or unconfirmed model context')
+            return ''
+        records = records.get('records')
+    elif context_id:
+        if diagnostics is not None:
+            diagnostics.append('legacy rule snapshot has no model-context proof; current cards remain searchable')
         return ''
     if not isinstance(records, list):
         return ''
@@ -104,8 +255,7 @@ def restore(destination, allowed_vaults, budget=1800, *, event=None, diagnostics
         if not target.is_relative_to(root):
             continue
         fields, _problem = memspec.frontmatter_fields(target)
-        if (memspec.card_expired(fields.get('valid_until'))
-                or fields.get(memspec.DECISION_STATUS_FIELD) in memspec.STOP_GATE_SILENT_STATUSES):
+        if not memspec.card_is_current(fields):
             continue
         description = ' '.join(str(fields.get('description', '')).split())[:240]
         if rule_provenance.FIELD in fields:
@@ -114,7 +264,7 @@ def restore(destination, allowed_vaults, budget=1800, *, event=None, diagnostics
                 fields, problem = memspec.frontmatter_text(card_text)
                 if problem:
                     raise ValueError('source-bound card has malformed frontmatter: ' + problem)
-                projected = rule_pipeline.projection(fields, target, card_text=card_text)
+                projected = rule_pipeline.projection(fields, target, card_text=card_text, allow_deferred=True)
                 if projected['expired']:
                     continue
                 state, reason = applicability(projected['document']['scope'], event)
@@ -139,6 +289,8 @@ def restore(destination, allowed_vaults, budget=1800, *, event=None, diagnostics
             except (ValueError, OSError) as error:
                 if diagnostics is not None:
                     diagnostics.append(f"{item['card']}: {error}")
+                continue
+            if reference_applicability(fields, target, event)[0] == 'OUTSIDE':
                 continue
             if not description:
                 continue

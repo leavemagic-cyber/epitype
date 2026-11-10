@@ -12,7 +12,11 @@ import pretooluse_gate as pretool
 class ToolAdviceRegression(unittest.TestCase):
     setUp = fixtures.ActionGuardRegression.setUp
     write_card = fixtures.ActionGuardRegression.write_card
-    call = fixtures.ActionGuardRegression.call
+
+    def call(self, tool_name, tool_input):
+        return pretool._handle({'session_id': 'advice-test',
+            'transcript_path': str(self.root / 'thread.jsonl'),
+            'tool_name': tool_name, 'tool_input': tool_input}, time.monotonic(), [])
     def test_three_text_cards_both_hosts_and_session_dedup(self):
         for number, fragment in enumerate(('search', 'inspect', 'review')):
             self.write_card(f'advice-{number}.md', name=f'advice-{number}',
@@ -22,6 +26,7 @@ class ToolAdviceRegression(unittest.TestCase):
         for host_tool in ('Bash', 'exec_command'):
             for number, fragment in enumerate(('search', 'inspect', 'review')):
                 event = {'session_id': f'advice-{host_tool}', 'tool_name': host_tool,
+                         'transcript_path': str(self.root / f'{host_tool}.jsonl'),
                          'tool_input': {'command': fragment}}
                 started = time.monotonic()
                 result = pretool._handle(event, started, [])
@@ -45,8 +50,9 @@ class ToolAdviceRegression(unittest.TestCase):
                         advise_all_of=['never-match'], advise_text='不要送我')
         self.assertIsNone(self.call('Bash', {'command': 'echo x'}))
 
+
     def test_changed_advice_is_delivered_again_for_the_same_target(self):
-        event = {'session_id': 'changed-' + self.root.name, 'tool_name': 'Bash',
+        event = {'session_id': 'changed-' + self.root.name, 'tool_name': 'Bash', 'transcript_path': str(self.root / 'transcript.jsonl'),
                  'tool_input': {'command': 'inspect example'}}
         self.write_card('changed.md', name='changed', advise_tool='Bash',
                         advise_text='previous advice')
@@ -62,7 +68,8 @@ class ToolAdviceRegression(unittest.TestCase):
 
     def test_dropped_output_releases_advice_for_retry(self):
         self.write_card('retry.md', name='retry', description='先查證', advise_tool='Bash')
-        event = {'session_id': 'retry-' + self.root.name, 'tool_name': 'Bash', 'tool_input': {'command': 'echo x'}}
+        event = {'session_id': 'retry-' + self.root.name, 'tool_name': 'Bash',
+                 'transcript_path': str(self.root / 'retry.jsonl'), 'tool_input': {'command': 'echo x'}}
         claims = []
         first = pretool._handle(event, time.monotonic(), [], advice_claims=claims)
         self.assertIn('先查證', first['hookSpecificOutput']['additionalContext'])

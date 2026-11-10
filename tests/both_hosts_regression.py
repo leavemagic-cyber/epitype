@@ -44,10 +44,10 @@ def codex_rows(prompt, answer, tool_name, command):
         {"type": "response_item", "payload": {"type": "message", "role": "user",
                                               "content": [{"type": "input_text",
                                                            "text": prompt}]}},
-        {"type": "response_item", "payload": {"type": "function_call", "name": tool_name,
+        {"type": "response_item", "payload": {"type": "function_call", "name": tool_name, "call_id": "t1",
                                               "arguments": json.dumps({"command": command})}},
         {"type": "response_item", "payload": {"type": "function_call_output",
-                                              "output": "ok"}},
+                                              "call_id": "t1", "output": "ok"}},
         {"type": "response_item", "payload": {"type": "message", "role": "assistant",
                                               "content": [{"type": "output_text",
                                                            "text": answer}]}},
@@ -60,8 +60,9 @@ class BothHostsReadTheSame(unittest.TestCase):
     COMMAND = "python tests/run_all.py"
 
     def write(self, rows):
-        directory = Path(tempfile.mkdtemp(prefix="epitype-hosts-"))
-        self.addCleanup(lambda: None)
+        temporary = tempfile.TemporaryDirectory(prefix="epitype-hosts-")
+        self.addCleanup(temporary.cleanup)
+        directory = Path(temporary.name).resolve()
         path = directory / "t.jsonl"
         with io.open(path, "w", encoding="utf-8", newline="\n") as stream:
             for row in rows:
@@ -80,7 +81,11 @@ class BothHostsReadTheSame(unittest.TestCase):
                 turn = stop_gate._turn_context(self.write(rows))
                 self.assertEqual(turn.prompt.strip(), self.PROMPT)
                 self.assertEqual([piece.strip() for piece in turn.texts], [self.ANSWER])
-                self.assertEqual(turn.calls_after_dispatch, 1)
+                self.assertEqual(turn.dispatch, "")
+                self.assertEqual(turn.calls_after_dispatch, 0)
+                self.assertEqual(len(turn.evidence), 1)
+                self.assertEqual(turn.evidence[0].call_id, "t1")
+                self.assertGreater(turn.evidence[0].finished, turn.evidence[0].started)
 
     def test_a_dispatch_is_visible_in_both(self):
         for host, rows in self.shapes(tool_name="Task").items():
@@ -88,6 +93,19 @@ class BothHostsReadTheSame(unittest.TestCase):
                 turn = stop_gate._turn_context(self.write(rows))
                 self.assertEqual(turn.dispatch, "Task")
                 self.assertEqual(turn.calls_after_dispatch, 0)
+
+    def test_only_finished_dispatches_count_and_following_calls_stay_visible(self):
+        for host, rows in self.shapes(tool_name="Task").items():
+            with self.subTest(host=host):
+                pending = [row for row in rows if transcript.turn_parts(row)[0] != transcript.TOOL_RESULT]
+                self.assertEqual(stop_gate._turn_context(self.write(pending)).dispatch, "")
+                follow = self.shapes()[host][1:3]
+                encoded = json.dumps(follow).replace("t1", "t2")
+                completed = rows[:-1] + json.loads(encoded) + rows[-1:]
+                turn = stop_gate._turn_context(self.write(completed))
+                self.assertEqual(turn.dispatch, "Task")
+                self.assertEqual(turn.calls_after_dispatch, 1)
+                self.assertEqual(set(turn.call_ids), {"t1", "t2"})
 
     def test_the_length_check_does_not_misread_a_request_for_detail(self):
         # Codex 審查實測到的那一條：使用者要求詳細，程式卻讀不到，反而把長回答擋下來。

@@ -24,7 +24,7 @@ from unittest import mock
 
 import _hook_common as common
 import pretooluse_gate as gate
-from epitype import memspec
+from epitype import memspec, hook_context
 
 ENGLISH = ("Now documenting the reason and removal condition in the launcher, and making its "
            "give-up message say what to do next instead of failing quietly.")
@@ -95,7 +95,8 @@ class MidturnLanguage(unittest.TestCase):
             self.event(**overrides), self.config, time.monotonic(), lambda _line: True)
 
     def state_file(self):
-        return common.notice_marker_directory(self.session) / memspec.TURN_LANGUAGE_MIDTURN_STATE_FILE
+        context = gate.hook_context.identity(self.event())
+        return common.notice_marker_directory(context) / memspec.TURN_LANGUAGE_MIDTURN_STATE_FILE
 
     def test_english_midturn_text_gives_one_reminder(self):
         self.call_tool()
@@ -163,6 +164,15 @@ class MidturnLanguage(unittest.TestCase):
         self.assertIsNone(self.line(agentId="agent-1"))
         self.assertFalse(self.state_file().exists())
 
+    def test_child_transcript_without_agent_marker_does_not_check_owner_language(self):
+        self.say(ENGLISH)
+        child = self.root / 'subagents' / 'agent-A.jsonl'
+        child.parent.mkdir()
+        child.write_bytes(self.transcript.read_bytes())
+        with mock.patch.object(gate, '_owner_language_decisions') as decisions:
+            self.assertIsNone(self.line(transcript_path=str(child)))
+            decisions.assert_not_called()
+
     def test_a_missing_or_unreadable_transcript_gives_none(self):
         self.say(ENGLISH)
         self.assertIsNone(self.line(transcript_path=str(self.root / "missing.jsonl")))
@@ -178,7 +188,8 @@ class MidturnLanguage(unittest.TestCase):
         self.assertIsNone(self.line(transcript_path=str(codex)))
         with mock.patch.object(gate, "_owner_language_decisions", side_effect=RuntimeError("boom")):
             self.assertIsNone(self.line())
-        self.assertIsNone(self.line(session_id=""))
+        self.assertIsNotNone(self.line(session_id=""))  # A known transcript still identifies its context.
+        self.assertIsNone(self.line(session_id="", transcript_path=""))
 
     def test_no_owner_language_card_gives_none(self):
         (self.vault / "lang.md").unlink()

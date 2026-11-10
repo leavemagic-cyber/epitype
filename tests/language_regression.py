@@ -36,7 +36,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from epitype import memspec
+from epitype import hook_context, memspec
 from install import graft
 
 ADAPTERS = ROOT / "adapters" / "claude"
@@ -48,21 +48,14 @@ CJK = re.compile(r"[　-〿㐀-鿿＀-￯]")
 GUARD_CARD = "starter-stage-explicit-paths-bash.md"
 SPEECH_CARD = "starter-no-hedged-completion.md"
 
-# owner 機器上現在看到的那兩句，逐字。片段與建議取自出貨卡，所以卡片改了這裡也要改——
-# 那正是重點：預設語言的輸出不准因為這次的改動而變形。出貨卡只提醒、回合閘不擋
-# （owner 2026-10-03；CORE-25），所以這兩句是放行時的提醒，不是拒絕理由。
+# 出貨卡的繁中提醒快照：單行現行建議，來源與命中片段留在記錄；回合閘不擋。
 ZH_GUARD_NOTE = (
     "Epitype [Stage explicit paths, not the whole tree]：提醒：Run git status first, "
     "then name each path you actually changed"
-    "\n既有記錄（來源未驗證；僅供查找）：Run git status first, then name each path you actually changed"
-    "\n作者：UNVERIFIED"
 )
-# 2026-10-10 派工第 4 條改了需求：只有卡名與檢查名的提醒說不出該照什麼做，所以這一句補回
-# 卡片建議與命中片段（出貨卡沒寫 advice，建議取自卡片說明，截在 140 字內）。
 ZH_STOP_NOTE = (
-    "Epitype 提醒：回覆命中 No hedged completion 的 forbidden 檢查"
-    "；建議：should work now is a guess wearing the clothes of…"
-    "；對照文字：「that should fix it」。這一則不用重送。"
+    "Epitype 提醒（No hedged completion）："
+    "should work now is a guess wearing the clothes of a result"
 )
 
 
@@ -264,18 +257,20 @@ class _HookCase(unittest.TestCase):
 
         self.install(SPEECH_CARD)
         sentence = _sequence(_card(SPEECH_CARD), memspec.EXAMPLE_BLOCKS_FIELD)[0]
+        event = {"hook_event_name": "Stop", "stop_hook_active": False,
+                 "last_assistant_message": sentence, "session_id": "lang-stop",
+                 "transcript_path": str(self.root / "lang-stop.jsonl"), "cwd": str(self.root)}
         result = subprocess.run(
             [sys.executable, str(STOP)],
-            input=json.dumps({"hook_event_name": "Stop", "stop_hook_active": False,
-                              "last_assistant_message": sentence,
-                              "session_id": "lang-stop", "cwd": str(self.root)}, ensure_ascii=False),
+            input=json.dumps(event, ensure_ascii=False),
             capture_output=True, text=True, encoding="utf-8",
             env=self.environment(language), cwd=str(self.root),
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "", "回合閘不擋")
         with patch.dict(os.environ, {memspec.EPITYPE_CONFIG_ENV: str(self.config)}):
-            notes = common.take_notes(common.load_config(time.monotonic()), "lang-stop")
+            notes = common.take_notes(common.load_config(time.monotonic()),
+                                      hook_context.notification_identity(event))
         self.assertEqual(len(notes), 1, f"{STOP.name} 沒有留下提醒：{result.stderr}")
         return notes[0]
 

@@ -38,7 +38,7 @@ def filed_kind(owner_text, assistant_text=None):
     if found is None:
         return NONE
     kind, body, summary, _digest = found
-    return kind if capture.auto_admitted(capture.owner_side(body, summary))[0] else NONE
+    return kind if capture.auto_admitted(owner_text)[0] else NONE
 
 
 # ---------------------------------------------------------------- synthetic set

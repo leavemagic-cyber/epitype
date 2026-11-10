@@ -47,6 +47,8 @@ MAP_NOTICE_TEMPLATE = '壓縮前原文地圖：{path}；需要原文時讀它按
 # 整行上限按 UTF-8 位元組計。超限＝整行不注，路徑絕不截斷：半條路徑讀不回任何東西，
 # 而讀不回來的指標比沒有指標更貴（Codex round 1 COUNTER，2026-09-10）。
 MAP_NOTICE_MAX_BYTES = 240
+RESUME_BEGIN = '<!-- EPITYPE RESUME BEGIN -->'
+RESUME_END = '<!-- EPITYPE RESUME END -->'
 _SESSION_COMPONENT_UNSAFE = re.compile(r'[^A-Za-z0-9._-]')
 
 
@@ -130,6 +132,38 @@ def handoff_notice(destination):
     if len(line.encode('utf-8')) > MAP_NOTICE_MAX_BYTES:
         return None
     return line
+
+
+def handoff_resume(destination, budget_bytes=COMPACT_MAP_DEFAULT_BUDGET_BYTES):
+    """Read one complete, explicitly maintained working-state block, never history.
+
+    A missing, malformed or oversized block falls back to the existing source
+    pointer. This does not summarize prose or turn an AI note into user authority.
+    """
+    if isinstance(budget_bytes, bool) or not isinstance(budget_bytes, int) or budget_bytes <= 0:
+        return None
+    try:
+        with Path(destination).open('rb') as stream:
+            prefix = stream.read(COMPACT_MAP_DEFAULT_BUDGET_BYTES * 2)
+        begin, end = RESUME_BEGIN.encode('ascii'), RESUME_END.encode('ascii')
+        if prefix.count(begin) != 1 or prefix.count(end) != 1:
+            return None
+        start = prefix.index(begin) + len(begin)
+        stop = prefix.index(end)
+        if stop <= start:
+            return None
+        body = prefix[start:stop].decode('utf-8').strip()
+    except (OSError, ValueError, UnicodeError):
+        return None
+    if not body:
+        return None
+    rendered = '同一任務短狀態（AI整理；原話按需查證）：\n' + body
+    return rendered if len(rendered.encode('utf-8')) <= budget_bytes else None
+
+
+def resume_notice(destination):
+    line = f'接續原件（按需查）：{os.fspath(destination)}'
+    return line if len(line.encode('utf-8')) <= MAP_NOTICE_MAX_BYTES else None
 
 
 def _positive_int(value):

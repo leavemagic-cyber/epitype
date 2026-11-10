@@ -159,6 +159,8 @@ def _run_hook(script, vault, root, event):
     config.write_text(
         json.dumps(
             {
+                # Synthetic pinned-card questions explicitly exercise opt-in delivery.
+                memspec.CONFIG_PROACTIVE_RECALL_FIELD: True,
                 memspec.CONFIG_VAULTS_FIELD: [str(vault)],
                 memspec.CONFIG_BUDGET_BYTES_FIELD: memspec.HOOK_DEFAULT_BUDGET_BYTES,
             },

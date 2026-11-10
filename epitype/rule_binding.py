@@ -17,10 +17,21 @@ def _path(namespace, identity):
 
 
 def matches(namespace, identity, digest):
+    from . import rule_provenance
+    path = _path(namespace, identity)
     try:
-        value = json.loads(_path(namespace, identity).read_text(encoding="utf-8"))
+        raw = path.read_bytes()
+        rule_provenance.record_validation_file(path, raw)
+        value = json.loads(raw.decode('utf-8'))
         return value == {"version": 1, "sha256": digest}
-    except (OSError, ValueError):
+    except FileNotFoundError:
+        rule_provenance.record_validation_file(path, None)
+        return False
+    except OSError:
+        if rule_provenance.validation_inputs_active():
+            raise  # A temporarily unreadable input cannot establish a reusable chain verdict.
+        return False
+    except ValueError:
         return False
 
 
@@ -35,6 +46,8 @@ def remember(namespace, identity, digest):
         with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
             json.dump({"version": 1, "sha256": digest}, stream)
         os.replace(temporary, target)
+        from . import rule_provenance
+        rule_provenance.record_validation_file(target, target.read_bytes())
     except OSError:
         # A read-only installation can still validate the original fingerprint.
         # It cannot migrate later edits until this state directory is writable.

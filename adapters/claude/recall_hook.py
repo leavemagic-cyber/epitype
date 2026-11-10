@@ -15,7 +15,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from epitype import context_meter, control_lifecycle, memsearch, memspec, recall_quiet
+from epitype import capture_route, context_meter, control_lifecycle, hook_context, memsearch, memspec, recall_quiet, rule_context
 # 捕捉核心住在 epitype.capture，讓離線回放（harvest）套用同一份觸發與遮罩規則；
 # 這裡保留原本的私名，呼叫端與 selftest 不因搬移而改。
 from epitype.capture import (
@@ -38,7 +38,8 @@ from _hook_common import (
     governance_vault,
     load_config,
     payload,
-    take_notes,
+    peek_notes,
+    consume_notes,
     payload_fits,
     read_event,
     recall_marker_directory,
@@ -188,7 +189,7 @@ def _event_card(hit, path):
     """
     card_path = _one_line(hit.get("card_path")).replace("\\", "/")
     directory = card_path.split("/")[0] if "/" in card_path else Path(path).parent.name
-    return directory in _EVENT_DIRECTORIES
+    return directory in _EVENT_DIRECTORIES or memspec.is_pending_capture(card_path or path)
 
 
 def _merge_ordinary(groups):
@@ -205,6 +206,24 @@ def _merge_ordinary(groups):
         if rank < len(groups[vault_index]):
             coverage, value = groups[vault_index][rank]
             heapq.heappush(queue, (rank, -coverage, vault_index, value))
+
+
+def _duplicate_card_copy(path, earlier_paths, digests):
+    """A shared filename is not evidence that two cards contain the same facts.
+
+    Only compare same-relative-path candidates, and read bytes lazily when that
+    path collides across vaults. Unique paths need no extra source read.
+    """
+    if not earlier_paths:
+        return False
+    try:
+        for candidate in (path, *earlier_paths):
+            if candidate not in digests:
+                digests[candidate] = hashlib.sha256(Path(candidate).read_bytes()).digest()
+    except OSError as error:
+        print(f"Epitype duplicate comparison unavailable [{Path(path).name}]: {error}", file=sys.stderr)
+        return False
+    return any(digests[path] == digests[earlier] for earlier in earlier_paths)
 
 
 def _recall_candidates(result):
@@ -242,18 +261,22 @@ def _recall_projection(projected):
     """The hook shares boilerplate; other projection consumers keep their full form."""
     from epitype import rule_provenance
     document = projected['document']
+    summary = (projected.get('current_description') or '').strip() if document['kind'] == 'owner-directive' else ''
     label = (memspec.RECALL_SOURCE_OWNER if document['kind'] == 'owner-directive'
              else memspec.RECALL_SOURCE_AI).format(author=document['author'])
-    if projected['provenance']['status'] != rule_provenance.VERIFIED:
+    if summary:
+        label = memspec.RECALL_SOURCE_CURRENT_DESCRIPTION.format(author=document['author'])
+    if projected.get('verification_deferred'):
+        label = memspec.RECALL_SOURCE_DEFERRED + label
+    elif not rule_provenance.usable(projected['provenance']['status']):
         label = memspec.RECALL_SOURCE_UNKNOWN.format(label=label)
     parts = [f"[{document['key']}] {label}"]
     if document['scope'] != _DEFAULT_RECALL_SCOPE:
         parts.append(memspec.RECALL_SOURCE_SCOPE.format(scope=rule_provenance.serialize(document['scope'])))
-    if document['kind'] == 'ai-derived':
+    if document['kind'] == 'ai-derived' and projected['provenance']['status'] == rule_provenance.VERIFIED:
         parts.append(memspec.RECALL_SOURCE_QUOTE.format(quote=document['quote']))
-    parts.append(projected['text'])
-    if projected['supersedes']:
-        parts.append(memspec.RECALL_SOURCE_SUPERSEDES.format(cards='、'.join(projected['supersedes'])))
+    parts.append(summary or projected['text'])
+    # Retired-card lineage is available in the source card, not repeated in routine guidance.
     return ' | '.join(parts)
 
 
@@ -293,7 +316,7 @@ def _source_omission(budget):
     return None
 
 
-def _card_identity(line, aliases):
+def _card_identity(line, aliases, versions=None):
     """A card line with its alias replaced by the vault path the alias stands for.
 
     The same line text under a different alias mapping is a different card; the same
@@ -301,10 +324,16 @@ def _card_identity(line, aliases):
     """
     text, separator, located = line.rpartition(" | ")
     alias, slash, rest = located.partition("/")
+    if versions is not None:
+        location = str((Path(aliases[alias]) / rest).resolve()) if alias in aliases else located
+        location = os.path.normcase(location)
+        if location in versions:
+            from epitype import rule_pipeline
+            return rule_pipeline.delivery_identity(location, versions[location]) + json.dumps(text, ensure_ascii=False)
     return f"{text}{separator}{aliases.get(alias, alias)}{slash}{rest}"
 
 
-def _source_passage(path, vault, terms, expected_name=None, fallback_first=False):
+def _source_passage(path, vault, terms, expected_name=None, fallback_first=False, presented_text=""):
     """Read the current card, then return a bounded, literal passage relevant to this prompt.
 
     The index selects candidates; it is not the source of the words delivered here.
@@ -369,12 +398,16 @@ def _source_passage(path, vault, terms, expected_name=None, fallback_first=False
             chosen.append(_one_line(following))
             end += 1
     passage = " ".join(chosen)
+    if presented_text and passage == _one_line(presented_text):
+        return ""  # This exact excerpt is already on the proposed line; no unseen prose is suppressed.
     if len(passage) > memspec.RECALL_SOURCE_MAX_CHARS:
         passage = passage[:memspec.RECALL_SOURCE_MAX_CHARS].rstrip() + "…"
     return f"原文節錄 L{index + 1}" + (f"-{end}" if end > index + 1 else "") + f"：{passage}"
 
 
-def _handle(event, started_at, delivery_markers=None, meter_pending=None, deliveries=None):
+@capture_route.observation_window()
+def _handle(event, started_at, delivery_markers=None, meter_pending=None, deliveries=None,
+            notes_pending=None):
     prompt = event.get("prompt")
     if not isinstance(prompt, str) or not prompt.strip():
         return None
@@ -385,7 +418,7 @@ def _handle(event, started_at, delivery_markers=None, meter_pending=None, delive
     value = _recall(event, started_at, config, delivery_markers, deliveries)
     if expired(started_at):
         return None
-    value = _with_notes(value, config, event)
+    value = _with_notes(value, config, event, notes_pending)
     value = _with_lifecycle(value, config, event, released)
     return _with_context_meter(value, config, event, started_at, meter_pending)
 
@@ -400,8 +433,8 @@ def _with_context_meter(value, config, event, started_at, meter_pending):
     為 None）搶不了標記，一律不附——否則同一段會每次都說。"""
     if meter_pending is None or expired(started_at):
         return value
-    session_id = event.get("session_id", event.get("sessionId", ""))
-    if not isinstance(session_id, str) or not session_id:
+    session_id = hook_context.identity(event)
+    if not session_id:
         return value
     try:
         found = context_meter.notice(
@@ -419,19 +452,29 @@ def _with_context_meter(value, config, event, started_at, meter_pending):
     return value
 
 
-def _with_notes(value, config, event):
+def _with_notes(value, config, event, pending=None):
     """回合閘上一則留下的提醒，跟著這一則提問一起送。
 
     提醒走這裡而不是用「擋下回合」送，是因為宿主先顯示、後跑回合閘：擋下來收不回
-    已經顯示的字，只會多跑一輪；附在下一則提問上是零成本的。"""
-    notes = take_notes(config, event.get("session_id", event.get("sessionId")))
+    已經顯示的字，只會多跑一輪。提醒仍佔輸出預算；沒送出的留待下一輪。"""
+    session = hook_context.identity(event)
+    notes = peek_notes(config, session)
     if not notes:
         return value
-    line = memspec.STOP_NOTE_DELIVERY.format(
-        notes=memspec.PROBLEM_JOINER.join(notes))
-    if value is None:
-        return payload("UserPromptSubmit", line)
-    context = value.get("hookSpecificOutput", {}).get("additionalContext", "")
+    context = value.get("hookSpecificOutput", {}).get("additionalContext", "") if value else ""
+    selected = []
+    for note in notes:
+        line = memspec.STOP_NOTE_DELIVERY.format(
+            notes=memspec.PROBLEM_JOINER.join([*selected, note]))
+        combined = (context + "\n" + line) if context else line
+        if not payload_fits("UserPromptSubmit", combined, config[memspec.CONFIG_BUDGET_BYTES_FIELD]):
+            break
+        selected.append(note)
+    if not selected:
+        return value
+    line = memspec.STOP_NOTE_DELIVERY.format(notes=memspec.PROBLEM_JOINER.join(selected))
+    if pending is not None:
+        pending.append((config, session, selected))
     return payload("UserPromptSubmit", (context + "\n" + line) if context else line)
 
 
@@ -485,6 +528,51 @@ def _recall(event, started_at, config, delivery_markers=None, deliveries=None):
         return _recall_cards(event, started_at, config, delivery_markers, deliveries)
 
 
+def _admitted_card(hit, vault, event, quiet):
+    """Share intrinsic eligibility between linked discovery and final delivery."""
+    path = _one_line(hit.get('path'))
+    if memspec.is_pending_capture(hit.get('card_path', path)):
+        return None
+    active = _one_line(hit.get(memspec.DECISION_STATUS_FIELD)) == memspec.ACTIVE_DECISION_STATUS
+    if not active and _event_card(hit, path):
+        return None
+    source_projection = None
+    try:
+        current_fields = _frontmatter_fields(Path(path))
+        if current_fields.get("layer") == "resident":
+            return None  # Native entries already carry resident rules; explicit search is separate.
+        if not memspec.card_is_current(current_fields):
+            return None
+        from epitype import rule_pipeline
+        if 'rule_provenance' not in current_fields:
+            # Unbound shell edits still cannot promote a changed legacy rule.
+            integrity = rule_pipeline.legacy_integrity(current_fields, Path(path))
+            if integrity is not None and not integrity.allowed:
+                raise ValueError('; '.join(integrity.issues))
+        if 'rule_provenance' in current_fields:
+            from epitype import rule_provenance
+            cache_path = memsearch._db_path(vault).parent / memspec.PROVENANCE_ORIGIN_CACHE_FILENAME
+            with rule_provenance.authorship_cache(cache_path):
+                source_projection = rule_pipeline.projection(current_fields, Path(path), allow_deferred=True)
+            if source_projection['expired']:
+                return None
+            state, _reason = rule_context.applicability(source_projection['document']['scope'], event)
+        else:
+            state, _reason = rule_context.reference_applicability(current_fields, Path(path), event)
+        if state == 'OUTSIDE':
+            return None
+    except (OSError, ValueError) as error:
+        print(f'Epitype source recall omitted [{Path(path).name}]: {error}', file=sys.stderr)
+        return None
+    decision = _active_decision(path, source_projection) if active else None
+    if decision is False:
+        return None
+    if decision is None and (_event_card(hit, path) or recall_quiet.should_quiet(
+            vault, _one_line(hit.get('card_path')), quiet)):
+        return None
+    return source_projection, decision
+
+
 def _recall_cards(event, started_at, config, delivery_markers=None, deliveries=None):
     prompt = event["prompt"]
 
@@ -493,10 +581,23 @@ def _recall_cards(event, started_at, config, delivery_markers=None, deliveries=N
     # 庫，所以專案對話裡的裁定與糾正全被寫進通用庫（實測 132 張裡 74 張屬於別的庫）。
     try:
         capture_vault = _capture_vault(config, event)
-    except OSError:
-        capture_vault = None
-    if capture_vault is not None:
-        _capture_event(prompt, capture_vault, event, started_at)
+        if capture_vault is not None:
+            from epitype.capture import capture_transcript
+            captured_prompt = capture_transcript(capture_vault, event, started_at)
+            # A prompt may reach this hook before its message record is appended.
+            # Let the next tool/stop hook capture that identity, rather than writing
+            # a second event under an anonymous byte-count identity. Explicit reviewed
+            # producers and callers without a transcript retain the direct API.
+            if not captured_prompt and (not event.get("transcript_path") or "rule_provenance" in event):
+                _capture_event(prompt, capture_vault, event, started_at)
+    except Exception as error:
+        # Card discovery must still run when ancillary capture fails.
+        print(f"Epitype event capture deferred: {type(error).__name__}", file=sys.stderr)
+
+    # Capture, lifecycle advice and compaction continuity are independent of card discovery.
+    # Broad prompt matching is opt-in; ordinary turns do not search the vaults.
+    if config.get(memspec.CONFIG_PROACTIVE_RECALL_FIELD) is not True:
+        return None
 
     # An active decision card outranks any lexical hit: it is the standing ruling
     # somebody curated from what the owner said, so it takes the first seats and is
@@ -505,10 +606,14 @@ def _recall_cards(event, started_at, config, delivery_markers=None, deliveries=N
     pinned_entries = []
     ordinary_groups = []
     legend = []
-    shown_names = set()  # 同檔名跨庫（專案的指路卡與通用庫正本）一則只端一張，先到的庫優先
+    shown_copies = {}  # Same relative path and exact bytes identify a copied card.
+    copy_digests = {}
     origins = {}  # 端出的那一行 -> (庫, 卡在庫裡的相對路徑, 送達方式)，送達帳用
     source_routes = {}
+    versions = {}
+    presented_texts = {}
     pointer_lines = set()
+    route_lines = set()
     replacement_paths = set()
     source_labels = False
     lookup_labels = False
@@ -516,8 +621,21 @@ def _recall_cards(event, started_at, config, delivery_markers=None, deliveries=N
     for vault in scoped_vaults(config, event):
         if expired(started_at):
             return None
+        quiet = recall_quiet.quiet_cards(vault)
+        admitted_cards = {}
+
+        def admission(hit):
+            if expired(started_at):
+                return None
+            path = _one_line(hit.get('path'))
+            if path not in admitted_cards:
+                admitted_cards[path] = _admitted_card(hit, vault, event, quiet)
+            return admitted_cards[path]
+
         try:
-            result = memsearch.recall_index(vault, prompt, limit=memspec.RECALL_PINNED_SCAN_LIMIT)
+            result = memsearch.recall_index(
+                vault, prompt, limit=memspec.RECALL_PINNED_SCAN_LIMIT,
+                seed_filter=lambda hit: admission(hit) is not None, automatic=True)
         except Exception:
             continue
         if result.get("error") == "no-index":
@@ -525,7 +643,6 @@ def _recall_cards(event, started_at, config, delivery_markers=None, deliveries=N
         if expired(started_at):
             return None
         alias = f"V{len(legend) + 1}"
-        quiet = recall_quiet.quiet_cards(vault)
         used = False
         body_only = 0
         ordinary = 0
@@ -546,45 +663,24 @@ def _recall_cards(event, started_at, config, delivery_markers=None, deliveries=N
             # Reject already-full ordinary slots before costly source checks.
             # Indexed-active cards still pass through live verification and pinning.
             if _one_line(hit.get(memspec.DECISION_STATUS_FIELD)) != memspec.ACTIVE_DECISION_STATUS:
-                card_name = Path(_one_line(hit.get("card_path")) or path).name
                 if (_event_card(hit, path)
-                        or card_name in shown_names or ordinary >= memspec.FTS_TOP_K
+                        or ordinary >= memspec.FTS_TOP_K
                         or (list(hit.get("hit_fields") or ()) == ["body"]
                             and body_only >= memspec.RECALL_BODY_ONLY_MAX_PER_VAULT)):
                     continue
-            source_projection = None
-            try:
-                current_fields = _frontmatter_fields(Path(path))
-                from epitype import rule_pipeline
-                if 'rule_provenance' not in current_fields:
-                    # General shell writes have no declared prospective text.
-                    # They still cannot promote a new/changed legacy rule here.
-                    integrity = rule_pipeline.legacy_integrity(current_fields, Path(path))
-                    if integrity is not None and not integrity.allowed:
-                        raise ValueError('; '.join(integrity.issues))
-                if "rule_provenance" in current_fields:
-                    from epitype import rule_provenance
-                    cache_path = memsearch._db_path(vault).parent / memspec.PROVENANCE_ORIGIN_CACHE_FILENAME
-                    with rule_provenance.authorship_cache(cache_path):
-                        source_projection = rule_pipeline.projection(current_fields, Path(path))
-                    if source_projection['expired']:
-                        continue
-            except (OSError, ValueError) as error:
-                print(f"Epitype source recall omitted [{Path(path).name}]: {error}", file=sys.stderr)
+            admitted = admission(hit)
+            if admitted is None:
                 continue
-            # Decided before the caps: the owner's standing ruling is never a weak hit.
-            decision = None
-            if _one_line(hit.get(memspec.DECISION_STATUS_FIELD)) == memspec.ACTIVE_DECISION_STATUS:
-                decision = _active_decision(path, source_projection)
-                if decision is False:
-                    continue  # A retired/unreadable ruling is not an ordinary hit.
-            if decision is None and _event_card(hit, path):
-                continue  # 原話事件檔只在 memsearch 端出（U-H）；卡片層才進喚回。
-            if decision is None and recall_quiet.should_quiet(
-                    vault, _one_line(hit.get("card_path")), quiet):
-                continue  # 夜間判定一再端出卻從沒用到的資訊型卡；裁定永遠不靜音。
-            card_name = Path(_one_line(hit.get("card_path")) or path).name
-            if decision is None and card_name in shown_names:
+            source_projection, decision = admitted
+            from epitype import rule_pipeline
+            try:
+                versions[os.path.normcase(str(Path(path).resolve()))] = (source_projection['effective_version']
+                    if source_projection is not None else rule_pipeline.effective_version(
+                        Path(path).read_text(encoding='utf-8-sig')))
+            except (OSError, UnicodeError, ValueError):
+                continue
+            copy_key = _one_line(hit.get("card_path")) or path
+            if decision is None and _duplicate_card_copy(path, shown_copies.get(copy_key, ()), copy_digests):
                 continue
             # A card matched only in its body is a weak lexical hit; two per vault
             # is plenty. A decision card is never weak, so its kind is decided
@@ -610,9 +706,13 @@ def _recall_cards(event, started_at, config, delivery_markers=None, deliveries=N
             description = _one_line(hit.get("description"))[: memspec.RECALL_DESCRIPTION_MAX_CHARS]
             if source_projection is not None:
                 description = _one_line(_recall_projection(source_projection))
+                primary = (source_projection.get('current_description')
+                    if source_projection['document']['kind'] == 'owner-directive' else '')
+                presented_texts[os.path.normcase(str(Path(path).resolve()))] = _one_line(primary or source_projection['text'])
                 source_labels = True
-                unavailable_sources |= source_projection['provenance']['status'] != 'VERIFIED'
+                unavailable_sources |= source_projection['provenance'].get('source_unavailable', False)
             else:
+                presented_texts[os.path.normcase(str(Path(path).resolve()))] = description
                 lookup_labels = True
             if decision is not None:
                 key, decided_at, quote = decision
@@ -637,12 +737,15 @@ def _recall_cards(event, started_at, config, delivery_markers=None, deliveries=N
                 source_routes[line] = "- " + memspec.RECALL_LOOKUP_PREFIX + redirect + located
             origins[line] = (vault, card_identity, memspec.RECALL_DELIVERY_MODE_DECISION
                              if decision is not None else memspec.RECALL_DELIVERY_MODE_CARD)
+            if source_projection is not None and source_projection.get('verification_deferred'):
+                pointer_lines.add(line)
+                source_routes[line] = "- 現行卡片（本輪取代鏈驗證未完成） | " + located
             if decision is not None:
                 pinned_entries.append((line, path, vault, result.get("terms", ()), name))
             else:
                 ordinary_lines.append((hit.get("matched_term_count", 0),
                                        (line, path, vault, result.get("terms", ()), name)))
-            shown_names.add(card_name)
+            shown_copies.setdefault(copy_key, []).append(path)
             used = True
         ordinary_groups.append(ordinary_lines)
         if used:
@@ -662,32 +765,33 @@ def _recall_cards(event, started_at, config, delivery_markers=None, deliveries=N
         head += "\n" + memspec.RECALL_UNAVAILABLE_LEGEND
     if legend:
         head += "\n" + memspec.RECALL_LEGEND_PREFIX + " ".join(legend)
-    session_id = event.get("session_id", event.get("sessionId", ""))
-    if not isinstance(session_id, str):
-        session_id = ""
+    session_id = hook_context.identity(event) or ""
     aliases = dict(entry.split("=", 1) for entry in legend)
 
     def already_delivered(line):
-        kind = "pointer-" if line in pointer_lines else "card-"
-        digest = kind + hashlib.sha256(_card_identity(line, aliases).encode("utf-8")).hexdigest()
+        kind = "pointer-" if line in route_lines else "card-"
+        digest = kind + hashlib.sha256(_card_identity(line, aliases, versions).encode("utf-8")).hexdigest()
         return bool(session_id) and (recall_marker_directory(session_id) / digest).is_file()
 
     pinned = []
     source_reads = 0
     for position, (line, path, vault, terms, name) in enumerate(pinned_entries):
         source_added = False
-        if already_delivered(line):
-            continue
+        # Source envelopes can omit operative card prose; receipts cover only actual rendered units.
         origin = origins.get(line)
         route = source_routes.get(line)
         if route and not payload_fits("UserPromptSubmit", "\n".join([head, *pinned, line]),
                                       config[memspec.CONFIG_BUDGET_BYTES_FIELD]):
+            if already_delivered(line):
+                continue  # A loaded summary needs no downgraded pointer.
             line = route
             pointer_lines.add(line)
+            route_lines.add(line)
             origin = (origin[0], origin[1], memspec.RECALL_DELIVERY_MODE_CARD)
         if line not in pointer_lines and source_reads == 0 and not expired(started_at):
             passage = _source_passage(path, vault, terms, name,
-                                      fallback_first=path in replacement_paths)
+                                      fallback_first=path in replacement_paths,
+                                      presented_text=presented_texts.get(os.path.normcase(str(Path(path).resolve())), ""))
             if passage:
                 front, separator, located = line.rpartition(" | ")
                 expanded = f"{front} | {passage} | {located}" if separator else line
@@ -705,17 +809,20 @@ def _recall_cards(event, started_at, config, delivery_markers=None, deliveries=N
         pinned.append(line)
     others = []
     for index, (line, path, vault, terms, name) in enumerate(other_entries):
+        source_added = False
         origin = origins.get(line)
         route = source_routes.get(line)
         if route and not payload_fits("UserPromptSubmit", "\n".join([head, *pinned, line]),
                                       config[memspec.CONFIG_BUDGET_BYTES_FIELD]):
             line = route
             pointer_lines.add(line)
+            route_lines.add(line)
             origin = (origin[0], origin[1], memspec.RECALL_DELIVERY_MODE_CARD)
-        if (line not in pointer_lines and index < memspec.RECALL_SOURCE_MAX_CARDS - source_reads
+        if (line not in pointer_lines and source_reads < memspec.RECALL_SOURCE_MAX_CARDS
                 and not expired(started_at)):
             passage = _source_passage(path, vault, terms, name,
-                                      fallback_first=path in replacement_paths)
+                                      fallback_first=path in replacement_paths,
+                                      presented_text=presented_texts.get(os.path.normcase(str(Path(path).resolve())), ""))
             if passage:
                 front, separator, located = line.rpartition(" | ")
                 expanded = f"{front} | {passage} | {located}" if separator else line
@@ -724,6 +831,10 @@ def _recall_cards(event, started_at, config, delivery_markers=None, deliveries=N
                 if payload_fits("UserPromptSubmit", "\n".join([head, *pinned, expanded]),
                                 config[memspec.CONFIG_BUDGET_BYTES_FIELD]):
                     line = expanded
+                    source_added = True
+        if already_delivered(line):
+            continue
+        source_reads += source_added
         origins[line] = origin
         others.append(line)
     # Each injection carries the legend that gives its compact item labels meaning.
@@ -734,8 +845,8 @@ def _recall_cards(event, started_at, config, delivery_markers=None, deliveries=N
     # changed. A line cut by the byte budget has not been delivered and stays eligible.
     pending = []
     for line in [*pinned, *others]:
-        kind = "pointer-" if line in pointer_lines else "card-"
-        digest = kind + hashlib.sha256(_card_identity(line, aliases).encode("utf-8")).hexdigest()
+        kind = "pointer-" if line in route_lines else "card-"
+        digest = kind + hashlib.sha256(_card_identity(line, aliases, versions).encode("utf-8")).hexdigest()
         if not session_id or not (recall_marker_directory(session_id) / digest).is_file():
             pending.append((line, digest))
     if not pending:
@@ -783,8 +894,9 @@ def _queue_deliveries(deliveries, config, event, session_id, delivered):
         return
     host = _event_host(event)
     rows = [
-        {"session_id": session_id, "vault": os.fspath(vault), "card": card, "mode": mode,
-         "host": host}
+        {"session_id": event.get("session_id", event.get("sessionId", "")),
+         "context_id": session_id or None, "vault": os.fspath(vault), "card": card,
+         "mode": mode, "host": host}
         for vault, card, mode in (item for item in delivered if item)
     ]
     if rows:
@@ -800,6 +912,7 @@ def _selftest():
     sys.path.insert(0, str(_REPO_ROOT / "tests"))
     from epitype import capture
     from rule_capture_source_fixtures import STAMP, calendar_wrapper, reviewed_capture_event
+    from hook_meter_fixtures import synchronized_meter_hook
 
     checks = []
     marker_directory = None
@@ -874,8 +987,9 @@ def _selftest():
             config = root / "config.json"
             write_config(config, [vault])
             session_id = "synthetic-" + uuid.uuid4().hex
-            marker_directory = recall_marker_directory(session_id)
-            event = {"prompt": "how do I use portable recall from the command line", "session_id": session_id}
+            event = {"prompt": "how do I use portable recall from the command line", "session_id": session_id,
+                     "transcript_path": os.fspath(root / "recall-session.jsonl")}
+            marker_directory = recall_marker_directory(hook_context.identity(event))
 
             first = run_synthetic(Path(__file__), event, config)
             first_value = json.loads(first.stdout) if first.stdout.strip() else {}
@@ -1323,16 +1437,18 @@ def _selftest():
             )
 
             (grant_vault / "plan.md").write_text(
-                "---\nname: Drive Plan\ndescription: 待刪 SWSetup 未辦（owner 自行）\n---\nSWSetup 3.32 GB 未辦\n",
+                "---\nname: Drive Plan\ndescription: 待整理 SampleCache 未辦（人工處理）\n---\nSampleCache 2.5 GB 未辦\n",
                 encoding="utf-8",
             )
             memsearch.build_index(grant_vault)
-            correction_sentence = "不要亂處理 SWSetup，我不是說過你只能處理AI產生資料"
+            # 2026-09-09 owner Q5「C」：喚回這幾條驗的是「入庫的卡怎麼端出來」，題目
+            # 一律用白名單形狀；白名單以外的句子落提案區，由下面那條專門驗。
+            correction_sentence = "不要亂整理 SampleCache，我不是說過你只能整理測試產生檔案"
             correction_session = uuid.uuid4().hex
             for _ in range(2):
                 run_reviewed_capture(
                     Path(__file__),
-                    {"prompt": f"待刪_雜項 SWSetup 卡到現在。{correction_sentence}", "session_id": correction_session},
+                    {"prompt": f"待整理 SampleCache 尚未處理。{correction_sentence}", "session_id": correction_session},
                     grant_config,
                 )
             correction_files = list(
@@ -1363,7 +1479,7 @@ def _selftest():
             )
             ranked = run_synthetic(
                 Path(__file__),
-                {"prompt": "SWSetup 未辦 要不要處理", "session_id": uuid.uuid4().hex},
+                {"prompt": "SampleCache 未辦 要不要整理", "session_id": uuid.uuid4().hex},
                 grant_config,
             )
             ranked_value = json.loads(ranked.stdout) if ranked.stdout.strip() else {}
@@ -1388,16 +1504,16 @@ def _selftest():
                     any(
                         _one_line(item.get("card_path")).endswith(correction_files[0].name)
                         for item in memsearch.recall_index(
-                            grant_vault, "SWSetup 未辦 要不要處理"
+                            grant_vault, "SampleCache 未辦 要不要整理"
                         ).get("results", ())
                     ),
                 )
             )
 
             widened = (
-                "3.不是!只有8x是標準茶杯，其他還是迷你，試飲組是指1杯",
-                "8X 維持擋單<我怎麼不知道有這個設定，請深度分析記憶",
-                "小口合約意思是1杯，不是指迷你，8X就是沒有迷你，我很清楚",
+                "3.不是!只有甲種是正式項目，其他還是草稿，單件是指1份",
+                "甲種 維持停用<我怎麼不知道有這個設定，請仔細比對說明",
+                "單件意思是1份，不是指草稿，甲種就是沒有草稿，我很清楚",
             )
             widened_ok = True
             pending_root = grant_vault.joinpath(*memspec.CAPTURE_PENDING_SUBPATH)
@@ -1417,7 +1533,7 @@ def _selftest():
                 )
             proposals = sorted(pending_root.rglob("correction-*.md"))
             checks.append((
-                "2026-09-02 contract-phase corrections all trigger capture; shapeless ones only propose",
+                "synthetic definition corrections all trigger capture; shapeless ones only propose",
                 widened_ok
                 and len(proposals) == 2
                 and all(
@@ -1429,18 +1545,20 @@ def _selftest():
             proposal_needle = next(pending_root.rglob("correction-*.md")).stem
             proposal_recall = run_synthetic(
                 Path(__file__),
-                {"prompt": "8X 標準茶杯 迷你 擋單 設定", "session_id": uuid.uuid4().hex},
+                {"prompt": "甲種 正式項目 草稿 停用 設定", "session_id": uuid.uuid4().hex},
                 grant_config,
             )
             checks.append((
-                "a proposal is neither indexed nor recalled",
+                "a proposal is searchable evidence but never recalled or injected",
                 proposal_recall.returncode == 0
                 and proposal_needle not in proposal_recall.stdout
+                and any(Path(hit['path']).stem == proposal_needle for hit in
+                        memsearch.query_index(grant_vault, proposal_needle)['results'])
                 and memsearch.recall_index(grant_vault, proposal_needle)["count"] == 0,
             ))
 
             transcript = root / "ruling-transcript.jsonl"
-            asked = "請你定一下：試飲組是「1 杯標準茶杯」還是維持「換迷你茶杯」？定了我才動，要你裁決。"
+            asked = "請你定一下：單件是「1 份正式項目」還是維持「換草稿項目」？定了我才動，要你裁決。"
             transcript.write_text(
                 json.dumps({"type": "user", "message": {"role": "user", "content": "先前的問題"}}, ensure_ascii=False)
                 + "\n"
@@ -1451,7 +1569,7 @@ def _selftest():
                 + "\n",
                 encoding="utf-8",
             )
-            answer = "不是！只有8x是標準茶杯，其他還是迷你，試飲組是指1杯(迷你或標準)"
+            answer = "不是！只有甲種是正式項目，其他還是草稿，單件是指1份(草稿或正式)"
             ruling_session = uuid.uuid4().hex
             for _ in range(2):
                 run_reviewed_capture(
@@ -1466,7 +1584,7 @@ def _selftest():
                     "owner answer to an explicit ruling request is captured once with the question",
                     len(ruling_files) == 1
                     and answer in ruling_text
-                    and "試飲組是「1 杯標準茶杯」" in ruling_text
+                    and "單件是「1 份正式項目」" in ruling_text
                     and "description: owner ruling auto-captured " in ruling_text,
                 )
             )
@@ -1530,7 +1648,7 @@ def _selftest():
             )
             pinned = run_synthetic(
                 Path(__file__),
-                {"prompt": "試飲組 8X 標準茶杯 還是迷你", "session_id": uuid.uuid4().hex},
+                {"prompt": "單件 甲種 正式項目 還是草稿", "session_id": uuid.uuid4().hex},
                 grant_config,
             )
             pinned_value = json.loads(pinned.stdout) if pinned.stdout.strip() else {}
@@ -2097,12 +2215,12 @@ def _selftest():
                 "the prompt that crosses 0.97T carries the handoff line and claims it; the next one does not",
                 first_prompt.returncode == 0
                 and handoff in first_context
-                and (recall_marker_directory("meter-s1") / memspec.CONTEXT_METER_MARKER).is_file()
+                and (recall_marker_directory(hook_context.identity({"session_id": "meter-s1", "transcript_path": os.fspath(meter_transcript)})) / memspec.CONTEXT_METER_MARKER).is_file()
                 and second_prompt.returncode == 0
                 and handoff not in second_context,
             ))
             tight_prompt, tight_context = meter_prompt("meter-s2", meter_config(40))
-            tight_marker = (recall_marker_directory("meter-s2") / memspec.CONTEXT_METER_MARKER).exists()
+            tight_marker = (recall_marker_directory(hook_context.identity({"session_id": "meter-s2", "transcript_path": os.fspath(meter_transcript)})) / memspec.CONTEXT_METER_MARKER).exists()
             retry_prompt, retry_context = meter_prompt("meter-s2", roomy)
             checks.append((
                 "a line the budget cannot hold is not sent and not claimed, so the next prompt sends it",
@@ -2140,7 +2258,7 @@ def _selftest():
                 "a Codex-shaped prompt at limit-H carries Codex's line and claims it; the next one does not",
                 codex_first.returncode == 0
                 and codex_line in codex_first_context.splitlines()
-                and (recall_marker_directory("meter-cx") / memspec.CONTEXT_METER_MARKER).is_file()
+                and (recall_marker_directory(hook_context.identity({"session_id": "meter-cx", "transcript_path": os.fspath(codex_rollout)})) / memspec.CONTEXT_METER_MARKER).is_file()
                 and codex_second.returncode == 0
                 and codex_line not in codex_second_context,
             ))
@@ -2153,7 +2271,7 @@ def _selftest():
                           "transcript_path": os.fspath(race_rollout), "model": "gpt-x",
                           "permission_mode": "default"}
             race_runs = run_concurrent(
-                Path(__file__), race_event, roomy, 4, environment=race_env,
+                synchronized_meter_hook(__file__, root, 4), race_event, roomy, 4, environment=race_env,
                 clock=memspec.HOOK_CLOCK_FROZEN)
             race_line = memspec.CONTEXT_METER_CODEX_NOTICE.format(
                 cur=170, left=40,
@@ -2176,7 +2294,7 @@ def _selftest():
                             "transcript_path": os.fspath(unsent_rollout)}
             run_concurrent(Path(__file__), unsent_event, roomy, 1, environment=unsent_env,
                            settle_seconds=0, close_stdout=True, clock=memspec.HOOK_CLOCK_FROZEN)
-            unsent_marker = (recall_marker_directory("meter-unsent") / memspec.CONTEXT_METER_MARKER).exists()
+            unsent_marker = (recall_marker_directory(hook_context.identity(unsent_event)) / memspec.CONTEXT_METER_MARKER).exists()
             unsent_outcomes = traced("meter-unsent")
             unsent_retry = run_synthetic(
                 Path(__file__), unsent_event, roomy, environment=unsent_env,
@@ -2194,6 +2312,13 @@ def _selftest():
                     path=os.fspath(compact_map.handoff_destination(meter_vault, "meter-unsent", unsent_rollout)))
                 in context_of(unsent_retry.stdout),
             ))
+            if not checks[-1][1]:
+                print("meter race diagnostics:", {
+                    "codes": [code for code, _out, _err in race_runs],
+                    "delivered": sum(race_line in context_of(out) for _code, out, _err in race_runs),
+                    "race": race_outcomes, "unsent_marker": unsent_marker,
+                    "unsent": unsent_outcomes, "retry_code": unsent_retry.returncode,
+                    "retry_context": context_of(unsent_retry.stdout)}, file=sys.stderr)
     except Exception as exc:
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
     finally:
@@ -2222,7 +2347,8 @@ def main():
         delivery_markers = []
         meter_pending = []
         deliveries = []
-        value = _handle(event, _STARTED_AT, delivery_markers, meter_pending, deliveries)
+        notes_pending = []
+        value = _handle(event, _STARTED_AT, delivery_markers, meter_pending, deliveries, notes_pending)
         if (value is not None or meter_pending) and not expired(_STARTED_AT):
             lost = []
             if meter_pending:
@@ -2231,6 +2357,11 @@ def main():
             if value is not None:
                 emit(value)
                 sys.stdout.flush()
+                for config, session, notes in notes_pending:
+                    try:
+                        consume_notes(config, session, notes)
+                    except (OSError, ValueError):
+                        pass  # Failed acknowledgement may repeat, never consume unsent context.
             emitted, won = won, []
             _trace_meter(event, emitted, lost)
             # A failed output must not consume the retry. A crash after output

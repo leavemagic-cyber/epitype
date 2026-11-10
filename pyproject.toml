@@ -17,6 +17,9 @@ classifiers = [
   "Programming Language :: Python :: 3.13",
 ]
 
+[project.optional-dependencies]
+test = ["hypothesis==6.170.15", "markdown-it-py==4.2.0"]
+
 [project.urls]
 Repository = "https://github.com/leavemagic-cyber/epitype"
 Changelog = "https://github.com/leavemagic-cyber/epitype/blob/master/CHANGELOG.md"
@@ -42,7 +45,7 @@ include-package-data = false
 exam = ["sample_corpus.json"]
 # Without this line a stranger's `pip install epitype` ships no cards at all, and the
 # installed vault stays empty — which is what `epitype starter` exists to fix.
-epitype = ["starter_cards/*.md"]
+epitype = ["starter_cards/*.md", "fixed_load_budget.json"]
 
 [tool.setuptools.dynamic]
 version = {attr = "epitype.__version__"}

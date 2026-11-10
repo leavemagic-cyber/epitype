@@ -122,6 +122,7 @@ GATE_DEGRADED_NOTICE = "⚠ Epitype {gate}：規則層這次沒有生效（{reas
 GATE_VAULT_UNREADABLE_NOTICE = "⚠ Epitype {gate}：記憶庫 {vault} 這次讀不到（{reason}），它的規則這一次全部沒生效。"
 EPITYPE_CONFIG_ENV = "EPITYPE_CONFIG"
 CONFIG_VAULTS_FIELD = "vaults"
+CONFIG_PROACTIVE_RECALL_FIELD = "proactive_recall"
 CONFIG_BUDGET_BYTES_FIELD = "budget_bytes"
 # RAMGuard 撞上限告警的開場提醒（epitype/ramguard_notice.py）。選填：沒設就不讀。
 # 為什麼：owner 要求撞過上限、還沒處理的告警，任何一個新的 Claude 或 Codex 對話一開始
@@ -153,6 +154,9 @@ RAMGUARD_ACK_CONFIG_UNREADABLE = "讀不到設定檔（{error}）"
 RAMGUARD_ACK_UNSET = "設定檔沒有 {field}"
 RAMGUARD_ACK_MISSING = "{path} 不存在"
 RAMGUARD_ACK_EMPTY = "{path} 檔尾沒有撞上限的告警"
+# 2026-09-09 owner 裁定（U-K；FAILURE_MODES §36）：上限是設定值，不是產品猜的。三個
+# core 鍵仍選填；索引依 2026-11-08 owner 要求改成全庫同一預設，見 memory_index.cap_of。
+# core_files 是絕對路徑清單（契約正本那一類檔案）。
 CONFIG_INDEX_CAP_BYTES_FIELD = "index_cap_bytes"
 CONFIG_SHARED_INDEX_CAP_BYTES_FIELD = "shared_index_cap_bytes"
 CONFIG_CORE_FILES_FIELD = "core_files"
@@ -186,12 +190,15 @@ COMPACT_HANDOFF_SUFFIX = ".handoff.md"
 # 交回第二次；檔案本身不刪——只有真的送出去才算交付，被預算裁掉的下次照樣交回。
 COMPACT_HANDOFF_DELIVERED_SUFFIX = ".handoff.delivered"
 
+# 門檻不猜：設定覆寫優先；宿主 token 視窗（可套 PCT）與同視窗學到的用量取較低值，
+# 只有一種就用那種，都沒有就不提醒。模型名稱與 hook 輸入都
 CONTEXT_METER_CONFIG_FIELD = "context_meter"
 CONTEXT_METER_ENABLED_FIELD = "enabled"
 # 只給 Claude：Codex 的壓縮點從 Codex 自己的設定算（下面 Codex 段），這個覆寫不套上去，
 # Codex 的數字也不會學進 Claude 的狀態檔（PreCompact --codex 不學）。
 CONTEXT_METER_OVERRIDE_FIELD = "autocompact_tokens"
 CONTEXT_METER_PCT_ENV = "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"
+CONTEXT_METER_WINDOW_ENV = "CLAUDE_CODE_AUTO_COMPACT_WINDOW"
 CONTEXT_METER_STATE_FILENAME = "context_meter.json"
 CONTEXT_METER_STATE_KEEP = 10
 CONTEXT_METER_STATE_MEDIAN_OF = 5
@@ -219,17 +226,21 @@ CONTEXT_METER_CALIBRATE_DAYS = 30
 # 的修改時間也證明不了哪個行程用了什麼），證明不了就不學。學習只剩 PreCompact 那一條路。
 CONTEXT_METER_CALIBRATE_REPORT_ONLY = (
     "calibrate：只是報告，不寫入。壓縮點只從這台機器實際的自動壓縮學（PreCompact 當下看得到自己的 pct），"
-    "不從歷史紀錄回填；首次提醒要等這台機器第一次自動壓縮之後。"
+    "不從歷史紀錄回填；未設定 token 視窗或覆寫門檻時，首次提醒要等這台機器第一次自動壓縮之後。"
 )
 CONTEXT_METER_SOURCE_OVERRIDE = "override"
+CONTEXT_METER_SOURCE_WINDOW = "window"
 CONTEXT_METER_SOURCE_LEARNED = "learned"
 CONTEXT_METER_SOURCE_SCALED = "scaled"
 CONTEXT_METER_USAGE_FIELDS = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
 CONTEXT_METER_SCALED_MARK = "（換算）"
 CONTEXT_METER_NOTICE = (
-    "context 約 {cur}k，約 {left}k 後自動壓縮{mark}。下一步就把交接寫進 {path}"
-    "（使用者原話、做到哪、下一步、未決事項與已排除的路），寫完再繼續。"
+    "context 約 {cur}k，約 {left}k 後自動壓縮{mark}。下一步將 {path} 整份覆寫成短狀態："
+    "仍有效的使用者要求、決定與理由、進度、下一步、未完成、已排除的路、確切路徑或指令。"
+    "不要保留舊內容再追加；仍需的舊流水搬到同目錄另一檔。寫完再繼續。"
 )
+CONTEXT_METER_HANDOFF_SIZE_BYTES = 32 * 1024
+CONTEXT_METER_HANDOFF_SIZE_NOTICE = "交接檔目前 {size} 位元組，超過 32 KB，請縮短。"
 # 壓縮續場交回交接檔的那一行。跟地圖那行同一個 240 B 上限：超過整行不注，路徑絕不截斷。
 CONTEXT_METER_HANDOFF_NOTICE = "壓縮前交接：{path}；先讀它再接續。"
 # 同一個 hook 呼叫可能來自兩種宿主：看檔尾的列長什麼樣決定，不看路徑。
@@ -269,9 +280,9 @@ CONTEXT_METER_CODEX_AUTO_DENOMINATOR = 10
 # 至少還有一次取樣收到提醒的最小值（42k 94.7%）；用量不含 Codex 另加的舊回合推理估計，H 已吸收。
 CONTEXT_METER_CODEX_HEADROOM_TOKENS = 44000
 CONTEXT_METER_CODEX_NOTICE = (
-    "context 約 {cur}k，距 Codex 自動壓縮約 {left}k。現在就把交接寫進 {path}：仍有效的使用者指示"
-    "（原話）、目標、決定與理由、進度、確切路徑／指令／數字、下一步、已排除的路；之後每到"
-    "里程碑就更新，直到壓縮。"
+    "context 約 {cur}k，距 Codex 自動壓縮約 {left}k。現在將 {path} 整份覆寫成短狀態："
+    "仍有效的使用者要求、決定與理由、進度、下一步、未完成、已排除的路、確切路徑或指令。"
+    "不要保留舊內容再追加；仍需的舊流水搬到同目錄另一檔。寫完再繼續。"
 )
 # 標記裡記著搶到當下的用量。之後讀到的用量跌掉這個比例以上＝已經壓縮過、而 PreCompact
 # 沒把標記清掉（2026-09-25 Codex App 實例：17:03 壓縮後一路到 204k 都沒提醒），就把標記
@@ -346,7 +357,7 @@ CORRECTION_TRIGGER_PATTERN = (
     r"(?:我(?:不是)?說過|說過(?:幾|很多|好多)次|不是這樣|錯了(?=[!！。，,]|\s|$)|不要亂|(?<![特分差個性])別[再亂]|不是叫你"
     # 2026-09-06：裸「你還是」實測 4 例全是一次性任務抱怨、0 例長效糾正，移出。
     r"|不要再|我糾正|更正一下"
-    # 2026-09-02 QUORUM 合約階段事故:三句糾正「我怎麼不知道有這個設定」「不是指微型…我很清楚」
+    # 定義式糾正與對既有設定的否認，也屬於強糾正訊號。
     # 句首「不是!」「不對，」與定義式「不是指」是強糾正訊號。
     r"|^\s*不是[!！]|^\s*不對[,，!！。]|我怎麼不知道|我很清楚|不是指|你(?:搞|弄|理解|想|看)錯"
     r"|明明|又犯"
@@ -429,8 +440,7 @@ CAPTURE_STANDING_PATTERN = (
 # 一詞式無範圍應答（「我同意」「核准了」）喚回時佔置頂卻沒有可執行內容；四字是實測
 # 分水嶺——短過它的真裁定都靠常規性語留下（「那就不做」保得住，「我同意」保不住）。
 CAPTURE_ACK_MIN_CHARS = 4
-# 沒有助理提問、也沒有常規性語時，裁定要靠子句數量自證：一個決定性詞是一次性指令
-# （「直接刪」），兩個以上才是在描述做法（「品牌是優先才對…先以這個為主」）。
+# 工作方式的禁止、替代與順序由 capture 的句型判斷；以下保留舊的多子句補充判準。
 CAPTURE_RULING_MIN_DECISIVE = 2
 CAPTURE_RULING_MIN_CHARS = 16
 # 助理自己的長段分析被 owner 貼回來時會被當 owner 句：>200 字，或每 20 字 ≥3 個
@@ -452,7 +462,18 @@ CAPTURE_REJECT_PATTERN = (
     r"|\b[A-Za-z][A-Za-z0-9+.\-]*://[^\s:@/]+:[^\s@/]+@)"
 )
 
+# 被核過。事件先保存在可搜尋的 captured_pending；模板仍只是候選形狀，不能代替
+# 發布前的現行內容審核。未審事件不參與執行走訪、主動喚回或規則恢復。
 CAPTURE_PENDING_SUBPATH = ("_drafts", "captured_pending")
+
+
+def is_pending_capture(path):
+    """Recognise evidence storage independently of any claimed card status."""
+    parts = str(path).replace("\\", "/").split("/")
+    return any(tuple(parts[index:index + 2]) == CAPTURE_PENDING_SUBPATH
+               for index in range(len(parts) - 1))
+
+
 # 模板一：箭頭回覆的短答。owner 貼回助理原文再用 <- / <= / 《 接自己的話時，接的
 # 第一個詞就是答案（同意／可／不／好／甲乙丙／A|B|C）；長篇接話不是短答，不入白名單。
 CAPTURE_ADMIT_ARROW_PATTERN = (
@@ -521,10 +542,12 @@ RECALL_LEGEND_PREFIX = "vaults: "
 RECALL_LOOKUP_PREFIX = ""
 RECALL_REDIRECT_PREFIX = "繼任 | "
 RECALL_LOOKUP_LEGEND = "查找線索（來源未核；非授權或新增禁令）：未另標來源的項目皆適用。"
-RECALL_SOURCE_LEGEND = "有作者分類的項目：未標適用範圍＝{scope}；未標取代＝無。"
-RECALL_UNAVAILABLE_LEGEND = "未核＝原始對話無法讀取，保留卡片記載；作者與原話／AI 分類按卡片記載。"
+RECALL_SOURCE_LEGEND = "有作者分類的項目：未標適用範圍＝{scope}；取代關係見來源卡。"
+RECALL_UNAVAILABLE_LEGEND = "未核＝本次尚未完成原文核對，不等於規則有錯或已撤銷；保留卡片記載與作者分類。"
 RECALL_SOURCE_OWNER = "Owner 原話（作者：{author}）"
 RECALL_SOURCE_AI = "AI 整理（作者：{author}；非 Owner 逐字裁定）"
+RECALL_SOURCE_CURRENT_DESCRIPTION = "卡片現行說明（AI整理；來源卡記載作者：{author}）"
+RECALL_SOURCE_DEFERRED = "取代鏈本輪未核（驗證尚未完成）；"
 RECALL_SOURCE_UNKNOWN = "未核 | {label}"
 RECALL_SOURCE_SCOPE = "適用範圍：{scope}"
 RECALL_SOURCE_QUOTE = "原始 Owner 引句：{quote}"
@@ -645,7 +668,7 @@ GENERIC_CARD_TYPES = (
     CARD_TYPE_HABIT,
 )
 DEFAULT_CARD_TYPE = CARD_TYPE_FEEDBACK
-# Keep one-off work records out of behavior cards recalled into later sessions.
+# Behavioral cards should describe actions rather than bury them in locator noise.
 # 專案與參考卡的工作就是記位置與編號，不在此列。
 CARD_LINT_BODY_NOISE_TYPES = (
     CARD_TYPE_DECISION,
@@ -810,8 +833,8 @@ METADATA_OWN_KEYS = tuple(
     field.split(".", 1)[1] for field in (METADATA_TYPE_FIELD, METADATA_MODIFIED_FIELD))
 # 到期日是作者親手寫的，過期只 WARN；協定 §3.5 允許歸檔、永遠不允許刪。
 CARD_EXPIRY_FIELDS = (GRANT_EXPIRES_FIELD, VALID_UNTIL_FIELD)
-# Time words alone do not establish expiry. Record a reviewed conclusion and
-# removal condition here to suppress a repeated advisory finding.
+# 期限用語只是形狀：2026-10-28 十張被點名的卡有五張其實沒有期限，「仍有效」的那張也
+# 只有移除條件、沒有日期。人審過就在這裡寫結論與移除條件，提醒不再重複。
 TIME_LIMIT_REVIEWED_FIELD = "time_limit_reviewed"
 # 通用卡的日期任一即可；沒有任何日期的卡無法判斷它講的是哪個時點的事實。
 CARD_DATE_FIELDS = (LAST_VERIFIED_AT_FIELD, METADATA_MODIFIED_FIELD)
@@ -1016,6 +1039,7 @@ SEARCH_INDEX_STALE_REASON = (
 # 2026-09-01 實測事故：別名查無時缺少全文兜底，會讓既存卡片完全不可達；
 # 規則：DB 使用 vault-root 相對路徑，且不得綁定特定 CLI。
 FTS_INDEX_DIRECTORY = ".epitype"
+PROJECT_ROOTS_CACHE_FILENAME = "project-roots.json"
 FTS_LEGACY_INDEX_DIRECTORY = "." + "ca" + "irn"
 FTS_DB_FILENAME = "memory_fts.sqlite3"
 FTS_DB_PATH = Path(FTS_INDEX_DIRECTORY) / FTS_DB_FILENAME
@@ -1059,6 +1083,7 @@ FRONTMATTER_DUPLICATE_PROBLEM = "L{line} {label} {key}"
 STOP_GATE_MAX_CARDS_PER_VAULT = 120
 # 退役或結案的卡不再說話；沒有 decision_key 的行為卡用這份名單判，而不是要求 active。
 STOP_GATE_SILENT_STATUSES = ("superseded", "closed", "retired")
+CURRENT_CARD_INACTIVE_STATUSES = (*STOP_GATE_SILENT_STATUSES, "draft", "deprecated")
 # 少檢查幾張卡一定要出聲：靜靜少做的話，「這回合沒擋」跟「這回合沒檢查完」長得一樣。
 STOP_GATE_INCOMPLETE_DEFECT = (
     "⚠ 這回合逾時，{vault} 只檢查了 {checked}/{total} 張武裝卡；沒檢查到的那些這次沒有生效"
@@ -1274,7 +1299,6 @@ WRITE_GATE_FIXTURE_DIRECTORIES = frozenset(("tests", "test", "__tests__", "fixtu
 # 「一定要擋」的例句，本來就必須長得跟禁語一模一樣——不然它測不到任何東西。所以寫進
 # 檔案時不能被當成「再說一次那句被禁的話」：2026-09-20 實際卡住的，正是「替 37 張規則
 # 補上證明它有效的例句」這件事本身。
-#
 # 條件收窄成「這一行附近有 example_blocks 這個宣告」：跟測試目錄那道豁免同一種取捨——
 # 它確實也是個洞，但要鑽這個洞得先寫下 example_blocks 四個字，而那是看得見的。
 WRITE_GATE_EXAMPLE_MARKERS = ('example_blocks:', '"example_blocks"', "'example_blocks'")
@@ -1370,7 +1394,6 @@ def readable_alternatives(pattern, limit=REQUIRE_HINT_MAX_ITEMS):
     return plain[:limit], len(plain) > limit or len(plain) < len(pieces)
 # 有一類毛病連 require_when 都抓不到，因為它不在「說了什麼字」裡，而在「這一回合的事實」
 # 裡：報告有多長、引的檔這一場到底有沒有打開過。字面比對永遠看不到這兩件事。
-#
 # 做法：卡片仍然是政策正本（要不要管、上限多少、為什麼），但判斷由閘門內建的檢查做。
 # 卡片用 turn_check 指名要用哪一個內建檢查，turn_check_limit 給它一個數字。
 # 這樣 owner 看得到、調得動、退得掉，而邏輯不必硬塞進正規表示式。
@@ -1537,7 +1560,6 @@ TURN_CITED_MAX_PATHS = 40
 GATE_ROTATION_SLICE = 8
 # 字面前置過濾：一則訊息連規則的必要字面都沒有，就不必把那條規則編譯出來。
 # 實測每回合編譯 91 條規則要 43 ms，而其中絕大多數本來就不可能命中。
-#
 # 這道過濾只看「訊息」，不看卡片，所以跟「每回合重讀卡片現行位元組」那條線無關——
 # 省的是編譯，不是重讀。判斷寧可回 None（照常編譯）也不要猜：猜錯的方向是規則默默
 # 不生效，那比慢更糟。
@@ -1693,7 +1715,6 @@ TURN_CITED_UNREAD_REASON = (
 # 「一件事沒人負責」的可查版本。最常發生的實況：派工出去、子代理回報、我把那份回報端出去
 # 說好了——中間沒有人驗過。這一件字面比對抓不到（我可以完全不提子代理就轉述），但它是
 # 這一回合的事實：收到子代理的東西之後，我自己有沒有動過任何一次手。
-#
 # 宣稱完成的寫法要收窄：單一個「完成」兩字到處都有（「完成後回報」「還沒完成」都是），
 # 拿它當條件會擋掉派工當下那一回合。
 TURN_DONE_CLAIM_PATTERN = (
@@ -1722,24 +1743,34 @@ STOP_NOTE_MAX_CHARS = 140
 STOP_NOTE_FORBIDDEN = "別說「{fragment}」（{decision}）"
 STOP_NOTE_POLICY = "{advice} ({decision})"
 STOP_NOTE_MATCHED_TEXT = "對照文字：{fragment}"
-# 回合閘不擋：命中只留這一行給下一則提問，整行不超過 STOP_NOTE_MAX_CHARS。只有卡名與檢查名
-# 的提醒說不出下一則該照什麼做，所以附上卡片建議、原話（不是 owner 明示的卡改用卡片說明）
-# 與命中片段各一段，超長就按比例截短；舊的「請改寫」阻擋理由不送回模型。
-STOP_NOTE_NOTICE = "Epitype 提醒：回覆命中 {decision} 的 {rule} 檢查{details}。這一則不用重送。"
+# 命中只留卡名與現行建議給下一則提問，整行不超過 STOP_NOTE_MAX_CHARS；原話與命中片段留在來源。
+STOP_NOTE_NOTICE = "Epitype 提醒（{decision}）：{advice}"
+STOP_NOTE_REVIEW_CURRENT_RULE = "請檢視這張現行規則。"
 STOP_NOTE_ADVICE_PART = "；建議：{text}"
 STOP_NOTE_OWNER_QUOTE_PART = "；來源原話：「{text}」"
 STOP_NOTE_CARD_TEXT_PART = "；卡片說明：「{text}」"
 STOP_NOTE_MATCHED_PART = "；對照文字：「{text}」"
 STOP_NOTE_ELLIPSIS = "…"
-# 卡名太長時至少留這麼多字給上面三段，卡名本身截短：卡名只是查找用的把手，三段才是要照做的內容。
+# 卡名太長時至少留這麼多字給現行建議，卡名本身截短，仍能當查找用的把手。
 # 截短的卡名仍至少留 STOP_NOTE_KEY_MIN_CHARS 字，人才查得到是哪張卡。
 STOP_NOTE_DETAIL_MIN_CHARS = 60
 STOP_NOTE_KEY_MIN_CHARS = 24
 RULE_SOURCE_LEGACY_REFERENCE = "既有記錄（來源未驗證；僅供查找）："
 RULE_SOURCE_AUTHOR_LABEL = "作者："
-CORE_GEN_SHARED_SOURCE = ("原始對話無法讀取：{count} 條來源狀態保留 UNVERIFIED；保留卡片記載內容。"
-    "U 註記代表這類來源；除另註外，卡片記載作者為 claude，適用範圍（卡片記載）為 {scope}。")
-CORE_GEN_SOURCE_DIRECTORY = "來源卡目錄：{path}；預設 rule-core-NN-english.md（NN 對應 CORE-NN）；其他已記載來源的相對路徑逐條另註。"
+CORE_GEN_SHARED_SOURCE = "本次尚未完成原文核對：{count} 條標為 UNVERIFIED；原因見各條，保留卡片記載內容。"
+CORE_GEN_SCOPE_DEFAULTS = "共用範圍：{scope}；逐條覆寫與此合併，完整範圍另註者優先。"
+CORE_GEN_CARD_SCOPE_DELTA = "範圍覆寫：{scope}"
+CORE_GEN_SCOPE_SUMMARY = "適用：{scope}"
+CORE_GEN_SCOPE_PROJECT = "專案 {project}"
+CORE_GEN_SHARED_PROJECT = "適用專案：{project}"
+CORE_GEN_SCOPE_CASE = "案例 {case}"
+CORE_GEN_SCOPE_ACTIONS = "執行 {actions} 時"
+CORE_GEN_SCOPE_EXCEPTIONS = "除外：{exceptions}"
+CORE_GEN_SCOPE_EXPIRY = "期限 {expiry}"
+CORE_GEN_HISTORY_ON_DEMAND = "以下條文為 AI 整理（{author}），原話在來源卡；不同作者另註。"
+CORE_GEN_REVIEWED_SUMMARY = "現行內容已審 REVIEWED；未審條目另註。"
+CORE_GEN_LEGACY_SOURCE = "來源未核 UNVERIFIED（舊卡）。"
+CORE_GEN_SOURCE_DIRECTORY = "來源卡目錄：{path}；CORE-NN 對應 rule-core-NN-english.md，其他條目依正文查卡。"
 CORE_GEN_CARD_AUTHOR = "卡片記載作者：{author}"
 CORE_GEN_CARD_SCOPE = "適用範圍（卡片記載）：{scope}"
 CORE_GEN_CARD_PATH = "來源卡：{path}"
@@ -1773,7 +1804,6 @@ CARD_GATE_FIELDS = (
 # 宿主檔同步：把卡片生成的規則塊與短索引，寫進宿主自己每一場都會載入的那個檔
 # （Claude 的 CLAUDE.md、Codex 的 AGENTS.md）。沒有這一段，使用者寫了卡、產生了規則，
 # 代理卻永遠讀不到——引擎有了，傳動軸沒有。
-#
 # 標記區塊而不是整檔覆寫：那個檔是使用者自己的，裡面有他自己寫的東西，我們只負責
 # 兩個標記之間。標記必須剛好一對；重複、巢狀、順序顛倒一律拒絕，不猜。
 HOST_SYNC_FILES = {
@@ -1843,7 +1873,6 @@ HOST_SYNC_REGION_CAP_BYTES = 24576
 # 宿主對「每場都載入的那個檔」有自己的上限，超過的部分是**安靜**被丟掉的——代理看起來
 # 讀了整份，實際上後半段從來沒到它面前。我們只守自己那兩塊沒有用：使用者自己的內容加上
 # 去之後超過，被丟掉的可能正是我們的規則。
-#
 # 只寫查得到出處的數字：Codex 的指示鏈 32 KiB 是官方文件寫的硬上限。Claude 的 CLAUDE.md
 # 沒有公告過硬上限，所以不編一個——那一欄留 None，只報大小不判定。
 HOST_BUDGET_BYTES = {"codex": 32 * 1024, "claude": None}
@@ -2401,6 +2430,13 @@ def join_block_scalar(style, lines):
     return " ".join(line for line in lines if line).strip()
 
 
+def card_is_current(fields, today=None):
+    """Use live card fields at every delivery outlet, not a cached index status."""
+    return (str(fields.get(DECISION_STATUS_FIELD, '')).strip().casefold()
+            not in CURRENT_CARD_INACTIVE_STATUSES
+            and not card_expired(fields.get(VALID_UNTIL_FIELD), today))
+
+
 def card_expired(value, today=None):
     """這張卡的到期日是不是已經過了。
 
@@ -2412,10 +2448,27 @@ def card_expired(value, today=None):
     if not text:
         return False
     try:
-        stamped = date.fromisoformat(text[:10])
-    except ValueError:
-        return False
-    return stamped < (today or date.today())
+        if len(text) == 10:
+            stamped = date.fromisoformat(text)
+            current_date = today.astimezone().date() if isinstance(today, datetime) else (today or date.today())
+            return stamped < current_date
+        stamped = datetime.fromisoformat(text.replace('Z', '+00:00'))
+        if stamped.tzinfo is None:
+            stamped = stamped.astimezone()
+        if isinstance(today, datetime):
+            current = today.astimezone() if today.tzinfo is None else today
+        elif today is not None:
+            current = datetime.combine(today, datetime.min.time()).astimezone()
+        else:
+            current = datetime.now().astimezone()
+        return stamped <= current
+    except (ValueError, TypeError):
+        try:
+            stamped = date.fromisoformat(text[:10])
+            current_date = today.astimezone().date() if isinstance(today, datetime) else (today or date.today())
+            return stamped < current_date
+        except (ValueError, TypeError):
+            return False
 
 
 def is_iso_date(value):
@@ -3156,7 +3209,6 @@ CARD_LINT_DECISION_FINDING = "規則{rule} {reason}｜{path}"
 # 機器一忙，「逾時放行」跟「判斷錯了」長得一模一樣——2026-09-25 同一份 selftest 連跑六次
 # 出現四種結果。自測子行程改用注入的時鐘：判斷案例用 frozen（期限永遠不到），逾時行為
 # 另用 expired 明確斷言。
-#
 # 注入只在 run_synthetic 起的子行程生效（Codex 審查 2026-09-25：正式掛鉤繼承
 # EPITYPE_HOOK_CLOCK=frozen 就等於拔掉 9 秒期限）。環境變數只帶一次性的 token；時鐘
 # 模式寫在設定檔旁邊、以該 token 命名的憑證檔裡，而且 HOME 必須在那個目錄底下。三者
@@ -3281,6 +3333,10 @@ HOST_CLAUDE_ENV_ALLOWED = {
     "BASH_MAX_OUTPUT_LENGTH": "output_chars",
     # https://code.claude.com/docs/en/env-vars: 1-100; higher than host default is ignored.
     "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "percentage",
+    # https://code.claude.com/docs/en/env-vars: 100000-1000000 integer tokens.
+    # https://code.claude.com/docs/en/settings-reference#autocompactwindow:
+    # env overrides autoCompactWindow; Claude Code caps it at the model's window.
+    "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "window_tokens",
     "CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS": HOST_CODEX_CONFIG_POSITIVE_INT,
     "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": HOST_CODEX_CONFIG_POSITIVE_INT,
 }
@@ -3535,6 +3591,11 @@ def host_native_values(front_lines):
                   and not (re.fullmatch(r"[0-9]+", value) and 1 <= int(value) <= 150000)):
                 problems.append(HOST_CLAUDE_ENV_TYPE_REASON.format(
                     field=HOST_CLAUDE_ENV_FIELD, key=key, value=value, expected="1-150000 的整數"))
+            elif (HOST_CLAUDE_ENV_ALLOWED[key] == "window_tokens"
+                  and not (re.fullmatch(r"[0-9]+", value) and 100000 <= int(value) <= 1000000)):
+                problems.append(HOST_CLAUDE_ENV_TYPE_REASON.format(
+                    field=HOST_CLAUDE_ENV_FIELD, key=key, value=value,
+                    expected="100000-1000000 的整數 token"))
             else:
                 env[key] = value
         if env:
@@ -3625,7 +3686,6 @@ def host_native_declared(front_lines):
 # Epitype 的說明是英文出貨的，擋下來的那一句卻寫死繁中——陌生人裝完第一次被擋，看到的
 # 是一句他讀不懂的話。這裡只換**顯示字**：樣式、欄名、log kind、任何閘拿去比對的東西
 # 都不動，換語言不會改變擋或不擋。
-#
 # 只在 memspec 匯入時解析一次。掛鉤有硬性的延遲預算，每一次 os.environ 以外的查詢都要
 # 付錢，所以：環境變數 →（讀不到才）設定檔 → 預設 zh-TW。設定檔壞掉一律當沒設——
 # 讓一個壞掉的 JSON 把整條掛鉤打掛，比顯示錯語言貴得多。
@@ -3701,21 +3761,26 @@ _EN = {
     "CONTEXT_TRUNCATED_SUFFIX": "…(over budget; {dropped} more segment(s) not injected)",
     "CONTEXT_METER_SCALED_MARK": " (scaled)",
     "CONTEXT_METER_NOTICE": (
-        "context is about {cur}k; auto-compaction in about {left}k{mark}. Your next step is to write "
-        "the handoff to {path} (the user's verbatim words, where you are, the next step, open items "
-        "and the paths already ruled out); continue only after it is written."
+        "context is about {cur}k; auto-compaction in about {left}k{mark}. Next, overwrite the entire "
+        "handoff at {path} with a short state: user requirements still in force, decisions and why, "
+        "progress, next step, unfinished work, ruled-out approaches, exact paths or commands. "
+        "Do not keep old content and append; move any history still needed to another file in the "
+        "same directory. Continue after writing."
     ),
+    "CONTEXT_METER_HANDOFF_SIZE_NOTICE": "Handoff is currently {size} bytes, over 32 KB; please shorten it.",
     "CONTEXT_METER_HANDOFF_NOTICE": "Pre-compaction handoff: {path}; read it before you continue.",
     "CONTEXT_METER_CODEX_NOTICE": (
-        "context is about {cur}k, about {left}k before Codex auto-compacts. Write the handoff to {path} "
-        "now: the user's instructions still in force (verbatim), the goal, decisions and why, progress, "
-        "exact paths/commands/numbers, the next step, dead ends; then update it at each milestone "
-        "until compaction."
+        "context is about {cur}k, about {left}k before Codex auto-compacts. Now overwrite the entire "
+        "handoff at {path} with a short state: user requirements still in force, decisions and why, "
+        "progress, next step, unfinished work, ruled-out approaches, exact paths or commands. "
+        "Do not keep old content and append; move any history still needed to another file in the "
+        "same directory. Continue after writing."
     ),
     "CONTEXT_METER_CALIBRATE_REPORT_ONLY": (
         "calibrate: report only, nothing is written. The compaction point is learned only from this "
         "machine's actual auto-compactions (PreCompact sees its own pct at that moment), never back-filled "
-        "from history; the first reminder waits for this machine's first auto-compaction."
+        "from history; without a token window or threshold override, the first reminder waits for "
+        "this machine's first auto-compaction."
     ),
     "DECISION_PREFIX": "⚖ ruling: ",
     "VAULT_MISSING_REASON": "No such vault: {vault}\n(Scanning a folder that does not exist reports 0 problems, which looks exactly like \"clean\"; so this reports an error instead of 0.)",
@@ -3856,7 +3921,8 @@ _EN = {
     "STOP_GATE_REWRITE_HINT": "Add only the missing content; do not repeat the previous text.",
     "STOP_NOTE_FORBIDDEN": 'do not say "{fragment}" ({decision})',
     "STOP_NOTE_MATCHED_TEXT": "Matched text: {fragment}",
-    "STOP_NOTE_NOTICE": "Epitype: last reply hit {rule} of {decision}{details}; no need to resend.",
+    "STOP_NOTE_NOTICE": "Epitype reminder ({decision}): {advice}",
+    "STOP_NOTE_REVIEW_CURRENT_RULE": "Review this current rule.",
     "STOP_NOTE_ADVICE_PART": "; advice: {text}",
     "STOP_NOTE_OWNER_QUOTE_PART": '; source words: "{text}"',
     "STOP_NOTE_CARD_TEXT_PART": '; card: "{text}"',
@@ -3884,7 +3950,17 @@ _EN = {
     "RULE_SOURCE_LEGACY_REFERENCE": "Source UNVERIFIED (legacy reference): ",
     "RULE_SOURCE_AUTHOR_LABEL": "Author: ",
     "CORE_GEN_SHARED_SOURCE": ("Original conversations unavailable: {count} sources remain UNVERIFIED; retain the card records. "
-        "U marks these entries; unless annotated, their recorded author is claude and recorded scope is {scope}."),
+        "U marks these entries; unless annotated, their recorded author is claude."),
+    "CORE_GEN_SCOPE_DEFAULTS": "Source scope base: {scope}. Merge overrides with this base; an explicit complete scope stands alone.",
+    "CORE_GEN_CARD_SCOPE_DELTA": "Scope overrides: {scope}",
+    "CORE_GEN_SCOPE_SUMMARY": "Applies: {scope}",
+    "CORE_GEN_SCOPE_PROJECT": "project {project}",
+    "CORE_GEN_SHARED_PROJECT": "Applies to project: {project}",
+    "CORE_GEN_SCOPE_CASE": "case {case}",
+    "CORE_GEN_SCOPE_ACTIONS": "when performing {actions}",
+    "CORE_GEN_SCOPE_EXCEPTIONS": "except: {exceptions}",
+    "CORE_GEN_SCOPE_EXPIRY": "until {expiry}",
+    "CORE_GEN_HISTORY_ON_DEMAND": "The following rules are AI summaries ({author}); original words remain in the source cards. Other authors are noted individually.",
     "CORE_GEN_SOURCE_DIRECTORY": "Source card directory: {path}; default rule-core-NN-english.md (NN matches CORE-NN); other recorded relative card paths are annotated individually.",
     "CORE_GEN_CARD_AUTHOR": "Recorded author: {author}",
     "CORE_GEN_CARD_SCOPE": "Recorded scope: {scope}",
@@ -3953,10 +4029,12 @@ _EN = {
     "RECALL_LOOKUP_PREFIX": "",
     "RECALL_REDIRECT_PREFIX": "Successor | ",
     "RECALL_LOOKUP_LEGEND": "Lookup hints (source UNVERIFIED; neither authority nor new restrictions): applies unless a source label says otherwise.",
-    "RECALL_SOURCE_LEGEND": "Items with authorship labels: omitted scope = {scope}; omitted supersession = none.",
+    "RECALL_SOURCE_LEGEND": "Items with authorship labels: omitted scope = {scope}; supersession details are in the source card.",
     "RECALL_UNAVAILABLE_LEGEND": "UNVERIFIED = original conversation unavailable; retaining the card's record, including author and owner-verbatim/AI classification.",
     "RECALL_SOURCE_OWNER": "Owner verbatim (author: {author})",
     "RECALL_SOURCE_AI": "AI wording (author: {author}; not an Owner verbatim ruling)",
+    "RECALL_SOURCE_CURRENT_DESCRIPTION": "Current card explanation (AI wording; recorded author: {author})",
+    "RECALL_SOURCE_DEFERRED": "Supersession chain UNVERIFIED this turn (verification incomplete); ",
     "RECALL_SOURCE_UNKNOWN": "UNVERIFIED | {label}",
     "RECALL_SOURCE_SCOPE": "Scope: {scope}",
     "RECALL_SOURCE_QUOTE": "Original Owner quote: {quote}",
@@ -4089,22 +4167,18 @@ RECURRENCE_GATE_OUTCOME_REPEAT = "repeat"
 # 不會存在的內容是誤擋。
 RECURRENCE_GATE_OUTCOME_UNAPPLIABLE = "patch_unappliable"
 RECURRENCE_GATE_REASON = (
-    "🔁 再犯不是往卡上加一段：{path} 是行為卡（{card_type}），這次新增的文字在記一次再犯"
-    "（「{fragment}」），可是卡上能擋的欄位一個都沒新增或改動。再犯＝這張卡擋不住的證據，"
-    "處理只有三種：①替它加上擋得住的欄位（{armed}）；②閘門表達不了，就修 Epitype 本身，"
-    "整類規則一起受益；③真的做不到，寫 {unenforceable}: <理由>，之後不再在它身上花 token。"
-    "事故經過留在對話紀錄與場次日誌，不寫進卡片。"
+    "🔁 {path}（{card_type}）新增再犯敘述（「{fragment}」）。這是提醒，寫入仍放行。"
+    "先查規則是否送達、判斷或動作哪裡失敗，再修實際路徑；必要時修 Epitype 本身。"
+    "新增卡、換措辭或改檢查欄位都不證明已修復；以原失敗情境及合理反例驗結果。"
+    "只有文字或範圍錯誤才改規則，不預設加攔阻。事故留在原始紀錄，不寫進卡片日常正文。"
 )
 _EN.update({
     "RECURRENCE_GATE_REASON": (
-        "🔁 a recurrence is not a paragraph to add: {path} is a behaviour card ({card_type}); "
-        'the text being added records the rule being broken again ("{fragment}"), yet no field '
-        "that can block anything was added or changed. A recurrence is evidence that this card "
-        "cannot stop the behaviour, and there are only three responses: (1) give it a field that "
-        "blocks ({armed}); (2) if the gates cannot express it, fix Epitype itself so the whole "
-        "class of rules benefits; (3) if it truly cannot be enforced, write {unenforceable}: "
-        "<reason> and stop spending tokens on it. The incident itself stays in the transcript "
-        "and the session log, not in the card."
+        '🔁 {path} ({card_type}) adds a recurrence narrative ("{fragment}"). This is advisory; '
+        "the write remains allowed. Check delivery, judgment and the actual action path; fix "
+        "Epitype itself when needed. New cards, wording or check fields do not prove a fix. "
+        "Replay the failure and a legitimate counterexample. Amend rules only when their wording "
+        "or scope is wrong; do not default to blocking. Keep incident history in original records."
     ),
 })
 _LAZY_REGEX.update({

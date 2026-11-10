@@ -7,8 +7,9 @@ UserPromptSubmit）在跨過學到的壓縮點 97% 的那一次附一行字，�
 輸出與標記的時機歸 adapter：先搶標記（獨占建立）、搶到的才輸出——Codex 並行的工具呼叫
 會同時看到「還沒說過」；搶到卻沒送出去的放掉標記，下次再試。
 
-門檻不猜（見 memspec 的 CONTEXT_METER 段落）：設定覆寫 → 學到的自動壓縮用量 → 都沒有
-就完全不提醒。hook 內每次呼叫只讀 transcript 檔尾，找不到就算了，永遠不讀整檔。
+門檻不猜（見 memspec 的 CONTEXT_METER 段落）：設定覆寫優先；宿主 token 視窗（可套 PCT）
+與同視窗學到的自動壓縮用量取較低值，只有一種就用那種，都沒有就不提醒。
+hook 內每次呼叫只讀 transcript 檔尾，找不到就算了，永遠不讀整檔。
 
 Codex 不套上面這一套：同一個 hook 從檔尾的列認出是 Codex rollout，就照 Codex 自己的算法
 算用量（最新 token_count＋最後一個模型產出項之後各項的估計），壓縮點從 Codex 的設定與
@@ -488,6 +489,7 @@ def read_samples(path):
         kept.append({
             "tokens": item["tokens"],
             "pct": pct if isinstance(pct, str) else "",
+            "window": item.get("window", ""),
             "at": item.get("at") if isinstance(item.get("at"), str) else "",
         })
     return kept
@@ -519,6 +521,14 @@ def _pct(text):
     return value if 1 <= value <= 100 else None
 
 
+def _window(text):
+    """只接受宿主卡片支援的 100000–1000000 整數 token 視窗。"""
+    value = str(text).strip()
+    if re.fullmatch(r"[0-9]+", value) and 100000 <= int(value) <= 1000000:
+        return int(value)
+    return None
+
+
 def _median(values):
     ordered = sorted(values)
     middle = len(ordered) // 2
@@ -527,15 +537,20 @@ def _median(values):
     return (ordered[middle - 1] + ordered[middle]) / 2
 
 
-def learned_threshold(samples, pct_now):
+def learned_threshold(samples, pct_now, window_now=None):
     """(門檻, 來源) 或 (None, None)。取最近 5 筆，逐筆換算到目前的 pct 再取中位數。
 
     紀錄當時的 pct 跟現在一樣：原值。兩邊都是 1–100 的數字但不同：按比例換算。
-    有一邊不是數字（例如一邊沒設）：那一筆換算不了，丟掉——不拿不同設定下的數字硬套。"""
+    有一邊不是數字（例如一邊沒設）：那一筆換算不了，丟掉。
+    視窗設定不同（含舊樣本沒有視窗）時也丟掉，不把不同設定的數字硬套。"""
     pct_now = "" if pct_now is None else str(pct_now).strip()
     values = []
     scaled = False
     for sample in list(samples)[-memspec.CONTEXT_METER_STATE_MEDIAN_OF:]:
+        recorded_window = sample.get("window", "")
+        if ((_window(recorded_window) or str(recorded_window).strip())
+                != (_window(window_now) or str(window_now or "").strip())):
+            continue
         recorded = sample.get("pct", "").strip()
         tokens = sample["tokens"]
         if recorded == pct_now:
@@ -566,6 +581,15 @@ def current_pct(environ=None, home=None):
     return (_settings_pct(home) or "").strip()
 
 
+def current_window(environ=None, home=None):
+    """行程的 token 視窗優先；未設才讀宿主 settings.json 的 env。"""
+    environ = os.environ if environ is None else environ
+    value = environ.get(memspec.CONTEXT_METER_WINDOW_ENV)
+    if value is None:
+        value = _settings_env(memspec.CONTEXT_METER_WINDOW_ENV, home)
+    return "" if value is None else str(value).strip()
+
+
 def threshold(options, state_file, environ=None, home=None):
     """(自動壓縮門檻 tokens, 來源)；不知道就 (None, None)——不知道就不提醒。"""
     section = _section(options)
@@ -574,12 +598,17 @@ def threshold(options, state_file, environ=None, home=None):
     override = section.get(memspec.CONTEXT_METER_OVERRIDE_FIELD)
     if _positive_int(override):
         return override, memspec.CONTEXT_METER_SOURCE_OVERRIDE
-    if state_file is None:
-        return None, None
-    samples = read_samples(state_file)
-    if not samples:
-        return None, None
-    return learned_threshold(samples, current_pct(environ, home))
+    window = current_window(environ, home)
+    pct = current_pct(environ, home)
+    samples = read_samples(state_file) if state_file is not None else []
+    learned, source = learned_threshold(samples, pct, window)
+    tokens = _window(window)
+    if tokens is not None:
+        # 宿主可能把設定視窗壓到模型上限；同視窗的實測壓縮點可以更低。
+        window_limit = int(tokens * (_pct(pct) or 100) / 100)
+        if learned is None or window_limit <= learned:
+            return window_limit, memspec.CONTEXT_METER_SOURCE_WINDOW
+    return learned, source
 
 
 def stage(current, limit):
@@ -598,7 +627,17 @@ def _k(tokens):
 def render(current, limit, source, path):
     mark = memspec.CONTEXT_METER_SCALED_MARK if source == memspec.CONTEXT_METER_SOURCE_SCALED else ""
     return memspec.CONTEXT_METER_NOTICE.format(
-        cur=_k(current), left=_k(limit - current), mark=mark, path=os.fspath(path))
+        cur=_k(current), left=_k(limit - current), mark=mark, path=os.fspath(path)) + _handoff_size_notice(path)
+
+
+def _handoff_size_notice(path):
+    try:
+        size = Path(path).stat().st_size
+    except OSError:
+        return ""
+    if size <= memspec.CONTEXT_METER_HANDOFF_SIZE_BYTES:
+        return ""
+    return " " + memspec.CONTEXT_METER_HANDOFF_SIZE_NOTICE.format(size=size)
 
 
 # ---------------------------------------------------------------- Codex 壓縮點
@@ -746,10 +785,13 @@ def rotation_notice(reading, limit, vault, session_id, transcript, directory, op
     _rearm_if_stale(directory, ROTATION_MARKER, reading.tokens, limit)
     if reading.tokens < threshold_tokens or (Path(directory) / ROTATION_MARKER).exists():
         return None
-    line = (f"目前約 {_k(reading.tokens)}k token；到有界檢查點時保存交接 {_handoff(vault, session_id, transcript)}，"
+    path = _handoff(vault, session_id, transcript)
+    line = (f"目前約 {_k(reading.tokens)}k token；到有界檢查點時將 {path} 整份覆寫成短狀態："
+            "仍有效的使用者要求、決定與理由、進度、下一步、未完成、已排除的路、確切路徑或指令。"
+            "不要保留舊內容再追加；仍需的舊流水搬到同目錄另一檔。"
             "只供同一 task 壓縮後續跑。寫完由原 task 繼續；不要要求 owner 開新 task、不要貼接手 prompt、"
             "不要宣稱已交接或因 context 壓力停止。")
-    return line, ROTATION_MARKER, reading.tokens
+    return line + _handoff_size_notice(path), ROTATION_MARKER, reading.tokens
 
 
 def notice(event, vault, marker_directory, options=None, environ=None, home=None, clock=None):
@@ -797,9 +839,10 @@ def notice(event, vault, marker_directory, options=None, environ=None, home=None
             if due is None:
                 return None
             current, limit = due
+            path = _handoff(vault, session_id, transcript)
             line = memspec.CONTEXT_METER_CODEX_NOTICE.format(
                 cur=_k(current), left=_k(limit - current),
-                path=os.fspath(_handoff(vault, session_id, transcript)))
+                path=os.fspath(path)) + _handoff_size_notice(path)
             return line, memspec.CONTEXT_METER_MARKER, current
         if limit is None:
             return None
@@ -938,7 +981,8 @@ def record_autocompact(vault, transcript_path, environ=None, now=None, home=None
     from datetime import datetime, timezone
 
     stamp = (now or datetime.now(timezone.utc)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    sample = {"tokens": tokens, "pct": current_pct(environ, home), "at": stamp}
+    sample = {"tokens": tokens, "pct": current_pct(environ, home),
+              "window": current_window(environ, home), "at": stamp}
     path = state_path(vault)
     path.parent.mkdir(parents=True, exist_ok=True)
     with memspec.file_lock(path, memspec.CONTEXT_METER_LOCK_SECONDS) as locked:
@@ -1002,15 +1046,19 @@ def _settings_path(home=None):
     return Path(home or Path.home()) / ".claude" / "settings.json"
 
 
-def _settings_pct(home=None):
-    """宿主設定裡的 CLAUDE_AUTOCOMPACT_PCT_OVERRIDE（終端機跑 CLI 時環境變數通常沒有）。"""
+def _settings_env(key, home=None):
+    """宿主設定裡的壓縮 env（終端機跑 CLI 時環境變數通常沒有）。"""
     try:
         value = json.loads(_settings_path(home).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     env = value.get("env") if isinstance(value, dict) else None
-    pct = env.get(memspec.CONTEXT_METER_PCT_ENV) if isinstance(env, dict) else None
-    return str(pct) if pct is not None else None
+    value = env.get(key) if isinstance(env, dict) else None
+    return str(value) if value is not None else None
+
+
+def _settings_pct(home=None):
+    return _settings_env(memspec.CONTEXT_METER_PCT_ENV, home)
 
 
 def _governance(vault_argument, options):
@@ -1064,12 +1112,15 @@ def status(options, vault, transcript=None, environ=None, out=print):
         return limit
     limit, source = threshold(options, state_path(vault) if vault else None, environ)
     pct = current_pct(environ)
+    window = current_window(environ)
     if limit is None:
-        out(f"status: threshold unknown (no override, no learned sample usable at pct={pct or '(unset)'}); "
+        out(f"status: threshold unknown (no override, no valid window, no learned sample usable "
+            f"at pct={pct or '(unset)'} window={window or '(unset)'}); "
             "no reminders until this machine's first auto-compaction (or set "
             f"{memspec.CONTEXT_METER_CONFIG_FIELD}.{memspec.CONTEXT_METER_OVERRIDE_FIELD}).")
     else:
         out(f"status: threshold={limit} tokens source={source} pct={pct or '(unset)'} "
+            f"window={window or '(unset)'} "
             f"remind_at={int(memspec.CONTEXT_METER_STAGE_RATIO * limit)}")
     if transcript:
         current = reading.tokens if reading is not None else None
@@ -1273,6 +1324,7 @@ def _selftest():
 
     import builtins
     import types
+    from unittest.mock import patch
 
     checks = []
     # 讀法與判斷的題目一律用停住的時鐘：時間上限是 150 ms 的真時鐘，機器一忙，讀到一半就
@@ -1346,10 +1398,13 @@ def _selftest():
     def write(path, rows, trailing_newline=True):
         path.write_text("\n".join(rows) + ("\n" if trailing_newline else ""), encoding="utf-8")
 
-    saved_config_env = os.environ.get(memspec.EPITYPE_CONFIG_ENV)
     try:
-        with tempfile.TemporaryDirectory(prefix="epitype-context-meter-") as temp_dir:
+        with tempfile.TemporaryDirectory(prefix="epitype-context-meter-") as temp_dir, patch.dict(os.environ):
             root = Path(temp_dir).resolve()
+            # 含未傳 home 的呼叫與子行程：一律用假家，且不繼承宿主的壓縮設定。
+            os.environ.update({"HOME": os.fspath(root), "USERPROFILE": os.fspath(root)})
+            for key in (memspec.CONTEXT_METER_WINDOW_ENV, memspec.CONTEXT_METER_PCT_ENV):
+                os.environ.pop(key, None)
             # 追蹤檔落在設定檔旁：自測一律指到暫存根，絕不寫進真的 ~/.epitype。
             os.environ[memspec.EPITYPE_CONFIG_ENV] = os.fspath(root / "selftest-config.json")
             (root / "selftest-config.json").write_text(json.dumps({
@@ -1467,6 +1522,40 @@ def _selftest():
                            and threshold({}, state, {memspec.CONTEXT_METER_PCT_ENV: ""},
                                          home=settings_home) == (None, None)
                            and current_pct({}, settings_home) == "92"))
+
+            window_env = {memspec.CONTEXT_METER_WINDOW_ENV: "300000"}
+            checks.append(("explicit token window overrides old samples, with optional pct",
+                           threshold({}, state, window_env, no_settings_home) == (300000, "window")
+                           and threshold({}, None, window_env, no_settings_home) == (300000, "window")
+                           and threshold({}, state, {**window_env, memspec.CONTEXT_METER_PCT_ENV: "40"},
+                                         no_settings_home) == (120000, "window")
+                           and stage(290999, 300000) is None
+                           and stage(291000, 300000) == memspec.CONTEXT_METER_MARKER))
+            key = memspec.CONTEXT_METER_WINDOW_ENV
+            checks.append(("host card token window accepts integer bounds and rejects invalid values",
+                           all(not memspec.host_native_values(["host_claude_env:", f"  {key}: {value}"])[1]
+                               for value in ("100000", "300000", "1000000"))
+                           and all(memspec.host_native_values(["host_claude_env:", f"  {key}: {value}"])[1]
+                                   for value in ("99999", "1000001", "300000.5", "true"))))
+            window_sample = {"tokens": 290000, "pct": "", "window": "300000", "at": ""}
+            checks.append(("learned samples are not reused across token window changes",
+                           learned_threshold([window_sample], "") == (None, None)
+                           and learned_threshold([window_sample], "", "400000") == (None, None)
+                           and learned_threshold([{"tokens": 80000, "pct": "40"}], "40", "300000")
+                           == (None, None)))
+
+            window_state = root / "window-state.json"
+            write_samples(window_state, [{**window_sample, "tokens": value}
+                                         for value in (1, 2, 170000, 180000, 190000, 200000, 210000)])
+            checks.append(("same-window learned median can lower the configured window",
+                           threshold({}, window_state, window_env) == (190000, "learned")))
+            write_samples(window_state, [{**window_sample, "tokens": 400000}])
+            checks.append(("configured window caps a higher same-window learned threshold",
+                           threshold({}, window_state, window_env) == (300000, "window")))
+            write_samples(window_state, [{**window_sample, "tokens": 180000, "pct": "100"}])
+            checks.append(("a lower same-window pct-scaled threshold keeps its source label",
+                           threshold({}, window_state, {**window_env, memspec.CONTEXT_METER_PCT_ENV: "40"})
+                           == (72000, "scaled")))
 
             # 5. 未知時不提醒（用量再高也一樣）；enabled=false 不做。
             markers = root / "markers"
@@ -1635,9 +1724,6 @@ def _selftest():
                 "import sys, time, pathlib\n"
                 "sys.path.insert(0, sys.argv[1])\n"
                 "from epitype import context_meter\n"
-                # Test data integrity under contention without conflating it with
-                # the production hook's deliberately short fail-open lock budget.
-                "context_meter.memspec.CONTEXT_METER_LOCK_SECONDS = 10\n"
                 "ready = pathlib.Path(sys.argv[4]) / ('ready-' + sys.argv[5])\n"
                 "go = pathlib.Path(sys.argv[4]) / 'go'\n"
                 "ready.write_text('1')\n"
@@ -2078,14 +2164,8 @@ def _selftest():
                                _compact_map.handoff_destination(vault, "dp-claude", large))))
     except Exception as exc:
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
-    finally:
-        if saved_config_env is None:
-            os.environ.pop(memspec.EPITYPE_CONFIG_ENV, None)
-        else:
-            os.environ[memspec.EPITYPE_CONFIG_ENV] = saved_config_env
-
     passed = sum(bool(ok) for _, ok in checks)
-    total = 32
+    total = 38
     status_word = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status_word} {passed}/{total}")
     if status_word != "PASS":

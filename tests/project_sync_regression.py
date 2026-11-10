@@ -123,10 +123,10 @@ class ProjectSync(unittest.TestCase):
         claude = (project / "CLAUDE.md").read_text(encoding="utf-8")
         self.assertIn(PROJECT_RULE_TEXT, agents)
         self.assertIn(PROJECT_RULE_TEXT, claude)
-        self.assertIn("- [收據](receipt.md)", agents)
+        self.assertIn(f"- [收據](<{(vault / 'receipt.md').resolve().as_posix()}>)", agents)
         # 索引塊只在 AGENTS.md：Claude Code 自己會載入專案庫的 MEMORY.md。
         self.assertNotIn(INDEX_BEGIN, claude)
-        self.assertNotIn("- [收據](receipt.md)", claude)
+        self.assertNotIn("- [收據]", claude)
         # MEMORY.md 的第一行標題不跟著進去（同全域索引的做法）。
         self.assertNotIn("# money 入口", agents)
         # 治理庫的規則不會混進專案檔，專案規則也不會混進全域宿主檔。
@@ -388,10 +388,12 @@ class ProjectSync(unittest.TestCase):
         code, report = self._apply([self.governance, vault])
         self.assertEqual(code, host_sync.EXIT_OK, report)
         agents = project / "AGENTS.md"
-        self.assertIn("- [收據](receipt.md)", agents.read_text(encoding="utf-8"))
+        self.assertIn(f"- [收據](<{(vault / 'receipt.md').resolve().as_posix()}>)",
+                      agents.read_text(encoding="utf-8"))
         cap = memspec.HOST_SYNC_REGION_CAP_BYTES
         index = vault / memspec.HOST_SYNC_INDEX_FILENAME
-        pointer_line = (vault.resolve() / memspec.HOST_SYNC_INDEX_FILENAME).as_posix()
+        # Rooted fallback must not expand an unfiltered shared MEMORY.md again.
+        pointer_line = host_sync.project_index_pointer(vault, root=project)
 
         # 剛好等於上限：整份照寫。
         index.write_text("# money 入口\n" + "x" * cap, encoding="utf-8")

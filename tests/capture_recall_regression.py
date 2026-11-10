@@ -136,9 +136,12 @@ class CaptureRecallRegression(unittest.TestCase):
         memsearch.build_index(self.vault)
         context = self.context()
         self.assertIn(memspec.DECISION_PREFIX + "fixturehistory-key（2026-01-02）", context)
-        # The current source contract requires the original, AI author and full
-        # scope together; the former quote-hiding expectation is superseded.
-        self.assertIn('原始 Owner 引句：fixturehistory 一律照這條走', context)
+        # A captured event remains unreviewed evidence even with a decision key.
+        fields, _ = memspec.frontmatter_fields(path)
+        document = json.loads(fields[rule_provenance.FIELD])
+        self.assertIn(fields[memspec.DESCRIPTION_FIELD], context)
+        self.assertIn(document["text"], context)
+        self.assertNotIn('原始 Owner 引句：fixturehistory 一律照這條走', context)
         self.assertIn(memspec.RECALL_SOURCE_AI.format(author='synthetic-test-ai'), context)
         document = json.loads(memspec.frontmatter_fields(path)[0][rule_provenance.FIELD])
         self.assertIn('適用範圍＝' + rule_provenance.serialize(document['scope']), context)
@@ -159,7 +162,7 @@ class CaptureRecallRegression(unittest.TestCase):
         self.assertFalse(any(digest.startswith("card-") for _session, digest in markers))
         self.assertIn(path.stem, self.context())
 
-    def test_unreviewed_capture_is_pending_and_not_searchable(self):
+    def test_unreviewed_capture_is_searchable_but_never_injected(self):
         replay = capture.Replay(stamp='2026-01-02T03:04:05Z')
         path = capture.write_capture(self.vault, memspec.RULING_DIRECTORY, 'ruling',
             capture.grant_digest(QUOTE), 'owner ruling auto-captured', QUOTE,
@@ -167,6 +170,7 @@ class CaptureRecallRegression(unittest.TestCase):
         self.assertEqual(replay.status, capture.STATUS_PENDING)
         self.assertIn('captured_pending', path.parts)
         memsearch.build_index(self.vault)
+        self.assertTrue(memsearch.query_index(self.vault, 'fixturehistory')["results"])
         self.assertEqual(self.searched(), [])
         self.assertEqual(self.invoke()[0], None)
 

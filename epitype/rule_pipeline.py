@@ -1,19 +1,21 @@
-"""One source contract for card admission and rule projections.
+"""Current-content review shared by maintenance and runtime consumers.
 
-This validates stored rule data, never whether the owner may perform an action.
-Unmigrated cards stay visible as unverified; a new interpretation cannot acquire
-authority merely by copying an old approval stamp.
+Original quotations are optional references, audited only on explicit request.
+This checks stored content and scope, never authority to perform an action.
 """
 import argparse
 import copy
 from datetime import datetime, timezone
 import hashlib
+import functools
 import json
+import os
+import uuid
 from pathlib import Path
 import re
 import time
 
-from . import memspec, rule_binding, rule_provenance
+from . import memspec, rule_binding, rule_provenance, rule_review
 
 _NORMATIVE = re.compile(
     r"必須|不得|一律|禁止|不可|不准|規則[：:]|原則[：:]|"
@@ -91,6 +93,22 @@ def _meaning(text, *, include_source=True, exclude_metadata_modified=True):
     return json.dumps([data, body], ensure_ascii=False, sort_keys=True)
 
 
+def _execution_meaning(fields, blocks):
+    """Bind the fields actually used for a guard's emitted advice, including fallbacks."""
+    execution = {key: blocks[key] for key in _EXECUTION_FIELDS if key in blocks}
+    advice = None
+    if fields.get('guard_tool'):
+        advice = 'guard_advice' if fields.get('guard_advice') else 'description'
+    elif not fields.get('write_check'):
+        if fields.get('require_tool_before') is not None:
+            advice = 'description'
+        elif fields.get('advise_tool') and not fields.get('advise_text'):
+            advice = 'description'
+    if advice in blocks:
+        execution[advice] = blocks[advice]
+    return execution
+
+
 def _payload_meaning(card_text, document=None):
     fields, _problem = memspec.frontmatter_text(card_text)
     if not fields.get("text") or fields.get("layer") not in memspec.RULE_GENERATED_LAYERS:
@@ -98,7 +116,7 @@ def _payload_meaning(card_text, document=None):
         return _meaning(card_text, include_source=False)
     scope = {key: fields[key] for key in rule_provenance.SCOPE_KEYS if key in fields}
     blocks, _body = json.loads(_meaning(card_text, include_source=False))
-    scope["execution"] = {key: blocks[key] for key in _EXECUTION_FIELDS if key in blocks}
+    scope["execution"] = _execution_meaning(fields, blocks)
     lines, _closing = memspec.split_frontmatter(card_text)
     scope["hosts"] = memspec.sequence_items(lines or (), memspec.RULE_HOSTS_FIELD)
     if document is not None:
@@ -154,8 +172,13 @@ def expired(document, now=None):
     return limit <= (now or datetime.now(timezone.utc))
 
 
-def supersession_issues(fields, card_path, *, card_text=None, seconds=5.0,
-                       allow_unavailable_sources=False, source_notices=None):
+class VerificationDeferred(OSError):
+    """The current check is incomplete; no evidence of invalid content was found."""
+
+
+def _inspect_supersession(fields, card_path, *, card_text=None, seconds=5.0,
+                       allow_unavailable_sources=False, source_notices=None, audit_originals=False,
+                       dependencies=None):
     """Verify reciprocal identities and both endpoint payloads without recursion.
 
     The prospective root can be supplied by a write caller; every other node is
@@ -166,15 +189,20 @@ def supersession_issues(fields, card_path, *, card_text=None, seconds=5.0,
         document = rule_provenance.parse(fields)
     except (ValueError, TypeError):
         return ["supersession provenance is unreadable"]
-    if fields.get("status") != "superseded" and not (document or {}).get("supersedes"):
-        return ["superseded_by requires superseded status"] if fields.get("superseded_by") else []
+    status = str(fields.get('status', 'active')).strip().casefold()
+    if fields.get('superseded_by') and status != 'superseded':
+        return ["superseded_by requires superseded status"]
+    if status != 'superseded' and not (document or {}).get('supersedes'):
+        return []
+    if status not in ('active', 'superseded'):
+        return ["supersession endpoint is not active"]
     root = Path(card_path).resolve()
     deadline = rule_provenance.verification_deadline(seconds)
     nodes, edges, pending, examined = {}, set(), [root], set()
 
     def remaining():
         if time.monotonic() >= deadline:
-            raise ValueError("supersession verification budget exhausted; next check: verify this exact chain")
+            raise VerificationDeferred("supersession verification budget exhausted; next check: verify this exact chain")
 
     def identity(value, current):
         if not isinstance(value, str) or not value.strip():
@@ -198,6 +226,8 @@ def supersession_issues(fields, card_path, *, card_text=None, seconds=5.0,
             else:
                 text = path.read_text(encoding="utf-8-sig")
                 data, problem = memspec.frontmatter_text(text)
+            if dependencies is not None:
+                dependencies[str(path)] = {'mode': 'text', 'sha256': _digest(text)}
             if problem:
                 raise ValueError("supersession endpoint frontmatter is unreadable")
             doc = rule_provenance.parse(data)
@@ -231,7 +261,7 @@ def supersession_issues(fields, card_path, *, card_text=None, seconds=5.0,
             canonical["supersedes"] = [str(identity(value, successor)) for value in declared]
             reviewed = dict(new, **{rule_provenance.FIELD: rule_provenance.serialize(canonical)})
             result = rule_provenance.validate_supersession(old, reviewed, prior, successor,
-                allow_unavailable_sources=allow_unavailable_sources)
+                allow_unavailable_sources=allow_unavailable_sources, audit_originals=audit_originals)
             if not result.verified and not (allow_unavailable_sources and result.source_unavailable):
                 raise ValueError("; ".join(result.issues))
             if result.source_unavailable and source_notices is not None:
@@ -273,10 +303,148 @@ def supersession_issues(fields, card_path, *, card_text=None, seconds=5.0,
                 if not indegree[successor]:
                     ready.append(successor)
         return [] if removed == len(nodes) else ["supersession graph contains a cycle"]
-    except (OSError, UnicodeError):
-        return ["supersession endpoint does not exist or is unreadable"]
+    except VerificationDeferred:
+        raise
+    except FileNotFoundError as error:
+        if dependencies is not None and error.filename:
+            dependencies[str(Path(error.filename).resolve())] = {'mode': 'bytes', 'sha256': None}
+        return ["supersession endpoint does not exist"]
+    except (OSError, UnicodeError) as error:
+        raise VerificationDeferred("supersession endpoint unreadable; next check: retry this exact chain") from error
     except (ValueError, TypeError) as error:
         return [str(error)]
+
+
+_CHAIN_RECEIPT_VERSION = 2
+
+
+def _chain_cache_path(card_path):
+    path = Path(card_path).resolve()
+    vault = next((parent for parent in path.parents if (parent / 'MEMORY.md').is_file()), path.parent)
+    return vault / '.epitype' / 'chain-verification' / (_digest(str(path)) + '.json')
+
+
+@functools.lru_cache(maxsize=1)
+def _chain_validator_revision():
+    try:
+        return _digest(''.join(hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
+            for name in ('rule_pipeline.py', 'rule_provenance.py', 'rule_review.py', 'rule_binding.py', 'memspec.py')))
+    except OSError:
+        return None
+
+
+def _receipt_seal(receipt):
+    return _digest(json.dumps({key: value for key, value in receipt.items() if key != 'seal'},
+                             ensure_ascii=False, sort_keys=True, separators=(',', ':')))
+
+
+def _chain_dependencies_match(dependencies, root, text):
+    if not isinstance(dependencies, dict) or root not in dependencies:
+        return False
+    for name, entry in dependencies.items():
+        if (not isinstance(entry, dict) or entry.get('mode') not in ('bytes', 'text')
+                or entry.get('sha256') is not None and not re.fullmatch('[0-9a-f]{64}', str(entry['sha256']))):
+            return False
+        if name == root:
+            current = _digest(text) if entry['mode'] == 'text' else None
+        else:
+            try:
+                current = (hashlib.sha256(Path(name).read_bytes()).hexdigest() if entry['mode'] == 'bytes'
+                           else _digest(Path(name).read_text(encoding='utf-8-sig')))
+            except FileNotFoundError:
+                current = None
+        if current != entry['sha256']:
+            return False
+    return True
+
+
+def supersession_issues(fields, card_path, *, card_text=None, seconds=5.0,
+                       allow_unavailable_sources=False, source_notices=None, audit_originals=False):
+    """Reuse complete checks only while actual current inputs and sealed result still match."""
+    arguments = dict(card_text=card_text, seconds=seconds,
+                     allow_unavailable_sources=allow_unavailable_sources,
+                     source_notices=source_notices, audit_originals=audit_originals)
+    try:
+        document = rule_provenance.parse(fields)
+    except (ValueError, TypeError):
+        document = None
+    if audit_originals or not (fields.get('superseded_by') or (document or {}).get('supersedes')
+                               or str(fields.get('status', '')).casefold() == 'superseded'):
+        return _inspect_supersession(fields, card_path, **arguments)
+    root = str(Path(card_path).resolve())
+    text = card_text if card_text is not None else Path(card_path).read_text(encoding='utf-8-sig')
+    actual, problem = memspec.frontmatter_text(text)
+    if problem or actual != fields:
+        return ['prospective supersession requires its complete card_text']
+    revision = _chain_validator_revision()
+    options = {'allow_unavailable_sources': bool(allow_unavailable_sources), 'validator': revision,
+               'binding_namespace': str(memspec.config_path().resolve().parent)}
+    cache_path = _chain_cache_path(card_path)
+    writable = True
+    try:
+        cached = json.loads(cache_path.read_text(encoding='utf-8'))
+        if not isinstance(cached, dict):
+            raise ValueError('chain receipt is not an object')
+        if type(cached.get('version')) is int and cached['version'] > _CHAIN_RECEIPT_VERSION:
+            writable = False
+        if (revision and type(cached.get('version')) is int and cached['version'] == _CHAIN_RECEIPT_VERSION
+                and cached.get('root') == root and cached.get('options') == options
+                and cached.get('seal') == _receipt_seal(cached)
+                and isinstance(cached.get('issues'), list) and all(isinstance(x, str) for x in cached['issues'])
+                and isinstance(cached.get('notices'), list) and all(isinstance(x, str) for x in cached['notices'])
+                and _chain_dependencies_match(cached.get('dependencies'), root, text)):
+            if source_notices is not None:
+                source_notices.extend(cached['notices'])
+            return cached['issues']
+    except (OSError, UnicodeError, ValueError, TypeError):
+        pass
+    dependencies = {root: {'mode': 'text', 'sha256': _digest(text)}}
+    notices = []
+    arguments.update(card_text=text, source_notices=notices, dependencies=dependencies)
+    with rule_provenance.validation_inputs(dependencies):
+        issues = _inspect_supersession(fields, card_path, **arguments)
+    if source_notices is not None:
+        source_notices.extend(notices)
+    if not writable or not revision:
+        return issues
+    receipt = {'version': _CHAIN_RECEIPT_VERSION, 'root': root, 'options': options,
+               'dependencies': dependencies, 'issues': issues, 'notices': notices}
+    receipt['seal'] = _receipt_seal(receipt)
+    staging = cache_path.with_name(cache_path.name + '.' + uuid.uuid4().hex + '.tmp')
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        staging.write_text(json.dumps(receipt, ensure_ascii=False), encoding='utf-8')
+        os.replace(staging, cache_path)
+    except OSError:
+        pass  # A derived memo changes cost, never the validation outcome.
+    finally:
+        try:
+            staging.unlink(missing_ok=True)
+        except OSError:
+            pass
+    return issues
+
+
+def delivery_identity(path, version):
+    return json.dumps([os.path.normcase(str(Path(path).resolve())), version], ensure_ascii=False)
+
+
+def effective_version(card_text, fields=None, projected=None):
+    """Delivery identity describes current guidance, not an excerpt or original transcript."""
+    fields = fields if fields is not None else memspec.frontmatter_text(card_text)[0]
+    document = (projected or {}).get('document')
+    if document is None and rule_provenance.FIELD in fields:
+        document = rule_provenance.parse(fields)
+    if document is not None:
+        operative = {key: document.get(key) for key in ('text', 'scope', 'kind', 'author', 'supersedes')}
+        blocks, _body = json.loads(_meaning(card_text, include_source=False))
+        operative['execution'] = _execution_meaning(fields, blocks)
+        operative['state'] = {key: fields.get(key) for key in ('status', 'superseded_by', 'valid_until')}
+        if not fields.get('text') or fields.get('layer') not in memspec.RULE_GENERATED_LAYERS:
+            # These source reviews bind card prose too; a quote alone is not the complete rule.
+            operative['payload'] = _payload_meaning(card_text, document)
+        return _digest(json.dumps(operative, ensure_ascii=False, sort_keys=True))
+    return _digest(_meaning(card_text, include_source=False))
 
 
 def admission(before, after, card_type, card_path):
@@ -294,18 +462,26 @@ def admission(before, after, card_type, card_path):
         # though generated payload bindings exclude this auxiliary metadata.
         if old_fields.get(rule_provenance.FIELD) == fields.get(rule_provenance.FIELD):
             return []
-    result = rule_provenance.validate(fields, card_path)
+    result = rule_review.validate(fields, card_path)
     if not result.verified:
         return ["規則來源 " + result.status + "：" + "; ".join(result.issues)]
-    issues = payload_issues(result.document, after) + supersession_issues(fields, card_path, card_text=after)
+    issues = payload_issues(result.document, after)
+    if issues:
+        return ["規則內容 INVALID：" + "; ".join(issues)]
+    try:
+        issues = supersession_issues(fields, card_path, card_text=after)
+    except VerificationDeferred as error:
+        return ["規則驗證 UNVERIFIED：" + str(error)]
     if issues:
         return ["規則來源 INVALID：" + "; ".join(issues)]
     return []
 
 
-def inspect_card(fields, path, *, card_text=None, allow_unavailable_sources=False):
-    """One original-source, complete-payload and successor check for every caller."""
-    result = rule_provenance.validate(fields, path)
+def inspect_card(fields, path, *, card_text=None, allow_unavailable_sources=False, audit_originals=False):
+    """Check current content; read historical records only for an explicit audit."""
+    result = (rule_provenance.validate(fields, path) if audit_originals
+              else rule_review.validate(fields, path))
+    result.source_audited = audit_originals
     if rule_provenance.FIELD not in fields:
         check = legacy_integrity(fields, path, card_text=card_text)
         if check is not None:
@@ -317,9 +493,17 @@ def inspect_card(fields, path, *, card_text=None, allow_unavailable_sources=Fals
         notices = []
         try:
             text = card_text if card_text is not None else Path(path).read_text(encoding="utf-8-sig")
-            issues = payload_issues(result.document, text) + supersession_issues(fields, path,
-                card_text=text, allow_unavailable_sources=allow_unavailable_sources,
-                source_notices=notices)
+            issues = payload_issues(result.document, text)
+            if not issues:
+                issues = supersession_issues(fields, path,
+                    card_text=text, allow_unavailable_sources=allow_unavailable_sources,
+                    source_notices=notices, audit_originals=audit_originals)
+        except VerificationDeferred as error:
+            result.status = rule_provenance.UNVERIFIED
+            result.verification_deferred = True
+            result.blocking_basis = False
+            result.issues.append(str(error))
+            return result
         except (ValueError, OSError) as error:
             issues = ["rule card cannot be verified: " + str(error)]
         if issues:
@@ -366,8 +550,11 @@ def legacy_integrity(fields, path, *, card_text=None):
     return check
 
 
-def projection(fields, path, *, legacy_text="", card_text=None, allow_unavailable_sources=False):
+def projection(fields, path, *, legacy_text="", card_text=None, allow_unavailable_sources=False,
+               allow_deferred=False):
     """Return source-labelled data; malformed supplied evidence never falls back."""
+    if memspec.is_pending_capture(path):
+        raise ValueError(Path(path).name + ': unreviewed event storage has no execution authority')
     payload = Path(path).read_bytes()
     snapshot = payload.decode('utf-8-sig').replace('\r\n', '\n').replace('\r', '\n')
     if card_text is not None and card_text.replace('\r\n', '\n').replace('\r', '\n') != snapshot:
@@ -379,7 +566,11 @@ def projection(fields, path, *, legacy_text="", card_text=None, allow_unavailabl
     # itself can change without changing its separately bound rule meaning.
     result = inspect_card(current_fields, path, card_text=snapshot,
                           allow_unavailable_sources=allow_unavailable_sources)
-    available_for_publication = result.verified or allow_unavailable_sources and result.source_unavailable
+    if current_fields.get('capture_review') == 'UNREVIEWED' and not result.verified:
+        raise ValueError(Path(path).name + ': captured event requires current content review')
+    available_for_publication = (result.verified
+        or allow_unavailable_sources and result.source_unavailable
+        or allow_deferred and result.verification_deferred)
     if (rule_provenance.FIELD in current_fields and not available_for_publication
             or result.status == rule_provenance.INVALID):
         raise ValueError(Path(path).name + ": rule provenance " + result.status + ": "
@@ -397,24 +588,43 @@ def projection(fields, path, *, legacy_text="", card_text=None, allow_unavailabl
             "supersedes": document.get("supersedes", []),
             "authorship": document.get("author", "UNVERIFIED"),
             "kind": document.get("kind", "legacy-unverified"),
-            "expired": available_for_publication and expired(document), "document": document}
+            "expired": available_for_publication and expired(document), "document": document,
+            "verification_deferred": result.verification_deferred,
+            "current_description": (current_fields.get("description", "")
+                if not current_fields.get("text")
+                or current_fields.get("layer") not in memspec.RULE_GENERATED_LAYERS else ""),
+            "effective_version": effective_version(snapshot, current_fields, {"document": document})}
 
 
 def render_projection(projected, *, card_path=None):
     """Render a projection without re-reading the record it just verified."""
     if projected["expired"]:
         return ""
-    if projected.get("display") == "plain" and projected["provenance"]["status"] == rule_provenance.VERIFIED:
+    if projected.get("verification_deferred"):
+        document = projected['document']
+        author = ('AI 整理：' if document['kind'] == 'ai-derived' else '卡片記載作者：')
+        return (f"[{document['key']}] " + author + document['author']
+                + "\n取代鏈本輪未核（驗證尚未完成）"
+                + "\n適用範圍：" + rule_provenance.serialize(document['scope'])
+                + "\n" + projected["text"]
+                + "\n來源卡：" + str(card_path or projected["card_path"]))
+    if projected.get("display") == "plain" and rule_provenance.usable(projected["provenance"]["status"]):
         return projected["text"]
-    if projected["provenance"]["status"] != rule_provenance.VERIFIED:
+    if not rule_provenance.usable(projected["provenance"]["status"]):
         if projected["provenance"].get("source_unavailable"):
             document = projected["document"]
-            return ("來源未核：原始對話無法讀取；保留卡片記載內容。\n"
+            return ("來源未核（本次尚未完成原文核對）：" + rule_provenance.unavailable_reason(projected['provenance'])
+                    + "保留卡片記載內容，不表示規則有錯或已撤銷。\n"
                     + "卡片記載作者：" + document["author"] + "\n"
                     + "適用範圍（卡片記載）：" + rule_provenance.serialize(document["scope"]) + "\n"
                     + projected["text"] + "\n來源卡：" + str(card_path or projected["card_path"]))
         return memspec.RULE_SOURCE_LEGACY_REFERENCE + projected["text"]
-    rendered = rule_provenance._render_document(projected["document"])
+    if projected['provenance']['status'] == rule_provenance.REVIEWED:
+        doc = projected['document']
+        rendered = (f"[{doc['key']}] 卡片記載作者：{doc['author']}\n"
+                    + '適用範圍：' + rule_provenance.serialize(doc['scope']) + '\n' + projected['text'])
+    else:
+        rendered = rule_provenance._render_document(projected["document"])
     if projected["document"]["kind"] == "ai-derived":
         rendered += "\n作者分類：AI 整理：" + projected["document"]["author"]
     rendered += "\n取代關係：" + ("、".join(projected["supersedes"]) or "無")
@@ -425,20 +635,21 @@ def render_projection(projected, *, card_path=None):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="唯讀規則來源驗證；不授予工具動作權限")
+    parser = argparse.ArgumentParser(description="現行規則內容檢查；原話僅在明確要求時查證")
+    parser.add_argument('--audit-originals', action='store_true', help='明確回查歷史原始訊息、角色與雜湊')
     parser.add_argument("cards", nargs="+", type=Path)
     args = parser.parse_args(argv)
     rows = []
     for path in args.cards:
         fields, _problem = memspec.frontmatter_fields(path)
-        result = inspect_card(fields, path)
+        result = inspect_card(fields, path, audit_originals=args.audit_originals)
         result_data = result.to_dict()
         if hasattr(result, "legacy_integrity"):
             result_data["legacy_integrity"] = result.legacy_integrity
         rows.append({"path": str(path), **result_data,
                      "expired": result.verified and expired(result.document)})
     print(json.dumps(rows, ensure_ascii=False, indent=2))
-    return int(any(row["status"] != rule_provenance.VERIFIED for row in rows))
+    return int(any(not rule_provenance.usable(row["status"]) for row in rows))
 
 
 if __name__ == "__main__":

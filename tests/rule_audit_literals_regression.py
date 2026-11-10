@@ -14,7 +14,7 @@ from unittest.mock import patch
 import rule_source_consumers_regression as fixtures
 import pretooluse_gate as pretool
 import stop_gate as stop
-from epitype import rule_pipeline
+from epitype import hook_context, memspec, rule_pipeline
 
 WRITE_NOTE = '既有裁定提醒（本次寫入放行）'
 
@@ -75,17 +75,26 @@ class AuditLiterals(unittest.TestCase):
                 {'vaults': [self.vault]}, self.root / 'artifact.md', ['badold'], 'badold',
                 time.monotonic(), notices)
             self.assertIsNone(found)
-            self.assertTrue(any(self.document['quote'] in note for note in notices))
+            expected = memspec.STOP_NOTE_POLICY.format(
+                advice='採用本測試規則。', decision=self.document['key'])
+            self.assertEqual(notices, [expected])
+            self.assertNotIn(self.document['quote'], notices[0])
+            transcript = self.root / ('.' + host) / 'note-stop.jsonl'
+            transcript.parent.mkdir(exist_ok=True)
+            transcript.write_text('{}\n', encoding='utf-8')
+            event = {'session_id': host + '-note-stop', 'cwd': str(self.root),
+                     'transcript_path': str(transcript), 'last_assistant_message': 'badold'}
             captured = []
             with patch.object(stop, 'leave_note', side_effect=lambda *args: captured.append(args)):
-                out = stop._handle({'session_id': host + '-note-stop', 'cwd': str(self.root),
-                    'last_assistant_message': 'badold'}, time.monotonic(), [])
+                out = stop._handle(event, time.monotonic(), [])
             self.assertIsNone(out)
-            self.assertTrue(captured)
-            # The Stop note names the card and the check only; it no longer quotes the
-            # rule or the matched text (b3ae5d3), so the card is identified by its key.
-            self.assertIn(self.document['key'] + ' 的 forbidden', captured[-1][-1])
-            self.assertNotIn('別說', captured[-1][-1])
+            self.assertEqual(len(captured), 1)
+            self.assertEqual(captured[0][1], hook_context.identity(event))
+            expected = memspec.STOP_NOTE_NOTICE.format(
+                decision=self.document['key'], advice='採用本測試規則。')
+            self.assertEqual(captured[0][-1], expected)
+            self.assertNotIn(self.document['quote'], captured[0][-1])
+            self.assertNotIn('badold', captured[0][-1])
 
     def test_write_says_advisory_and_unadopted_lines_only_where_they_concern_it(self):
         def write(target, text):

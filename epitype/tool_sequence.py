@@ -6,8 +6,11 @@ except ImportError:  # Used by the standalone card-lint CLI.
 
 
 def applies(audience, event):
-    sub = bool(event.get('agent_id') or event.get('agentId')
-               or event.get('hook_event_name') == 'SubagentStop')
+    try:
+        from . import hook_context
+    except ImportError:
+        import hook_context
+    sub = hook_context.is_subagent(event) or event.get('hook_event_name') == 'SubagentStop'
     return audience in ('', 'all') or audience == ('sub' if sub else 'root')
 
 

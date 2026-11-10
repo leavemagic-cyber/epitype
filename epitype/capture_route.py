@@ -15,11 +15,15 @@ import sys; sys.dont_write_bytecode = True; [getattr(stream, "reconfigure", lamb
 """
 
 import argparse
+from contextlib import contextmanager
+from contextvars import ContextVar
+import hashlib
 import io
 import json
 import os
 from pathlib import Path
 import re
+import tempfile
 import time
 
 try:
@@ -49,6 +53,20 @@ ROUTE_BROKEN = "broken"
 REHOME_NOTE = "（{stamp} 歸戶：自 {source} 移入，依卡上 {field}「{cwd}」；epitype/capture_route.py --apply）"
 # 同名時的後綴上限：撞名超過這個數字代表判斷錯了，不是要再加一個檔。
 MAX_RENAME_SUFFIX = 99
+_OBSERVATIONS = ContextVar('epitype_project_observations', default=None)
+
+
+@contextmanager
+def observation_window():
+    """Reuse observations within one event, never across separate hook events."""
+    if _OBSERVATIONS.get() is not None:
+        yield
+        return
+    token = _OBSERVATIONS.set({})
+    try:
+        yield
+    finally:
+        _OBSERVATIONS.reset(token)
 
 
 def _one_line(value):
@@ -58,6 +76,12 @@ def _one_line(value):
 def project_slug(text):
     """宿主把 cwd 的每個非英數字元換成 `-` 當目錄名；歸戶要算同一個 slug。"""
     return _SLUG_PATTERN.sub("-", str(text))
+
+
+def project_key(root):
+    """Lossless logical identity; a native slug is only a compatibility locator."""
+    value = os.path.normcase(os.fspath(Path(root).resolve()))
+    return hashlib.sha256(value.encode('utf-8')).hexdigest()[:24]
 
 
 def holds_cards(vault):
@@ -111,7 +135,10 @@ def native_cwd_vaults(cwd, home=None):
 
 def capture_vault(cwd, governance, home=None):
     """自動捕捉的事件卡該寫進哪個庫：專案的進專案庫，其餘進治理庫。"""
-    return next(iter(native_cwd_vaults(cwd, home)), Path(governance).resolve())
+    for vault in native_cwd_vaults(cwd, home):
+        if reference_owner_matches(vault, cwd) is not False:
+            return vault
+    return Path(governance).resolve()
 
 
 def native_vaults(home=None):
@@ -153,9 +180,217 @@ def native_vaults(home=None):
 # 專案目錄裡一份對話紀錄都沒有時的回覆值：那不是證據，只是沒有證據，所以由呼叫端自己
 # 決定要當成「判不出來」還是「不是孤兒」。
 PROJECT_ROOT_NO_TRANSCRIPT = "no-transcript"
-# 只看最新幾份紀錄的前幾行：cwd 每一行都有，讀整個目錄只是把時間花在同一個答案上。
-PROJECT_TRANSCRIPT_FILES = 3
+# 每份只取檔頭的 cwd；未變的檔頭不重讀，已觀測到的碰撞不因歷史輪替而遺失。
 PROJECT_TRANSCRIPT_ROWS = 40
+
+
+def _project_roots_cache(path, vault):
+    """A derived observation cache, never a registry or a source of rule authority."""
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+        if (not isinstance(data, dict) or not isinstance(data.get('vault'), str)
+                or os.path.normcase(data['vault']) != os.path.normcase(str(vault))):
+            return None
+        roots = {}
+        values = data.get('roots', [])
+        for value in values if isinstance(values, list) else ():
+            if isinstance(value, str) and Path(value).is_absolute():
+                roots.setdefault(_observed_root_key(value), value)
+        files = {}
+        entries = data.get('files', {})
+        version = data.get('version')
+        for name, entry in entries.items() if isinstance(entries, dict) and type(version) is int and version == 1 else ():
+            if (Path(name).name != name or not name.endswith('.jsonl')
+                    or not isinstance(entry, list) or len(entry) != 4
+                    or any(type(value) is not int or value < 0 for value in entry[:3])):
+                continue
+            origin = entry[3]
+            if origin is None:
+                files[name] = entry
+            elif isinstance(origin, str) and Path(origin).is_absolute():
+                canonical = roots.get(_observed_root_key(origin))
+                if canonical is not None:
+                    files[name] = [*entry[:3], canonical]
+        return {'version': version, 'vault': str(vault), 'roots': list(roots.values()), 'files': files}
+    except (OSError, UnicodeError, ValueError, KeyError, TypeError):
+        return None
+
+
+def _observed_root_key(value):
+    # Cache entries were resolved at observation time. Re-resolving each file's
+    # origin turns one warm read into hundreds of Windows filesystem calls.
+    return os.path.normcase(os.path.normpath(value))
+
+
+def _transcript_root(transcript, max_rows):
+    with transcript.open(encoding='utf-8-sig', errors='replace') as stream:
+        for _index, line in zip(range(max_rows), stream):
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            cwd = row.get('cwd') if isinstance(row, dict) else None
+            if isinstance(cwd, str) and cwd.strip() and Path(cwd).is_absolute():
+                return Path(cwd).resolve()
+    return None
+
+
+def project_roots_of(vault, *, max_rows=PROJECT_TRANSCRIPT_ROWS):
+    observations = _OBSERVATIONS.get()
+    if observations is None:
+        return _project_roots_of(vault, max_rows=max_rows)
+    key = ('roots', str(Path(vault).resolve()), max_rows)
+    if key not in observations:
+        observations[key] = tuple(_project_roots_of(vault, max_rows=max_rows))
+    return list(observations[key])
+
+
+def _project_roots_of(vault, *, max_rows=PROJECT_TRANSCRIPT_ROWS):
+    """Retain all observed cwd identities; read only new or changed transcript heads.
+
+    Scan all available headers on a cold/malformed cache, not just the latest three.
+    The cache preserves collisions when a host later removes old transcripts. It
+    cannot reconstruct evidence already removed before the first observation.
+    """
+    vault = Path(vault).resolve()
+    if not vault.is_dir():
+        return []
+    cache_path = vault / memspec.FTS_INDEX_DIRECTORY / memspec.PROJECT_ROOTS_CACHE_FILENAME
+    cached = _project_roots_cache(cache_path, vault)
+    roots = {}
+    for value in (cached or {}).get('roots', ()):
+        root = Path(value)
+        roots.setdefault(project_key(root), root)
+    files = {}
+    incomplete = False
+    try:
+        transcripts = sorted(vault.parent.glob('*.jsonl'))
+    except OSError:
+        return list(roots.values()) if len(roots) > 1 else []
+    for transcript in transcripts:
+        prior = (cached or {}).get('files', {}).get(transcript.name)
+        try:
+            before = transcript.stat()
+            stamp = [before.st_mtime_ns, before.st_size, max_rows]
+            if prior and prior[:3] == stamp:
+                files[transcript.name] = prior
+                incomplete |= prior[3] is None
+                continue
+            root = _transcript_root(transcript, max_rows)
+            if root is not None:
+                root = roots.setdefault(project_key(root), root)
+            else:
+                incomplete = True
+            after = transcript.stat()
+            if (after.st_mtime_ns, after.st_size) == (before.st_mtime_ns, before.st_size):
+                files[transcript.name] = [*stamp, str(root) if root is not None else None]
+            elif (root is not None and after.st_size >= before.st_size
+                  and (after.st_dev, after.st_ino) == (before.st_dev, before.st_ino)):
+                # Appending to this session does not invalidate its already-read cwd.
+                # Keep the old stamp (if any) so a later call inspects the new bytes.
+                if prior:
+                    files[transcript.name] = prior
+            else:
+                incomplete = True
+        except (OSError, ValueError):
+            if prior and prior[3] is not None:
+                files[transcript.name] = prior
+            else:
+                incomplete = True
+    updated = {'version': 1, 'vault': str(vault),
+               'roots': sorted(map(str, roots.values())), 'files': files}
+    if not _future_roots_cache(cached) and cached != updated:
+        temporary = None
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            with memspec.file_lock(cache_path, timeout=0.1) as held:
+                if held:
+                    # A concurrent observer may have learned another root meanwhile.
+                    latest = _project_roots_cache(cache_path, vault)
+                    for value in (latest or {}).get('roots', ()):
+                        root = Path(value)
+                        roots.setdefault(project_key(root), root)
+                    if not _future_roots_cache(latest):
+                        updated['roots'] = sorted(map(str, roots.values()))
+                        fd, temporary = tempfile.mkstemp(prefix='.project-roots-', suffix='.tmp',
+                                                         dir=cache_path.parent)
+                        with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+                            json.dump(updated, stream, ensure_ascii=False, sort_keys=True)
+                            stream.flush()
+                            os.fsync(stream.fileno())
+                        os.replace(temporary, cache_path)
+                else:
+                    # Read the winner before returning, even when this call cannot persist.
+                    latest = _project_roots_cache(cache_path, vault)
+                    for value in (latest or {}).get('roots', ()):
+                        root = Path(value)
+                        roots.setdefault(project_key(root), root)
+        except OSError as error:
+            print(f'Epitype project observations not saved: {error}', file=sys.stderr)
+        finally:
+            if temporary is not None:
+                try:
+                    Path(temporary).unlink(missing_ok=True)
+                except OSError:
+                    pass
+    if incomplete and len(roots) < 2:
+        return []  # an unreadable/changing header cannot establish an unambiguous owner
+    return list(roots.values())
+
+
+def _future_roots_cache(cached):
+    version = (cached or {}).get('version')
+    return type(version) is int and version > 1
+
+
+def reference_owner_matches(vault, cwd):
+    observations = _OBSERVATIONS.get()
+    if observations is None:
+        return _reference_owner_matches(vault, cwd)
+    key = ('owner', str(Path(vault).resolve()), str(cwd))
+    if key not in observations:
+        observations[key] = _reference_owner_matches(vault, cwd)
+    return observations[key]
+
+
+def _reference_owner_matches(vault, cwd):
+    """False means an unscoped card cannot inherit this cwd from its physical vault.
+
+    Custom vaults retain compatibility. Mixed/ancestor native vaults need per-card
+    ownership; explicit global/source scopes are checked by callers.
+    """
+    if not cwd:
+        return None
+    vault = Path(vault).resolve()
+    if vault.name != 'memory' or vault.parent.parent.name != 'projects':
+        return None
+    current = Path(cwd).resolve()
+    roots = project_roots_of(vault)
+    if len(roots) != 1:
+        # With no transcript, ASCII compatibility still locates an exact project
+        # or its subdirectory. A lossy unicode slug never proves ownership.
+        if not roots and not any(vault.parent.glob('*.jsonl')):
+            for root in (current, *current.parents):
+                candidate = vault.parent.parent / project_slug(root) / NATIVE_MEMORY_DIRNAME
+                if candidate != vault and holds_cards(candidate):
+                    return False
+                if project_slug(root) == vault.parent.name:
+                    return False if not str(root).isascii() else None
+        return False
+    root = roots[0]
+    if not root.is_dir() or not current.is_relative_to(root):
+        return False
+    for child in (current, *current.parents):
+        if child == root or not child.is_relative_to(root):
+            break
+        candidate = vault.parent.parent / project_slug(child) / NATIVE_MEMORY_DIRNAME
+        if candidate != vault and holds_cards(candidate):
+            return False
+    # A native ancestor outside the nearest Git checkout is not project ownership.
+    if any((parent / '.git').exists() for parent in (current, *current.parents)
+           if parent != root and parent.is_relative_to(root)):
+        return False
+    return True
 
 
 def project_root_of(vault, *, no_transcript=None, max_rows=PROJECT_TRANSCRIPT_ROWS):
@@ -169,37 +404,27 @@ def project_root_of(vault, *, no_transcript=None, max_rows=PROJECT_TRANSCRIPT_RO
     沒有時回 `no_transcript`（預設 None）——「沒有紀錄」與「紀錄說那裡已經不在」是兩件事，
     孤兒庫盤點要把前者當活的，同步專案檔要把前者當判不出來，預設值不能只有一個。
     """
-    project_dir = Path(vault).parent
     try:
-        transcripts = sorted(
-            project_dir.glob("*.jsonl"), key=lambda item: item.stat().st_mtime, reverse=True)
+        if not any(Path(vault).parent.glob('*.jsonl')):
+            return no_transcript
     except OSError:
         return None
-    if not transcripts:
-        return no_transcript
-    for transcript in transcripts[:PROJECT_TRANSCRIPT_FILES]:
-        try:
-            with transcript.open(encoding="utf-8", errors="replace") as stream:
-                for _index, line in zip(range(max_rows), stream):
-                    try:
-                        row = json.loads(line)
-                    except ValueError:
-                        continue
-                    cwd = row.get("cwd") if isinstance(row, dict) else None
-                    if isinstance(cwd, str) and cwd.strip():
-                        root = Path(cwd)
-                        return root if root.is_dir() else None
-        except OSError:
-            continue
-    return None
+    roots = project_roots_of(vault, max_rows=max_rows)
+    if len(roots) == 1:
+        return roots[0] if roots[0].is_dir() else None
+    if roots:
+        return None
+    try:
+        return None if any(Path(vault).parent.glob('*.jsonl')) else no_transcript
+    except OSError:
+        return None
 
 
 def managed_vaults(configured, home=None):
     """實際受管的庫：設定檔登記的（原順序、只留存在的）在前，接上掃描到的原生庫。
 
-    owner 2026-09-21：「不應該是登記，應該是所有不管是不是專案都通用才對」。設定檔的
-    `vaults` 不是名冊——裝著卡的原生庫本來就是這套東西在管的庫，沒被登記只代表沒人去
-    寫那一行，不代表它的卡不該進夜間夢、卡片檢查與視圖。
+    設定檔的 `vaults` 與宿主原生記憶庫共同決定管理範圍；未明列的原生庫仍須納入
+    夜間整理、卡片檢查與視圖。
 
     掃描只准在 CLI 與夜間這一側做。喚回與各 hook（adapters/）仍以 cwd 解析庫：實測
     373 個專案目錄的全域掃描要 0.44 秒，每一則提問都付這個代價不可接受。

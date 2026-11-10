@@ -11,6 +11,7 @@ import re
 import sqlite3
 import stat
 import time
+import unicodedata
 
 try:
     from . import cardscan, memspec
@@ -27,6 +28,7 @@ _FRONT_FIELDS = _SEARCH_FRONT_FIELDS + (
     memspec.DECISION_STATUS_FIELD,
     memspec.SUPERSEDED_BY_FIELD,
     "current_decision_at", "last_verified_at",
+    memspec.OWNER_QUOTE_FIELD,
 )
 _ALL_FIELDS = _SEARCH_FRONT_FIELDS + ("body",)
 # 卡的身分欄：一個切詞碰到這裡，講的是這張卡是什麼；碰到描述或本文只是提到。
@@ -49,7 +51,7 @@ _RECALL_PART = re.compile(f"[{_CJK_RANGE}]+|[^\\s{_CJK_RANGE}，。！？：；�
 # bigrams indexable while the cards table and returned hit fields stay raw.
 _CJK_BIGRAM_PREFIX = "\ue000"
 _FTS_FORMAT_KEY = "fts_format"
-_FTS_FORMAT_VERSION = "9"
+_FTS_FORMAT_VERSION = "10"
 _CURRENT_DECISION_GUIDANCE = "此題現行決定="
 
 
@@ -317,8 +319,9 @@ def _is_link(entry, info):
 def _scan_vault(vault):
     """Every card-shaped file as (vault-relative posix path, path, mtime_ns, size).
 
-    A vault is a privacy boundary: symlinks, Windows junctions, and any path part
-    starting with '_' or '.' are neither entered nor listed, so a link-shaped
+    A vault is a privacy boundary: symlinks, Windows junctions, and private paths
+    are neither entered nor listed, except the named captured-event draft lane.
+    This search-only exception never changes cardscan's execution inventory, so a link-shaped
     entry cannot make files outside the vault searchable. Links are recognised
     from the directory entry itself; nothing is resolved (2026-09-04 regression:
     resolving every entry cost 4 s per hook on a loaded machine)."""
@@ -330,7 +333,11 @@ def _scan_vault(vault):
             with os.scandir(directory) as entries:
                 for entry in entries:
                     name = entry.name
-                    if name.startswith(("_", ".")):
+                    relative = prefix + name
+                    capture_lane = relative in ("_drafts", "_drafts/captured_pending")
+                    if name.startswith(("_", ".")) and not capture_lane:
+                        continue
+                    if prefix == "_drafts/" and not capture_lane:
                         continue
                     try:
                         info = entry.stat(follow_symlinks=False)
@@ -423,7 +430,7 @@ def _ensure_schema(connection):
         memspec.DECISION_STATUS_FIELD,
         memspec.SUPERSEDED_BY_FIELD,
         "body",
-        "recall_date", "recall_links",
+        "recall_date", "recall_links", "recall_quotes",
     }
     rebuild = row is None or row[0] != _FTS_FORMAT_VERSION or not expected_columns.issubset(columns)
     if rebuild:
@@ -447,7 +454,8 @@ def _ensure_schema(connection):
             superseded_by TEXT NOT NULL,
             body TEXT NOT NULL,
             recall_date TEXT NOT NULL,
-            recall_links TEXT NOT NULL
+            recall_links TEXT NOT NULL,
+            recall_quotes TEXT NOT NULL
         );
         CREATE VIRTUAL TABLE IF NOT EXISTS cards_fts USING fts5(
             card_path UNINDEXED, name, description, fm_aliases, fm_scope, body,
@@ -467,6 +475,24 @@ def _cjk_bigrams(text):
             if term not in seen:
                 seen.add(term)
                 yield term
+
+
+def _source_quote_phrases(value):
+    """Retain complete source phrases for discovery, outside the full-text index.
+
+    Matching a quotation finds its current card; the quotation itself neither
+    becomes current guidance nor supplies fragments for ordinary text search.
+    """
+    phrases = [value or ""]
+    for pattern in (r'「([^「」]+)」', r'『([^『』]+)』', r'“([^“”]+)”', r'"([^"\n]+)"'):
+        phrases.extend(re.findall(pattern, value or ""))
+    normalized = []
+    for phrase in phrases:
+        phrase = " ".join(unicodedata.normalize("NFKC", phrase).casefold().split())
+        phrase = phrase.strip(' \t\r\n「」『』“”"\'。.!?！？;；')
+        if phrase and phrase not in normalized:
+            normalized.append(phrase)
+    return normalized
 
 
 def _fts_document(text):
@@ -557,16 +583,17 @@ def build_index(vault, lock_timeout=0.0, *, prepare_sources=False):
                         """
                         INSERT INTO cards(
                             card_path, mtime_ns, size, is_card, name, description, fm_aliases,
-                            fm_scope, status, superseded_by, body, recall_date, recall_links
+                            fm_scope, status, superseded_by, body, recall_date, recall_links, recall_quotes
                         )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT(card_path) DO UPDATE SET
                             mtime_ns=excluded.mtime_ns, size=excluded.size,
                             is_card=excluded.is_card, name=excluded.name,
                             description=excluded.description, fm_aliases=excluded.fm_aliases,
                             fm_scope=excluded.fm_scope, status=excluded.status,
                             superseded_by=excluded.superseded_by, body=excluded.body,
-                            recall_date=excluded.recall_date, recall_links=excluded.recall_links
+                            recall_date=excluded.recall_date, recall_links=excluded.recall_links,
+                            recall_quotes=excluded.recall_quotes
                         """,
                         (
                             card_path,
@@ -582,6 +609,7 @@ def build_index(vault, lock_timeout=0.0, *, prepare_sources=False):
                             fields["body"],
                             _recall_date(fields, card_path),
                             json.dumps(re.findall(r"\[\[([^\]#|]+)(?:[^\]]*)\]\]", fields["body"])),
+                            "\n".join(_source_quote_phrases(fields[memspec.OWNER_QUOTE_FIELD])),
                         ),
                     )
                     row_id = connection.execute(
@@ -814,7 +842,13 @@ def _short_latin_pattern(key):
     return None
 
 
-def _recall_hits(row, terms):
+def _recall_pattern(key, automatic=False):
+    if automatic and len(key) > 3 and key.isalpha() and not _CJK_RUN.fullmatch(key):
+        return re.compile(r'(?<![^\W_])' + re.escape(key))
+    return _short_latin_pattern(key)
+
+
+def _recall_hits(row, terms, *, automatic=False):
     hit_fields = []
     matched_terms = set()
     term_fields = {}
@@ -823,7 +857,7 @@ def _recall_hits(row, terms):
         field_hit = False
         for term in terms:
             key = term.casefold()
-            pattern = _short_latin_pattern(key)
+            pattern = _recall_pattern(key, automatic)
             found = bool(pattern.search(value)) if pattern is not None else key in value
             if found:
                 field_hit = True
@@ -872,6 +906,45 @@ def _qualifies(strong_hit_fields, strong):
     if len(term) <= 3 and _LATIN_ALPHA_TERM.fullmatch(term):
         return any(field in _IDENTITY_FIELDS for field in strong_hit_fields)
     return True
+
+
+# These workflow words do not provide a second topic for proactive delivery.
+# They stay in manual search and alias parsing, including phrase denominators.
+_AUTO_CONVERSATIONAL_TERMS = frozenset(('先看', '修改', '確定', '確認', '狀況', '方式'))
+# A complete lookup request is different from mentioning one identifier in a discussion.
+_EXPLICIT_TOPIC_LOOKUP = re.compile(
+    r'(?:(?:find|load|recall|lookup|search(?:\s+for)?)\s+)?([a-z]{4,})[?!.]?', re.I)
+
+
+def _recall_units(prompt, terms):
+    """Count overlapping lexical pieces once, without inferring word meaning."""
+    text = prompt.casefold()
+    spans = []
+    pending = {term.casefold() for term in terms}
+    for part in _RECALL_PART.finditer(text):
+        value = part.group(0)
+        if _CJK_RUN.fullmatch(value):
+            for key in tuple(pending):
+                offset = value.find(key)
+                if offset >= 0:
+                    spans.append((part.start() + offset, part.start() + offset + len(key)))
+                    pending.remove(key)
+        else:
+            key = value.strip("?!.,;:()[]{}\"'")
+            if key in pending:
+                offset = value.index(key)
+                spans.append((part.start() + offset, part.start() + offset + len(key)))
+                pending.remove(key)
+        if not pending:
+            break
+    spans.sort()
+    merged = []
+    for start, end in spans:
+        if merged and start < merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return {text[start:end] for start, end in merged}
 
 
 def _is_superseded(row):
@@ -953,6 +1026,8 @@ def _current_successors(vault, excluded_links, indexed_paths):
             if successor is None:
                 break
             relative = Path(successor).relative_to(vault).as_posix()
+            if memspec.is_pending_capture(relative):
+                break
             if relative.casefold() in visited:
                 break
             visited.add(relative.casefold())
@@ -990,7 +1065,7 @@ def _result(vault, row, hits):
     # joining them is the real path; resolving every candidate row again cost
     # more than the FTS query itself.
     card_path = row["card_path"]
-    return {
+    result = {
         "path": str(vault / card_path),
         "card_path": card_path,
         "is_card": bool(row["is_card"]),
@@ -1000,6 +1075,10 @@ def _result(vault, row, hits):
         memspec.SUPERSEDED_BY_FIELD: row[memspec.SUPERSEDED_BY_FIELD],
         "hit_fields": hits,
     }
+    if memspec.is_pending_capture(card_path):
+        result.update(capture_review="UNREVIEWED", authority="none",
+                      evidence_notice="未審事件，僅供查證；不是授權、規則或動作提醒。")
+    return result
 
 
 def _recall_date(fields, card_path):
@@ -1017,10 +1096,10 @@ def _alias_identity(name, aliases):
     return identities, parts, words
 
 
-def _alias_rank(row, prompt, terms):
+def _alias_rank(row, prompt, terms, *, automatic=False):
     identities, parts, words = _alias_identity(row["name"], row["fm_aliases"])
     exact = sum(bool(pattern.search(prompt.casefold())) if pattern else value in prompt.casefold()
-                for value in identities for pattern in [_short_latin_pattern(value)])
+                for value in identities for pattern in [_recall_pattern(value, automatic)])
     coverage = sum(bool(group) and len(group & terms) / len(group) >= .8 for group in parts)
     # Fuzzy Latin identifiers supplement trigram search; short CJK fragments
     # remain subject to the existing substantive-term test.
@@ -1035,28 +1114,66 @@ def _alias_rank(row, prompt, terms):
     return (exact, coverage, near, 1.0 if cjk_phrase else support * support)
 
 
-def _fuse_recall(connection, candidates, prompt, terms, include_superseded, include_noncard):
+def _fuse_recall(connection, candidates, prompt, terms, include_superseded, include_noncard,
+                 excluded_links=None, *, seed_filter=None, automatic=False):
     """Fuse ordinal signals; independent vault BM25 values are never comparable."""
+    candidates = [item for item in candidates
+                  if not memspec.is_pending_capture(item[1]['card_path'])]
     # A busy upgrade lock leaves the old snapshot readable with its old ranking.
     columns = {row[1] for row in connection.execute('PRAGMA table_info(cards)')}
     if not {'recall_date', 'recall_links'} <= columns:
         return sorted(candidates, key=lambda item: item[0])
+    quote_column = 'recall_quotes' if 'recall_quotes' in columns else "'' AS recall_quotes"
     metadata = connection.execute(
-        "SELECT card_path, name, fm_aliases, recall_date, recall_links, is_card, status, description, fm_scope FROM cards"
+        "SELECT card_path, name, fm_aliases, recall_date, recall_links, is_card, status, "
+        "superseded_by, description, fm_scope, " + quote_column + " FROM cards"
     ).fetchall()
+    metadata = [row for row in metadata if not memspec.is_pending_capture(row['card_path'])]
+    # Compare the entire prompt, never a quoted fragment extracted from it.
+    # Two substantive terms keep short acknowledgements from discovering cards.
+    prompt_phrase = next(iter(_source_quote_phrases(prompt)), '')
+    quote_matches = {row['card_path'] for row in metadata
+                     if len(terms) >= 2 and prompt_phrase in row['recall_quotes'].splitlines()
+                     and (include_noncard or row['is_card'])
+                     and not historical_only(row['description'], row['fm_scope'], row['status'])}
+    if not include_superseded and excluded_links is not None:
+        for row in metadata:
+            if row['card_path'] in quote_matches and _is_superseded(row):
+                link = (row['card_path'], row['superseded_by'])
+                if link not in excluded_links:
+                    excluded_links.append(link)
     eligible = {row['card_path']: row for row in metadata
                 if (include_noncard or row['is_card'])
                 and (include_superseded or not _is_superseded(row))
                 and not historical_only(row['description'], row['fm_scope'], row['status'])}
+    quote_list = sorted(quote_matches & eligible.keys())
     ordered = sorted(candidates, key=lambda item: item[0])
     base = [item[1]['card_path'] for item in ordered]
     base_keys = {item[1]['card_path']: item[0][:-1] for item in ordered}
-    aliases = {path: _alias_rank(row, prompt, terms) for path, row in eligible.items()}
-    alias_list = sorted((path for path, score in aliases.items() if any(score[:3])),
+    aliases = {path: _alias_rank(row, prompt, terms, automatic=automatic)
+               for path, row in eligible.items()}
+    # Proactive delivery needs a complete topic, not coincidental body words or
+    # a fuzzy identifier. Explicit searches retain the broader discovery routes.
+    if automatic:
+        quote_list = [path for path in quote_list if any(aliases[path][:2])]
+    alias_list = sorted((path for path, score in aliases.items()
+                         if any(score[:2] if automatic else score[:3])),
                         key=lambda path: (tuple(-value for value in aliases[path]), path))
     # Only lexical seeds expand. Newly discovered neighbours cannot recursively
     # traverse the graph or turn a generic prompt into a vault-wide recall.
     seeds = set(base[:3])
+    seed_hits = {hit['card_path']: hit for _, hit in ordered[:3]}
+    seed_admission = {}
+
+    def expandable(path):
+        if path not in seeds:
+            return False
+        if seed_filter is None:
+            return True
+        if path not in seed_admission:
+            seed_admission[path] = bool(seed_filter(seed_hits[path]))
+        return seed_admission[path]
+
     names = {}
     qualified = {posixpath.splitext(path)[0].casefold(): path for path in eligible}
     for path, row in eligible.items():
@@ -1072,22 +1189,29 @@ def _fuse_recall(connection, candidates, prompt, terms, include_superseded, incl
             if len(targets) != 1:
                 continue
             target = next(iter(targets))
-            if path in seeds:
+            if expandable(path):
                 neighbours.add(target)
-            if target in seeds:
+            if expandable(target):
                 neighbours.add(path)
-    discovered = (set(alias_list) | neighbours) - set(base)
+    discovered = (set(alias_list) | neighbours | set(quote_list)) - set(base)
     for path in sorted(discovered):
         row = connection.execute('SELECT * FROM cards WHERE card_path = ?', (path,)).fetchone()
         hits, matched, _fields = _recall_hits(row, terms)
         candidates.append(((0, 0, 0, 0, path),
                            {**_result(Path('.'), row, hits), 'matched_term_count': len(matched),
-                            'hit_fields': hits or ([memspec.ALIASES_FIELD] if path in aliases and any(aliases[path][:3]) else ['wikilink'])}))
+                            'hit_fields': hits or ([memspec.OWNER_QUOTE_FIELD] if path in quote_matches
+                                                  else [memspec.ALIASES_FIELD] if any(aliases[path][:3])
+                                                  else ['wikilink'])}))
+    for _rank, hit in candidates:
+        if hit['card_path'] in quote_matches:
+            hit['hit_fields'] = list(dict.fromkeys(hit['hit_fields'] + [memspec.OWNER_QUOTE_FIELD]))
+            hit['matched_term_count'] = len(terms)
     pool = {item[1]['card_path'] for item in candidates}
     recent = sorted((path for path in pool if eligible[path]['recall_date']),
                     key=lambda path: (eligible[path]['recall_date'], path), reverse=True)
     scores = dict.fromkeys(pool, 0.0)
-    for weight, ranking, keys in ((2.0, base, base_keys), (.35, alias_list, aliases),
+    for weight, ranking, keys in ((2.0, base, base_keys), (3.0, quote_list, dict.fromkeys(quote_list, 0)),
+                                  (.35, alias_list, aliases),
                                   (.15, sorted(neighbours), dict.fromkeys(neighbours, 0)),
                                   (.15, recent, {path: eligible[path]['recall_date'] for path in recent})):
         previous, rank = object(), 0
@@ -1163,16 +1287,22 @@ def query_index(vault, term, include_superseded=False, include_noncard=False):
     return payload
 
 
-def recall_index(vault, prompt, include_superseded=False, include_noncard=False, limit=None):
+def recall_index(vault, prompt, include_superseded=False, include_noncard=False, limit=None,
+                 *, seed_filter=None, automatic=False):
     """`limit` widens the returned window; callers that pin a card class need to
     see past the default top-k or a pinned card ranked below it never surfaces
-    (adversarial review 2026-09-03 #1)."""
+    (adversarial review 2026-09-03 #1). An optional seed_filter gates only graph
+    expansion; direct matches still pass through the caller's admission checks.
+    Automatic delivery discounts conversational filler as topic evidence and
+    uses current-card frequency and independent lexical spans for topic evidence.
+    Manual recall keeps its full-text behavior."""
     vault = _resolve_vault(vault)
     db_path, migration_pending = _read_db_path(vault)
     if not db_path.is_file():
         return _no_index_result(vault)
     prompt = str(prompt).strip()
-    terms = _recall_terms(prompt)
+    explicit_lookup = _EXPLICIT_TOPIC_LOOKUP.fullmatch(prompt) if automatic else None
+    terms = [explicit_lookup.group(1)] if explicit_lookup else _recall_terms(prompt)
     if not terms:
         payload = {"query": prompt, "terms": [], "count": 0, "results": [], "guidance": []}
         if migration_pending:
@@ -1186,27 +1316,102 @@ def recall_index(vault, prompt, include_superseded=False, include_noncard=False,
     connection.row_factory = sqlite3.Row
     try:
         strong_terms = _strong_terms(terms)
+        topic_terms = strong_terms - _AUTO_CONVERSATIONAL_TERMS if automatic else strong_terms
+        topic_units = _recall_units(prompt, topic_terms)
+        lookup_term = next(iter(topic_units)) if automatic and len(topic_units) == 1 else None
         candidates = []
         excluded_links = []
-        for row in _rows_for_recall(connection, terms):
+        rows = [row for row in _rows_for_recall(connection, terms)
+                if not memspec.is_pending_capture(row["card_path"])]
+        lookup_cache = {}
+
+        def unique_match(term, fields, *, token_match=False):
+            key = (term, tuple(fields), token_match)
+            if key in lookup_cache:
+                return lookup_cache[key]
+            indexed_paths = [item[0] for item in connection.execute("SELECT card_path FROM cards")]
+            exact_word = re.compile(r"(?<![a-z0-9_])" + re.escape(term) + r"(?![a-z0-9_])", re.I)
+            current_matches = set()
+            for item in rows:
+                if not item["is_card"] or historical_only(item["description"], item["fm_scope"], item["status"]):
+                    continue
+                values = [item[_DB_FIELDS[field]] or "" for field in fields]
+                matched = (any(term in {part.casefold() for part in _recall_terms(value)}
+                               for value in values) if token_match
+                           else any(exact_word.search(value) for value in values))
+                if not matched:
+                    continue
+                if _is_superseded(item):
+                    replacements = _current_successors(vault,
+                        [(item["card_path"], item[memspec.SUPERSEDED_BY_FIELD])], indexed_paths)
+                    current_matches.update(hit["path"].casefold() for hit in replacements)
+                else:
+                    current_matches.add(str(vault / item["card_path"]).casefold())
+                if len(current_matches) > 1:
+                    break
+            lookup_cache[key] = len(current_matches) == 1
+            return lookup_cache[key]
+
+        unique_lookup = bool(automatic and lookup_term and unique_match(lookup_term, _ALL_FIELDS))
+        low_terms = topic_terms
+        if automatic:
+            current = lambda item: item["is_card"] and not memspec.is_pending_capture(item["card_path"]) and not _is_superseded(item) and not historical_only(
+                item["description"], item["fm_scope"], item["status"])
+            total = sum(current(item) for item in connection.execute(
+                "SELECT card_path, is_card, status, description, fm_scope FROM cards"))
+            frequency = dict.fromkeys(topic_terms, 0)
+            for item in rows:
+                if current(item):
+                    for key in _recall_hits(item, topic_terms, automatic=True)[1]:
+                        frequency[key] += 1
+            low_terms = {key for key, count in frequency.items()
+                         if count < max(2, total * .05)}
+        for row in rows:
             if historical_only(row["description"], row["fm_scope"], row["status"]):
                 continue
-            hits, matched, term_fields = _recall_hits(row, terms)
+            hits, matched, term_fields = _recall_hits(row, terms, automatic=automatic)
             if not hits:
                 continue
             if not include_noncard and not row["is_card"]:
                 continue
             # 只被泛詞碰到＝沒有命中。放在被取代卡的分支之前：泛詞不該連「現行決定
             # 在這裡」那行指路都一起帶出來。
-            strong = matched & strong_terms
+            strong = matched & topic_terms
             # 身分欄門檻只看實詞自己碰到哪些欄——泛詞（what/is/the...）巧合命中的
             # 欄位不能替實詞背書，否則 capital 這種單一實詞又會靠泛詞灌水的 hits
             # 蒙混過關（2026-09-06 實測）。
             strong_hit_fields = set()
             for term in strong:
                 strong_hit_fields |= term_fields.get(term, set())
-            if not _qualifies(strong_hit_fields, strong):
+            if (not strong if automatic else not _qualifies(strong_hit_fields, strong)):
                 continue
+            if automatic:
+                identity_match = any(_alias_rank(row, prompt, strong_terms, automatic=True)[:2])
+                compound_identity = False
+                for identity in (row["name"], *row["fm_aliases"].splitlines()):
+                    value = identity.casefold()
+                    keys = set()
+                    for key in strong:
+                        pattern = _recall_pattern(key, automatic=True)
+                        if pattern.search(value) if pattern is not None else key in value:
+                            keys.add(key)
+                    if len(_recall_units(prompt, keys)) >= 2:
+                        compound_identity = True
+                        break
+                low = strong & low_terms
+                low_identity = any(key in {term.casefold() for term in _recall_terms(row[_DB_FIELDS[field]] or "")}
+                                   for key in low for field in _IDENTITY_FIELDS)
+                low_units = _recall_units(prompt, low)
+                matched_units = _recall_units(prompt, strong)
+                description_low = any("description" in term_fields.get(key, ()) for key in low)
+                front_hit = any(field in (*_IDENTITY_FIELDS, "description") for field in strong_hit_fields)
+                explicit_front = (lookup_term and lookup_term in matched_units
+                                  and "description" in strong_hit_fields)
+                all_topics = len(topic_units) >= 2 and topic_units <= matched_units and front_hit
+                if not (identity_match or compound_identity or low_identity or description_low or len(low_units) >= 2
+                        or explicit_front or all_topics
+                        or (lookup_term and unique_lookup and lookup_term in matched_units)):
+                    continue
             if not include_superseded and _is_superseded(row):
                 excluded_links.append(
                     (row["card_path"], row[memspec.SUPERSEDED_BY_FIELD])
@@ -1227,7 +1432,8 @@ def recall_index(vault, prompt, include_superseded=False, include_noncard=False,
                 )
             )
         candidates = _fuse_recall(connection, candidates, prompt,
-                                  strong_terms, include_superseded, include_noncard)
+                                  strong_terms, include_superseded, include_noncard, excluded_links,
+                                  seed_filter=seed_filter, automatic=automatic)
         for _rank, hit in candidates:
             hit['path'] = str(vault / hit['card_path'])
         indexed_paths = (
@@ -2326,7 +2532,7 @@ def main(argv=None):
         return _selftest()
     try:
         if args.command == "build":
-            payload = build_index(args.vault, prepare_sources=True)
+            payload = build_index(args.vault, prepare_sources=False)
             exit_code = 0 if payload["status"] == "built" else 3
         elif args.command == "query":
             payload = query_index(

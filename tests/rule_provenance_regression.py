@@ -113,19 +113,57 @@ class ProvenanceTests(unittest.TestCase):
         self.assertEqual(result.status, provenance.INVALID)
         self.assertTrue(any('first occurred' in issue for issue in result.issues))
 
-    def test_existing_card_validator_requires_data_for_new_ai_timeout(self):
+    def test_pattern_only_timeout_is_source_data_not_blocking_authority(self):
         document = copy.deepcopy(self.document)
         document.update(kind='ai-derived', author='codex', text='前置檢查超過10分鐘就取消')
         result = self.verdict(document)
-        self.assertEqual(result.status, provenance.INVALID)
-        self.assertTrue(any('restriction_evidence' in issue for issue in result.issues))
+        self.assertEqual(result.status, provenance.VERIFIED)
+        self.assertEqual(result.restriction_review, 'ADVISORY_ONLY')
+        self.assertFalse(result.to_dict()['blocking_basis'])
 
-    def test_non_numeric_ai_ban_cannot_bypass_via_card_metadata(self):
+    def test_pattern_only_ban_cannot_acquire_blocking_authority(self):
         document = copy.deepcopy(self.document)
         document.update(kind='ai-derived', author='codex', text='校準資料不交dot')
         result = self.verdict(document)
+        self.assertEqual(result.status, provenance.VERIFIED)
+        self.assertFalse(result.to_dict()['blocking_basis'])
+
+    def test_supplied_false_restriction_evidence_remains_invalid(self):
+        document = copy.deepcopy(self.document)
+        document.update(kind='ai-derived', author='codex', text='校準資料不交dot',
+                        restriction_evidence={'text': 'different', 'author': 'codex'})
+        result = self.verdict(document)
         self.assertEqual(result.status, provenance.INVALID)
-        self.assertTrue(any('restriction_evidence' in issue for issue in result.issues))
+        self.assertFalse(result.to_dict()['blocking_basis'])
+
+    def test_read_budget_is_unavailable_not_a_known_source_defect(self):
+        result=self.verdict(max_bytes=1)
+        self.assertEqual(result.status,provenance.UNVERIFIED)
+        self.assertTrue(result.source_unavailable)
+        self.assertEqual(result.to_dict()['source_limitation'],'verification_budget')
+        self.assertFalse(result.to_dict()['blocking_basis'])
+
+    def test_budget_cannot_hide_an_already_observed_source_defect(self):
+        from unittest.mock import patch
+        document=copy.deepcopy(self.document)
+        document['sources'].append(copy.deepcopy(document['sources'][0]))
+        with patch.object(provenance,'_original',side_effect=[ValueError('bad record hash'),
+                provenance._ReadBudgetExhausted('bounded read')]):
+            result=self.verdict(document)
+        self.assertEqual(result.status,provenance.INVALID)
+        self.assertFalse(result.source_unavailable)
+
+    def test_adopted_guard_does_not_depend_on_restriction_word_matching(self):
+        quote=self.quote+' 我同意採用。'
+        self.replace_owner(quote)
+        document=copy.deepcopy(self.document)
+        document.update(kind='ai-derived',author='codex',quote=quote,text='Apply the safe command check.')
+        document['approval']={'by':'owner','source':0,'quote':quote,
+            'text_sha256':hashlib.sha256(document['text'].encode()).hexdigest()}
+        fields=self.fields(document);fields['on_hit']='block'
+        result=provenance.validate(fields,self.root/'rule.md')
+        self.assertEqual(result.status,provenance.VERIFIED,result.issues)
+        self.assertTrue(result.to_dict()['blocking_basis'])
 
     def test_pasted_assistant_arrow_and_actual_owner_half(self):
         self.replace_owner("所有案都直接提送。《" + self.quote)
@@ -663,9 +701,7 @@ class AskUserQuestionSources(unittest.TestCase):
                     {"label": label, "description": description}]}
                 self.write(*self.ask("toolu_ask", [question], answers={self.QUESTION: label}))
                 result = self.verdict(self.document("ai-derived", quote, self.source(1, "S"), label))
-                self.assertNotEqual(result.status, provenance.VERIFIED)
-                self.assertIn("AI restriction requires restriction_evidence for the exact "
-                              "interpretation", result.issues)
+                self.assertFalse(result.to_dict()['blocking_basis'])
         affirmative = "核准，照這版做 (Recommended)"
         question = {"question": self.QUESTION, "multiSelect": False, "options": [
             {"label": affirmative, "description": self.DESCRIPTION},

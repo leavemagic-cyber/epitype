@@ -829,7 +829,7 @@ def _unfenced_lines(text):
         yield line
 
 
-# Time-limited wording needs review when no expiry or reviewed conclusion exists.
+# Reason: 2026-10-28 owner one-week trial stayed active six weeks; remove when card writing records time limits as expiry fields itself.
 def _owner_quote_time_limit_findings(fields, text, closing):
     status = fields.get(memspec.DECISION_STATUS_FIELD, "").strip().casefold()
     if status not in ("", memspec.ACTIVE_DECISION_STATUS):
@@ -1021,17 +1021,11 @@ def _check_card(path, relative, today, known_cards=None, source_path=None):
         from epitype import rule_pipeline, rule_provenance
     source = None
     if rule_provenance.FIELD in fields:
-        source = rule_provenance.validate(fields, source_path or path)
+        source = rule_pipeline.inspect_card(fields, source_path or path, card_text=text)
         if not source.verified:
             findings.append((FAIL,
                              "rule-source", "規則來源 " + source.status + "："
                              + "; ".join(source.issues)))
-        else:
-            issues = rule_pipeline.payload_issues(source.document, text)
-            issues += rule_pipeline.supersession_issues(fields, source_path or path, card_text=text)
-            if issues:
-                findings.append((FAIL, "rule-source", "規則來源 INVALID：" + "; ".join(issues)))
-                source = None
     derived = None
     if problem:
         level = FAIL if memspec.CARD_LINT_DUPLICATE_FIELD_REASON in problem else WARN
@@ -1240,12 +1234,22 @@ def _vault_findings(vault, relatives):
     兩個漏卡是 WARN 不是 FAIL：修法是機械重生，不是「這張卡不能收」。
     """
     try:  # lazy import：hook 熱路徑（scan_vaults）不走這條，不為它付 import
-        from . import decision_lint, views
+        from . import decision_lint, views, memory_index
     except ImportError:  # Direct script execution keeps the CLI contract.
         import decision_lint
         import views
+        import memory_index
 
     findings = []
+    if (Path(vault) / memspec.MEMORY_INDEX_FILENAME).exists():
+        try:
+            index = memory_index.lint(vault)
+            if index["status"] == "over-cap":
+                findings.append((FAIL, "memory-index-cap",
+                                 f"MEMORY.md {index['before_bytes']} bytes > index_cap_bytes "
+                                 f"{index['cap_bytes']}; run epitype memory-index {vault} --apply"))
+        except (OSError, ValueError) as exc:
+            findings.append((FAIL, "memory-index-cap", str(exc)))
     try:
         decisions = decision_lint.lint_vault(vault)
     except Exception as exc:
@@ -1651,7 +1655,7 @@ def _reason_of(report, path, rule):
 def _git_commit_fixture(vault, stamp):
     """在 temp vault 建一個單提交的 git repo；git 不在就回 False，測試改驗降級路徑。"""
     environment = dict(os.environ)
-    address = "epitype@" + "example" + ".invalid"
+    address = "epitype@example.invalid"
     environment.update({
         "GIT_AUTHOR_NAME": "epitype",
         "GIT_COMMITTER_NAME": "epitype",
@@ -2226,16 +2230,27 @@ def main(argv=None, output=sys.stdout):
     parser.add_argument("--verbose", action="store_true", help="also list INFO findings")
     parser.add_argument("--deep", action="store_true",
                         help="also run the vault-level checks: decision uniqueness, supersession chains, view and search-index coverage")
+    parser.add_argument("--refresh-cache", action="store_true",
+                        help="publish a complete per-card lint/example result for startup accounting")
     parser.add_argument("--fix-dates", action="store_true", help="write derived dates back as last_verified_at")
     parser.add_argument("--dry-run", action="store_true", help="with --fix-dates: name the writes, change nothing")
     parsed = parser.parse_args(arguments)
+    if parsed.refresh_cache and (parsed.deep or parsed.fix_dates or parsed.dry_run):
+        parser.error("--refresh-cache requires a per-card scan without --deep, --fix-dates or --dry-run")
     target = parsed.vault.expanduser()
     if not target.is_dir():
         # 同一族的老病：不存在的來源被回報成乾淨。打錯一個字就讀成「沒問題」。
         print(memspec.VAULT_MISSING_REASON.format(vault=target), file=sys.stderr)
         return 2
     try:
-        report = scan_vault(target, parsed.today, deep=parsed.deep)
+        if parsed.refresh_cache:
+            try:
+                from . import lint_result
+            except ImportError:
+                from epitype import lint_result
+            report = lint_result.refresh(target, today=parsed.today)
+        else:
+            report = scan_vault(target, parsed.today, deep=parsed.deep)
     except Exception as exc:
         print(f"ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2

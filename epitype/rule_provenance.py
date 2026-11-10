@@ -1,8 +1,7 @@
-"""Source-bound rule data shared by admission, lint and generated entrypoints.
+"""Optional historical-source audits and shared rule result types.
 
-VERIFIED means exact quotation, structural identity and explicit reviewed scope.
-It does not prove semantic entailment or grant permission to execute an action.
-Legacy cards remain readable, but missing evidence is never upgraded to proof.
+Daily content review lives in rule_review; this module retains exact source
+checks for a concrete dispute or an explicitly requested audit.
 """
 import contextlib
 from contextvars import ContextVar
@@ -10,6 +9,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 import functools
 import hashlib
+import io
 import json
 from pathlib import Path
 import re
@@ -24,6 +24,7 @@ from .transcript import OWNER_SELECTED, ask_tool_uses, source_record, tool_resul
 FIELD = "rule_provenance"
 VERSION = 1
 VERIFIED = "VERIFIED"
+REVIEWED = "REVIEWED"
 UNVERIFIED = "UNVERIFIED"
 INVALID = "INVALID"
 SCOPE_KEYS = ("level", "project", "case", "actions", "conditions", "expiry", "exceptions")
@@ -42,8 +43,8 @@ class _ReadBudgetExhausted(OSError):
     pass
 
 
-# The per-check budgets keep a tool call responsive. A run nobody waits on (the
-# nightly dream) verifies to completion instead of refusing for lack of time.
+# Per-check budgets keep routine work responsive. Only an explicit source audit
+# may opt into the legacy unbounded context; nightly processing stays bounded.
 _UNBOUNDED = False
 _VERIFICATION_DEADLINE = ContextVar('verification_deadline', default=float('inf'))
 _AUTHORSHIP_CACHE = ContextVar('authorship_cache', default=None)
@@ -99,7 +100,13 @@ class _ReadBudget:
 
 
 def _budget_unverified(result):
-    result.status = UNVERIFIED
+    # Exhausting an AI resource limit proves no source defect. Keep the existing
+    # unavailable-source publication policy, while retaining any observed error.
+    only_unavailable = all(issue.startswith(('original source unavailable',
+        'earliest authorship UNVERIFIED')) for issue in result.issues)
+    result.status = UNVERIFIED if only_unavailable else INVALID
+    result.source_unavailable = only_unavailable
+    result.source_limitation = 'verification_budget'
     result.issues.append(
         "whole validation time/input read budget exhausted; next check: rerun exact source "
         "locators with byte offsets or an explicitly larger verification resource budget")
@@ -113,19 +120,63 @@ class Verification:
     document: dict = field(default_factory=dict, repr=False)
     records: list[dict] = field(default_factory=list)
     source_unavailable: bool = False
+    source_limitation: str = ""
+    restriction_review: str = "NONE"
+    blocking_basis: bool = False
+    source_audited: bool = False
+    verification_deferred: bool = False
 
     @property
     def verified(self):
-        return self.status == VERIFIED
+        return usable(self.status)
 
     def to_dict(self):
         # Original message bodies can contain unrelated private data.
         return {"status": self.status, "issues": list(self.issues),
+                "verification_deferred": self.verification_deferred,
+                "source_audit_status": self.status if self.source_audited else 'NOT_REQUESTED',
                 "source_unavailable": self.source_unavailable,
+                "source_limitation": self.source_limitation,
                 "key": self.document.get("key"), "kind": self.document.get("kind"),
                 "author": self.document.get("author"),
                 "scope": self.document.get("scope"), "records": list(self.records),
+                "restriction_review": self.restriction_review,
+                "blocking_basis": self.verified and self.blocking_basis,
                 "semantic_entailment": "REVIEW_REQUIRED", "action_authorization": False}
+
+
+def usable(status):
+    return status in (VERIFIED, REVIEWED)
+
+
+def unavailable_reason(provenance):
+    if (provenance.get('source_limitation') == 'verification_budget'
+            or any('budget exhausted' in str(issue) for issue in provenance.get('issues', []))):
+        return '本次讀取預算不足，未完成原始紀錄核對。'
+    return '本次未能取得完整原始紀錄。'
+
+
+_VALIDATION_INPUTS = ContextVar('rule_validation_inputs', default=None)
+
+
+@contextlib.contextmanager
+def validation_inputs(dependencies):
+    token = _VALIDATION_INPUTS.set(dependencies)
+    try:
+        yield
+    finally:
+        _VALIDATION_INPUTS.reset(token)
+
+
+def record_validation_file(path, payload):
+    dependencies = _VALIDATION_INPUTS.get()
+    if dependencies is not None:
+        dependencies[str(Path(path).resolve())] = {
+            'mode': 'bytes', 'sha256': hashlib.sha256(payload).hexdigest() if payload is not None else None}
+
+
+def validation_inputs_active():
+    return _VALIDATION_INPUTS.get() is not None
 
 
 def parse(fields):
@@ -146,8 +197,13 @@ def parse(fields):
         source = Path(result["ref"])
         if not source.is_absolute() or not _HASH.fullmatch(str(result["sha256"])):
             raise ValueError("external rule provenance needs an absolute path and SHA256")
-        with source.open("rb") as stream:
-            raw = stream.read(1024 * 1024 + 1)
+        try:
+            with source.open("rb") as stream:
+                raw = stream.read(1024 * 1024 + 1)
+        except FileNotFoundError:
+            record_validation_file(source, None)
+            raise
+        record_validation_file(source, raw)
         if len(raw) > 1024 * 1024 or hashlib.sha256(raw).hexdigest() != result["sha256"]:
             raise ValueError("external rule provenance size or hash mismatch")
         result = json.loads(raw.decode("utf-8-sig"))
@@ -165,9 +221,10 @@ def _integer(value, minimum=0):
     return isinstance(value, int) and not isinstance(value, bool) and value >= minimum
 
 
-def _read_row(stream, source, budget):
+def _read_row(stream, source, budget, *, forward_only=False):
     budget.check()
-    stream.seek(0)
+    if not forward_only:
+        stream.seek(0)
     offset = source.get("byte_offset")
     line = source.get("line")
     if offset is not None:
@@ -175,7 +232,7 @@ def _read_row(stream, source, budget):
             raise ValueError("invalid byte_offset")
         # ZIP decompression is streamed; never extract the whole archive.
         remaining = max(0, offset - 1)
-        if not isinstance(stream, zipfile.ZipExtFile):
+        if not forward_only and not isinstance(stream, zipfile.ZipExtFile):
             stream.seek(remaining)
             remaining = 0
         while remaining:
@@ -216,7 +273,7 @@ def _session(header, item):
     return None
 
 
-def _asked_prefix(stream, source, raw, budget):
+def _asked_prefix(stream, source, raw, budget, *, forward_only=False):
     """ask_tool_uses entries of the AskUserQuestion prompts this cited tool result answers,
     found in the same original file before the cited row; {} for any other row."""
     try:
@@ -226,7 +283,8 @@ def _asked_prefix(stream, source, raw, budget):
         return {}
     if not wanted:
         return {}
-    stream.seek(0)
+    if not forward_only:
+        stream.seek(0)
     offset, line = source.get("byte_offset"), source.get("line")
     position = number = 0
     found = {}
@@ -256,7 +314,12 @@ def _original(source, base, cache, budget, *, stable_prefix=None):
     archived = bool(source.get("archive"))
     if source.get("archive") and source.get("path"):
         raise ValueError("source cannot have both path and archive")
-    if path.suffix.casefold() != (".zip" if archived else ".jsonl"):
+    compressed = not archived and str(path).casefold().endswith(".jsonl.zst")
+    if not archived and path.suffix.casefold() == ".jsonl" and not path.exists():
+        sidecar = path.with_suffix(".jsonl.zst")
+        if sidecar.is_file():
+            path, compressed = sidecar, True
+    if not compressed and path.suffix.casefold() != (".zip" if archived else ".jsonl"):
         raise ValueError("source must be an original JSONL or ZIP member")
     before = path.stat()
     fingerprint = (str(path), before.st_size, before.st_mtime_ns)
@@ -275,6 +338,24 @@ def _original(source, base, cache, budget, *, stable_prefix=None):
                 header = budget.read(stream, 256 * 1024)
                 raw = _read_row(stream, source, budget)
                 asked = _asked_prefix(stream, source, raw, budget)
+    elif compressed:
+        try:
+            import zstandard
+        except ImportError as exc:
+            raise OSError("native compressed-source support is unavailable") from exc
+        try:
+            # Reopen for each bounded pass: a streaming decoder cannot seek backwards.
+            with path.open("rb") as encoded, io.BufferedReader(zstandard.ZstdDecompressor().stream_reader(encoded)) as stream:
+                header = budget.read(stream, 256 * 1024)
+            offset = source.get('byte_offset')
+            if _integer(offset) and offset >= budget.remaining:
+                raise _ReadBudgetExhausted('compressed source offset exceeds the remaining sequential-read budget')
+            with path.open("rb") as encoded, io.BufferedReader(zstandard.ZstdDecompressor().stream_reader(encoded)) as stream:
+                raw = _read_row(stream, source, budget, forward_only=True)
+            with path.open("rb") as encoded, io.BufferedReader(zstandard.ZstdDecompressor().stream_reader(encoded)) as stream:
+                asked = _asked_prefix(stream, source, raw, budget, forward_only=True)
+        except zstandard.ZstdError as exc:
+            raise ValueError("native compressed source is invalid") from exc
     else:
         with path.open("rb") as stream:
             header = budget.read(stream, 256 * 1024)
@@ -282,7 +363,7 @@ def _original(source, base, cache, budget, *, stable_prefix=None):
             asked = _asked_prefix(stream, source, raw, budget)
     after = path.stat()
     if (after.st_size, after.st_mtime_ns) != fingerprint[1:]:
-        if stable_prefix is None or archived:
+        if stable_prefix is None or archived or compressed:
             raise OSError("source changed while reading")
         _verify_stable_prefix(path, stable_prefix, budget)
     digest = hashlib.sha256(raw).hexdigest()
@@ -1290,11 +1371,30 @@ def _bounded_claim(text, transcript_path, options, started, notices):
     return result['reason']
 
 
-def claim_violation(text, transcript_path=None, *, previous=None, require_citations=False,
+def claim_violation(text, transcript_path=None, *, audit_originals=False, **options):
+    """Review explicit attribution contradictions; originals are an opt-in audit."""
+    if audit_originals:
+        return audit_claim_violation(text, transcript_path, **options)
+    if not isinstance(text, str):
+        return None
+    for match in CLAIM_MARKER.finditer(text):
+        try:
+            claim = json.loads(match[1])
+        except ValueError:
+            return 'claim metadata is unreadable'
+        if (claim.get('kind') == 'ai-derived'
+                and str(claim.get('author', '')).casefold() in ('owner', 'human', 'user')):
+            return 'AI-derived text cannot claim human authorship'
+        if claim.get('kind') == 'owner-directive' and claim.get('text') != claim.get('quote'):
+            return 'owner-directive quotation and text disagree'
+    return None
+
+
+def audit_claim_violation(text, transcript_path=None, *, previous=None, require_citations=False,
                     base=None, seconds=None, card_metadata=False, hard_deadline=False, notices=None):
     """Return a blocking reason for new authority/restriction claims, else None.
 
-    Owner quotations are checked automatically on every surface. Source markers
+    This explicit audit checks owner quotations against historical sources. Source markers
     remain supported but are optional for true quotes. Only asserted new rules,
     owner authority and operative cancellation require provenance. Hook callers
     use hard_deadline to contain all CPU work in a bounded worker; ordinary text
@@ -1422,7 +1522,7 @@ def validate(fields, card_path=None, cache=None, *, seconds=5.0, max_bytes=MAX_B
         return Verification(INVALID, ["rule_provenance is not valid JSON"])
     if document is None:
         return Verification(UNVERIFIED, ["missing rule_provenance; legacy data is not source proof"])
-    result = Verification(INVALID, document=document)
+    result = Verification(INVALID, document=document, source_audited=True)
     required = ("version", "key", "kind", "author", "quote", "text", "sources", "scope",
                 "scope_basis", "supersedes")
     missing = [name for name in required if name not in document]
@@ -1439,6 +1539,7 @@ def validate(fields, card_path=None, cache=None, *, seconds=5.0, max_bytes=MAX_B
     if _SECRET.search(document["quote"]) or _SECRET.search(document["text"]):
         result.issues.append("credential-shaped rule content is not admissible")
     owner = document["kind"] == "owner-directive"
+    result.blocking_basis = owner
     if owner and (document["author"] != "owner" or document["text"] != document["quote"]):
         result.issues.append("owner-directive must have owner author and exact quotation text")
     if not owner and document["author"].casefold() in ("owner", "user", "human", "owner-explicit"):
@@ -1537,7 +1638,8 @@ def validate(fields, card_path=None, cache=None, *, seconds=5.0, max_bytes=MAX_B
                 result.issues.append('earliest authorship UNVERIFIED; next check: restore/read original prefix')
             elif not origin['human_authored']:
                 result.issues.append('owner-directive quotation first occurred in assistant/quoted text')
-    elif _RESTRICTION.search(document['text']):
+    elif (_RESTRICTION.search(document['text']) or 'restriction_evidence' in document
+          or str(fields.get('on_hit', '')).casefold() == 'block'):
         approval = document.get('approval', {})
         index = approval.get('source') if isinstance(approval, dict) else None
         explicitly_approved = (
@@ -1559,13 +1661,20 @@ def validate(fields, card_path=None, cache=None, *, seconds=5.0, max_bytes=MAX_B
             if explicitly_approved:
                 # Verified owner adoption differs from AI-created restrictions.
                 # The interpretation remains AI-authored.
-                pass
+                result.blocking_basis = True
+                result.restriction_review = 'OWNER_ADOPTED'
+            elif constraint is None and 'restriction_evidence' not in document:
+                # A lexical match cannot establish a new restriction or veto
+                # authorized maintenance. Publication is not action authority.
+                result.restriction_review = 'ADVISORY_ONLY'
             elif not isinstance(constraint, dict) or constraint.get('text') != document['text']:
-                raise ValueError('AI restriction requires restriction_evidence for the exact interpretation')
+                raise ValueError('restriction evidence differs from the exact interpretation')
             elif constraint.get('author') != document['author']:
                 raise ValueError('restriction evidence author differs from interpretation author')
             else:
                 _validate_claim(constraint, base, budget)
+                result.blocking_basis = True
+                result.restriction_review = 'EVIDENCE_BOUND'
         except (ValueError, OSError, TypeError, KeyError) as exc:
             result.issues.append(str(exc))
     basis = document["scope_basis"]
@@ -1605,10 +1714,15 @@ def validate(fields, card_path=None, cache=None, *, seconds=5.0, max_bytes=MAX_B
 
 
 def validate_supersession(before, after, before_path=None, after_path=None, cache=None,
-                         *, allow_unavailable_sources=False):
+                         *, allow_unavailable_sources=False, audit_originals=True):
     """A successor cannot silently swallow another key, project or case."""
-    old = validate(before, before_path, cache)
-    new = validate(after, after_path, cache)
+    if audit_originals:
+        old = validate(before, before_path, cache)
+        new = validate(after, after_path, cache)
+    else:
+        from . import rule_review
+        old = rule_review.validate(before, before_path)
+        new = rule_review.validate(after, after_path)
     if not all(result.verified or allow_unavailable_sources and result.source_unavailable
                for result in (old, new)):
         return Verification(UNVERIFIED, ["both supersession endpoints require verified provenance"])
@@ -1619,11 +1733,11 @@ def validate_supersession(before, after, before_path=None, after_path=None, cach
         # Explicit reviewed owner changes may broaden, narrow or replace scope.
         # A copied approval may not silently do so.
         basis = new.document.get("supersession_basis", {})
-        reviewed = new.document["scope_basis"]
+        reviewed = new.document.get("scope_basis", {})
         if not (isinstance(basis, dict) and basis.get("prior_key") == old.document["key"]
                 and basis.get("prior_scope") == old.document["scope"]
-                and basis.get("source") == reviewed["source"]
-                and basis.get("quote") == reviewed["quote"]
+                and (not audit_originals or basis.get("source") == reviewed.get("source")
+                     and basis.get("quote") == reviewed.get("quote"))
                 and isinstance(basis.get("reviewed_by"), str) and basis["reviewed_by"].strip()
                 and _iso(basis.get("reviewed_at"))
                 and isinstance(basis.get("rationale"), str) and basis["rationale"].strip()):
@@ -1666,5 +1780,5 @@ if __name__ == '__main__':
     sys.stdin.reconfigure(encoding='utf-8')
     sys.stdout.reconfigure(encoding='utf-8')
     notices = []
-    reason = claim_violation(**json.load(sys.stdin), notices=notices)
+    reason = audit_claim_violation(**json.load(sys.stdin), notices=notices)
     print(json.dumps({'reason': reason, 'notices': notices}, ensure_ascii=False))

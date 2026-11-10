@@ -27,6 +27,31 @@ STATUS_PENDING = "pending"
 STATUS_DUPLICATE = "duplicate"
 STATUS_REJECTED = "rejected"
 STATUS_ERROR = "error"
+CODEX_SESSION_META_MAX_BYTES = 32768
+
+
+def is_codex_exec_transcript(path):
+    """Only native session metadata identifies an exec caller; unreadable means unknown.
+
+    Keep this capture-specific: exec sessions still need guards, turn checks and
+    compaction continuity. Do not cache a missing or partially written header.
+    """
+    if not path:
+        return False
+    try:
+        with Path(path).open("rb") as stream:
+            raw = stream.readline(CODEX_SESSION_META_MAX_BYTES + 1)
+        if len(raw) > CODEX_SESSION_META_MAX_BYTES:
+            return False
+        item = json.loads(raw)
+        if not isinstance(item, dict) or item.get("type") != "session_meta":
+            return False
+        meta = item.get("payload")
+        return isinstance(meta, dict) and (
+            meta.get("originator") == "codex_exec" or meta.get("source") == "exec"
+        )
+    except (OSError, ValueError, TypeError):
+        return False
 
 
 class Replay:
@@ -203,6 +228,18 @@ def evidence_text(text):
     return " ".join(piece for piece in stripped if piece.strip())
 
 
+# These describe an instruction's relationship (prohibition, replacement or
+# ordering), rather than counting isolated decision words.
+_WORKFLOW = re.compile(
+    r"(?:不用再|不要|不必再|禁止|不准)[^。！？?\n]{2,}"
+    r"|你(?:只要|應該|必須|要)[^。！？?\n]{2,}"
+    r"|先[^。！？?\n]{2,}(?:再|才|以後)[^。！？?\n]{2,}"
+    r"|(?:改用|改成|換成)[^。！？?\n]{2,}"
+    r"|\b(?:instead\s+of|stop\s+using|use\s+.+?\s+instead)\b",
+    re.IGNORECASE,
+)
+
+
 def is_decisive(evidence):
     """True when the evidence says what to do (or not do), or names a standing rule.
 
@@ -218,6 +255,7 @@ def is_decisive(evidence):
         or memspec.GRANT_TRIGGER_REGEX.search(evidence)
         # 同理，「你搞錯了，那欄是給 A 用的，不是給 B」的決定就在糾正詞本身。
         or memspec.CORRECTION_TRIGGER_REGEX.search(evidence)
+        or _WORKFLOW.search(evidence)
     )
 
 
@@ -260,7 +298,7 @@ def matched_sentence(prompt, trigger):
     Searching the raw sentence is what let a trigger inside a question, an empty
     acknowledgement, or pasted assistant text write a card (2026-09-06 measurement).
     """
-    for sentence in memspec.GRANT_SENTENCE_SPLIT_REGEX.split(prompt):
+    for sentence in memspec.GRANT_SENTENCE_SPLIT_REGEX.split(owner_reply(prompt)):
         candidate = sentence.strip()
         if not candidate:
             continue
@@ -330,6 +368,9 @@ def event_position(event):
     為止的轉錄檔有多長」——那是同一場對話裡逐回合單調遞增的位置證據，而且只花一次
     stat。讀不到就回 `-`（位置未知，不是位置 0）。
     """
+    identity = event.get("source_message_id")
+    if isinstance(identity, str) and identity:
+        return "M" + identity
     index = event.get(MESSAGE_INDEX_KEY)
     if isinstance(index, int) and not isinstance(index, bool) and index >= 0:
         return f"{POSITION_LINE_PREFIX}{index}"
@@ -337,6 +378,20 @@ def event_position(event):
         return f"{POSITION_BYTES_PREFIX}{Path(event['transcript_path']).stat().st_size}"
     except (KeyError, TypeError, ValueError, OSError):
         return ORIGIN_UNKNOWN
+
+
+def record_message_id(item, fallback):
+    """Use host identity; timestamped Codex messages have a stable record identity."""
+    if isinstance(item.get("uuid"), str) and item["uuid"]:
+        return item["uuid"]
+    payload = item.get('payload')
+    if isinstance(payload, dict) and isinstance(payload.get('id'), str) and payload['id']:
+        return payload['id']
+    if item.get("timestamp"):
+        identity = {key: item.get(key) for key in ("type", "timestamp", "message", "payload", "attachment")}
+        material = json.dumps(identity, sort_keys=True, ensure_ascii=False).encode("utf-8")
+        return "R" + hashlib.sha256(material).hexdigest()[:24]
+    return str(fallback)
 
 
 def event_identity(event, digest):
@@ -392,7 +447,8 @@ def auto_admitted(text):
         and memspec.CAPTURE_ADMIT_ARROW_REGEX.match(reply)
     ):
         return True, memspec.CAPTURE_ADMIT_ARROW
-    if memspec.CAPTURE_ADMIT_CORRECTION_REGEX.match(reply):
+    if any(memspec.CAPTURE_ADMIT_CORRECTION_REGEX.match(sentence.strip())
+           for sentence in memspec.GRANT_SENTENCE_SPLIT_REGEX.split(reply)):
         return True, memspec.CAPTURE_ADMIT_CORRECTION
     # 授權句不限句首：「那個資料夾的整理你可以直接動」的授權動詞落在句中。
     if memspec.CAPTURE_ADMIT_GRANT_REGEX.search(reply):
@@ -403,20 +459,21 @@ def auto_admitted(text):
 def pending_directory(vault, stamp):
     """提案落點：`<vault>/_drafts/captured_pending/YYYYMMDD/`。
 
-    `_` 開頭的路徑段是 memsearch._scan_vault 的排除規則，所以提案不進索引、不被喚回、
-    也不會被寫檔閘當成卡片審——不必再加第二道排除規則。
+    搜尋僅對這個草稿子目錄開例外；執行端的 cardscan 仍不走入 `_drafts`。
+    未審事件可查詢，不參與主動喚回，也不取得規則或動作授權。
     """
     return Path(vault).joinpath(*memspec.CAPTURE_PENDING_SUBPATH, stamp[:10].replace("-", ""))
 
 
-def existing_capture(vault, directory_name, kind, digest, session_id=None, event_id=None):
+def existing_capture(vault, directory_name, kind, digest, session_id=None, event_id=None,
+                     message_id=None):
     """同一件事的既有卡（去重規則的唯一實作），沒有就 None。
 
     問的是「這是不是同一個事件」，不是「這句話出現過沒有」。2026-09-09（U-P）之前
     同文句一律不重寫，所以 owner 在三場對話各講一次同一句話只留下一張卡，事故次數
     再也數不回來（Codex 指出的接線缺口）。現在：同 `event_id` ＝同一則事件重送，不
-    重寫；同一場對話裡的同一句話也仍然只留一張（同一場講兩次是同一件事）；跨場的同
-    一句話各自留卡。`session_id` 空＝判不出來源，退回舊的整庫比對——分不出事件時不
+    重寫；有訊息身分時以訊息去重，同場不同訊息可以各自留卡。沒有訊息身分的舊呼叫
+    仍採同場同句去重。`session_id` 空＝判不出來源，退回舊的整庫比對——分不出事件時不
     能假設它們是兩件事。提案區也要問：提案的日期子目錄每天不同，只看正式目錄的話同
     一件事會每天長出一份新提案。
 
@@ -435,6 +492,10 @@ def existing_capture(vault, directory_name, kind, digest, session_id=None, event
         fields, _problem = memspec.frontmatter_fields(path)
         if event_id and one_line(fields.get(memspec.EVENT_ID_FIELD)) == event_id:
             return path
+        if message_id:
+            if fields.get("source_message_id") == message_id and card_session(fields) == session_id:
+                return path
+            continue
         if card_session(fields) == session_id:
             return path
     return None
@@ -444,7 +505,7 @@ def capture_owner_sentence(prompt, vault, event, started_at, kind, replay=None, 
     found = _classify_event(prompt, event, started_at, question)
     if found is None or found[0] != kind:
         return None
-    return _capture_classified(found, vault, event, started_at, replay)
+    return _capture_classified(found, vault, event, started_at, replay, source_text=prompt)
 
 
 def capture_card_text(name, label, body, summary, stamp, event, event_id, origin, replay=None):
@@ -467,6 +528,11 @@ def capture_card_text(name, label, body, summary, stamp, event, event_id, origin
         f"{memspec.SCOPE_FIELD}: captured-context\n"
         "capture_author: epitype-capture (AI)\n"
         f"captured_at: {stamp}\n"
+        f"source_transcript: {one_line(event.get('transcript_path'))}\n"
+        f"source_message_id: {one_line(event.get('source_message_id'))}\n"
+        f"source_role: {one_line(event.get('source_role', 'hook-prompt'))}\n"
+        f"source_position: {event_position(event)}\n"
+        f"source_line: {one_line(event.get(MESSAGE_INDEX_KEY))}\n"
         f"{memspec.CWD_FIELD}: {one_line(event.get('cwd'))}\n"
         f"session_id: {one_line(event.get('session_id', event.get('sessionId')))}\n"
         f"{memspec.EVENT_ID_FIELD}: {event_id}\n"
@@ -489,8 +555,12 @@ def write_capture(vault, directory_name, kind, digest, label, body, event, start
     the owner's sentence.
     """
     from epitype import rule_pipeline
-    # A captured card is persistent, indexed, and re-injected later: credential-shaped
-    # text never earns that (adversarial review 2026-09-03 #5). The sentence still
+    if event.get('source_message_id') and source_text is not None and kind != 'ruling':
+        # A classifier can select one sentence. Preserve the complete human
+        # reply here so hooks and harvest retain identical original evidence.
+        body = owner_reply(source_text)
+    # Captured text is persistent and searchable: credential-shaped text must
+    # never reach storage. The sentence still
     # exists in the transcript; Epitype simply does not copy it into the vault.
     if memspec.CAPTURE_REJECT_REGEX.search(body):
         _report(replay, STATUS_REJECTED)
@@ -499,18 +569,20 @@ def write_capture(vault, directory_name, kind, digest, label, body, event, start
         owner_side(body, summary) if source_text is None else source_text
     )
     # 只產草稿的回放（harvest --drafts-only）把入庫閘整個關掉：判定照跑（卡面仍記得
-    # 它本來合格），落點一律是提案區，所以正式目錄不會被寫、索引也就沒有東西要重建。
+    # 它本來合格），落點一律是可搜尋提案區，正式目錄不會被寫。
     if replay is not None and replay.force_pending:
         admitted = False
     event_id, origin, session = event_identity(event, digest)
     try:
         if existing_capture(
-            vault, directory_name, kind, digest, session_id=session, event_id=event_id
+            vault, directory_name, kind, digest, session_id=session, event_id=event_id,
+            message_id=event.get("source_message_id"),
         ) is not None:
             _report(replay, STATUS_DUPLICATE)
             return None
         # 回放時用原話當時的時間，否則整批歷史卡會全部標成今天，日期就不再是證據。
-        stamp = (replay.stamp if replay is not None else None) or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        stamp = ((replay.stamp if replay is not None else None) or event.get("timestamp")
+                 or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
         # 檔名尾巴帶 event_id：同一句話在兩場對話裡各講一次，同一天就會撞到同一個
         # `{kind}-{日期}-{digest}` 檔名，而撞名在下面是「已經有了」——第二件事故會
         # 靜靜消失。事件識別進了檔名，兩張卡才各自存在。
@@ -525,7 +597,8 @@ def write_capture(vault, directory_name, kind, digest, label, body, event, start
                   rule_pipeline.admission("", card, "decision", target)) if admitted else []
         if issues:
             admitted = False
-            card = card.replace("---\n", "---\npublication_status: UNVERIFIED\n", 1)
+        if not admitted:
+            card = card.replace("---\n", "---\npublication_status: UNVERIFIED\ncapture_review: UNREVIEWED\n", 1)
         directory = vault / directory_name if admitted else pending_directory(vault, stamp)
         directory.mkdir(parents=True, exist_ok=True)
         target = directory / f"{name}.md"
@@ -540,9 +613,9 @@ def write_capture(vault, directory_name, kind, digest, label, body, event, start
         # The staleness grace window would hide the new card from the very next
         # prompt; a captured owner sentence must be recallable immediately. When
         # the index lock is taken by another hook, age the index instead so the
-        # next reader rebuilds it. A proposal is deliberately unsearchable, so it
-        # has nothing to reindex.
-        if admitted and (replay.reindex if replay is not None else True) and not expired(started_at):
+        # next reader rebuilds it. Pending events are searchable evidence too.
+        memsearch.mark_stale(vault)
+        if (replay.reindex if replay is not None else True) and not expired(started_at):
             elapsed = 0.0 if started_at is None else time.monotonic() - started_at
             remaining = memspec.HOOK_TIMEOUT_SECONDS - elapsed
             wait = max(0.0, min(memspec.GRANT_LOCK_SECONDS, remaining - 0.5))
@@ -651,15 +724,15 @@ def ruling_body(prompt, question):
     if not shaped:
         return None
     asked = ruling_question(question)
-    answer = prompt.strip()
+    answer = owner_reply(prompt).strip()
     if asked:
         return f"問（助理）：{asked}\n答（owner 逐字）：{answer}", answer
     evidence = evidence_text(prompt)
-    # No request on the wire: the sentence has to carry the ruling on its own —
-    # either standing scope (以後／一律／我說過), or several decisive clauses, which
-    # is what separates a rule the owner is laying down from a one-off order
-    # (「直接刪」 has one decisive word and nothing else; a ruling states a shape).
+    # A prohibition, replacement or ordering can carry a decision without an
+    # assistant asking first. The older multi-clause fallback remains compatible.
     if memspec.CAPTURE_STANDING_REGEX.search(evidence):
+        return answer, answer
+    if _WORKFLOW.search(evidence):
         return answer, answer
     if (
         len(memspec.CAPTURE_DECISIVE_REGEX.findall(evidence)) >= memspec.CAPTURE_RULING_MIN_DECISIVE
@@ -667,6 +740,117 @@ def ruling_body(prompt, question):
     ):
         return answer, answer
     return None
+
+
+def capture_transcript(vault, event, started_at):
+    """Incremental U/Q capture shared by prompt, tool and stop hooks on both hosts.
+
+    First attachment starts at a bounded tail; harvest handles older history.
+    Checkpoint only complete records. Message UUIDs (or byte positions when absent)
+    survive hook retries and ignore Codex's duplicate event stream.
+    """
+    from . import transcript
+
+    if expired(started_at) or not event.get("transcript_path"):
+        return False
+    if is_codex_exec_transcript(event["transcript_path"]):
+        return False
+    deadline = time.monotonic() + 0.1 if started_at is not None else float("inf")
+    path = Path(event["transcript_path"])
+    if not path.exists():
+        # Hosts can submit the first prompt before creating the transcript.
+        return False
+    key = hashlib.sha256(str(path.resolve()).encode("utf-8")).hexdigest()[:24]
+    cursor = Path(vault) / ".epitype" / "capture_cursors" / (key + ".json")
+    matched_prompt = False
+    try:
+        cursor.parent.mkdir(parents=True, exist_ok=True)
+        with memspec.file_lock(cursor, 0.0) as locked:
+            if not locked:
+                return False
+            try:
+                state = json.loads(cursor.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                state = {}
+            if not isinstance(state, dict):
+                state = {}
+            with path.open("rb") as stream:
+                size = os.fstat(stream.fileno()).st_size
+                offset = state.get("offset")
+                if not isinstance(offset, int) or not 0 <= offset <= size:
+                    offset = max(0, size - memspec.COMPACT_MAP_MAX_LINE_BYTES)
+                    state = {}
+                    stream.seek(offset)
+                    if offset:
+                        state["skip_long_line"] = True
+                else:
+                    stream.seek(offset)
+                question = state.get("question", "")
+                if not isinstance(question, str):
+                    question = ""
+                line_number = state.get("line", 0 if offset == 0 else None)
+                if not isinstance(line_number, int) or isinstance(line_number, bool) or line_number < 0:
+                    line_number = None
+                skipping = state.get("skip_long_line", False)
+                read_until = offset + memspec.COMPACT_MAP_MAX_LINE_BYTES
+                while (stream.tell() < read_until and not expired(started_at)
+                       and time.monotonic() < deadline):
+                    position = stream.tell()
+                    raw = stream.readline(memspec.COMPACT_MAP_MAX_LINE_BYTES + 1)
+                    if not raw:
+                        break
+                    if skipping or len(raw) > memspec.COMPACT_MAP_MAX_LINE_BYTES:
+                        skipping = not raw.endswith(b"\n")
+                        if not skipping and line_number is not None:
+                            line_number += 1
+                        continue
+                    if not raw.endswith(b"\n"):
+                        stream.seek(position)  # retry an unfinished record
+                        break
+                    if line_number is not None:
+                        line_number += 1
+                    try:
+                        item = json.loads(raw)
+                    except (ValueError, UnicodeError):
+                        continue
+                    record = transcript.source_record(item)
+                    if record is None:
+                        if isinstance(item, dict) and item.get("isCompactSummary"):
+                            question = ""
+                        continue
+                    role, text = record
+                    if role == "A":
+                        question = ruling_question((question + text)[-memspec.RULING_TAIL_BYTES:]) or ""
+                        continue
+                    if role not in ("U", "Q"):
+                        question = ""
+                        continue
+                    source_event = dict(event)
+                    source_event.update(
+                        prompt=text, timestamp=item.get("timestamp"),
+                        source_message_id=record_message_id(item,
+                            f"L{line_number}" if line_number is not None else f"B{position}"),
+                        source_role=role,
+                    )
+                    if line_number is not None:
+                        source_event[MESSAGE_INDEX_KEY] = line_number
+                    replay = Replay(stamp=item.get("timestamp"), reindex=False)
+                    capture_event(text, vault, source_event, started_at, question=question, replay=replay)
+                    if replay.status == STATUS_ERROR or expired(started_at):
+                        stream.seek(position)
+                        if line_number is not None:
+                            line_number -= 1
+                        break
+                    matched_prompt |= text == event.get("prompt")
+                    question = ""
+                state = {"offset": stream.tell(), "line": line_number, "question": question,
+                         "skip_long_line": skipping}
+            temporary = cursor.with_suffix(".tmp")
+            temporary.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+            os.replace(temporary, cursor)
+    except (OSError, sqlite3.Error) as error:
+        print(f"Epitype event capture deferred: {type(error).__name__}", file=sys.stderr)
+    return matched_prompt
 
 
 def classify(prompt, question=None):
@@ -715,6 +899,8 @@ def _classify_event(prompt, event, started_at, question=None):
         return None
     if not candidate_shape(prompt)[0]:
         return None
+    if is_codex_exec_transcript(event.get("transcript_path")):
+        return None
     if question is None:
         question = last_assistant_text(event.get("transcript_path"))
     if expired(started_at):
@@ -722,7 +908,7 @@ def _classify_event(prompt, event, started_at, question=None):
     return classify(prompt, question)
 
 
-def _capture_classified(found, vault, event, started_at, replay):
+def _capture_classified(found, vault, event, started_at, replay, source_text=None):
     kind, body, summary, digest_source = found
     if kind == "ruling":
         directory, label = memspec.RULING_DIRECTORY, "owner ruling auto-captured"
@@ -730,14 +916,15 @@ def _capture_classified(found, vault, event, started_at, replay):
         directory, _trigger, label = CAPTURE_KINDS[kind]
     return write_capture(
         vault, directory, kind, grant_digest(digest_source), label, body, event, started_at,
-        summary=summary, replay=replay,
+        summary=summary, replay=replay, source_text=source_text,
     )
 
 
 def capture_event(prompt, vault, event, started_at, question=None, replay=None):
     """Capture one event using the same prompt + question decision as replay."""
     found = _classify_event(prompt, event, started_at, question)
-    return _capture_classified(found, vault, event, started_at, replay) if found is not None else None
+    return (_capture_classified(found, vault, event, started_at, replay, source_text=prompt)
+            if found is not None else None)
 
 
 def capture_ruling(prompt, vault, event, started_at, question=None, replay=None):
@@ -745,4 +932,4 @@ def capture_ruling(prompt, vault, event, started_at, question=None, replay=None)
     found = _classify_event(prompt, event, started_at, question)
     if found is None or found[0] != "ruling":
         return None
-    return _capture_classified(found, vault, event, started_at, replay)
+    return _capture_classified(found, vault, event, started_at, replay, source_text=prompt)

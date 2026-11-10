@@ -22,8 +22,9 @@ import os
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
-from epitype import compliance
+from epitype import compliance, rule_legacy
 
 import stop_gate
 
@@ -51,6 +52,14 @@ class SamplesFromRealTurns(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory(prefix="epitype-samples-")
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name).resolve()
+        config = self.root / 'config.json'
+        config.write_text('{}', encoding='utf-8')
+        environment = patch.dict(os.environ, {
+            'HOME': str(self.root / 'home'), 'USERPROFILE': str(self.root / 'home'),
+            'CODEX_HOME': str(self.root / 'home' / '.codex'), 'EPITYPE_CONFIG': str(config),
+        })
+        environment.start()
+        self.addCleanup(environment.stop)
         self.vault = self.root / "vault"
         self.vault.mkdir()
         (self.vault / "owner-words.md").write_text(CARD, encoding="utf-8", newline="\n")
@@ -84,6 +93,25 @@ class SamplesFromRealTurns(unittest.TestCase):
     def test_card_filter_and_window(self):
         self.assertEqual(self.report(card="no-such-card")["cards"], [])
         self.assertEqual(self.report(days=0)["cards"], [])
+
+    def test_inherited_foreign_baseline_cannot_filter_synthetic_cards(self):
+        import hashlib
+        baseline = self.root / 'foreign-baseline.json'
+        baseline.write_text(json.dumps(rule_legacy.build_baseline({})), encoding='utf-8')
+        config = self.root / 'foreign-config.json'
+        config.write_text(json.dumps({'rule_source_baseline': str(baseline),
+            'rule_source_baseline_sha256': hashlib.sha256(baseline.read_bytes()).hexdigest()}), encoding='utf-8')
+        before = config.read_bytes(), baseline.read_bytes()
+        with patch.dict(os.environ, {'EPITYPE_CONFIG': str(config)}):
+            fixture = SamplesFromRealTurns('test_card_filter_and_window')
+            fixture.setUp()
+            try:
+                cards = fixture.report()['cards']
+                self.assertEqual([(card['card'], card['hits']) for card in cards], [('owner-words', 1)])
+            finally:
+                fixture.doCleanups()
+            self.assertEqual(os.environ['EPITYPE_CONFIG'], str(config))
+        self.assertEqual((config.read_bytes(), baseline.read_bytes()), before)
 
     def test_replay_agrees_with_the_gate_when_the_evidence_is_a_quotation(self):
         quoted = "卡上留的你的原話是「不用導流了」。"

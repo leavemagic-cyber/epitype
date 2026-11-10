@@ -1065,64 +1065,42 @@ def _positive_int(value):
 
 
 def _section_caps(vaults, today, since_date, config):
-    """上限＝檢討值＋兩成。超量產出整理材料，不改卡或上限。
+    """Report one raw MEMORY.md budget for every vault; core budgets stay opt-in.
 
-    三個鍵都選填，而且缺鍵一律寫一行「未設定」而不是套內建門檻：一個產品猜出來的
-    上限被寫成「超上限」，讀的人會以為那是 owner 的判斷。
+    Index default/legacy migration follow memory-index.
+    This reporting path changes neither indexes nor cards.
     """
     notes = []
     entries = []
     errors = []
     try:
-        from . import cap_consolidation, core_gen, host_sync
+        from . import cap_consolidation, core_gen, host_sync, memory_index
     except ImportError:
         import cap_consolidation
         import core_gen
         import host_sync
-    index_cap = _positive_int(config.get(memspec.CONFIG_INDEX_CAP_BYTES_FIELD))
-    shared_index_cap = _positive_int(config.get(memspec.CONFIG_SHARED_INDEX_CAP_BYTES_FIELD))
-    if index_cap is None:
-        if shared_index_cap is None:
-            notes.append(CAP_UNSET_NOTE.format(field=memspec.CONFIG_INDEX_CAP_BYTES_FIELD))
-    else:
-        for vault in vaults:
-            path = Path(vault) / memspec.MEMORY_INDEX_FILENAME
-            try:
-                size = path.stat().st_size
-                text = path.read_bytes().decode("utf-8") if size > index_cap else None
-            except (OSError, UnicodeError) as exc:
-                errors.append(f"{path}: {type(exc).__name__}: {exc}")
-                continue
-            if size > index_cap:
-                entries.append({
-                    "path": str(path), "bytes": size, "cap": index_cap, "over": size - index_cap,
-                    "kind": "index-file", "reduce_bytes": size - index_cap,
-                    "items": cap_consolidation.ranked_index(text, path),
-                })
-    if shared_index_cap is not None:
+        import memory_index
+    try:
+        index_cap = memory_index.cap_of(config)
+    except ValueError as exc:
+        errors.append(str(exc))
+        index_cap = None
+    for vault in vaults if index_cap is not None else ():
+        path = Path(vault) / memspec.MEMORY_INDEX_FILENAME
+        if not path.exists():
+            continue
         try:
-            try:
-                from . import host_sync
-            except ImportError:
-                import host_sync
-            contract = host_sync.contract_vaults(vaults)
-            for vault in contract:
-                path = Path(vault) / memspec.MEMORY_INDEX_FILENAME
-                index = host_sync._index_of(vault)
-                if index is None:
-                    errors.append(f"{path}: shared index unavailable")
-                    continue
-                size = len(index.encode("utf-8"))
-                if size > shared_index_cap:
-                    entries.append({"path": str(path), "bytes": size,
-                                    "cap": shared_index_cap, "over": size - shared_index_cap,
-                                    "reduce_bytes": size - shared_index_cap,
-                                    "hosts": list(memspec.RULE_HOSTS),
-                                    "items": cap_consolidation.ranked_index(index, path,
-                                                                          path.read_text(encoding="utf-8")),
-                                    "kind": "shared-index-payload"})
-        except (OSError, ValueError) as exc:
-            errors.append("shared-index: " + type(exc).__name__)
+            size = path.stat().st_size
+            text = path.read_bytes().decode("utf-8") if size > index_cap else None
+        except (OSError, UnicodeError) as exc:
+            errors.append(f"{path}: {type(exc).__name__}: {exc}")
+            continue
+        if size > index_cap:
+            entries.append({
+                "path": str(path), "bytes": size, "cap": index_cap, "over": size - index_cap,
+                "kind": "index-file", "reduce_bytes": size - index_cap,
+                "items": cap_consolidation.ranked_index(text, path),
+            })
     core_files = config.get(memspec.CONFIG_CORE_FILES_FIELD)
     core_cap = _positive_int(config.get(memspec.CONFIG_CORE_CAP_BYTES_FIELD))
     named = [
@@ -3314,10 +3292,9 @@ def _selftest():
             core_file = Path(temp_dir).resolve() / "core.md"
             core_file.write_text("y" * 40, encoding="utf-8")
             unset_by_id = {s["id"]: s for s in build_report([cap_vault], today=today, config={})["sections"]}
-            checks.append(("section 11 without the config keys says so and judges nothing", (
+            checks.append(("section 11 defaults the index budget but leaves the core budget unset", (
                 unset_by_id[11]["counts"]["over_cap"] == 0
-                and unset_by_id[11]["counts"]["unset_keys"] == 2
-                and memspec.CONFIG_INDEX_CAP_BYTES_FIELD in unset_by_id[11]["note"]
+                and unset_by_id[11]["counts"]["unset_keys"] == 1
                 and memspec.CONFIG_CORE_FILES_FIELD in unset_by_id[11]["note"]
             )))
             capped_by_id = {s["id"]: s for s in build_report([cap_vault], today=today, config={
@@ -4112,10 +4089,7 @@ def _selftest():
 
 
 def main(argv=None, output=sys.stdout):
-    # Dream never runs inside a tool call; its own time budget bounds the night.
-    from epitype import rule_provenance
-    with rule_provenance.unbounded_verification():
-        return _main(argv, output)
+    return _main(argv, output)
 
 
 def _main(argv, output):
@@ -4214,7 +4188,7 @@ def _main(argv, output):
             # edited cards fall back to the slow transcript scan inside the recall hook.
             for vault in vaults:
                 try:
-                    memsearch.build_index(vault, prepare_sources=True)
+                    memsearch.build_index(vault, prepare_sources=False)
                 except Exception:
                     continue
         # Duplicate settlement belongs to the lead AI; the nightly job only reports.

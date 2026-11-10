@@ -138,16 +138,16 @@ class CaptureAdmissionRegression(unittest.TestCase):
         }
         self.assertEqual(len(identities), 2)
 
-    def test_proposals_are_not_indexed_or_recalled(self):
+    def test_proposals_are_searchable_evidence_but_not_recalled(self):
         prompt = f"以後都用第一種寫法處理 {NEEDLE}，一律不要混用"
         path = self.capture(prompt)
         self.assertEqual(path.parent.parent, self.pending_root)
         memsearch.build_index(self.vault)
         self.assertEqual(memsearch.recall_index(self.vault, NEEDLE)["count"], 0)
-        self.assertNotIn(
+        self.assertIn(
             path.stem, json.dumps(memsearch.query_index(self.vault, NEEDLE), ensure_ascii=False))
-        self.assertNotIn(
-            path.resolve(), [Path(item) for item in memsearch.indexed_card_paths(self.vault)])
+        self.assertIn(
+            path.relative_to(self.vault).as_posix(), memsearch.indexed_card_paths(self.vault))
         value = recall._handle(
             {"prompt": NEEDLE, "session_id": "recall-session", "cwd": str(self.root)},
             time.monotonic(), [],
@@ -169,6 +169,7 @@ class CaptureAdmissionRegression(unittest.TestCase):
             capture.write_capture(
                 replayed, directory, kind, digest, label, body,
                 event, None, summary=summary, replay=replay,
+                source_text=prompt,
             )
             live = self.capture(prompt, question)
             # 兩邊的檔名尾巴是各自的事件識別（回放是另一場 session），所以比對用文句

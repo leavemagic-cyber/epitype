@@ -15,7 +15,7 @@ import re
 import time
 
 try:
-    from . import capture, capture_route, card_io, memsearch, memspec, rule_pipeline, rule_provenance
+    from . import capture, capture_route, card_io, memsearch, memspec, rule_pipeline, rule_provenance, transcript
 except ImportError:  # Direct script execution keeps the CLI contract.
     import capture
     import capture_route
@@ -23,7 +23,7 @@ except ImportError:  # Direct script execution keeps the CLI contract.
     import memsearch
     import memspec
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from epitype import rule_pipeline, rule_provenance
+    from epitype import rule_pipeline, rule_provenance, transcript
 
 
 CLAUDE_TRANSCRIPT_GLOB = ("projects", "*", "*.jsonl")
@@ -40,7 +40,7 @@ ROLE_MARKERS = (b'"user"', b'"assistant"')
 # 回放出來的 Codex 卡就永遠沒有來源專案（實測治理庫 40 張卡的 cwd 是空的）。
 SESSION_META_TYPE = "session_meta"
 SESSION_META_MARKER = b'"session_meta"'
-SCAN_MARKERS = (*ROLE_MARKERS, SESSION_META_MARKER)
+SCAN_MARKERS = (*ROLE_MARKERS, SESSION_META_MARKER, b'"queued_command"')
 # 文件裡的 owner 裁定句：只挖明確標記 owner 裁定或 owner 原話引號的行，其餘留給人。
 DOC_RULING_REGEX = re.compile(r"owner\s*(?:已)?裁(?:定|示|決)|owner[:：]\s*[「\"]", re.IGNORECASE)
 DECISION_KEY_REGEX = re.compile(rf"^{re.escape(memspec.DECISION_KEY_FIELD)}:\s*(\S.*)$", re.MULTILINE)
@@ -104,34 +104,9 @@ def owner_text(item):
     Sidechain (subagent) turns, tool results, and host-injected blocks are not the
     owner speaking; a card written from them would be Epitype quoting itself.
     """
-    if not isinstance(item, dict) or item.get("isSidechain") is True:
-        return None
-    if item.get("type") == "user":
-        if item.get("isMeta") or item.get("isCompactSummary"):
-            return None
-        message = item.get("message")
-        kinds = ("text",)
-    elif item.get("type") == "response_item":
-        message = item.get("payload")
-        if not isinstance(message, dict) or message.get("type") != "message" or message.get("role") != "user":
-            return None
-        kinds = ("input_text",)
-    else:
-        return None
-    if not isinstance(message, dict):
-        return None
-    content = message.get("content")
-    if isinstance(content, str):
-        text = content
-    elif isinstance(content, list):
-        text = "".join(
-            block.get("text", "")
-            for block in content
-            if isinstance(block, dict) and block.get("type") in kinds and isinstance(block.get("text"), str)
-        )
-    else:
-        return None
-    return memspec.owner_typed_text(text) or None
+    record = transcript.source_record(item)
+    return (memspec.owner_typed_text(record[1]) or None
+            if record is not None and record[0] in ("U", "Q") else None)
 
 
 def utterances(path):
@@ -140,6 +115,8 @@ def utterances(path):
     The assistant text is the ruling question window: it resets at every user-shaped
     record, exactly as the online tail reader stops walking back at one.
     """
+    if capture.is_codex_exec_transcript(path):
+        return
     pending = []
     session_cwd = ""
     try:
@@ -170,7 +147,7 @@ def utterances(path):
                 if text.strip():
                     pending.append(text)
                 continue
-            if item.get("type") not in ("user", "response_item"):
+            if item.get("type") not in ("user", "response_item", "attachment"):
                 continue
             question = "".join(pending)
             pending = []
@@ -232,6 +209,11 @@ def _record_event(item, session_id, transcript_path="", message_index=None):
         event["transcript_path"] = transcript_path
     if message_index is not None:
         event[capture.MESSAGE_INDEX_KEY] = message_index
+    record = transcript.source_record(item)
+    if record is not None and record[0] in ("U", "Q"):
+        event["prompt"] = record[1]
+        event["source_role"] = record[0]
+        event["source_message_id"] = capture.record_message_id(item, f"L{message_index}")
     return event
 
 
@@ -415,6 +397,7 @@ def harvest(home, vaults, docs=(), since=None, limit=None, dry_run=False,
     manifest = load_manifest(vault)
     seen = dict(manifest)
     landed = {}
+    pending_targets = set()
     routes = {}
     now = _utc_stamp()
 
@@ -458,7 +441,9 @@ def harvest(home, vaults, docs=(), since=None, limit=None, dry_run=False,
                 # 句話會在專案庫裡再長出一張。
                 if any(
                     capture.existing_capture(
-                        item_vault, directory, kind, digest, session_id=event_session
+                        item_vault, directory, kind, digest, session_id=event_session,
+                        event_id=capture.event_identity(event, digest)[0],
+                        message_id=event.get("source_message_id"),
                     ) is not None
                     for item_vault in dict.fromkeys((target, vault))
                 ):
@@ -468,7 +453,7 @@ def harvest(home, vaults, docs=(), since=None, limit=None, dry_run=False,
                     stamp = _record_stamp(item, fallback)
                     event_id, origin, _session = capture.event_identity(event, digest)
                     landing = "" if target == vault else f" -> {os.fspath(target)}"
-                    admitted, _template = capture.auto_admitted(capture.owner_side(body, summary))
+                    admitted, _template = capture.auto_admitted(text)
                     if drafts_only:
                         admitted = False
                     if admitted:
@@ -503,13 +488,14 @@ def harvest(home, vaults, docs=(), since=None, limit=None, dry_run=False,
                 # 同一處，回放出來的卡才會和今天線上寫的卡分在同一邊。
                 capture.write_capture(
                     target, directory, kind, digest, label, body,
-                    event, None, summary=summary, replay=replay,
+                    event, None, summary=summary, replay=replay, source_text=text,
                 )
                 if replay.status == capture.STATUS_WRITTEN:
                     counts[f"{kind}s"] += 1
                     landed[target] = landed.get(target, 0) + 1
                 elif replay.status == capture.STATUS_PENDING:
                     counts["drafts"] += 1
+                    pending_targets.add(target)
                 elif replay.status == capture.STATUS_DUPLICATE:
                     counts["duplicates"] += 1
                 else:
@@ -524,7 +510,7 @@ def harvest(home, vaults, docs=(), since=None, limit=None, dry_run=False,
         save_manifest(vault, seen)
         # 新卡必須立刻可喚回；索引鎖被別人拿著就把索引標舊，讓下一個讀者重建。
         # 卡可能落在好幾個專案庫，每個寫過的庫都要重建自己的索引。
-        for target in landed:
+        for target in set(landed) | pending_targets:
             if memsearch.build_index(target, lock_timeout=INDEX_LOCK_SECONDS).get("status") != "built":
                 memsearch.mark_stale(target)
     routed = {os.fspath(target): count for target, count in landed.items() if target != vault}
@@ -884,7 +870,7 @@ def _selftest():
                 # the real writer and admission engine still execute unchanged.
                 text = real_capture_renderer(name, label, body, summary, stamp, event,
                                              event_id, origin, replay)
-                admitted, _ = capture.auto_admitted(capture.owner_side(body, summary))
+                admitted, _ = capture.auto_admitted(event.get("prompt", capture.owner_side(body, summary)))
                 if admitted and not memspec.CAPTURE_REJECT_REGEX.search(body):
                     return fixture_card(text, root / "reviewed-cards" / f"{name}.md",
                                         source_root=root / "reviewed-originals", case_id=name)
@@ -1184,7 +1170,7 @@ def _selftest():
             drafts_pending = sorted(drafts_vault.joinpath(*memspec.CAPTURE_PENDING_SUBPATH).rglob("*.md"))
             drafts_pending_text = "\n".join(path.read_text(encoding="utf-8") for path in drafts_pending)
             checks.append((
-                "--drafts-only proposes every capture: no vault card, no index rebuild",
+                "--drafts-only saves searchable evidence without publishing or recalling it",
                 drafts_counts["files"] == 2
                 and drafts_counts["drafts"] == 2
                 and drafts_counts["grants"] == 0
@@ -1194,7 +1180,10 @@ def _selftest():
                 and not (drafts_vault / memspec.CORRECTION_DIRECTORY).exists()
                 and not (drafts_vault / memspec.RULING_DIRECTORY).exists()
                 and drafts_routed == {}
-                and not (drafts_vault / memspec.FTS_DB_PATH).exists(),
+                and (drafts_vault / memspec.FTS_DB_PATH).exists()
+                and memsearch.query_index(drafts_vault, "測試檔")["count"] == 1
+                and memsearch.query_index(drafts_vault, "腳本")["count"] == 1
+                and memsearch.recall_index(drafts_vault, "測試檔 腳本")["count"] == 0,
             ))
             # 同一份 fixture 不帶 --drafts-only：證明剛才那兩句本來就會入庫，不是題目
             # 選得太軟。提案已經存在，所以這一趟判它們重複，正式目錄仍然是空的。

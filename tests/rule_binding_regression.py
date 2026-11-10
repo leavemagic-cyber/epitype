@@ -119,11 +119,22 @@ class RuleBindings(unittest.TestCase):
                                 "text_sha256": hashlib.sha256(document["text"].encode()).hexdigest()}
         text = self.card(document)
         self.target.write_text(text, encoding="utf-8")
-        self.assertTrue(rule_pipeline.inspect_card(self.fields(text), self.target).verified)
+        reviewed = rule_pipeline.inspect_card(self.fields(text), self.target)
+        self.assertTrue(reviewed.verified)
+        self.assertTrue(reviewed.blocking_basis)
+        self.assertTrue(rule_pipeline.inspect_card(
+            self.fields(text), self.target, audit_originals=True).blocking_basis)
         document["approval"]["text_sha256"] = "0" * 64
         text = self.card(document)
         self.target.write_text(text, encoding="utf-8")
-        self.assertFalse(rule_pipeline.inspect_card(self.fields(text), self.target).verified)
+        reviewed = rule_pipeline.inspect_card(self.fields(text), self.target)
+        self.assertTrue(reviewed.verified)
+        self.assertFalse(reviewed.blocking_basis)
+        self.assertEqual(reviewed.restriction_review, "ADVISORY_ONLY")
+        audited = rule_pipeline.inspect_card(self.fields(text), self.target, audit_originals=True)
+        self.assertTrue(audited.verified)
+        self.assertFalse(audited.blocking_basis)
+        self.assertEqual(audited.restriction_review, "ADVISORY_ONLY")
 
 
 if __name__ == "__main__":

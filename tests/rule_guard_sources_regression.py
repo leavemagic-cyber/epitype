@@ -160,14 +160,73 @@ class GuardSources(unittest.TestCase):
         self.assertEqual(path.stat().st_size, old.st_size)
         self.assertEqual(path.stat().st_mtime_ns, old.st_mtime_ns)
 
+    def generated_card(self, fields):
+        text = self.card(fields=fields)
+        text = text.replace('---\n', '---\nlayer: resident\ntext: '
+                            + json.dumps(self.document['text'], ensure_ascii=False)+'\n', 1)
+        return self.review_generated(text)
+
+    def review_generated(self, text):
+        document = rule_pipeline.bind_payload(self.document, text, reviewer='synthetic-current-review')
+        encoded = json.dumps(json.dumps(document, ensure_ascii=False), ensure_ascii=False)
+        text = '\n'.join('rule_provenance: '+encoded if line.startswith('rule_provenance:')
+                         else line for line in text.splitlines())+'\n'
+        self.card_path.write_text(text, encoding='utf-8')
+        return text
+
+    def test_generated_guard_emitted_advice_and_fallback_are_bound(self):
+        for explicit in (True, False):
+            with self.subTest(explicit=explicit):
+                fields = {'guard_tool': 'Bash', 'guard_all_of': ['guard-hit-marker'],
+                          'description': 'reviewed description'}
+                if explicit:
+                    fields['guard_advice'] = 'reviewed guard advice'
+                text = self.generated_card(fields)
+                old_fields = memspec.frontmatter_text(text)[0]
+                version = rule_pipeline.effective_version(text, old_fields)
+                self.assertIsInstance(gate._read_guard(self.card_path), dict)
+                before = fields['guard_advice' if explicit else 'description']
+                changed = text.replace(before, 'unreviewed emitted replacement')
+                self.card_path.write_text(changed, encoding='utf-8')
+                data = memspec.frontmatter_text(changed)[0]
+                self.assertEqual(rule_pipeline.inspect_card(data, self.card_path).status, 'INVALID')
+                self.assertNotEqual(rule_pipeline.effective_version(changed, data), version)
+                self.assertIsInstance(gate._read_guard(self.card_path), str)
+                value = self.call({**self.event(), 'session_id': 'unreviewed-'+str(explicit)})
+                self.assertNotIn('unreviewed emitted replacement', json.dumps(value))
+                self.assertIsNone(self.denial(value))
+
+    def test_generated_other_consumers_bind_their_description_fallback(self):
+        for fields in ({'advise_tool': 'Bash', 'advise_all_of': ['guard-hit-marker']},
+                       {'require_tool_before': ['@git.status => @git.main_update']}):
+            with self.subTest(fields=fields):
+                text = self.generated_card({**fields, 'description': 'reviewed description'})
+                changed = text.replace('reviewed description', 'unreviewed description')
+                self.card_path.write_text(changed, encoding='utf-8')
+                data = memspec.frontmatter_text(changed)[0]
+                self.assertEqual(rule_pipeline.inspect_card(data, self.card_path).status, 'INVALID')
+
+    def test_generated_nonexecuted_description_remains_auxiliary_and_real_review_allows_edit(self):
+        text = self.generated_card({'guard_tool': 'Bash', 'guard_all_of': ['guard-hit-marker'],
+            'guard_advice': 'reviewed guard advice', 'description': 'auxiliary retrieval description'})
+        changed = text.replace('auxiliary retrieval description', 'new retrieval description')
+        self.card_path.write_text(changed, encoding='utf-8')
+        data = memspec.frontmatter_text(changed)[0]
+        self.assertEqual(rule_pipeline.inspect_card(data, self.card_path).status, 'REVIEWED')
+        self.assertEqual(rule_pipeline.effective_version(text), rule_pipeline.effective_version(changed))
+        reviewed = self.review_generated(changed.replace('reviewed guard advice', 'new reviewed advice'))
+        self.assertEqual(rule_pipeline.inspect_card(memspec.frontmatter_text(reviewed)[0], self.card_path).status,
+                         'REVIEWED')
+        self.assertIn('new reviewed advice', gate._read_guard(self.card_path)['advice'])
+
     def test_both_original_formats_and_host_tool_names(self):
         for host, tool in (('claude', 'Bash'), ('codex', 'exec_command')):
             with self.subTest(host=host):
                 self.card(host=host)
                 reason = self.denial(self.call(self.event(tool=tool)))
-                self.assertIn(self.document['quote'], reason)
-                self.assertIn('作者：owner', reason)
-                self.assertIn('適用範圍：', reason)
+                self.assertIn('隔離測試建議。', reason)
+                self.assertNotIn('作者：', reason)
+                self.assertNotIn('適用範圍：', reason)
 
     def test_project_inside_outside(self):
         self.card(scope=self.scope(level='project', project=str(self.root / 'project')))
@@ -183,7 +242,7 @@ class GuardSources(unittest.TestCase):
         result = self.call(defects=defects)
         self.assertIsNone(self.denial(result))
         self.assertTrue(any('case context is unavailable' in item for item in defects))
-        self.assertTrue(any(self.document['quote'] in item for item in defects))
+        self.assertTrue(any('ADVISORY' in item and '隔離測試建議。' in item for item in defects))
 
     def test_uninterpreted_action_condition_exception_are_advisory(self):
         for clause in ({'actions': ['shell']}, {'conditions': ['special context']},
@@ -202,18 +261,18 @@ class GuardSources(unittest.TestCase):
         self.card()
         self.assertIsNotNone(self.denial(self.call()))
         self.replace_same_stat(self.source, b'guard-hit-marker', b'guard-new-marker')
-        defects = []
-        self.assertIsNone(self.denial(self.call(defects=defects)))
-        self.assertTrue(any('INVALID' in item for item in defects))
+        self.assertIsNotNone(self.denial(self.call()))
+        fields,_=memspec.frontmatter_fields(self.card_path)
+        self.assertFalse(rule_pipeline.inspect_card(fields,self.card_path,audit_originals=True).verified)
 
-    def test_unavailable_original_keeps_guard_as_reminder(self):
+    def test_unavailable_original_keeps_reviewed_guard_active(self):
         self.card()
         self.source.unlink()
-        defects = []
-        context = self.advice('unavailable-original', defects)
-        self.assertIn(self.document['quote'], context)
-        self.assertIn('來源未核', context)
+        defects=[]
+        self.assertIsNotNone(self.denial(self.call(defects=defects)))
         self.assertFalse(any('INVALID' in item for item in defects))
+        fields,_=memspec.frontmatter_fields(self.card_path)
+        self.assertFalse(rule_pipeline.inspect_card(fields,self.card_path,audit_originals=True).verified)
 
     def test_complete_body_and_execution_fields_read_fresh(self):
         for old, new in ((b'Synthetic body.', b'Synthetic evil.'),
@@ -249,10 +308,10 @@ class GuardSources(unittest.TestCase):
     def test_all_known_guards_refresh_even_when_discovery_cap_is_zero(self):
         self.card()
         self.call()
-        self.replace_same_stat(self.source, b'guard-hit-marker', b'guard-new-marker')
-        defects = []
-        self.assertEqual(gate._guards(self.vault, time.monotonic(), defects,
-                                     cap=0, event=self.event()), [])
+        self.replace_same_stat(self.card_path, b'guard_all_of: ["guard-hit-marker"]',
+                               b'guard_all_of: ["guard-new-marker"]')
+        defects=[]
+        self.assertEqual(gate._guards(self.vault,time.monotonic(),defects,cap=0,event=self.event()),[])
         self.assertTrue(any('INVALID' in item for item in defects))
 
     def test_legacy_unconfigured_is_compatible_and_explicitly_unverified(self):
@@ -261,8 +320,7 @@ class GuardSources(unittest.TestCase):
         defects = []
         context = self.advice('legacy-unconfigured', defects)
         self.assertIn('legacy advice', context)
-        self.assertIn('來源未驗證', context)
-        self.assertIn('作者：UNVERIFIED', context)
+        self.assertNotIn('作者：', context)
         self.assertIn(memspec.ACTION_GUARD_UNVERIFIED_BLOCK_NOTE, context)
         self.assertTrue(any('UNVERIFIED' in item for item in defects))
 
@@ -341,17 +399,16 @@ class GuardSources(unittest.TestCase):
             self.assertIsNone(self.denial(self.call(defects=defects)))
         self.assertTrue(any('budget exhausted' in item for item in defects))
 
-    def test_advice_keeps_ai_author_original_full_scope_together(self):
+    def test_advice_keeps_scope_internal_and_emits_current_action_only(self):
         self.card(kind='ai-derived', scope=self.scope(level='case', project=str(self.root),
             case='case-A'), fields={'advise_tool': 'Bash', 'advise_all_of': ['guard-hit-marker'],
                                   'advise_text': 'synthetic scoped advice'})
         guards = gate._guards(self.vault, time.monotonic(), [],
                               event=self.event(context={'case': 'case-A'}))
         advice = guards[0].advise_text
-        self.assertIn('作者：synthetic-guard-ai', advice)
-        self.assertIn(self.document['quote'], advice)
-        self.assertIn('case-A', advice)
-        self.assertIn('適用範圍：', advice)
+        self.assertEqual(advice, 'synthetic scoped advice')
+        self.assertNotIn(self.document['quote'], advice)
+        self.assertEqual(gate._read_guard(self.card_path)['source_scope'], self.document['scope'])
         self.assertIsNone(self.denial(self.call(self.event(context={'case': 'case-A'}))))
 
     def test_denial_does_not_truncate_verified_source_details(self):
@@ -359,9 +416,9 @@ class GuardSources(unittest.TestCase):
             'guard_all_of': ['guard-hit-marker'], 'guard_advice': 'long advice ' * 240})
         reason = self.denial(self.call())
         self.assertGreater(len(reason), 2000)
-        self.assertIn(self.document['quote'], reason)
-        self.assertIn('作者：synthetic-guard-ai', reason)
-        self.assertIn('適用範圍：', reason)
+        self.assertNotIn(self.document['quote'], reason)
+        self.assertNotIn('作者：', reason)
+        self.assertNotIn('適用範圍：', reason)
 
     def test_repeated_calls_cannot_use_a_notice_marker_to_autoapprove(self):
         self.card()
@@ -377,8 +434,8 @@ class GuardSources(unittest.TestCase):
         event['tool_input'] = {'file_path': str(target), 'old_string': '1', 'new_string': '2'}
         context = self.allowed_context(self.call(event))
         self.assertIn('編碼提醒（本次寫入放行）', context)
-        self.assertIn(self.document['quote'], context)
-        self.assertIn('適用範圍：', context)
+        self.assertIn(self.document['text'], context)
+        self.assertNotIn('適用範圍：', context)
         event['rule_context']['case'] = 'case-B'
         event['session_id'] = 'synthetic-guard-call-case-b'
         self.assertNotIn('編碼提醒', self.allowed_context(self.call(event)))
@@ -417,7 +474,8 @@ class GuardSources(unittest.TestCase):
                 self.assertNotIn('ADVISORY', stderr)
         context, stderr = self.hook('advisory-hit', 'Bash', {'command': 'guard-hit-marker'})
         self.assertIn('限定參考（本場範圍未確認）', context)
-        self.assertIn(self.document['quote'], context)
+        self.assertIn('隔離測試建議。', context)
+        self.assertNotIn(self.document['quote'], context)
         self.assertIn('guard scope ADVISORY', stderr)
 
     def test_unverified_source_note_only_when_the_guard_itself_matches(self):

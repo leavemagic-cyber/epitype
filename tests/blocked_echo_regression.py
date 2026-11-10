@@ -30,7 +30,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from epitype import memspec
+from epitype import hook_context, memspec
 
 import _hook_common as common
 import stop_gate
@@ -75,7 +75,8 @@ class RepeatingABlockedTurn(unittest.TestCase):
              "last_assistant_message": message}, __import__("time").monotonic(), [])
 
     def notes(self, session="echo-1"):
-        return common.take_notes(self.loaded, session)
+        return common.take_notes(self.loaded, hook_context.identity(
+            {"session_id": session, "transcript_path": str(self.root / "turn.jsonl")}))
 
     def test_a_repasted_retry_is_neither_blocked_nor_asked_to_shrink(self):
         self.assertIsNone(self.retry(BLOCKED), "重複的那一段已經在 owner 眼前，再擋只是第三輪")
@@ -84,7 +85,7 @@ class RepeatingABlockedTurn(unittest.TestCase):
     def test_a_retry_is_not_judged_again(self):
         defects = []
         self.assertIsNone(stop_gate._handle(
-            {"session_id": "echo-1", "stop_hook_active": True, "last_assistant_message": BLOCKED},
+            {"session_id": "echo-1", "transcript_path": str(self.root / "transcript.jsonl"), "stop_hook_active": True, "last_assistant_message": BLOCKED},
             __import__("time").monotonic(), defects))
         log = self.vault / memspec.GATE_LOG_FILENAME
         rows = ([json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
@@ -98,12 +99,19 @@ class RepeatingABlockedTurn(unittest.TestCase):
         (self.vault / "no-hedge.md").write_text(card, encoding="utf-8", newline="\n")
         value = stop_gate._handle(
             {"session_id": "echo-first", "cwd": str(self.root),
+             "transcript_path": str(self.root / "turn.jsonl"),
              "last_assistant_message": "這樣應該可以。"}, __import__("time").monotonic(), [])
         self.assertIsNone(value)
-        notes = self.notes("echo-first")
-        self.assertEqual(len(notes), 1, notes)
-        self.assertIn("no-hedge", notes[0])
-        self.assertIn("這一則不用重送", notes[0])
+        event = {"session_id": "echo-first", "transcript_path": str(self.root / "turn.jsonl"),
+                 "cwd": str(self.root), "prompt": "繼續下一項"}
+        notes = common.peek_notes(self.loaded, hook_context.identity(event))
+        self.assertEqual(notes, ["Epitype 提醒（no-hedge）：不說含糊的完成"])
+        result = common.run_synthetic(ROOT / "adapters/claude/recall_hook.py", event, self.config)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("已經送出的不用重寫、不用道歉", context)
+        self.assertEqual(context.count(notes[0]), 1)
+        self.assertEqual(common.peek_notes(self.loaded, hook_context.identity(event)), [])
 
 
 def _selftest():

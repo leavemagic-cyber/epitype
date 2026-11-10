@@ -238,6 +238,7 @@ def load_config(started_at):
     return {
         memspec.CONFIG_VAULTS_FIELD: vaults,
         "_unavailable_vaults": unavailable,
+        memspec.CONFIG_PROACTIVE_RECALL_FIELD: value.get(memspec.CONFIG_PROACTIVE_RECALL_FIELD) is True,
         memspec.CONFIG_BUDGET_BYTES_FIELD: min(
             budget,
             memspec.HOOK_DEFAULT_BUDGET_BYTES,
@@ -318,6 +319,20 @@ def capture_vault(config, event, home=None):
         event.get("cwd") if isinstance(event, dict) else None,
         governance_vault(config, for_write=True), home
     )
+
+
+def capture_transcript_events(config, event, started_at):
+    """Save human mid-turn events without producing hook advice or verdicts."""
+    try:
+        from epitype.capture import capture_transcript
+        if config is None or expired(started_at) or not event.get("transcript_path"):
+            return
+        vault = capture_vault(config, event)
+        if vault is not None:
+            capture_transcript(vault, event, started_at)
+    except Exception as error:
+        # Capture is ancillary: its failures must not bypass the caller's gate.
+        print(f"Epitype event capture deferred: {type(error).__name__}", file=sys.stderr)
 
 
 _REPEAT_OPS = frozenset(
@@ -535,12 +550,6 @@ def append_gate_log(vault, row, started_at):
             stream.flush()
             os.fsync(stream.fileno())
 
-    try:
-        from epitype import rule_context
-        rule_context.record(vault, row.get("session_id"), row.get("card_path") or row.get("card"))
-    except (OSError, ValueError):
-        pass
-
 
 def append_recall_deliveries(vault, rows, started_at):
     """喚回送達帳：一次提問送出的每張卡一列，同一把檔案鎖寫完（並行的提問不會交錯）。
@@ -558,12 +567,6 @@ def append_recall_deliveries(vault, rows, started_at):
     )
     if not lines:
         return
-    from epitype import rule_context
-    for row in rows:
-        try:
-            rule_context.record(Path(row.get("vault") or vault), row.get("session_id"), row.get("card"))
-        except (OSError, ValueError):
-            pass
     target.parent.mkdir(parents=True, exist_ok=True)
     with memspec.file_lock(target, min(0.25, remaining)) as acquired:
         if not acquired:
@@ -589,11 +592,48 @@ def leave_note(config, session_id, text):
     line = " ".join(str(text).split())[: memspec.STOP_NOTE_MAX_CHARS]
     if path is None or not line:
         return
-    existing = path.read_text(encoding="utf-8").splitlines() if path.is_file() else []
-    if line in existing or len(existing) >= memspec.STOP_NOTE_MAX_PENDING:
-        return
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join([*existing, line]) + "\n", encoding="utf-8")
+    with memspec.file_lock(path, 0.1) as held:
+        if not held:
+            print("Epitype pending note UNVERIFIED: write lock unavailable; reminder not stored.", file=sys.stderr)
+            return
+        existing = path.read_text(encoding="utf-8").splitlines() if path.is_file() else []
+        if line not in existing and len(existing) < memspec.STOP_NOTE_MAX_PENDING:
+            path.write_text("\n".join([*existing, line]) + "\n", encoding="utf-8")
+        elif line not in existing:
+            print("Epitype pending note omitted: pending reminder limit reached.", file=sys.stderr)
+
+
+def peek_notes(config, session_id):
+    try:
+        path = _notes_path(config, session_id)
+        if path is None or not path.is_file():
+            return []
+        with memspec.file_lock(path, 0.1) as held:
+            if not held:
+                print("Epitype pending note UNVERIFIED: read lock unavailable; reminders remain pending.", file=sys.stderr)
+                return []
+            return [line for line in path.read_text(encoding="utf-8").splitlines()
+                    if line.strip()][:memspec.STOP_NOTE_MAX_PENDING]
+    except (OSError, ValueError):
+        return []
+
+
+def consume_notes(config, session_id, delivered):
+    """Acknowledge only complete notes whose payload was emitted successfully."""
+    path = _notes_path(config, session_id)
+    if path is None or not path.is_file():
+        return
+    with memspec.file_lock(path, 0.1) as held:
+        if not held:
+            print("Epitype pending note UNVERIFIED: acknowledgement lock unavailable; reminders remain pending.", file=sys.stderr)
+            return
+        remaining = [line for line in path.read_text(encoding="utf-8").splitlines()
+                     if line.strip() and line not in delivered]
+        if remaining:
+            path.write_text("\n".join(remaining) + "\n", encoding="utf-8")
+        else:
+            path.unlink(missing_ok=True)
 
 
 def take_notes(config, session_id):
@@ -831,11 +871,10 @@ def run_concurrent(script, event, config_path, count, environment=None, settle_s
     """自測用：同時起 count 個掛鉤行程，等它們載入完、卡在讀 stdin，再一起餵同一個事件——
     重現 Codex 一次並行好幾個工具呼叫。回 [(returncode, stdout, stderr)]。
 
-    環境跟 run_synthetic 一樣隔離（家目錄、夢關掉；時鐘要明傳）。多行程在真正算出
-    notice 後、搶標記前同步，確保測到競爭；settle_seconds 只給起始載入預留時間。
+    環境跟 run_synthetic 一樣隔離（家目錄、夢關掉；時鐘要明傳）。呼叫端用同步 wrapper
+    確保所有 notice 都在搶標記前就緒；settle_seconds 只給起始載入預留時間。
     close_stdout=True 在餵事件前關掉讀端，模擬「輸出失敗」（stdout 回空字串）。"""
     import subprocess
-    import tempfile
 
     isolated_home = os.fspath(Path(config_path).resolve().parent / "_synthetic_home")
     environment = {
@@ -861,36 +900,10 @@ def run_concurrent(script, event, config_path, count, environment=None, settle_s
         environment[memspec.HOOK_CLOCK_ENV] = token
     processes = []
     results = []
-    barrier = tempfile.TemporaryDirectory(prefix="epitype-meter-race-") if count > 1 else None
     try:
         for _ in range(count):
-            command = [sys.executable, os.fspath(script)]
-            if barrier is not None:
-                # A stdin release cannot ensure all children reach the claim together.
-                # Synchronize after each real notice calculation, before any claim.
-                wrapper = (
-                    "import os, pathlib, runpy, sys, time\n"
-                    "target, directory, count = sys.argv[1:]\n"
-                    "sys.path[:0] = [str(pathlib.Path(target).resolve().parents[2]), str(pathlib.Path(target).parent)]\n"
-                    "from epitype import context_meter\n"
-                    "original = context_meter.notice\n"
-                    "def synchronized(*args, **kwargs):\n"
-                    "    value = original(*args, **kwargs)\n"
-                    "    if value is not None:\n"
-                    "        root = pathlib.Path(directory)\n"
-                    "        (root / str(os.getpid())).write_text('ready')\n"
-                    "        deadline = time.monotonic() + 20\n"
-                    "        while len(list(root.iterdir())) < int(count):\n"
-                    "            if time.monotonic() >= deadline: raise RuntimeError('meter race barrier incomplete')\n"
-                    "            time.sleep(0.001)\n"
-                    "    return value\n"
-                    "context_meter.notice = synchronized\n"
-                    "sys.argv = [target]\n"
-                    "runpy.run_path(target, run_name='__main__')\n"
-                )
-                command = [sys.executable, "-c", wrapper, os.fspath(script), barrier.name, str(count)]
             processes.append(subprocess.Popen(
-                command, stdin=subprocess.PIPE,
+                [sys.executable, os.fspath(script)], stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=environment))
         if close_stdout:
             for process in processes:
@@ -913,8 +926,6 @@ def run_concurrent(script, event, config_path, count, environment=None, settle_s
             if process.poll() is None:
                 process.kill()
                 process.wait()
-        if barrier is not None:
-            barrier.cleanup()
         if credential is not None:
             try:
                 credential.unlink()
@@ -952,7 +963,9 @@ def write_codex_fixture(root, session_id, total, auto_limit=210000):
 
 
 def write_config(path, vaults, budget=memspec.HOOK_DEFAULT_BUDGET_BYTES):
+    # Synthetic fixture helper: legacy automatic-delivery tests opt in explicitly.
     value = {
+        memspec.CONFIG_PROACTIVE_RECALL_FIELD: True,
         memspec.CONFIG_VAULTS_FIELD: [os.fspath(item) for item in vaults],
         memspec.CONFIG_BUDGET_BYTES_FIELD: budget,
     }

@@ -7,7 +7,7 @@ from pathlib import Path
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from epitype import host_native, rule_legacy, rule_pipeline
+from epitype import host_native, memspec, rule_legacy, rule_pipeline
 import rule_native_sources_regression as native_fixture
 NATIVE_FIELDS = native_fixture.NATIVE_FIELDS
 
@@ -91,7 +91,7 @@ class NativeMembershipConsumers(unittest.TestCase):
         f.path.unlink()
         f.assert_refuses_preserving('ownership source')
 
-    def test_new_native_and_invalid_settings_provenance_refuse(self):
+    def test_new_native_and_changed_settings_refuse_but_historic_drift_requires_explicit_audit(self):
         f = self.f
         f.card(legacy=True); self.freeze_v2(); f.install()
         unknown = f.vault / 'new-native.md'
@@ -101,8 +101,23 @@ class NativeMembershipConsumers(unittest.TestCase):
         for host in ('claude', 'codex'):
             with self.subTest(source_host=host):
                 text = f.card(host=host)
+                fields, _ = memspec.frontmatter_fields(f.path)
+                self.assertEqual(rule_pipeline.inspect_card(fields, f.path, audit_originals=True).status, 'VERIFIED')
                 f.equal_stat_replace(f.source, b'Synthetic fixture only', b'Synthetic FIXTURE only')
-                f.assert_refuses_preserving('INVALID')
+                before = f.snapshot()
+                checked, report = f.call(host_native.check)
+                self.assertEqual(checked, (0, 0), report)
+                self.assertEqual(f.snapshot(), before)
+                applied, report = f.call()
+                self.assertEqual(applied, (0, 0), report)
+                self.assertEqual(f.snapshot(), before)
+                fields, _ = memspec.frontmatter_fields(f.path)
+                reviewed = rule_pipeline.inspect_card(fields, f.path)
+                self.assertEqual(reviewed.status, 'REVIEWED')
+                self.assertEqual(reviewed.to_dict()['source_audit_status'], 'NOT_REQUESTED')
+                audited = rule_pipeline.inspect_card(fields, f.path, audit_originals=True)
+                self.assertEqual(audited.status, 'INVALID')
+                self.assertEqual(audited.issues, ['original source identity, record boundary or role validation failed'])
                 f.card(host=host)
                 f.equal_stat_replace(f.path, b'"4"', b'"5"')
                 f.assert_refuses_preserving('complete rule body and execution fields')

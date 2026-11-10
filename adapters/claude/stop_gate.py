@@ -17,7 +17,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from epitype import memspec, rule_context, rule_pipeline, rule_provenance
+from epitype import hook_context, memspec, rule_context, rule_pipeline, rule_provenance
 from _hook_common import (
     isolated_temp_root,
     append_gate_log,
@@ -69,7 +69,7 @@ _TURN_CHECK_RULE = "turn_check"
 
 _SELFTEST_HANG_SECONDS = 120
 
-_Turn = namedtuple("_Turn", "texts prompt dispatch calls_after_dispatch tools call_ids", defaults=((), ()))
+_Turn = namedtuple("_Turn", "texts prompt dispatch calls_after_dispatch tools call_ids evidence owner_task", defaults=((), (), (), ""))
 
 
 def _turn(texts=(), prompt="", dispatch="", calls_after_dispatch=0):
@@ -153,7 +153,7 @@ def _read_decision(path):
             if problem or front_lines is None or closing is None:
                 return None
             checked_projection = rule_pipeline.projection(fields, path, card_text=card_text)
-            if checked_projection['provenance']['status'] == rule_provenance.VERIFIED:
+            if rule_provenance.usable(checked_projection['provenance']['status']):
                 projected = checked_projection
         except (ValueError, OSError):
             return None
@@ -211,10 +211,13 @@ def _read_decision(path):
         document = projected['document']
         ruling.update(source_status=projected['provenance']['status'],
                       source_scope=document['scope'], source_author=document['author'],
-                      source_kind=document['kind'], source_original_quote=document['quote'])
+                      source_kind=document['kind'], source_original_quote=(document.get('quote', '')
+                          if projected['provenance']['status'] == 'VERIFIED' else ''))
+        if projected['provenance']['status'] == 'REVIEWED':
+            ruling[_QUOTE] = document['text'][:memspec.STOP_GATE_QUOTE_MAX_CHARS]
         # A description and an AI interpretation may be approved by the Owner,
         # but their author does not become the Owner as a result.
-        ruling[_ADVICE] = rule_pipeline.render_projection(projected)
+        ruling[_ADVICE] = _one_line(fields.get(memspec.DESCRIPTION_FIELD) or projected['text'])
     else:
         ruling.update(source_status='UNVERIFIED', source_scope=None,
                       source_author='UNVERIFIED', source_kind='legacy-unverified',
@@ -236,12 +239,12 @@ def _decision_from_ruling(vault, card_path, ruling, *, fresh=False, event=None, 
     if not fresh:
         # An old cache can omit or mislabel provenance. When its file is present,
         # use the current card regardless of the cached authorship declaration.
-        if ruling.get('source_status') == 'VERIFIED' or path.is_file():
+        if ruling.get('source_status') in ('VERIFIED', 'REVIEWED') or path.is_file():
             ruling = _checked_read(path, defects if unadopted is None else unadopted)
             if ruling is None:
                 return None
     reference = None
-    if ruling.get('source_status') == 'VERIFIED':
+    if ruling.get('source_status') in ('VERIFIED', 'REVIEWED'):
         scope = ruling.get('source_scope')
         if not isinstance(scope, dict) or rule_pipeline.expired({'scope': scope}):
             return None
@@ -587,7 +590,142 @@ def _demoted(vault):
     return frozenset()
 
 
-def _forbidden_fragment(decision, message, defects, masked=None):
+def _claim_sentence(message, start, end):
+    """Keep context local; a denial before a contrast does not excuse its next claim."""
+    left = max((message.rfind(c, 0, start) for c in "。！？!?；;\n"), default=-1) + 1
+    right = min((p for c in "。！？!?；;\n" if (p := message.find(c, end)) >= 0),
+                default=len(message))
+    before = message[left:start]
+    contrasts = list(re.finditer(r"但是|然而|可是|不過|但|\bbut\b|\bhowever\b", before, re.I))
+    if contrasts:
+        left += contrasts[-1].end()
+    return message[left:right], message[left:start]
+
+
+def _claim_is_asserted(message, found):
+    """Literal triggers describe assertions, not quotations, conditions or other actors."""
+    spans = _quoted_spans(message)
+    # Requirement triggers need ordinary short quotations even in a mostly quoted reply.
+    spans += [m.span() for m in memspec.STOP_GATE_QUOTE_TEXT_REGEX.finditer(message)]
+    spans += [m.span() for m in re.finditer(r"'[^'\n]*'", message)]
+    if any(a <= found.start() and found.end() <= b for a, b in spans):
+        return False
+    sentence, before = _claim_sentence(message, found.start(), found.end())
+    if re.search(r"如果|假設|假如|若是|只有|\bif\b|\bsuppos(?:e|ing)\b", before, re.I):
+        return False
+    if re.search(r"(?:不會|不能|不應|不該|不是|沒有|尚未|還沒|並未|未曾|拒絕|不准|不要|不得)"
+                 r"[^。！？!?；;\n]{0,55}$|(?:\bnot\b|\bnever\b|\bhaven't\b)[^.!?\n]{0,55}$",
+                 before, re.I):
+        return False
+    # Prefer the last explicit subject, so 'the user failed, I cannot finish' stays live.
+    subjects = list(re.finditer(r"使用者|用戶|產品|攻擊者|訪客|訂閱者|端點|工具|人(?=做不到)|"
+                                r"我(?:們)?|\b(?:users?|product|attacker|I|we)\b", before, re.I))
+    if subjects and not re.fullmatch(r"我(?:們)?|I|we", subjects[-1].group(), re.I):
+        return False
+    return True
+
+
+def _technical_task(turn):
+    prompt = memspec.owner_typed_text(turn.prompt) if turn else ""
+    if re.search(r"不要.{0,8}(?:術語|專有名詞|技術名稱)", prompt):
+        return False
+    prompt = prompt + "\n" + (turn.owner_task if turn else "")
+    return bool(re.search(r"診斷|技術審查|技術說明|程式.*審查|審查.*(?:程式|hook|掛鉤)|"
+                          r"正式環境.{0,12}實測|查.{0,40}優化|優化.{0,40}查|GitHub.{0,30}repo|"
+                          r"(?:分析|檢查|自測|測試|審查|修正|修復).{0,80}"
+                          r"(?:hook|SessionStart|PreToolUse|Stop|程式)|"
+                          r"\b(?:diagnos\w*|debug\w*|technical (?:review|audit))\b", prompt, re.I))
+
+
+def _has_recheck_evidence(turn):
+    if not turn:
+        return False
+    from epitype import action_targets, shell_text_exec
+
+    for call in turn.evidence:
+        if not call.finished or call.success is not True:
+            continue
+        if re.search(r"(?:^|[_.])(?:read|search|fetch|get_content)$", call.name, re.I):
+            return True
+        if any(action.kind == 'file.read' for action in
+               action_targets.actions(call.name, call.payload, call.cwd, live=False)):
+            return True
+        if call.name.casefold().rsplit('.', 1)[-1] not in ('bash', 'powershell', 'exec_command'):
+            continue
+        source = call.payload.get('command') or call.payload.get('cmd') or ''
+        try:
+            commands = shell_text_exec.simple_commands(source)
+        except shell_text_exec.ScanLimitExceeded:
+            continue
+        for words in commands:
+            program = words[0].replace('\\', '/').rsplit('/', 1)[-1].removesuffix('.exe')
+            if program in ('pytest', 'unittest'):
+                return True
+            if program.startswith('python') and ('--selftest' in words or any(
+                    words[i:i + 2] in (['-m', 'pytest'], ['-m', 'unittest'])
+                    for i in range(len(words) - 1))):
+                return True
+    return False
+
+
+def _card_claim_applies(decision, message, found, turn=None):
+    key = decision.key
+    sentence, before = _claim_sentence(message, found.start(), found.end())
+    if key == "root-fix-no-evasion":
+        if re.search(r"之前|先前|上一|原先|原本|撤回|說過頭|是錯的|\bpreviously\b", sentence, re.I):
+            return False
+        if re.search(r"(?:已|改|正在|繼續).{0,15}(?:改用|改從|改走|替代|等待|等候)|"
+                     r"\b(?:instead|so I(?:'ll| will) follow)\b", sentence, re.I):
+            return False
+        # Inability alone is often a product finding or an honest evidence boundary.
+        return bool(re.search(r"(?:請|麻煩|等|要|需要)(?:你|\s*owner\s*)(?:本人|自己)?"
+                              r"(?:貼上去|跑|執行|操作|處理|手動|按|停|登入)|"
+                              r"我.{0,8}(?:做不到|辦不到|無法|不能).{0,16}"
+                              r"(?:工作|任務|要求|修復|完成|執行|處理)|"
+                              r"(?:沒有|無法).{0,8}(?:解法|辦法|根本解|徹底修)|"
+                              r"(?:需要|建議|應該)先(?:量測|做量測|量一下)|"
+                              r"\b(?:lead (?:cannot|can't)|ask the owner to|owner (?:must|needs to))\b",
+                              sentence, re.I))
+    if key == "owner-words-verbatim":
+        return bool(re.search(r"(?:owner|你)\s*(?:的)?\s*(?:原話|逐字)(?:引用)?\s*(?:是|如下|：|:)|"
+                              r"(?:逐字引用|逐字引述)\s*(?:owner|你)", sentence, re.I))
+    if key == "plain-words-to-owner" and _technical_task(turn):
+        return False
+    if key == "correction-carries-a-recheck":
+        if not re.search(r"我|自己|\bI\b", sentence, re.I):
+            return False
+        if _has_recheck_evidence(turn):
+            return False
+    if key == "no-green-by-lowering-the-bar":
+        return bool(re.search(r"放寬|調低|降低|拉低|(?:測試|斷言|檢查|閘門).{0,8}"
+                              r"(?:拿掉|移除|註解掉|跳過|停用|關掉)|(?:刪掉|移除|拿掉).{0,8}測試", sentence))
+    if key == "no-third-try-same-way":
+        if re.search(r"(?:已|這次).{0,8}(?:改變條件|更換環境|修改參數)", sentence):
+            return False
+        same_method = re.search(r"(?:同樣|一樣|同一).{0,8}(?:做法|方法|寫法|命令|指令|參數)", sentence)
+        repeated = re.search(r"失敗.{0,5}(?:兩次|2\s*次)|(?:兩次|2\s*次).{0,5}失敗|failed twice", sentence, re.I)
+        if same_method and repeated:
+            return True
+        attempts = [c for c in (turn.evidence if turn else ())
+                    if c.name.casefold().rsplit('.', 1)[-1] in ('bash', 'powershell', 'exec_command')]
+        if len(attempts) < 3:
+            return False
+        first, second, third = attempts[-3:]
+        return bool(first.finished and second.finished
+                    and first.success is False and second.success is False
+                    and first.name == second.name == third.name
+                    and first.cwd == second.cwd == third.cwd
+                    and first.payload == second.payload == third.payload
+                    and first.response and first.response == second.response)
+    return True
+
+
+_CONTEXTUAL_FORBIDDEN_KEYS = frozenset((
+    "root-fix-no-evasion", "plain-words-to-owner", "no-green-by-lowering-the-bar",
+    "no-third-try-same-way", "symptom-suppression-is-not-a-fix"))
+
+
+def _forbidden_fragment(decision, message, defects, masked=None, turn=None):
     """The matched fragment of the first usable `forbidden` pattern that fires
     outside a quoted citation (U64: see _quoted_spans) — a hit fully inside a
     quoted span is a citation, not a restatement; one outside still blocks,
@@ -621,6 +759,10 @@ def _forbidden_fragment(decision, message, defects, masked=None):
         if regex is None:
             continue
         for found in regex.finditer(message):
+            if decision.key in _CONTEXTUAL_FORBIDDEN_KEYS and (
+                    not _claim_is_asserted(message, found)
+                    or not _card_claim_applies(decision, message, found, turn)):
+                continue
             if ("negatable_action" in regex.groupindex
                     and found.group("negatable_action") is not None
                     and _negated_action(message, found.start("negatable_action"),
@@ -636,7 +778,7 @@ def _forbidden_fragment(decision, message, defects, masked=None):
     return None
 
 
-def _requirement_gap(decision, message, defects):
+def _requirement_gap(decision, message, defects, turn=None):
     """The trigger fragment when this turn owes the card's required text and lacks it.
 
     Whole classes of rule are "do this first", and whether I did it is invisible from
@@ -668,26 +810,26 @@ def _requirement_gap(decision, message, defects):
                 )
             )
             return None
-    quoted = _quoted_spans(message)
-
-    def outside_quotes(regex):
-        for found in regex.finditer(message):
-            if any(start <= found.start() and found.end() <= end for start, end in quoted):
+    # Evidence may itself be quoted. These claim-specific checks bind it to the
+    # same sentence; an unrelated quotation must not excuse an unquoted claim.
+    local_evidence = decision.key in ("root-fix-no-evasion", "owner-words-verbatim",
+                                      "symptom-suppression-is-not-a-fix")
+    if not local_evidence and patterns[memspec.REQUIRE_TEXT_FIELD].search(message) is not None:
+        return None
+    for triggered in patterns[memspec.REQUIRE_WHEN_FIELD].finditer(message):
+        if (_claim_is_asserted(message, triggered)
+                and _card_claim_applies(decision, message, triggered, turn)):
+            if decision.key == "owner-words-verbatim":
+                tail = message[triggered.end():triggered.end() + 1000]
+                quote = memspec.STOP_GATE_QUOTE_TEXT_REGEX.search(tail)
+                if quote and not re.search(r"[。！？!?；;]", tail[:quote.start()]):
+                    continue
+                return _one_line(triggered.group(0))[: memspec.STOP_GATE_FRAGMENT_MAX_CHARS]
+            sentence, _before = _claim_sentence(message, triggered.start(), triggered.end())
+            if local_evidence and patterns[memspec.REQUIRE_TEXT_FIELD].search(sentence):
                 continue
-            return found
-        return None
-
-    triggered = outside_quotes(patterns[memspec.REQUIRE_WHEN_FIELD])
-    if triggered is None:
-        return None
-    # 觸發條件要在引號外面找（引述別人的話不是我在主張），但**證據要在整則裡找**。
-    # 證據常常就是一段引文——「owner 原話要附引號原文」這條的證據根本就是引號本身。
-    # 2026-09-19 真的發生：一則正常長度、有三處引號的回報，附了原話仍被擋，因為遮罩
-    # 把每個「…」連同括號一起遮掉，證據就消失了；同一句單獨送反而過（引用佔比超過
-    # 上限、遮罩整則失效）。證據被引號遮掉的閘，會在訊息越規矩的時候越擋人。
-    if patterns[memspec.REQUIRE_TEXT_FIELD].search(message) is not None:
-        return None
-    return _one_line(triggered.group(0))[: memspec.STOP_GATE_FRAGMENT_MAX_CHARS]
+            return _one_line(triggered.group(0))[: memspec.STOP_GATE_FRAGMENT_MAX_CHARS]
+    return None
 
 
 def _turn_body(message):
@@ -1058,14 +1200,7 @@ def _audit(config, decision_key, rule, started_at, session_id=None, digest="",
     per turn and stops, so without the digest every second violation in a blocked
     message reads as a miss."""
     try:
-        if card_path is not None:
-            from epitype import rule_context
-            target = Path(card_path).resolve()
-            for vault in config[memspec.CONFIG_VAULTS_FIELD]:
-                root = Path(vault).resolve()
-                if target.is_relative_to(root):
-                    rule_context.record(root, session_id, target.relative_to(root).as_posix())
-                    break
+        # An audit or queued Stop note is not evidence that a card reached the model.
         row = {
             "kind": kind,
             "decision": decision_key,
@@ -1117,9 +1252,6 @@ def _turn_context(transcript_path):
     prompt = ""
     turn_tools = []
     evidence_rows = []
-    # 派工的結果進來之後，我自己還動過幾次手。倒著走，遇到派工那一次呼叫就凍結計數。
-    dispatch = ""
-    calls_after = 0
     for line in reversed(lines):
         try:
             row = json.loads(line)
@@ -1131,19 +1263,13 @@ def _turn_context(transcript_path):
         kind, row_texts, tools = parts
         if kind == transcript_reader.TOOL_RESULT:
             # 工具回傳記在真人那一側，但它不結束一個回合。
+            evidence_rows.append(row)
             continue
         if kind == transcript_reader.USER:
             prompt = " ".join(piece for piece in row_texts if piece)
             break
         evidence_rows.append(row)
         turn_tools.extend(reversed(tools))
-        for name, _payload in reversed(tools):
-            if dispatch:
-                break
-            if name.casefold() in memspec.TURN_DISPATCH_TOOLS:
-                dispatch = name
-            else:
-                calls_after += 1
         for piece in reversed(row_texts):
             if str(piece or "").strip():
                 texts.append(piece)
@@ -1153,12 +1279,45 @@ def _turn_context(transcript_path):
         # 正是那句話。取不出來（整則是機器的）才截原文，派工通知的記號在開頭，截不掉。
         prompt = memspec.owner_typed_text(prompt) or prompt
     prompt = prompt[: memspec.STOP_GATE_MESSAGE_MAX_CHARS]
+    from epitype import tool_evidence
+    calls = tool_evidence.calls(reversed(evidence_rows))
+    results = [call for call in calls
+               if call.name.casefold() in memspec.TURN_DISPATCH_TOOLS and call.finished > 0
+               and not (isinstance(call.result_meta, dict)
+                        and call.result_meta.get('status') == 'async_launched')]
+    dispatch = ""
+    calls_after = 0
+    if results:
+        result = max(results, key=lambda call: call.finished)
+        dispatch = result.name
+        calls_after = sum(call.started > result.finished
+                          and call.name.casefold() not in memspec.TURN_DISPATCH_TOOLS
+                          for call in calls)
     if not dispatch and memspec.TURN_DISPATCH_NOTICE_MARKER in prompt:
         # 背景子代理跑完是以一則新提問的形式回來的，這一回合裡沒有派工那一次呼叫。
         dispatch = memspec.TURN_DISPATCH_NOTICE_MARKER
-    from epitype import tool_evidence
-    identities = tuple(call.call_id for call in tool_evidence.calls(reversed(evidence_rows)))
-    return _Turn(texts, prompt, dispatch, calls_after, tuple(reversed(turn_tools)), identities)
+        calls_after = sum(call.name.casefold() not in memspec.TURN_DISPATCH_TOOLS for call in calls)
+    identities = tuple(call.call_id for call in calls)
+    # Notifications and short continuations do not replace the owner's task.
+    # Keep only actual nearby requests; compaction summaries are not owner evidence.
+    owner_requests = []
+    for line in reversed(lines):
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        parts = transcript_reader.turn_parts(row)
+        if parts is None or parts[0] != transcript_reader.USER:
+            continue
+        text = memspec.owner_typed_text(" ".join(parts[1]))
+        if (not text or row.get('isCompactSummary') or row.get('isMeta')
+                or text.startswith(("This session is being continued", "# AGENTS.md"))):
+            continue
+        owner_requests.append(text[:memspec.STOP_GATE_MESSAGE_MAX_CHARS])
+        if len(owner_requests) == 4:
+            break
+    return _Turn(texts, prompt, dispatch, calls_after, tuple(reversed(turn_tools)), identities,
+                 tuple(calls), "\n".join(reversed(owner_requests)))
 
 
 def _handle(event, started_at, defects):
@@ -1182,6 +1341,8 @@ def _handle(event, started_at, defects):
         defects.append(memspec.STOP_GATE_EXPIRED_BEFORE_CHECK_DEFECT)
         _source_notice(event, message, started_at, defects)
         return None
+    from _hook_common import capture_transcript_events
+    capture_transcript_events(config, event, started_at)
     # 卡片檢查先跑：歸屬查核可以用掉掛鉤剩下的全部時間，不能把卡片檢查擠掉。
     verdict = _verdict(event, message, config, started_at, defects, turn)
     _source_notice(event, message, started_at, defects)
@@ -1191,7 +1352,17 @@ def _handle(event, started_at, defects):
 def _is_subagent_stop(event):
     return isinstance(event, dict) and (
         event.get("hook_event_name") == memspec.SUBAGENT_STOP_EVENT
-        or bool(event.get("agent_id") or event.get("agentId")))
+        or hook_context.is_subagent(event))
+
+
+def _leave_context_note(config, event, line):
+    recipient = hook_context.notification_identity(event)
+    if not recipient:
+        return
+    if event.get("hook_event_name") == memspec.SUBAGENT_STOP_EVENT:
+        agent = _one_line(event.get("agent_id") or event.get("agentId") or "unknown")[:36]
+        line = _clip("子代理 " + agent + " 結束檢查：" + line, memspec.STOP_NOTE_MAX_CHARS)
+    leave_note(config, recipient, line)
 
 
 def _source_notice(event, message, started_at, defects):
@@ -1209,11 +1380,11 @@ def _source_notice(event, message, started_at, defects):
     if reason or notices:
         line = memspec.STOP_NOTE_ATTRIBUTION.format(detail=_one_line(reason or notices[0])[:240])
         config = load_config(started_at)
-        session_id = event.get("session_id", event.get("sessionId"))
+        session_id = hook_context.notification_identity(event)
         if config is None or not session_id:
             defects.append(line)
         else:
-            _best_effort_audit(leave_note, config, session_id, line)
+            _best_effort_audit(_leave_context_note, config, event, line)
 
 
 def _verdict(event, message, config, started_at, defects, turn=None):
@@ -1252,17 +1423,18 @@ def _verdict(event, message, config, started_at, defects, turn=None):
         if digest not in excepted.get(decision.key, frozenset())
     ]
     session_id = event.get("session_id", event.get("sessionId"))
+    context_id = hook_context.identity(event)
     verdict = _first_violation(decisions, event, message, config, started_at, defects, turn,
                                require_notes=True)
     if verdict is None:
         return None
     decision, rule, reason, fragment = verdict
-    if not _claim_marker(session_id, decision.key, message):
+    if not _claim_marker(context_id, decision.key, message):
         return None
     _audit(config, decision.key, rule, started_at, session_id, _message_digest(message),
            kind=memspec.STOP_NOTE_LOG_KIND, card_path=decision.path)
-    # 舊理由含「請改寫」等字眼，不送回模型；提醒自己組卡片建議、原話與命中片段。
-    _best_effort_audit(leave_note, config, session_id, _stop_note(decision, rule, fragment))
+    # 舊理由含「請改寫」等字眼；只把現行卡片建議送到下一則提問。
+    _best_effort_audit(_leave_context_note, config, event, _stop_note(decision, rule, fragment))
     return None
 
 
@@ -1273,36 +1445,16 @@ def _clip(text, chars):
 
 
 def _stop_note(decision, rule, fragment):
-    """One note of at most STOP_NOTE_MAX_CHARS: card key and check, then the card's advice,
-    the owner's words (or the card's description) and the matched fragment, each clipped
-    to a fair share of the room left."""
-    quote_part = (memspec.STOP_NOTE_OWNER_QUOTE_PART
-                  if decision.decided_by == memspec.OWNER_EXPLICIT_DECIDER
-                  else memspec.STOP_NOTE_CARD_TEXT_PART)
-    advice, quote = _one_line(decision.advice), _one_line(decision.quote)
-    parts = [(template, text) for template, text in (
-        (memspec.STOP_NOTE_ADVICE_PART, advice),
-        (quote_part, "" if quote == advice else quote),
-        (memspec.STOP_NOTE_MATCHED_PART, _one_line(fragment))) if text]
-
-    def room(key):
-        bare = "".join(template.format(text="") for template, _ in parts)
-        return memspec.STOP_NOTE_MAX_CHARS - len(
-            memspec.STOP_NOTE_NOTICE.format(decision=key, rule=rule, details=bare))
-
+    """Current action only; quotations and matched prose remain in their source records."""
+    advice = _one_line(decision.advice) or memspec.STOP_NOTE_REVIEW_CURRENT_RULE
     key = _one_line(decision.key)
-    deficit = min(sum(len(text) for _, text in parts), memspec.STOP_NOTE_DETAIL_MIN_CHARS) - room(key)
-    if deficit > 0 and len(key) > memspec.STOP_NOTE_KEY_MIN_CHARS:
+    prefix = memspec.STOP_NOTE_NOTICE.format(decision=key, advice="")
+    deficit = min(len(advice), memspec.STOP_NOTE_DETAIL_MIN_CHARS) - (
+        memspec.STOP_NOTE_MAX_CHARS - len(prefix))
+    if deficit > 0:
         key = _clip(key, max(memspec.STOP_NOTE_KEY_MIN_CHARS, len(key) - deficit))
-    budget = max(0, room(key))
-    shares = {}
-    order = sorted(range(len(parts)), key=lambda index: len(parts[index][1]))
-    for done, index in enumerate(order):
-        shares[index] = min(len(parts[index][1]), budget // (len(order) - done))
-        budget -= shares[index]
-    details = "".join(template.format(text=_clip(text, shares[index]))
-                      for index, (template, text) in enumerate(parts) if shares[index])
-    return memspec.STOP_NOTE_NOTICE.format(decision=key, rule=rule, details=details)
+        prefix = memspec.STOP_NOTE_NOTICE.format(decision=key, advice="")
+    return prefix + _clip(advice, max(0, memspec.STOP_NOTE_MAX_CHARS - len(prefix)))
 
 
 # 開頭圍籬：行首（可縮排，清單裡的區塊會縮）三個以上反引號或波浪號，後面第一個詞是語言
@@ -1530,7 +1682,7 @@ def _first_violation(decisions, event, message, config, started_at, defects, tur
                 return decision, "tool_sequence", f"[{decision.key}] {reason}", ""
     for decision in decisions:
         masked = []
-        fragment = _forbidden_fragment(decision, message, defects, masked)
+        fragment = _forbidden_fragment(decision, message, defects, masked, turn)
         if masked:
             # 豁免也是一件發生過的事，要進帳。內容本身仍然不記，只記卡名與命中片段。
             _best_effort_audit(
@@ -1594,7 +1746,7 @@ def _first_violation(decisions, event, message, config, started_at, defects, tur
         for decision in (() if _is_subagent_stop(event) else decisions):
             if decision.require_on_hit == memspec.ON_HIT_NOTE and not require_notes:
                 continue
-            trigger = _requirement_gap(decision, message, defects)
+            trigger = _requirement_gap(decision, message, defects, turn)
             if trigger is None:
                 continue
             verdicts.append(
@@ -1720,7 +1872,8 @@ def _selftest():
             def notes(session_id, note_vault=vault):
                 from _hook_common import _notes_path
 
-                target = _notes_path({memspec.CONFIG_VAULTS_FIELD: [note_vault]}, session_id)
+                key = hook_context.identity({"session_id": session_id, "transcript_path": os.fspath(root / (session_id + ".jsonl"))})
+                target = _notes_path({memspec.CONFIG_VAULTS_FIELD: [note_vault]}, key)
                 if target is None or not target.is_file():
                     return []
                 return target.read_text(encoding="utf-8").splitlines()
@@ -1731,6 +1884,7 @@ def _selftest():
                     sessions.append(session_id)
                 event = {
                     "session_id": session_id,
+                    "transcript_path": os.fspath(root / (session_id + ".jsonl")),
                     "hook_event_name": "Stop",
                     "stop_hook_active": False,
                     "last_assistant_message": message,
@@ -1769,13 +1923,14 @@ def _selftest():
                 noted(forbidden_session, "virtual-mirrors-live", _FORBIDDEN_RULE, log_rows),
             ))
             checks.append((
-                "a finding emits no payload; one bounded notice naming the card and rule waits"
+                "a finding emits no payload; one bounded notice with current advice waits"
                 " for the next prompt",
                 not forbidden_result.stdout.strip()
                 and not forbidden_result.stderr
                 and len(forbidden_notes) == 1
                 and "virtual-mirrors-live" in forbidden_notes[0]
-                and _FORBIDDEN_RULE in forbidden_notes[0]
+                and "模型船與原型船參數一致" in forbidden_notes[0]
+                and "來源原話" not in forbidden_notes[0]
                 and len(forbidden_notes[0]) <= memspec.STOP_NOTE_MAX_CHARS,
             ))
 
@@ -1887,6 +2042,7 @@ def _selftest():
 
             active_event = {
                 "session_id": "stopgate-active",
+                "transcript_path": os.fspath(root / "stopgate-active.jsonl"),
                 "hook_event_name": "Stop",
                 "stop_hook_active": True,
                 "last_assistant_message": "我建議模型船先用不同參數跑一週再說。",
@@ -1910,9 +2066,10 @@ def _selftest():
             repeat_message = "我建議模型船先用不同參數跑一週再說。"
             _first, first_value, repeat_session = run(repeat_message)
             _second, second_value, _ = run(repeat_message, session=repeat_session)
+            repeat_context = hook_context.identity({"session_id": repeat_session, "transcript_path": os.fspath(root / (repeat_session + ".jsonl"))})
             markers = sorted(
                 path.name
-                for path in recall_marker_directory(repeat_session).iterdir()
+                for path in recall_marker_directory(repeat_context).iterdir()
                 if path.is_file()
             )
             checks.append((
@@ -1924,10 +2081,10 @@ def _selftest():
                 and len(markers) == 1
                 and markers[0].startswith(memspec.STOP_GATE_MARKER_PREFIX),
             ))
-            clear_recall_markers(repeat_session)
+            clear_recall_markers(repeat_context)
             checks.append((
                 "PreCompact's marker sweep covers the stop marker",
-                not recall_marker_directory(repeat_session).exists(),
+                not recall_marker_directory(repeat_context).exists(),
             ))
 
             codex_result, codex_value, codex_session = run(
@@ -2058,10 +2215,11 @@ def _selftest():
             # ---- fence_shell：指令區塊交給 owner 實際的殼層解析器驗語法 ----
             fence_vault = root / "fence-vault"
             fence_vault.mkdir()
+            fence_advice = "2026-09-25 給 owner 的指令區塊要能在 Windows PowerShell 5.1 直接跑"
             (fence_vault / "run-button.md").write_text(
                 "---\n"
                 "name: 執行鍵區塊\n"
-                "description: 2026-09-25 給 owner 的指令區塊要能在 Windows PowerShell 5.1 直接跑\n"
+                f"description: {fence_advice}\n"
                 f"{memspec.ALIASES_FIELD}: [執行鍵]\n"
                 f"{memspec.FENCE_SHELL_FIELD}: {memspec.FENCE_SHELL_POWERSHELL}\n"
                 "metadata:\n  type: feedback\n"
@@ -2078,6 +2236,7 @@ def _selftest():
                 sessions.append(session_id)
                 result = synthetic(
                     {"session_id": session_id, "hook_event_name": "Stop",
+                     "transcript_path": os.fspath(root / (session_id + ".jsonl")),
                      "stop_hook_active": False, "last_assistant_message": message},
                     fence_config, environment=home,
                 )
@@ -2137,10 +2296,9 @@ def _selftest():
             noted_bad = (
                 bad_result.returncode == 0
                 and not bad_value
+                and not bad_result.stderr.strip()
                 and noted(bad_session, "執行鍵區塊", memspec.FENCE_SHELL_RULE, fence_rows)
-                and len(bad_notes) == 1
-                and "執行鍵區塊" in bad_notes[0]
-                and memspec.FENCE_SHELL_RULE in bad_notes[0]
+                and bad_notes == ["Epitype 提醒（執行鍵區塊）：" + fence_advice]
             )
             # 逾時放行不算通過：這題要證明的就是原句一定被認出來。
             checks.append((

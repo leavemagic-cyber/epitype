@@ -12,11 +12,14 @@
 
 Epitype 就是為了這件事做的一層小東西。它接 Claude Code 和 Codex 原本就有的 hook，你原本的記憶檔放在哪裡就繼續放在哪裡，它補上那些檔案自己做不到的部分：該用到的那張紙，在該用到的那一刻送到它面前；不該用的那張，擋在外面。
 
-只用 Python 標準函式庫，不要求額外服務，套件本身不呼叫模型；注入的文字仍會使用宿主的上下文額度。
+整個 Epitype 以做對、記對為目標：正確時機取得正確有效的記憶，壓縮後能接續，減少重犯與浪費。原話只作必要備查，不是新增、修改或日常載入的門檻。詳見[現行內容檢查](docs/RULE_PROVENANCE.md)。
 
-重點是指令的完整生命週期：保留規則的原始來源與範圍、讓被取代的決定退出現行喚回、在兩個宿主間管理支援的原生設定，以及壓縮後找回原始對話。原生記憶仍是底層儲存。與現有工具的重疊、差異及驗證界線，見[產品範圍與相關專案](docs/PRODUCT_SCOPE.md)。
+只用 Python 標準函式庫。不必註冊服務，自己不呼叫模型，也不用付錢。
 
-## 從待審範本開始
+[`epitype memory-index`](docs/memory-index.md) 讓每個 vault 的常駐索引使用同一個可設定的大小目標，
+可先預覽，再把超量內容逐字保留到完整索引。
+
+## 先查看起手範本
 
 ```powershell
 pip install epitype
@@ -24,19 +27,15 @@ epitype install
 epitype starter
 ```
 
-五張隨箱範本是尚未核對原始出處的 AI 範例。`epitype starter` 把它們放在
-`_drafts/starter_templates/`，安裝不會讓範本自動成為現行規則。採用前先審閱文字，
-並把規則綁定到實際來源，再正式放入記憶庫。詳見[規則出處](docs/RULE_PROVENANCE.md)。
-
-Stop 的查核結果會留給同一場的下一則提問作為提醒，不會攔回覆、要求重寫或另開模型回合。
+五張隨附卡片是 AI 撰寫的範本，保存在 `_drafts/starter_templates/`，安裝不會啟用規則。採用前須依[現行內容與範圍](docs/RULE_PROVENANCE.md)完成審核。`epitype starter --remove` 只移除未修改的起手卡。
 
 ## 你實際會在哪裡看到它
 
-週一你否決掉的做法，週四它又提一次。Stop 記下命中的查核結果，讓同一場的下一則提問收到相關卡片的提醒。
+週一你否決掉的做法，週四它又提一次。回合結束檢查會記下命中，下一則提問再補上現行裁定。已送達的回覆會保留，不會強制退回重寫。
 
-PreToolUse 提供寫入與歸屬查核提醒；明確的動作守衛與保留的安全檢查則能拒絕命中的動作，與一般流程提醒分開處理。
+工具執行前會收到格式、歸屬與工作流程提醒；明確的動作守衛與保留的安全檢查仍可拒絕命中的呼叫。
 
-做到一半 context 被壓縮。下一輪開場會拿到一份壓縮前寫好的復原地圖路徑，讓它去讀當時真正說過的話，而不是自己重建。
+做到一半 context 被壓縮。下一輪先恢復目前要求、例外、決定與未完工作的短狀態；放不下時提供必讀交接指標。歷史訊息只在需要查證時讀取。
 
 這三件事都不是多開一個地方存東西。它們跑的都是你 vault 裡已經有的那些紙。
 
@@ -73,16 +72,16 @@ epitype doctor
 
 ## 運作方式
 
-Epitype 透過下列 host 事件與對應的 SubagentStop 處理器讀取原生 vault：
+Epitype 把同一組原生 vault 接到六個 host 事件：
 
 | 事件 | Epitype 的動作 |
 |---|---|
-| `SessionStart` | 只出「有事要做」的行（卡片型別 FAIL、順手補中文別名、夢報錯／有待審候選／到期沒跑）。壓縮之後那一場，另外把下面那份地圖的路徑交回去，讓它自己去讀壓縮前的原話；壓縮前模型寫了交接檔、而且同一份還沒交回過的話，交接檔那行排在地圖之後，預算只放得下一行時被裁掉的是它。沒事要做的那一場整段不注入；常駐內容一律不重送，短入口索引也一樣，那由宿主自己從 `CLAUDE.md`／`AGENTS.md` 載入。 |
-| `UserPromptSubmit` | 在共用輸出預算內，從每個已解析的 vault 取回最多五張相關卡片——只端卡片，逐字捕捉的原話檔搜得到但不注入。簡短的 owner 授權語句會逐字保存、去重並立即進索引；捕捉當下不替原話加上解釋。 |
-| `PreToolUse` | 提供寫入格式、歸屬、資源收尾與讀取量提醒，執行可確定的輸入修復與保留的動作安全檢查。明確動作卡的 `on_hit` 設定與一般提醒分開處理。用量計在宿主壓縮門檻前提醒模型寫交接，每個壓縮週期一次；門檻未知就不提醒。 |
+| `SessionStart` | 讀取已快取的維護狀態並增量暖備動作守衛，不在工作對話派發修卡或補別名任務。壓縮後先恢復短工作狀態；子代理只接收自己的狀態，不沿用主代理交接。 |
+| `UserPromptSubmit` | 預設不比對一般 prompt 或注入相關卡；設定 `proactive_recall: true` 才啟用，且先檢查專案範圍、排除常駐規則。待送通知、事件捕捉與壓縮恢復各自運作。 |
+| `PreToolUse` | 提供寫入格式、歸屬與工作流程提醒；明確的動作守衛與保留的安全檢查可拒絕呼叫。用量計在壓縮前提醒寫交接，每個週期一次；Claude Code 可依 token 視窗設定或同視窗的實測壓縮點判斷，Codex 依自己的壓縮點保留 44k tokens 餘裕。未知門檻時不提醒。 |
 | `PreCompact` | 在 context 壓縮前，從 transcript 尾端製作小型復原地圖；自動壓縮時順便記下當下用量，給用量計學門檻。 |
 | `PostToolUse` | 記錄代理自建的瀏覽器分頁、操控工作階段，以及工具結果證實的關閉。仍有未關資源時，在下一次提問或非瀏覽器工具呼叫提醒代理；Epitype 本身不替代理關閉。 |
-| `Stop` | 將查核結果記為 `stop_note`，留給同一場的下一則提問提醒，不阻擋或重啟回覆。`SubagentStop` 沿用同一條提醒路徑。 |
+| `Stop` | 記錄命中並在同場下一則提問提醒，不撤回回覆；`SubagentStop` 使用同一條提醒路徑。自我完成宣稱與引用他人證據分開判斷。 |
 
 注入的記憶只是參考資料，不能推翻 system 或 developer 指令、繞過 host 權限，也不能自行授予工具操作權。每次 hook 輸出最多 10 KiB，執行超過十秒就 fail open，避免記憶層卡住宿主流程。
 
@@ -90,12 +89,13 @@ Epitype 透過下列 host 事件與對應的 SubagentStop 處理器讀取原生 
 
 ### 捕捉：入庫，或只是提案
 
-觸發詞命中只證明「這句話長得像裁定」，不證明有人核過，所以只有三個形狀模板放行自動
-入庫——箭頭回覆而 owner 那半以短答開頭、句首就是糾正、明說是第一人稱在授權。其餘仍
-被規則捕捉到的句子改寫成提案，落在 `<vault>/_drafts/captured_pending/YYYYMMDD/`：不進
-索引、不被喚回，等人看過再說。兩種卡都帶 `provenance: auto-captured` 與
-`verified: false`；轉正＝改成 `verified: true` 並補 `verified_by`／`verified_at` 再搬檔，
-回放不會替你做這件事。
+觸發詞命中只證明這句話是候選，不代表有人核過。未審的真人事件保存原句、來源身分、
+時間與範圍，落在 `<vault>/_drafts/captured_pending/YYYYMMDD/`。明確的記憶搜尋查得到，
+結果標為 `capture_review: UNREVIEWED`、`authority: none`；不進主動喚回或動作提醒。
+
+發布仍須通過既有的內容、作者、範圍與正文綁定審核，不能只靠句型、改 `verified: true`
+或搬檔轉正。兩個宿主共用 transcript 增量擷取入口，包含真人 queued 訊息；工具結果與
+壓縮摘要不算 owner 發言。Codex 的非互動 exec 工作階段不捕捉使用者事件。詳見[規則來源政策](docs/RULE_PROVENANCE.md)。
 
 `verified: false` 的卡不是任何東西的依據：Stop 決策閘與寫檔閘讀的都是宣告
 `decision_key` 的卡，捕捉卡從來不宣告這個。
@@ -112,7 +112,7 @@ UserPromptSubmit 只端卡片。細節與量測見 `docs/FAILURE_MODES.md` §32 
 
 傷疤是由實際事故產生的規則：一個 `incident`（哪次踩到）加上可執行的 `advice`（改走哪條路）。多數卡片是被讀回一個回合的內容，什麼都不拒絕。
 
-`forbidden` 樣式找出 owner 裁定過不能說的話；`require_when` 配 `require_text` 找出缺少指定證據的宣稱。Stop 對這些結果只提醒。明確的動作守衛以 `guard_tool` 配 `guard_all_of`，在工具呼叫文字同時含有卡片指名的每個字面片段時，依 `on_hit` 設定拒絕或提醒；沒有正則、不解析 shell、不猜指令的意思。
+卡片也可以拒絕，形式有三種而且都很窄。`forbidden` 樣式讓回合在說出 owner 裁定過不能說的話時結束不了；`require_when` 配 `require_text` 讓「宣稱」在缺了該附的證據時結束不了；`guard_tool` 配 `guard_all_of` 在一次工具呼叫的文字**同時含有卡片指名的每一個字面片段**時拒絕它——沒有正則、不解析 shell、不猜指令的意思。
 
 最後這一項 2026-09-09 曾被移除，2026-09-16 恢復：當初移除的前提（交給宿主原生規則）實測不成立——Claude 的 Bash 權限樣式是位置比對、沒有 AND 運算子，九類危險裡四類搬得過去、五類根本寫不出來。字面連言會往「多擋」的方向偏，那是安全的方向；它是**防止重犯已經記錄過的錯誤，不是安全邊界**。同一個指令換個等價寫法就過得去，這是設計上接受的。
 
@@ -132,7 +132,7 @@ UserPromptSubmit 只端卡片。細節與量測見 `docs/FAILURE_MODES.md` §32 
 
 ```text
 HOSTS: claude, codex
-SHIM RESOLUTION: PASS 5/5 repo_root=C:\path\to\epitype
+SHIM RESOLUTION: PASS 5/5 repo_root=C:\Epitype\repo
 REGISTRATION claude: PASS 6/6
 REGISTRATION codex: PASS 6/6
 HOOK SessionStart: PASS (515 ms)
@@ -209,13 +209,12 @@ epitype search recall "自然語言提示" --vault C:\path\to\vault
 | `epitype doctor [--home HOME] [--dry-run] [--clear-shim-status]` | 對已安裝的 hook 註冊與 shim 執行做合成體檢；安裝後或懷疑哪裡壞了時執行。 |
 | `epitype dream [vaults...] [--since SINCE] [--dry-run] [--scheduled] [--json]` | 唯讀離線整理盤點（缺別名、卡片 lint 結果、殭屍待辦、待審草稿、老化事件卡，以及未登記的口袋庫、草稿老化、混雜卡拆卡候選、超過設定上限的檔案、沒有決策卡承接的 owner 原話、與規則卡重組結果不一致的生成塊，以及把 owner 事件、閘門擋下與考題失敗對齊到卡上的檢討包），整理成一份編號審核包；本身不套用任何建議。排程模式是 config 的 `dream.mode`——`piggyback`（預設：開場時起一個脫鉤背景程序）、`nightly`（系統排程）、`off`；用 `epitype install --dream {piggyback,nightly,off} [--at HH:MM]` 切換（nightly 預設 `03:30`）。 |
 | `epitype gates <vault> [--since Nd\|YYYY-MM-DD] [--json] [--by kind\|decision\|session\|day]` | 把 `_GATE_LOG.jsonl` 整理成閘門實際擋下什麼的報告，例如 `epitype gates C:\path\to\vault --since 2d`。 |
-| `epitype cards <vault> [--strict] [--verbose] [--deep] [--json] [--fix-dates [--dry-run]]` | 依必填欄位檢查記憶卡。`--deep` 另加庫層級檢查：同一個 `decision_key` 只有一張現行卡、取代鏈完整、每張納管卡都在生成目錄與搜尋索引裡。`--fix-dates` 是唯一會寫檔的旗標：把推得的日期補成一行 `last_verified_at:`；先用 `--fix-dates --dry-run` 預覽會寫什麼。 |
+| `epitype cards <vault> [--strict] [--verbose] [--deep] [--json] [--refresh-cache] [--fix-dates [--dry-run]]` | 依必填欄位檢查記憶卡。`--deep` 另加庫層級檢查：同一個 `decision_key` 只有一張現行卡、取代鏈完整、每張納管卡都在生成目錄與搜尋索引裡。`--refresh-cache` 完整執行逐卡與範例檢查，寫入 `<vault>/.epitype/card-lint-result.json`；不能搭配 `--deep` 或 `--fix-dates`。開場只讀這份狀態；輸入、驗證版本或 UTC 日期改變（最長 24 小時）即失效，不在工作對話派修卡或補別名任務。規則實際使用端仍驗證現行卡片。`--fix-dates` 把推得的日期補成一行 `last_verified_at:`；先用 `--fix-dates --dry-run` 預覽會寫什麼。 |
 | `epitype dupes [vaults...] [--json] [--threshold N]` | 用字元片段與欄位偵測跨庫近重複候選；預設採共用的設定庫清單、門檻 0.35。每次寫入治理庫 `_drafts/duplicates/YYYYMMDD.md` 和同名 JSON；`--json` 另讓標準輸出採 JSON。夢在目錄重生後寫相同報告（`--dry-run` 不寫）。列出機器檢查欄位、owner 引文、成對相似度及建議保留卡；主導 AI 依 owner 規則處理，Epitype 不改卡或退役卡。語意改寫仍易漏抓，校準結果見 `docs/dupes-calibration.md`。 |
 | `epitype views <vaults...> [--force] [--json]` | 依卡片欄位重生可瀏覽的目錄：`_views/current.md`（現用卡，含完整現行決策清單）與 `_views/history/closed.md`（已結案專案與已取代決策）。永遠不寫 `MEMORY.md`；輸入指紋沒變就不重寫；同庫並行有鎖。說明見 [四個閱讀層級](docs/ARCHITECTURE.md#four-reading-levels)。 |
-| `epitype core-gen <vaults...> --out FILE [--cap-bytes N] [--dry-run] [--check] [--json]` | 由 `type: rule` 卡組裝常駐核心塊：`floor` 依 `order` 編號、`resident` 依 `section` 分小節、只給單一宿主的卡另立宿主區，每張卡核准過的 `text` 逐位元組照抄，並在庫內寫一份核准包。組出來超過上限、或生成層的卡缺 `approved_by`／`approved_at` 時拒絕寫出（回非零）。`--check` 只比對不寫檔，供漂移稽核使用。說明見 [核心生成](docs/ARCHITECTURE.md#core-generation-rule-cards--the-resident-block)。 |
+| `epitype core-gen <vaults...> --out FILE [--cap-bytes N] [--dry-run] [--check] [--json]` | 由 `type: rule` 卡組裝常駐核心塊：`floor` 依 `order` 編號、`resident` 依 `section` 分小節、單一宿主的卡另立宿主區，核准的 `text` 逐位元組照抄，另寫核准包。超過大小目標會提醒並保留完整規則；生成層的卡缺 `approved_by`／`approved_at` 仍拒寫。`--check` 只比對不寫檔。說明見 [核心生成](docs/ARCHITECTURE.md#core-generation-rule-cards--the-resident-block)。 |
 | `epitype aliases {export,apply}` | `export` 把缺別名的卡片列成 JSON 工作清單；`apply` 把審核過的 `suggested` 別名寫回卡片，只新增不刪改。 |
 | `epitype search {build,query,recall}` | 建立本機 FTS 索引，並用關鍵詞或自然語言查詢；詳見上方〈搜尋本機 vault〉。 |
-| `epitype owner-index {build,update,find}` | 增量建立使用者輸入的全文索引，保留來源位元組位置；搜尋結果僅供定位，不代表已核實的決策。詳見 [Owner input index](docs/OWNER_INDEX.md)。 |
 
 ### 維護／批次
 
@@ -226,9 +225,9 @@ epitype search recall "自然語言提示" --vault C:\path\to\vault
 | `epitype capture-route <vault> [--audit] [--apply] [--home HOME] [--json]` | 用落點規則盤點一個庫裡自動捕捉的事件卡：卡屬於它 `cwd` 指到的專案庫，所以治理庫裡其實屬於別的庫的卡會列成 `MISROUTED <卡> -> <庫>`。`--audit` 唯讀；`--apply` 才真的搬（`os.replace`、同名加 `-2`、永不刪），並在卡的正文補一行歸戶註記。 |
 | `epitype harvest [--inventory] [--docs DOCS] [--since SINCE] [--drafts-only] [--reevaluate DIR [--apply]] [--quarantine-drops [DIR]]` | 零模型回放捕捉規則到歷史 transcript 與文件，做第一次大整理的補課；也能用現行規則重新評斷草稿或 vault 自己的事件卡。 `--drafts-only` 時，找到的東西一律留在待審草稿區。 |
 | `epitype token-meter [rollout] [--selftest]` | 讀 Codex rollout JSONL，印出最後一筆當前與累計 token 用量對照視窗大小。 |
-| `epitype context-meter calibrate [--root DIR]`／`status [--transcript PATH]` | Claude Code 用量計：`calibrate` 是唯讀報告，列出近 30 天自動壓縮最近 5 筆的中位數、樣本數與時間範圍，不寫任何東西——門檻只從這台機器實際的自動壓縮學，首次提醒要等第一次自動壓縮之後；`status` 印目前門檻、來源與（給 transcript 時）當前用量落在哪一段（Codex rollout 則印 Codex 的用量、壓縮點與提醒點）；`codex-calibrate --limit N --hard-cap N` 唯讀重播 Codex rollout，報告每個候選餘裕下，有多少次自動壓縮能提早至少一次模型取樣收到提醒。 |
+| `epitype context-meter calibrate [--root DIR]`／`status [--transcript PATH]` | Claude Code 用量計：`calibrate` 是唯讀報告，列出近 30 天自動壓縮最近 5 筆的中位數、樣本數與時間範圍，不寫任何東西——未設定 token 視窗時，門檻從這台機器實際的自動壓縮學；已設定視窗時可直接計算，並參考同視窗的實測值；`status` 印目前門檻、來源與（給 transcript 時）當前用量落在哪一段（Codex rollout 則印 Codex 的用量、壓縮點與提醒點）；`codex-calibrate --limit N --hard-cap N` 唯讀重播 Codex rollout，報告每個候選餘裕下，有多少次自動壓縮能提早至少一次模型取樣收到提醒。 |
 | `epitype lifecycle --session SESSION_ID --json` | 唯讀查本場瀏覽器資源紀錄；`pending` 列出關閉尚未驗證的資源。 |
-| `epitype starter [--list\|--remove\|--dry-run]` | 加入五張通用起手卡、列出狀態，或只移除仍未修改的起手卡。 |
+| `epitype starter [--list\|--remove\|--dry-run]` | 建立五張待審 AI 起手範本、列出狀態，或只移除仍未修改的起手卡。 |
 | `epitype scar-census build` | 建立四層傷疤普查的機器生成視圖。 |
 | `epitype compact-map build` | 建立有界的壓縮復原地圖，與 `PreCompact` 每場自動寫的是同一種。 |
 | `epitype source SOURCE.jsonl [--find TEXT] [--role user\|assistant\|all] [--line N] [--offset BYTES] [--limit 1..8]` | 唯讀查原始訊息，列出角色、實體行號、雜湊及截斷／涵蓋範圍。指定 offset 時行號相對該位元位置。逐字查找不等於現行裁定或前提已受證據支持。 |
@@ -247,7 +246,7 @@ python tests/privacy_lint.py
 python exam/exam_runner.py --strict
 ```
 
-`tests/run_all.py` 執行元件 selftest，涵蓋核心工具、hook adapter、套件介面、安裝器、筆試引擎與隱私閘。repo 內的筆試題庫是小型合成樣本。GitHub 發行工作流程執行發行檢查；本機量測與私人題庫不包含在本 repo。
+`tests/run_all.py` 執行元件 selftest，涵蓋核心工具、hook adapter、套件介面、安裝器、筆試引擎與隱私閘。repo 內的筆試題庫是小型合成樣本。公開測試使用合成資料；本機實測與私人題庫不包含在本 repo。
 
 這些結果是防回歸證據，不代表未來每個 host 版本或每一種記憶失效都已涵蓋。
 
@@ -277,9 +276,9 @@ HTTP 客戶端，也沒有任何回傳、帳號或金鑰。卡片是你自己目
 ## 跟別的工具怎麼分
 
 - **[claude-mem](https://github.com/thedotmack/claude-mem)** 把對話摘要起來，讓代理記得更多。
-  Epitype 保存有出處的裁定，執行查核並提供提醒。
+  Epitype 保管現行裁定，用來檢查寫入內容；回覆命中違反時記錄並在下一輪提醒。
 - **[claudekit](https://github.com/carlrannaberg/claudekit)** 這類掛鉤工具箱給你零件自己組。
-  Epitype 把卡片接到喚回、查核提醒與明確的動作守衛。
+  Epitype 把卡片接到按需喚回、寫入檢查與提醒。
 - **CLAUDE.md／AGENTS.md 範本包**是給代理更多字讀。Epitype 從你的規則卡生成那個常駐區塊，
   然後在回合結束時去查那條規則有沒有真的守住。
 
@@ -289,12 +288,14 @@ HTTP 客戶端，也沒有任何回傳、帳號或金鑰。卡片是你自己目
 
 - hook 只能治理 host 有提供的事件與工具；直接讀檔不會經過 Epitype 的現行決定過濾。
 - 執行時間與輸出上限要求 Epitype 選擇內容，不會在每個 prompt 塞入整座 vault。
-- 流程查核與 Stop 只提醒；明確的動作守衛與保留的安全檢查可以拒絕命中的工具呼叫。Epitype 不是完整安全邊界，不可逆動作的權限由宿主負責；卡片格式有誤時 fail open。
+- 一般流程查核只提供提醒；明確的動作守衛與保留的安全檢查可以拒絕工具呼叫。回合結束檢查只記錄並在後續提問提醒，不撤回回覆。等價改寫可能避開字面比對；不可逆動作由宿主原生規則負責。卡片格式有誤時會 fail open，不接管 host。
 - 目前測過的 host 邊界是 Claude Code 與 Codex；host 升級後仍需重新做整合驗證。
 - 隨箱測試使用合成資料，驗的是行為與失敗處理，不是長期實地成效。
 
 ## 文件
 
+- [文件入口](docs/INDEX.md)：公開使用指南與參考資料。
+- [可參考的 GitHub 專案](docs/REPOSITORY_REFERENCES.md)：適用性、成本與採用情況。
 - [架構說明](docs/ARCHITECTURE.md)：記憶分層、四條檢索路、決策卡、傷疤生命週期與權威規則。
 - [瀏覽器資源查漏](docs/CONTROL_LIFECYCLE.md)：Epitype 記錄、提醒及保留未驗證狀態的範圍。
 - [失敗模式](docs/FAILURE_MODES.md)：病象、對治與驗證邊界。
@@ -302,4 +303,5 @@ HTTP 客戶端，也沒有任何回傳、帳號或金鑰。卡片是你自己目
 
 ## 專案狀態
 
-原始碼版本為 1.10.0；實際發布狀態見上方 GitHub release 與 PyPI 標章。發布時機依一批修正完成的時間決定，沒有固定日期。
+已發布版本見 [GitHub Releases](https://github.com/leavemagic-cyber/epitype/releases)。
+本機尚未發布的修正記在 [CHANGELOG](CHANGELOG.md) 與上方日期明確的實測紀錄；程式合入本機與發布套件分開記錄。

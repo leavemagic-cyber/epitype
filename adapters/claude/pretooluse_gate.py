@@ -20,7 +20,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from epitype import context_meter
+from epitype import capture_route, context_meter, hook_context
 from epitype import control_lifecycle
 from epitype import memspec
 from epitype import patch_envelope
@@ -124,6 +124,8 @@ def _sweep_notice_markers(root, now, keep=None):
 
 def _notice_marker(session_id, text):
     """True the first time this session sees this notice; False afterwards."""
+    if not session_id:
+        return True
     # 用到才載入：hashlib 要 6 ms，絕大多數呼叫走不到這裡。
     import hashlib
 
@@ -609,7 +611,8 @@ def _incident_line(line):
     return any(hit.start() == start for hit in hits)
 
 
-def _recurrence_review(card, target, additions, prospective, patch, started_at, session_id):
+def _recurrence_review(card, target, additions, prospective, patch, started_at, session_id,
+                       context_id=None):
     """Deny value when this write narrates a recurrence into a behaviour card that it
     leaves exactly as unable to block as before; None otherwise (docs/FAILURE_MODES.md
     §45). `card` is the (vault, relative path) the target already resolved to; `patch`
@@ -694,7 +697,7 @@ def _recurrence_review(card, target, additions, prospective, patch, started_at, 
             _append_recurrence_allow, vault, memspec.RECURRENCE_GATE_OUTCOME_ARMING,
             relative, target, started_at, session_id)
         return None
-    if not _write_marker(session_id, memspec.RECURRENCE_GATE_RULE, target, new_text):
+    if not _write_marker(context_id, memspec.RECURRENCE_GATE_RULE, target, new_text):
         _best_effort_audit(
             _append_recurrence_allow, vault, memspec.RECURRENCE_GATE_OUTCOME_REPEAT,
             relative, target, started_at, session_id)
@@ -729,6 +732,22 @@ def _recurrence_review(card, target, additions, prospective, patch, started_at, 
 _Guard = namedtuple("_Guard", "card tool substrings advice path requires unless when write_check advise_tool advise_fragments advise_text sequence audience on_hit scope_reference source_note", defaults=((), "", "note", (), ""))
 
 
+_GUARD_FIELDS = (memspec.ACTION_GUARD_TOOL_FIELD, 'advise_tool', 'require_tool_before', memspec.WRITE_CHECK_FIELD)
+
+
+def _guard_candidate(path):
+    """Locate declarations only; tool calls already validate positive sources.
+
+    Unreadable/malformed cards remain candidates so discovery cannot turn a
+    failed read into a cached claim that no guard exists.
+    """
+    try:
+        fields, problem = memspec.frontmatter_text(Path(path).read_text(encoding='utf-8-sig'))
+    except (OSError, UnicodeError):
+        return True
+    return True if problem or any(key in fields for key in _GUARD_FIELDS) else None
+
+
 def _read_guard(path):
     """One card's action guard, a defect string, or None when the card declares none.
 
@@ -747,36 +766,34 @@ def _read_guard(path):
     fields, problem = memspec.frontmatter_text(card_text)
     if problem:
         return f"[{path.name}] guard source INVALID: {problem}"
-    if not any(key in fields for key in (
-            memspec.ACTION_GUARD_TOOL_FIELD, "advise_tool", "require_tool_before", memspec.WRITE_CHECK_FIELD)):
+    if not any(key in fields for key in _GUARD_FIELDS):
         return None
     try:
         # An unreadable original conversation leaves the card UNVERIFIED; the
         # caller then demotes block to note, so it must not drop the guard here.
         projected = rule_pipeline.projection(
             fields, path, legacy_text=fields.get("guard_advice") or fields.get("description", ""),
-            card_text=card_text, allow_unavailable_sources=True)
+            card_text=card_text, allow_unavailable_sources=True, allow_deferred=True)
     except (ValueError, OSError, UnicodeError) as exc:
         return f"[{path.name}] guard source INVALID: {exc}"
-    if projected["expired"]:
+    if projected["expired"] or not memspec.card_is_current(fields):
         return None
     if fields.get(memspec.DECISION_STATUS_FIELD, "").strip() in memspec.STOP_GATE_SILENT_STATUSES:
         return None
 
     def finish(entry):
         # Advice and its authority always come from this same fresh card read.
-        rendered = rule_pipeline.render_projection(projected, card_path=path)
-        rendered += "\n" + memspec.RULE_SOURCE_AUTHOR_LABEL + projected["authorship"]
+        rendered = " ".join(projected["text"].split())
         entry["source_scope"] = projected["document"].get("scope")
         entry["source_status"] = projected["provenance"]["status"]
-        entry["source_render"] = rendered
         entry["source_issues"] = projected["provenance"].get("issues", [])
+        entry["source_blocking_basis"] = projected["provenance"].get("blocking_basis", False)
         # Explicit card demotion leaves unrelated retained safety guards unchanged.
         entry["on_hit"] = fields.get("on_hit", "note").strip().casefold()
-        if projected['text'].strip():
-            entry["advice"] = "\n".join(filter(None, (entry.get("advice", ""), rendered)))
+        entry["advice"] = " ".join(str(entry.get("advice") or rendered).split())
         if entry.get("advise_text"):
-            entry["advise_text"] += "\n" + rendered
+            entry["advise_text"] = " ".join(entry["advise_text"].split())
+        entry["source_render"] = entry.get("advise_text") or entry["advice"]
         return entry
 
     def one_line(value):
@@ -965,25 +982,11 @@ def _guard_cache(vault):
 
 
 def warm_guard_cache(vaults, started_at, deadline=None):
-    """Read every card's guard status once, inside `deadline` (a time.monotonic() cap).
+    """Discover only new/changed cards, bounded by the startup segment deadline.
 
-    A tool call may only re-read a bounded slice of a vault, so on a cold cache a
-    guard sitting past that slice is not enforced yet — the gate under-enforces
-    silently, which is the failure this whole mechanism exists to remove. SessionStart
-    has budget a tool call does not, so it pays the discovery cost once per session
-    and every later call reads a warm cache.
-
-    Warming is pure optimisation, so the deadline is a hard stop, checked between
-    vaults and between cards inside a vault. A truncated pass writes nothing at all —
-    the cache is all-or-nothing, so a vault that cannot be walked inside the deadline
-    starts cold again next session and this segment buys nothing there (measured
-    2026-09-22: the 463-card governance vault finishes in 1.02 s, so it does converge
-    on this machine). Truncating changes how fast the cache finishes warming, never
-    whether a guard is enforced — the gate itself reads no less and skips nothing,
-    because what it never wrote it also never claims to know.
-    Without a deadline the segment takes its own default budget rather than running
-    until the host's timeout: `started_at` bounds the host's patience, not this
-    segment's share of it.
+    Both positive and negative locators survive unchanged. Partial discovery is
+    saved with per-card stamps, so the next pass resumes rather than repeating
+    the same prefix. Actual tool calls still verify current positive sources.
     """
     if deadline is None:
         deadline = time.monotonic() + memspec.SESSIONSTART_WARM_GUARD_BUDGET_SECONDS
@@ -991,7 +994,7 @@ def warm_guard_cache(vaults, started_at, deadline=None):
         if expired(started_at) or time.monotonic() >= deadline:
             return
         try:
-            _guards(vault, started_at, [], cap=_WARM_CAP, deadline=deadline)
+            _guards(vault, started_at, [], cap=_WARM_CAP, deadline=deadline, warm_only=True)
         except Exception:
             continue
 
@@ -999,11 +1002,11 @@ def warm_guard_cache(vaults, started_at, deadline=None):
 _WARM_CAP = 1 << 30
 # 欄位形狀增加 write_check；版本不對就整份重讀。
 # 6：包在 `metadata:` 底下的守衛欄位照頂層讀，舊快取把那些卡記成「沒有守衛」。
-_GUARD_CACHE_VERSION = 8
+_GUARD_CACHE_VERSION = 10
 
 
 def _guards(vault, started_at, defects, cap=None, deadline=None, *, event=None, advisories=None,
-            match_first=False):
+            match_first=False, warm_only=False):
     """Every usable guard in one vault, discovered through a manifest cache.
 
     The cache locates candidates; it never supplies executable evidence. Every
@@ -1064,22 +1067,25 @@ def _guards(vault, started_at, defects, cap=None, deadline=None, *, event=None, 
     negatives = sorted(key for key in paths if key in cached and key not in changed and not known.get(key))
     rotated = [key for key in negatives if key > cursor] + [key for key in negatives if key <= cursor]
     budget = memspec.ACTION_GUARD_MAX_CARDS_PER_VAULT if cap is None else cap
-    positives = sorted(key for key, value in known.items() if value)
-    discovery = [key for key in changed + rotated if key not in positives][:budget]
+    positives = [] if warm_only else sorted(key for key, value in known.items() if value)
+    discovery = [key for key in changed + ([] if warm_only else rotated) if key not in positives][:budget]
     fresh = {}
     for card_path in positives + discovery:
         if timed_out():
+            if warm_only:
+                break  # Keep completed entries; unfinished entries retain old stamps.
             timeout_notice()
             return []
         try:
-            known[card_path] = _read_guard(paths[card_path])
+            known[card_path] = (_guard_candidate(paths[card_path]) if warm_only
+                                else _read_guard(paths[card_path]))
         except Exception as exc:
             known[card_path] = f"[{card_path}] guard source UNVERIFIED: fresh read failed ({type(exc).__name__})"
         fresh[card_path] = known[card_path]
         verified[card_path] = manifest[card_path]
         if card_path in negatives:
             cursor = card_path
-    if timed_out():
+    if timed_out() and not warm_only:
         timeout_notice()
         return []
     if len([key for key in changed if key not in positives]) > len(discovery):
@@ -1108,6 +1114,8 @@ def _guards(vault, started_at, defects, cap=None, deadline=None, *, event=None, 
             except OSError:
                 pass
 
+    if warm_only:
+        return []
     found = []
     for card_path in sorted(fresh):
         entry = fresh[card_path]
@@ -1125,7 +1133,12 @@ def _guards(vault, started_at, defects, cap=None, deadline=None, *, event=None, 
             on_hit = entry.get("on_hit", "note")
             advice = entry.get("advice", "")
             source_note = ""
-            if entry.get("source_status") != "VERIFIED":
+            if (on_hit == "block" and entry.get("source_status") in ("VERIFIED", "REVIEWED")
+                    and not entry.get("source_blocking_basis", False)):
+                on_hit = "note"
+                advice = "\n".join(filter(None, (advice,
+                    "AI 程序僅作提醒：尚無使用者採納或具體錯誤檢查依據。")))
+            if entry.get("source_status") not in ("VERIFIED", "REVIEWED"):
                 source_note = f"[{card_path}] guard source UNVERIFIED: " + "; ".join(entry.get("source_issues") or ["legacy source not verified"])
                 if not match_first:
                     defects.append(source_note)
@@ -1216,7 +1229,89 @@ def _action_text(tool_input):
     return "\n".join(parts)[: memspec.ACTION_GUARD_HAYSTACK_MAX_CHARS]
 
 
-def _guard_review(event, tool_name, tool_input, config, started_at, defects, advisories=None):
+def _guard_condition(name, fields, tool_name, defects):
+    """Computed conditions are opt-in card fields, never guesses from reminder wording."""
+    if name == "dispatch_model_unresolved":
+        if not memspec.action_guard_tool_matches("Task", tool_name):
+            return "false"
+        inherited = tool_name.casefold() == "spawn_agent" or bool(
+            str(fields.get("subagent_type") or "").strip())
+        return str(not (inherited or str(fields.get("model") or "").strip())).lower()
+    if name == "shell_unquoted_heredoc_backslash":
+        shell = str(fields.get("shell") or "").replace("\\", "/").rsplit("/", 1)[-1].casefold()
+        if tool_name.casefold() != "bash" and shell not in ("bash", "bash.exe", "sh", "sh.exe"):
+            return "false"
+        command = fields.get("command") or fields.get("cmd") or ""
+        if not isinstance(command, str) or "<<" not in command or "\\" not in command:
+            return "false"
+        try:
+            return str(shell_text_exec.has_unquoted_heredoc_backslash(command)).lower()
+        except shell_text_exec.ScanLimitExceeded as exc:
+            defects.append(f"heredoc condition unverified: {exc}")
+            return "unverified"
+    return str(fields.get(name, "") or "").strip()
+
+
+def _jsonl_delete_matches(card, fields, tool_name, defects):
+    """Narrow the two legacy JSONL reminders to an invoked deletion and its operands."""
+    if card not in ("scar-keep-diagnostic-jsonl-20260916",
+                    "scar-keep-diagnostic-jsonl-ps-20260916"):
+        return True
+    command = fields.get("command") or fields.get("cmd") or ""
+    shell = str(fields.get("shell") or "").replace("\\", "/").rsplit("/", 1)[-1].casefold()
+    powershell = (shell in ("powershell", "powershell.exe", "pwsh", "pwsh.exe")
+                  or tool_name.casefold().rsplit('.', 1)[-1] in ('powershell', 'pwsh'))
+    # Codex exec_command defaults to the Windows host shell; Bash remains POSIX.
+    powershell = powershell or (tool_name.casefold().rsplit(".", 1)[-1] == "exec_command"
+                               and not shell)
+    if ("-ps-" in card) != powershell:
+        return False
+    try:
+        if powershell:
+            # Here-strings are data even when their body resembles a command list.
+            command = re.sub(r"(?ms)@(['\"])\r?\n.*?^\1@[^\S\n]*(?:\r?\n|$)", " ", command)
+            tokens = re.findall(r"'(?:''|[^'])*'|\"(?:`.|[^\"`])*\"|#[^\n]*|[;|\n&]|[^\s;|&,'\"]+", command)
+            commands, words = [], []
+            for token in tokens:
+                if token.startswith('#'):
+                    continue
+                if token in (';', '|', '\n', '&'):
+                    if words:
+                        commands.append(words)
+                    words = []
+                else:
+                    words.append(token.strip("'\""))
+            if words:
+                commands.append(words)
+        else:
+            commands = shell_text_exec.simple_commands(command)
+    except shell_text_exec.ScanLimitExceeded as exc:
+        defects.append(f"JSONL deletion condition unverified: {exc}")
+        return False
+    expected = "remove-item" if "-ps-" in card else "rm"
+    for words in commands:
+        program = words[0].replace("\\", "/").rsplit("/", 1)[-1].casefold()
+        if program.removesuffix('.exe') != expected:
+            continue
+        if any(w.casefold() in ('--help', '--version', '-whatif', '-whatif:$true') for w in words[1:]):
+            continue
+        skip_value = False
+        for operand in words[1:]:
+            if skip_value:
+                skip_value = False
+                continue
+            if powershell and operand.casefold() in ('-exclude', '-erroraction', '-warningaction',
+                                                     '-informationaction', '-errorvariable',
+                                                     '-warningvariable', '-outvariable'):
+                skip_value = True
+                continue
+            if not operand.startswith('-') and operand.casefold().endswith('.jsonl'):
+                return True
+    return False
+
+
+def _guard_review(event, tool_name, tool_input, config, started_at, defects, advisories=None,
+                  delivery_claims=None):
     """(deny value, ()) when a scar card's fragments all appear in this call.
 
     Owner 2026-09-16 lifted §34's "cards may not carry an action condition". What is
@@ -1300,13 +1395,15 @@ def _guard_review(event, tool_name, tool_input, config, started_at, defects, adv
             ):
                 continue
             fields = tool_input if isinstance(tool_input, dict) else {}
+            if not _jsonl_delete_matches(guard.card, fields, tool_name, defects):
+                continue
             if any(
                 str(fields.get(name, "")).strip() == value for name, value in guard.unless
             ):
                 continue
             # 欄位組合型的條件：全部成立才算命中。一組不成立就整張卡跳過，不是「部分命中」。
             if guard.when and not all(
-                str(fields.get(name, "") or "").strip().casefold() in values
+                _guard_condition(name, fields, folded_tool, defects).casefold() in values
                 for name, values in guard.when
             ):
                 continue
@@ -1371,6 +1468,8 @@ def _guard_review(event, tool_name, tool_input, config, started_at, defects, adv
                     defects.append(memspec.ACTION_GUARD_NOTE.format(advice=reason))
                 continue
             # Explicit retained safety cards continue to return deny.
+            if delivery_claims is not None:
+                delivery_claims.append((hook_context.identity(event), None, guard.path, vault))
             return _deny_value(reason)
     return None
 
@@ -1831,7 +1930,7 @@ for exact source validation; writing a draft is not publishing verified authorit
     if found is not None:
         vault, decision_key, reason = found
         if not _write_marker(
-            session_id, memspec.WRITE_GATE_FORBIDDEN_RULE, target, "\0".join(additions)
+            hook_context.identity(event), memspec.WRITE_GATE_FORBIDDEN_RULE, target, "\0".join(additions)
         ):
             return None, notices
         _best_effort_audit(
@@ -1853,7 +1952,8 @@ for exact source validation; writing a draft is not publishing verified authorit
     # 這條自己壞掉，不能連帶讓卡片契約那條也不判，所以單獨接住。
     try:
         recurrence = _recurrence_review(
-            card, target, additions, prospective, patch, started_at, session_id
+            card, target, additions, prospective, patch, started_at, session_id,
+            context_id=hook_context.identity(event)
         )
     except Exception:
         recurrence = None
@@ -1869,7 +1969,7 @@ for exact source validation; writing a draft is not publishing verified authorit
         if advice:
             notices.append(advice)
         return None, notices
-    if not _write_marker(session_id, memspec.WRITE_GATE_CARD_RULE, target, prospective):
+    if not _write_marker(hook_context.identity(event), memspec.WRITE_GATE_CARD_RULE, target, prospective):
         return None, notices
     _best_effort_audit(
         _append_write_block,
@@ -2100,8 +2200,8 @@ def _context_meter_line(event, config, started_at):
     子代理的呼叫由 context_meter.notice 擋掉——提醒被子代理吃掉，主線就永遠收不到。"""
     if config is None or expired(started_at):
         return None
-    session_id = event.get("session_id")
-    if not isinstance(session_id, str) or not session_id:
+    session_id = hook_context.identity(event)
+    if not session_id:
         return None
     try:
         directory = recall_marker_directory(session_id)
@@ -2244,9 +2344,9 @@ def _midturn_language_line(event, config, started_at, fits):
     提醒一次；外文字母還不夠判的段留著，跟下一段合起來量。任何例外都不輸出。"""
     try:
         if (config is None or started_at is None or expired(started_at)
-                or event.get("agent_id") or event.get("agentId")):
+                or hook_context.is_subagent(event)):
             return None
-        session_id = event.get("session_id")
+        session_id = hook_context.identity(event)
         transcript = event.get("transcript_path")
         if not (isinstance(session_id, str) and session_id
                 and isinstance(transcript, str) and transcript):
@@ -2297,12 +2397,9 @@ def _midturn_language_line(event, config, started_at, fits):
 
 def _finish_advice(claims, emitted):
     import hashlib
-    from epitype import rule_context
     for session, marker, path, vault in claims:
         try:
-            if emitted:
-                rule_context.record(vault, session, path.relative_to(vault))
-            else:
+            if not emitted and marker is not None:
                 digest = hashlib.sha256(marker.encode('utf-8')).hexdigest()[:16]
                 (notice_marker_directory(session) / digest).unlink(missing_ok=True)
         except (OSError, ValueError):
@@ -2339,7 +2436,7 @@ def _allow_context(event, notices=(), config=None, started_at=None, meter_claims
     whose output then fails is released, so the line is tried again on the next call.
     `meter_claims` is None for in-process callers, which get no meter line."""
     lines = []
-    session_id = event.get("session_id")
+    session_id = hook_context.identity(event)
     target = _notice_target(event)
     for notice in list(dict.fromkeys(notices))[: memspec.GATE_DEFECT_MAX_LINES]:
         if _notice_marker(session_id, notice + "\0" + target):
@@ -2356,12 +2453,9 @@ def _allow_context(event, notices=(), config=None, started_at=None, meter_claims
             lines.append(line)
             shown += 1
             try:
-                from epitype import rule_context
                 for vault in resolve_vaults(config, event):
                     if path.resolve().is_relative_to(vault.resolve()):
-                        if advice_claims is None:
-                            rule_context.record(vault, session_id, path.relative_to(vault))
-                        else:
+                        if advice_claims is not None:
                             advice_claims.append((session_id, marker, path, vault))
                         break
             except (OSError, ValueError):
@@ -2446,7 +2540,7 @@ def _waste_review(event, tool_name, tool_input, config, started_at):
     ).hexdigest()[:16]
 
     vault = governance_vault(config, for_write=True)
-    state_path = _read_state_path(vault, event.get("session_id"))
+    state_path = _read_state_path(vault, hook_context.identity(event))
     if state_path is None:
         return None, None
     try:
@@ -2802,15 +2896,19 @@ def _handle_review(event, started_at, defects=None, meter_claims=None, advice_cl
             defects.append(f"write admission UNVERIFIED: expired review failed ({type(exc).__name__}); "
                            "next check: inspect this exact tool call")
             return None
+    from _hook_common import capture_transcript_events
+    capture_transcript_events(config, event, started_at)
     advisories = []
     try:
         guard_value = _guard_review(
-            event, tool_name, event.get("tool_input"), config, started_at, defects, advisories
+            event, tool_name, event.get("tool_input"), config, started_at, defects, advisories,
+            delivery_claims=advice_claims
         )
         for step_tool, step_input in memspec.nested_tool_calls(tool_name, event.get("tool_input")):
             if guard_value is not None:
                 break
-            guard_value = _guard_review(event, step_tool, step_input, config, started_at, defects, advisories)
+            guard_value = _guard_review(event, step_tool, step_input, config, started_at, defects, advisories,
+                                        delivery_claims=advice_claims)
     except Exception as exc:
         defects.append(f"guard source UNVERIFIED: review failed ({type(exc).__name__}); next check: inspect this exact tool call")
         guard_value = None
@@ -2932,6 +3030,7 @@ def _verify_ps_syntax(text, started_at, notices):
         staging.unlink(missing_ok=True)
 
 
+@capture_route.observation_window()
 def _handle(event, started_at, defects=None, meter_claims=None, advice_claims=None):
     notices = [] if defects is None else defects
     prepared = deepcopy(event)
@@ -2964,6 +3063,7 @@ def _selftest():
     from epitype import card_lint
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tests"))
     from rule_source_fixtures import source_bound_card
+    from hook_meter_fixtures import synchronized_meter_hook
     try:
         with tempfile.TemporaryDirectory(prefix="epitype-gate-") as temp_dir:
             root = Path(temp_dir).resolve()
@@ -3252,6 +3352,7 @@ def _selftest():
                                         tool_input["command"] = command.replace(marker, marker + hunk, 1)
                 event = {
                     "session_id": session or f"write-{uuid.uuid4().hex}",
+                    "transcript_path": os.fspath(root / "write-session.jsonl"),
                     "tool_name": tool_name,
                     "tool_input": tool_input,
                     "cwd": os.fspath(write_root),
@@ -3626,7 +3727,7 @@ def _selftest():
                 and noted(bare_write_out, forbidden_note),
             ))
 
-            recurrence_line = "**再犯（2026-09-25，sample-project 台指期休市事故）**：Run 區塊又拆成兩條指令。"
+            recurrence_line = "**再犯（2026-09-25，sample-project 排程停機事故）**：Run 區塊又拆成兩條指令。"
             recurrence_body = "Run 按鈕區塊必須是一條完整的 PowerShell 指令。\n"
 
             def recurrence_card(name, card_type="feedback", extra=""):
@@ -3661,11 +3762,11 @@ def _selftest():
             run_card.write_text(recurrence_card("feedback-run-button"), encoding="utf-8")
             recurrence_denied, recurrence_out = append_incident(run_card)
             checks.append((
-                "往擋不住的 feedback 卡追加「再犯（日期）…」就提醒並放行，提醒寫出三種處理與事故經過不進卡",
+                "追加再犯敘述只提醒並放行；要求查真實路徑與反例，不預設加攔阻",
                 recurrence_denied.returncode == 0
                 and noted(recurrence_out, recurrence_note, "feedback-run-button.md",
-                          memspec.FORBIDDEN_FIELD, memspec.UNENFORCEABLE_FIELD,
-                          "修 Epitype 本身", "不寫進卡片", "台指期休市")
+                          "寫入仍放行", "修 Epitype 本身", "合理反例",
+                          "不預設加攔阻", "不寫進卡片", "排程停機事故")
                 and recurrence_body in run_card.read_text(encoding="utf-8")
                 and recurrence_line not in run_card.read_text(encoding="utf-8"),
             ))
@@ -3675,7 +3776,7 @@ def _selftest():
                     row.get("kind") == "write_note"
                     and row.get("rule") == memspec.RECURRENCE_GATE_RULE
                     and row.get("card_path") == "feedback-run-button.md"
-                    and "台指期" not in json.dumps(row, ensure_ascii=False)
+                    and "排程停機" not in json.dumps(row, ensure_ascii=False)
                     for row in recurrence_rows()
                 ),
             ))
@@ -3706,7 +3807,7 @@ def _selftest():
                     row.get("kind") == memspec.RECURRENCE_GATE_ALLOW_LOG_KIND
                     and row.get("card_path") == "feedback-armed.md"
                     and row.get("outcome") == memspec.RECURRENCE_GATE_OUTCOME_ARMING
-                    and "台指期" not in json.dumps(row, ensure_ascii=False)
+                    and "排程停機" not in json.dumps(row, ensure_ascii=False)
                     for row in recurrence_rows()
                 ),
             ))
@@ -3798,7 +3899,7 @@ def _selftest():
 
             headline = []
             for index, text in enumerate((
-                "**再犯（sample-project 台指期休市事故）**：Run 區塊又拆成兩條指令。",
+                "**再犯（sample-project 排程停機事故）**：Run 區塊又拆成兩條指令。",
                 "## 第二次犯同一件事",
                 "3. **（sample-project）又犯**：同一件事。",
             )):
@@ -4095,7 +4196,7 @@ def _selftest():
                 compact_map.handoff_destination(meter_vault, "meter-sub", meter_transcript))
             by_agent, agent_context = meter_call("meter-sub", agent_id="agent-1")
             agent_left_no_marker = not (
-                recall_marker_directory("meter-sub") / memspec.CONTEXT_METER_MARKER).exists()
+                recall_marker_directory(hook_context.identity({"session_id": "meter-sub", "transcript_path": str(meter_transcript), "agent_id": "agent-1"})) / memspec.CONTEXT_METER_MARKER).exists()
             after_agent, after_context = meter_call("meter-sub")
             checks.append((
                 "a subagent's call says nothing and claims nothing, so the main thread still gets the line",
@@ -4144,7 +4245,7 @@ def _selftest():
                           "model": "gpt-x", "permission_mode": "default", "tool_name": "Bash",
                           "tool_use_id": "call-1", "tool_input": {"command": "echo hi"}}
             race_runs = run_concurrent(
-                Path(__file__), race_event, meter_config, 6, environment=race_env,
+                synchronized_meter_hook(__file__, root, 6), race_event, meter_config, 6, environment=race_env,
                 clock=memspec.HOOK_CLOCK_FROZEN)
             race_line = memspec.CONTEXT_METER_CODEX_NOTICE.format(
                 cur=170, left=40,
@@ -4168,7 +4269,7 @@ def _selftest():
                 and sum(race_line in context_of(out) for _code, out, _err in race_runs) == 1
                 and race_outcomes.count("meter-emitted") == 1
                 and race_outcomes.count("meter-lost") >= 1
-                and (recall_marker_directory("codex-race") / memspec.CONTEXT_METER_MARKER).is_file(),
+                and (recall_marker_directory(hook_context.identity(race_event)) / memspec.CONTEXT_METER_MARKER).is_file(),
             ))
 
             # 搶到卻沒送出去（輸出失敗）：放掉標記、記一行 meter-released，下一次照說。
@@ -4176,7 +4277,7 @@ def _selftest():
             lost_event = {**race_event, "session_id": "codex-unsent", "transcript_path": os.fspath(lost_rollout)}
             run_concurrent(Path(__file__), lost_event, meter_config, 1, environment=lost_env,
                            settle_seconds=0, close_stdout=True, clock=memspec.HOOK_CLOCK_FROZEN)
-            unsent_marker = (recall_marker_directory("codex-unsent") / memspec.CONTEXT_METER_MARKER).exists()
+            unsent_marker = (recall_marker_directory(hook_context.identity(lost_event)) / memspec.CONTEXT_METER_MARKER).exists()
             unsent_outcomes = traced("codex-unsent")
             unsent_retry = run_synthetic(
                 Path(__file__), lost_event, meter_config, environment=lost_env,

@@ -172,7 +172,7 @@ class AdvisoryRegression(unittest.TestCase):
 
     def test_implicit_new_guard_defaults_to_note_explicit_valid_block_survives(self):
         from epitype import rule_context
-        from rule_source_fixtures import source_bound_card
+        from rule_source_fixtures import source_bound_card, owner_bound_card
         path = self.vault / "implicit-guard.md"
         text = ("---\nname: implicit-guard\ndescription: isolated fixture guard\n"
                 "source_agent: codex\nmetadata:\n  type: scar\nguard_tool: Bash\n"
@@ -182,7 +182,7 @@ class AdvisoryRegression(unittest.TestCase):
             case_id="implicit-new-guard"), encoding="utf-8")
         event = pre("implicit", "Bash", {"command": "fixture-command"})
         entry = gate._read_guard(path)
-        self.assertEqual(entry["source_status"], "VERIFIED")
+        self.assertEqual(entry["source_status"], "REVIEWED")
         self.assertEqual(entry["on_hit"], "note")
         self.assertEqual(gate._Guard(*self.guard()[:gate._Guard._fields.index("on_hit")]).on_hit, "note")
         with mock.patch.object(rule_context, "applicability", return_value=("MATCH", "fixture scope")):
@@ -197,11 +197,11 @@ class AdvisoryRegression(unittest.TestCase):
             legacy_entry = {key: value for key, value in entry.items() if key != "on_hit"}
             with mock.patch.object(gate, "_read_guard", return_value=legacy_entry):
                 self.assertEqual(gate._guards(self.vault, time.monotonic(), [], event=event)[0].on_hit, "note")
-            explicit = source_bound_card(text.replace("guard_tool: Bash", "on_hit: block\nguard_tool: Bash"),
+            explicit = owner_bound_card(text.replace("guard_tool: Bash", "on_hit: block\nguard_tool: Bash"),
                 path, source_root=self.root / "sources", case_id="explicit-retained-guard")
             path.write_text(explicit, encoding="utf-8")
             explicit_entry = gate._read_guard(path)
-            self.assertEqual(explicit_entry["source_status"], "VERIFIED")
+            self.assertEqual(explicit_entry["source_status"], "REVIEWED")
             self.assertEqual(explicit_entry["on_hit"], "block")
             self.assertTrue(self.denied(gate._guard_review(event, "Bash", event["tool_input"],
                 self.config, time.monotonic(), [], [])))
@@ -214,7 +214,7 @@ class AdvisoryRegression(unittest.TestCase):
         card.write_text("fixture", encoding="utf-8")
 
         def context(target, advisories=()):
-            event = {"session_id": session, "tool_name": "Write",
+            event = {"session_id": session, "transcript_path": str(self.root / "thread.jsonl"), "tool_name": "Write",
                      "tool_input": {"file_path": str(target), "content": "x"}}
             value = gate._allow_context(event, () if advisories else ["同一句提醒"],
                                         self.config, advisories=advisories)
@@ -274,7 +274,7 @@ class AdvisoryRegression(unittest.TestCase):
             print("BEFORE deny: A15")
         notice = None
         for _ in range(3):
-            value, notice = gate._waste_review({"session_id": "new-read"}, "Read", payload, self.config, time.monotonic())
+            value, notice = gate._waste_review({"session_id": "new-read", "transcript_path": str(self.root / "read.jsonl")}, "Read", payload, self.config, time.monotonic())
         self.changed("A15", value)
         self.assertIn("第 3 次", notice)
         target.write_bytes(b"x" * memspec.READ_WASTE_BIG_FILE_BYTES)

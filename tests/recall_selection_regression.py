@@ -50,12 +50,13 @@ class RecallSelectionRegression(unittest.TestCase):
             instrument.start()
             self.addCleanup(instrument.stop)
 
-    def card(self, vault, name, description="refillneedle", decision=False):
+    def card(self, vault, name, description="refillneedle", decision=False, aliases=()):
         authority = ("decision_key: " + name + "\nstatus: active\n"
                      "current_decision_at: 2026-09-07\ndecided_by: owner-explicit\n"
                      "owner_quote: Keep the synthetic policy\n") if decision else ""
+        topics = 'aliases: [' + ', '.join(aliases) + ']\n' if aliases else ''
         (vault / (name + ".md")).write_text(
-            f"---\nname: {name}\ndescription: {description}\n{authority}---\n",
+            f"---\nname: {name}\ndescription: {description}\n{topics}{authority}---\n",
             encoding="utf-8",
         )
 
@@ -65,11 +66,14 @@ class RecallSelectionRegression(unittest.TestCase):
                 self.card(vault, f"fixture-{index}-{number}")
             memsearch.build_index(vault)
 
-    def invoke(self, session="refill", prompt="refillneedle", cwd=None):
+    def invoke(self, session="refill", prompt="refillneedle", cwd=None, **context):
         output = io.StringIO()
-        event = {"prompt": prompt, "session_id": session}
+        event = {"prompt": prompt, "session_id": session,
+                 "transcript_path": (str(self.root / '.claude/projects/fixture' / (session+'.jsonl'))
+                                     if session else None)}
         if cwd is not None:
             event["cwd"] = cwd
+        event.update(context)
         with patch.object(sys, "stdin", io.StringIO(json.dumps(event))), \
              patch.object(sys, "argv", ["recall"]), \
              patch.object(recall, "_STARTED_AT", time.monotonic()), \
@@ -82,6 +86,37 @@ class RecallSelectionRegression(unittest.TestCase):
     @staticmethod
     def lines(context):
         return [line for line in context.splitlines() if line.startswith("- ")]
+
+    def test_default_turn_does_not_search_but_still_captures(self):
+        self.populate()
+        value = json.loads(self.config.read_text(encoding="utf-8"))
+        value.pop(memspec.CONFIG_PROACTIVE_RECALL_FIELD)
+        self.config.write_text(json.dumps(value), encoding="utf-8")
+        with patch.object(memsearch, "recall_index", side_effect=AssertionError("unexpected proactive search")), \
+             patch("epitype.capture.capture_transcript", return_value=1) as capture, \
+             patch.object(recall, "_capture_event") as fallback:
+            self.assertEqual(self.invoke(prompt="refillneedle"), "")
+            capture.assert_called_once()
+            self.assertEqual(capture.call_args.args[1]["prompt"], "refillneedle")
+            fallback.assert_not_called()
+
+    def test_default_turn_keeps_pending_notes(self):
+        value = json.loads(self.config.read_text(encoding="utf-8"))
+        value.pop(memspec.CONFIG_PROACTIVE_RECALL_FIELD)
+        self.config.write_text(json.dumps(value), encoding="utf-8")
+        with patch.object(memsearch, "recall_index", side_effect=AssertionError("unexpected proactive search")), \
+             patch.object(recall, "peek_notes", return_value=["Keep the current task state"]), \
+             patch.object(recall, "consume_notes") as consume:
+            self.assertIn("Keep the current task state", self.invoke())
+            consume.assert_called_once()
+
+    def test_resident_is_not_proactively_resent_but_remains_searchable(self):
+        self.card(self.vaults[0], "resident", description="residentneedle")
+        path = self.vaults[0] / "resident.md"
+        path.write_text(path.read_text(encoding="utf-8").replace("---\n", "---\nlayer: resident\n", 1), encoding="utf-8")
+        memsearch.build_index(self.vaults[0])
+        self.assertEqual(self.invoke(prompt="residentneedle"), "")
+        self.assertEqual(memsearch.query_index(self.vaults[0], "residentneedle")["count"], 1)
 
     def test_seen_cards_do_not_consume_new_slots(self):
         self.populate()
@@ -132,6 +167,86 @@ class RecallSelectionRegression(unittest.TestCase):
             recall._card_identity("- sameneedle | V1/same.md", {"V1": "C:/vault-a"}),
             recall._card_identity("- sameneedle | V2/same.md", {"V2": "C:/vault-a"}),
         )
+
+    def test_new_matching_body_of_a_delivered_decision_is_not_hidden(self):
+        vault = self.vaults[0]
+        self.card(vault, "mutable-decision", "revisionneedle policy", decision=True)
+        path = vault / "mutable-decision.md"
+        revised_body = "revisionneedle current revised detail."
+        original_body = "Initial unrelated detail.".ljust(len(revised_body))
+        initial = path.read_text(encoding="utf-8") + original_body + "\n"
+        path.write_text(initial, encoding="utf-8")
+        memsearch.build_index(vault)
+        first = self.invoke(session="revision", prompt="revisionneedle")
+        self.assertIn("/mutable-decision.md", first)
+        self.assertNotIn("current revised detail", first)
+        self.assertEqual(self.invoke(session="revision", prompt="revisionneedle"), "")
+
+        before = path.stat()
+        path.write_text(initial.replace(original_body, revised_body), encoding="utf-8")
+        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+        # A same-size, preserved-mtime edit must still be read from the real source.
+        self.assertEqual(path.stat().st_size, before.st_size)
+        updated = self.invoke(session="revision", prompt="revisionneedle")
+        self.assertIn("revisionneedle current revised detail", updated)
+        self.assertEqual(self.invoke(session="revision", prompt="revisionneedle"), "")
+
+    def test_changed_description_is_already_eligible_in_the_same_session(self):
+        vault = self.vaults[0]
+        self.card(vault, "mutable-description", "descriptionneedle previous detail", decision=True)
+        memsearch.build_index(vault)
+        self.assertIn("previous detail", self.invoke(session="description", prompt="descriptionneedle"))
+        self.card(vault, "mutable-description", "descriptionneedle current detail", decision=True)
+        memsearch.build_index(vault)
+        self.assertIn("current detail", self.invoke(session="description", prompt="descriptionneedle"))
+
+    def test_new_prompt_can_load_a_different_part_of_a_delivered_decision(self):
+        vault = self.vaults[0]
+        self.card(vault, "different-passage", "readfirstneedle policy", decision=True)
+        path = vault / "different-passage.md"
+        path.write_text(path.read_text(encoding="utf-8")
+                        + "newtopicneedle detailneedle applies to the current case.\n", encoding="utf-8")
+        memsearch.build_index(vault)
+        first = self.invoke(session="different-passage", prompt="readfirstneedle")
+        self.assertNotIn("applies to the current case", first)
+        second = self.invoke(session="different-passage", prompt="newtopicneedle detailneedle")
+        self.assertIn("newtopicneedle detailneedle applies to the current case", second)
+        self.assertEqual(self.invoke(session="different-passage", prompt="newtopicneedle detailneedle"), "")
+
+    def test_delivered_summary_is_not_downgraded_to_a_new_pointer(self):
+        vault = self.vaults[0]
+        self.card(vault, "summary-budget", "budgetneedle " + "長" * 180, decision=True)
+        memsearch.build_index(vault)
+        self.assertIn("/summary-budget.md", self.invoke(session="summary-budget", prompt="budgetneedle"))
+        common.write_config(self.config, [vault], budget=500)
+        self.assertEqual(self.invoke(session="summary-budget", prompt="budgetneedle"), "")
+
+    def test_updated_decision_body_reaches_the_real_adapter_process(self):
+        vault = self.vaults[0]
+        self.card(vault, "process-decision", "processrevisionneedle policy", decision=True)
+        path = vault / "process-decision.md"
+        initial = path.read_text(encoding="utf-8") + "Initial unrelated detail.\n"
+        path.write_text(initial, encoding="utf-8")
+        memsearch.build_index(vault)
+        temporary = self.root / "process-temp"
+        temporary.mkdir()
+        event = {"prompt": "processrevisionneedle", "session_id": "process-revision",
+                 "transcript_path": str(self.root/'.claude/projects/fixture/process-revision.jsonl')}
+        environment = {name: str(temporary) for name in ("TMPDIR", "TEMP", "TMP")}
+
+        def invoke():
+            result = common.run_synthetic(Path(recall.__file__), event, self.config,
+                                          environment=environment)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return (json.loads(result.stdout).get("hookSpecificOutput", {}).get("additionalContext", "")
+                    if result.stdout.strip() else "")
+
+        self.assertIn("/process-decision.md", invoke())
+        path.write_text(initial.replace("Initial unrelated detail.",
+                                        "processrevisionneedle current body."), encoding="utf-8")
+        memsearch.build_index(vault)
+        self.assertIn("processrevisionneedle current body", invoke())
+        self.assertEqual(invoke(), "")
 
     def test_prompt_recall_reads_relevant_source_words_not_just_the_pointer(self):
         vault = self.vaults[0]
@@ -223,6 +338,18 @@ class RecallSelectionRegression(unittest.TestCase):
         vault.mkdir(parents=True)
         return vault
 
+    def test_unicode_native_project_reference_reaches_actual_recall_output(self):
+        current = self.root/'中文專案'
+        current.mkdir()
+        here = self.native_vault(current)
+        (here.parent/'session.jsonl').write_text(
+            json.dumps({'cwd':str(current)}, ensure_ascii=False)+'\n', encoding='utf-8')
+        self.card(here, 'own-history', 'unicoderecallneedle relevant precedent')
+        memsearch.build_index(here)
+        context = self.invoke(session='unicode-own', prompt='unicoderecallneedle', cwd=str(current))
+        self.assertIn('own-history', context)
+        self.assertIn('relevant precedent', context)
+
     def test_recall_stays_in_this_project_and_the_governance_vault(self):
         # vaults[0] holds the ledger, so it is the governance vault; vaults[1] is another project.
         (self.vaults[0] / memspec.WORK_LEDGER_FILENAME).write_text("# ledger\n", encoding="utf-8")
@@ -239,14 +366,187 @@ class RecallSelectionRegression(unittest.TestCase):
         unscoped = self.invoke(session="unscoped", prompt="scopeneedle")
         self.assertIn("other-project-card", unscoped)  # 沒有 cwd 判斷不出專案，照舊搜全部
 
-    def test_a_card_name_already_shown_from_an_earlier_vault_is_not_shown_again(self):
+    def test_shared_reference_declaring_another_project_is_not_delivered(self):
+        vault = self.vaults[0]
+        current, other = self.root / 'current', self.root / 'other'
+        current.mkdir()
+        other.mkdir()
+        self.card(vault, 'project-payment', 'scopepaymentneedle payment policy')
+        path = vault / 'project-payment.md'
+        path.write_text(path.read_text(encoding='utf-8').replace(
+            '---\n', '---\nmetadata:\n  type: reference\n', 1)
+            + f'**適用專案**：`{other}`。Retained here to preserve links.\n', encoding='utf-8')
+        self.card(vault, 'common-policy', 'scopepaymentneedle shared guidance', decision=True)
+        memsearch.build_index(vault)
+        outside = self.invoke(session='scope-out', prompt='scopepaymentneedle', cwd=str(current))
+        self.assertNotIn('project-payment.md', outside)
+        self.assertIn('common-policy', outside)
+        inside = self.invoke(session='scope-in', prompt='scopepaymentneedle', cwd=str(other))
+        self.assertIn('project-payment.md', inside)
+        unknown = self.invoke(session='scope-unknown', prompt='scopepaymentneedle')
+        self.assertIn('project-payment.md', unknown)
+        # Ownership is read live, even when the search index still has old bytes.
+        original = path.read_text(encoding='utf-8')
+        changed = original.replace(str(other), str(current))
+        length = max(len(original), len(changed))
+        path.write_text(original.ljust(length), encoding='utf-8')
+        memsearch.build_index(vault)
+        stamp = path.stat()
+        path.write_text(changed.ljust(length), encoding='utf-8')
+        os.utime(path, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+        refreshed = self.invoke(session='scope-live-body', prompt='scopepaymentneedle', cwd=str(current))
+        self.assertIn('project-payment.md', refreshed)
+
+    def test_explicit_reference_project_is_checked_before_ordinary_slots(self):
+        vault = self.vaults[0]
+        current, other = self.root / 'current', self.root / 'other'
+        for number in range(5):
+            self.card(vault, f'a-other-{number}', 'projectslotneedle')
+            path = vault / f'a-other-{number}.md'
+            path.write_text(path.read_text(encoding='utf-8').replace(
+                '---\n', f'---\nmetadata:\n  type: reference\nproject: {other}\n', 1), encoding='utf-8')
+        self.card(vault, 'z-common', 'projectslotneedle')
+        memsearch.build_index(vault)
+        value = self.invoke(session='scope-slots', prompt='projectslotneedle', cwd=str(current))
+        self.assertNotIn('a-other-', value)
+        self.assertIn('z-common.md', value)
+
+    def test_verified_scope_is_checked_before_pinning_for_both_hosts(self):
+        from rule_source_fixtures import source_bound_card
+        vault = self.vaults[0]
+        for host in ('claude', 'codex'):
+            path = vault / f'source-project-{host}.md'
+            text = ('---\nname: source-project-' + host + '\ndescription: sourcescopeneedle\n'
+                    'decision_key: source-project-' + host + '\nstatus: active\n'
+                    'current_decision_at: 2026-09-07\ndecided_by: owner-explicit\n'
+                    'owner_quote: Use this isolated sourcescopeneedle case.\n---\n')
+            path.write_text(source_bound_card(text, path, source_root=self.root / 'sources',
+                                             case_id='source-scope', host=host), encoding='utf-8')
+        memsearch.build_index(vault)
+        outside = self.invoke(session='source-out', prompt='sourcescopeneedle',
+                              project='another-project', case_id='source-scope')
+        self.assertNotIn('source-project-', outside)
+        inside = self.invoke(session='source-in', prompt='sourcescopeneedle',
+                             project='epitype-pretooluse-selftest', case_id='source-scope')
+        self.assertIn('source-project-claude.md', inside)
+        self.assertIn('source-project-codex.md', inside)
+
+    def test_rejected_search_seeds_do_not_smuggle_in_linked_cards(self):
+        vault = self.vaults[0]
+        for kind in ('foreign', 'raw-event', 'invalid-source', 'quiet', 'retired'):
+            with self.subTest(kind=kind):
+                needle = kind.replace('-', '') + 'expansionneedle'
+                name = ('corrections/seed-event' if kind == 'raw-event' else 'seed-' + kind)
+                seed = vault / (name + '.md')
+                seed.parent.mkdir(parents=True, exist_ok=True)
+                extra = (f'project: {self.root / "other"}\nmetadata:\n  type: reference\n'
+                         if kind == 'foreign' else 'rule_provenance: "{}"\n' if kind == 'invalid-source' else '')
+                if kind == 'quiet':
+                    extra = 'metadata:\n  type: reference\n'
+                if kind == 'retired':
+                    extra = ('decision_key: retired-seed\nstatus: active\ncurrent_decision_at: 2026-09-07\n'
+                             'decided_by: owner-explicit\nowner_quote: Keep the isolated seed policy.\n')
+                seed.write_text(f'---\nname: {name}\ndescription: {needle}\n{extra}---\n'
+                                f'[[linked-{kind}]]\n', encoding='utf-8')
+                self.card(vault, 'linked-' + kind, 'Unrelated project detail')
+                self.card(vault, 'global-' + kind, needle, decision=True)
+                if kind == 'quiet':
+                    health = vault / memspec.FTS_INDEX_DIRECTORY / memspec.RECALL_HEALTH_FILENAME
+                    health.parent.mkdir(parents=True, exist_ok=True)
+                    health.write_text(json.dumps({'version': recall.recall_quiet.HEALTH_VERSION,
+                                                 'days': {}, 'quiet': [seed.name]}), encoding='utf-8')
+                memsearch.build_index(vault)
+                if kind == 'retired':
+                    stamp = seed.stat()
+                    seed.write_text(seed.read_text(encoding='utf-8').replace('status: active', 'status: closed'), encoding='utf-8')
+                    os.utime(seed, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+                context = self.invoke(session='seed-' + kind, prompt=needle, cwd=str(self.root / 'here'))
+                self.assertIn('global-' + kind + '.md', context)
+                self.assertNotIn(seed.name, context)
+                self.assertNotIn('linked-' + kind + '.md', context)
+
+    def test_valid_links_and_independent_direct_matches_remain_available(self):
+        vault = self.vaults[0]
+        self.card(vault, 'valid-seed', 'validexpansionneedle')
+        seed = vault / 'valid-seed.md'
+        seed.write_text(seed.read_text(encoding='utf-8') + '[[valid-neighbour]]\n', encoding='utf-8')
+        self.card(vault, 'valid-neighbour', 'Related by a valid source link')
+        self.card(vault, 'foreign-seed', 'directexpansionneedle')
+        seed = vault / 'foreign-seed.md'
+        seed.write_text(seed.read_text(encoding='utf-8').replace(
+            '---\n', f'---\nproject: {self.root / "other"}\n', 1)
+            + '[[independent-target]]\n', encoding='utf-8')
+        self.card(vault, 'independent-target', 'directexpansionneedle')
+        memsearch.build_index(vault)
+        linked = self.invoke(session='valid-links', prompt='validexpansionneedle', cwd=str(self.root / 'here'))
+        self.assertIn('valid-seed.md', linked)
+        self.assertIn('valid-neighbour.md', linked)
+        direct = self.invoke(session='direct-link', prompt='directexpansionneedle', cwd=str(self.root / 'here'))
+        self.assertIn('independent-target.md', direct)
+        self.assertNotIn('foreign-seed.md', direct)
+
+    def test_reviewed_global_scope_wins_over_legacy_reference_project_text(self):
+        from rule_source_fixtures import owner_bound_card
+        vault = self.vaults[0]
+        path = vault / 'global-source.md'
+        text = ('---\nname: global-source\ndescription: globalscopeneedle\n'
+                'metadata:\n  type: reference\nproject: ' + str(self.root / 'other') + '\n---\n'
+                f'**適用專案**：`{self.root / "other"}`。\n')
+        path.write_text(owner_bound_card(text, path, source_root=self.root / 'sources',
+                                        case_id='global-scope'), encoding='utf-8')
+        memsearch.build_index(vault)
+        self.assertIn('global-source.md', self.invoke(session='global-source', prompt='globalscopeneedle',
+                                                    cwd=str(self.root / 'here')))
+
+    def test_an_exact_card_copy_in_a_later_vault_is_not_shown_again(self):
         self.card(self.vaults[0], "shared-name", "dupeneedle first")
-        self.card(self.vaults[1], "shared-name", "dupeneedle second")
+        (self.vaults[1] / "shared-name.md").write_bytes((self.vaults[0] / "shared-name.md").read_bytes())
         for vault in self.vaults:
             memsearch.build_index(vault)
         lines = [line for line in self.lines(self.invoke(session="dupe", prompt="dupeneedle"))
                  if "shared-name.md" in line]
         self.assertEqual(len(lines), 1, lines)
+
+    def test_same_filename_with_different_current_summaries_keeps_both_cards(self):
+        self.card(self.vaults[0], "shared-name", "dupeneedle first requirement")
+        self.card(self.vaults[1], "shared-name", "dupeneedle second requirement")
+        for vault in self.vaults:
+            memsearch.build_index(vault)
+        context = self.invoke(session="distinct-summaries", prompt="dupeneedle")
+        self.assertIn("first requirement", context)
+        self.assertIn("second requirement", context)
+        self.assertEqual(len(self.lines(context)), 2)
+
+    def test_same_filename_and_summary_with_different_bodies_keeps_both_cards(self):
+        for vault, detail in zip(self.vaults, ("first detail", "second detail")):
+            self.card(vault, "shared-name", "dupeneedle summary")
+            with (vault / "shared-name.md").open("a", encoding="utf-8") as stream:
+                stream.write(f"dupeneedle {detail}.\n")
+            memsearch.build_index(vault)
+        context = self.invoke(session="distinct-bodies", prompt="dupeneedle")
+        self.assertIn("first detail", context)
+        self.assertIn("second detail", context)
+        self.assertEqual(len(self.lines(context)), 2)
+
+    def test_same_basename_in_different_subdirectories_keeps_both_cards(self):
+        vault = self.vaults[0]
+        for folder in ("alpha", "beta"):
+            (vault / folder).mkdir()
+            self.card(vault, folder + "/shared-name", "dupeneedle " + folder)
+        memsearch.build_index(vault)
+        context = self.invoke(session="distinct-subdirectories", prompt="dupeneedle")
+        self.assertIn("/alpha/shared-name.md", context)
+        self.assertIn("/beta/shared-name.md", context)
+
+    def test_identical_bytes_in_different_relative_paths_remain_distinct(self):
+        vault = self.vaults[0]
+        self.card(vault, "shared-name", "dupeneedle copy")
+        (vault / "nested").mkdir()
+        (vault / "nested/shared-name.md").write_bytes((vault / "shared-name.md").read_bytes())
+        memsearch.build_index(vault)
+        context = self.invoke(session="distinct-relative-paths", prompt="dupeneedle")
+        self.assertEqual(len(self.lines(context)), 2)
+        self.assertIn("/nested/shared-name.md", context)
 
     def test_nightly_quiet_list_skips_ordinary_cards_but_never_decisions(self):
         self.card(self.vaults[0], "noisy", "quietneedle")
@@ -293,7 +593,7 @@ class RecallSelectionRegression(unittest.TestCase):
     def test_stronger_query_evidence_in_later_vault_gets_first_slot(self):
         for vault in self.vaults:
             for number in range(5):
-                self.card(vault, f"weak-{vault.name}-{number}", "selectneedle")
+                self.card(vault, f"weak-{vault.name}-{number}", "selectneedle", aliases=('selectneedle',))
         third = self.root / "third"
         third.mkdir()
         self.vaults.append(third)
@@ -336,7 +636,7 @@ class RecallSelectionRegression(unittest.TestCase):
         self.assertFalse(any("ruling-20260907-quote" in line for line in lines))
 
     def test_authority_precedes_stronger_ordinary_query_evidence(self):
-        self.card(self.vaults[0], "policy", "selectneedle", decision=True)
+        self.card(self.vaults[0], "policy", "selectneedle", decision=True, aliases=('selectneedle',))
         self.card(self.vaults[1], "answer", "selectneedle detailneedle")
         for vault in self.vaults:
             memsearch.build_index(vault)

@@ -65,7 +65,7 @@ def _sort_key(rule):
     return (rule["order"] is None, rule["order"] or 0, rule["vault"], rule["path"])
 
 
-def collect_rules(vaults, failures=None):
+def collect_rules(vaults, failures=None, *, minimum_projects=0):
     """(規則卡清單, 讀不到的東西)。
 
     掃描範圍與型別判定都不自己造一套：範圍用 `memsearch.scan_cards`、型別用
@@ -74,6 +74,7 @@ def collect_rules(vaults, failures=None):
     """
     rules = []
     errors = []
+    project_identities = {}
     for raw in vaults:
         vault = Path(raw).expanduser().resolve()
         try:
@@ -104,8 +105,21 @@ def collect_rules(vaults, failures=None):
                 if failures is not None:
                     failures.append((str(vault), relative, str(exc), fields))
                 continue
-            if status == memspec.SUPERSEDED_DECISION_STATUS or projected["expired"]:
+            if not memspec.card_is_current(fields) or projected["expired"]:
                 continue
+            qualification = None
+            scope = projected["provenance"].get("scope") or {}
+            if (minimum_projects and fields.get(memspec.RULE_LAYER_FIELD, "").strip() in memspec.RULE_GENERATED_LAYERS
+                    and scope.get("level", "global") == "global"):
+                from epitype import core_qualification
+                try:
+                    qualification = core_qualification.inspect(fields, minimum_projects, project_identities)
+                except (ValueError, OSError, TypeError) as exc:
+                    reason = '[core qualification] ' + str(exc)
+                    errors.append(f"{vault}｜{relative}: {reason}")
+                    if failures is not None:
+                        failures.append((str(vault), relative, reason, fields))
+                    continue
             rules.append({
                 "vault": str(vault),
                 "path": relative,
@@ -113,6 +127,7 @@ def collect_rules(vaults, failures=None):
                 "section": fields.get(memspec.RULE_SECTION_FIELD, "").strip(),
                 "order": _order_of(fields),
                 "text": projected["text"],
+                "core_qualification": qualification,
                 "projection": projected,
                 "scope": projected["provenance"].get("scope"),
                 "provenance": projected["provenance"],
@@ -167,7 +182,7 @@ def unapproved(rules):
     ]
 
 
-def _section_lines(members, defaults=None):
+def _section_lines(members, defaults=None, records=None):
     lines = []
     for section, section_members in _resident_sections(members):
         lines.append(memspec.CORE_GEN_SECTION_HEADING.format(section=section))
@@ -175,6 +190,8 @@ def _section_lines(members, defaults=None):
             rendered = memspec.CORE_GEN_RESIDENT_LINE.format(text=_display_rule(rule, defaults))
             lines.append(_rule_marker(rule, rendered))
             lines.append(rendered)
+            if records is not None:
+                records[(_rule_marker(rule, rendered), rendered)] = rule
         lines.append("")
     return lines
 
@@ -186,55 +203,121 @@ def rule_identity(relative):
 def _rule_marker(rule, rendered):
     source = " U" if rule.get("provenance", {}).get("source_unavailable") else ""
     order = "x" if rule["order"] is None else str(rule["order"])
-    return "<!--r:" + rule_identity(rule["path"]) + " " + str(len(rendered.splitlines())) + " " + order + source + "-->"
+    identity = rule_identity(rule['vault'] + '\0' + rule['path'])
+    return "<!--r:" + identity + " " + str(len(rendered.splitlines())) + " " + order + source + "-->"
 
 
-def _default_source(rule, defaults):
-    match = re.fullmatch(r"rule-core-(\d{2})-english\.md", rule["path"])
-    return (rule["vault"] == defaults["vault"] and match is not None
-            and rule["text"].startswith("CORE-" + match.group(1) + "."))
+def _content_ready(rule):
+    from epitype import rule_provenance
+    return rule_provenance.usable(rule.get('provenance', {}).get('status'))
 
 
-def _source_path(rule, defaults):
-    return rule["path"] if rule["vault"] == defaults["vault"] else str(Path(rule["vault"]) / rule["path"])
+def _review_label(rule):
+    return ('現行內容已審 REVIEWED；原話備查。' if rule.get('provenance', {}).get('status') == 'REVIEWED'
+            else memspec.CORE_GEN_VERIFIED_SOURCE)
+
+
+def _author_label(rule, document):
+    if rule.get('provenance', {}).get('source_unavailable'):
+        return memspec.CORE_GEN_CARD_AUTHOR.format(author=document['author'])
+    if document['kind'] != 'owner-directive':
+        return 'AI 整理：' + document['author']
+    return ('卡片記載作者：owner' if rule.get('provenance', {}).get('status') == 'REVIEWED'
+            else 'Owner 原話')
 
 
 def _display_rule(rule, defaults=None):
     if "previous_rendering" in rule:
         return rule["previous_rendering"]
-    if rule.get("core_display") == "plain" and rule.get("provenance", {}).get("status") == "VERIFIED":
-        text = rule["text"]
-        if defaults:
-            text += "\n" + memspec.CORE_GEN_VERIFIED_SOURCE
-            if not _default_source(rule, defaults):
-                text += "\n" + memspec.CORE_GEN_CARD_PATH.format(path=_source_path(rule, defaults))
-        return text
-    if (rule.get("provenance", {}).get("status") != "VERIFIED"
+    if (not _content_ready(rule)
             and not rule.get("provenance", {}).get("source_unavailable")):
-        return rule["text"]
-    from epitype import rule_pipeline
-    if defaults and rule.get("provenance", {}).get("source_unavailable"):
-        document = rule["projection"]["document"]
-        lines = [rule["text"]]
-        if document["author"] != "claude":
-            lines.append(memspec.CORE_GEN_CARD_AUTHOR.format(author=document["author"]))
-        if document["scope"] != defaults["scope"]:
-            from epitype import rule_provenance
-            lines.append(memspec.CORE_GEN_CARD_SCOPE.format(scope=rule_provenance.serialize(document["scope"])))
-        if not _default_source(rule, defaults):
-            lines.append(memspec.CORE_GEN_CARD_PATH.format(path=_source_path(rule, defaults)))
-        return "\n".join(lines)
-    rendered = rule_pipeline.render_projection(
-        rule["projection"], card_path=Path(rule["vault"]) / rule["path"])
-    if defaults and rule.get("provenance", {}).get("status") == "VERIFIED":
-        if rule["vault"] == defaults["vault"]:
-            rendered = rendered.replace("\n來源卡：" + str(Path(rule["vault"]) / rule["path"]),
-                                        "\n來源卡：" + rule["path"])
-        rendered += "\n" + memspec.CORE_GEN_VERIFIED_SOURCE
-    return rendered
+        return rule["text"] + '\n' + memspec.CORE_GEN_LEGACY_SOURCE
+    document = rule["projection"]["document"]
+    parts = [rule['text']]
+    if rule.get("provenance", {}).get("source_unavailable"):
+        from epitype import rule_provenance
+        parts.append('UNVERIFIED：' + rule_provenance.unavailable_reason(rule['provenance']))
+    if not defaults or document['kind'] == 'owner-directive' or document['author'] != defaults['author']:
+        if rule.get("provenance", {}).get("source_unavailable"):
+            parts.append(memspec.CORE_GEN_CARD_AUTHOR.format(author=document['author']))
+        else:
+            parts.append(_author_label(rule, document))
+    summary = scope_summary(document['scope'], rule['text'],
+                            project=(defaults or {}).get('project'))
+    if summary:
+        parts.append(summary)
+    if _content_ready(rule) and rule.get('provenance', {}).get('status') != 'REVIEWED':
+        parts.append(_review_label(rule))
+    core = re.match(r'CORE-(\d+)\.', rule['text'])
+    if core and rule['path'] != f'rule-core-{core.group(1)}-english.md':
+        parts.append(memspec.CORE_GEN_CARD_PATH.format(path=rule['path']))
+    return '\n'.join(parts)
 
 
-def assemble(rules):
+def _scope_words(value):
+    return ' '.join(str(value).split()).casefold().rstrip('.。')
+
+
+def scope_summary(scope, text, *, project=None):
+    """Display restrictions conservatively; machine consumers use card scopes.
+
+    Named actions narrow when a rule applies, even if they sound like categories.
+    Only universal actions and literal repetitions in the body are redundant.
+    Do not guess that an English condition means the same as a translated body.
+    """
+    body = _scope_words(text)
+
+    def covered(value):
+        words = _scope_words(value)
+        left = r'(?<![a-z0-9_])' if re.match(r'[a-z0-9_]', words) else ''
+        right = r'(?![a-z0-9_])' if re.search(r'[a-z0-9_]$', words) else ''
+        return bool(words) and re.search(left + re.escape(words) + right, body) is not None
+
+    universal_actions = {'*', 'all', 'all actions', 'any action', 'all tasks', 'all project work'}
+    universal_exceptions = {
+        'higher-priority system or developer instructions',
+        'higher priority system or developer instructions',
+        'higher-priority system/developer instructions',
+        '更高優先的系統或開發者指令',
+    }
+    parts = []
+    if scope.get('project') and scope['project'] != project and not covered(scope['project']):
+        parts.append(memspec.CORE_GEN_SCOPE_PROJECT.format(project=scope['project']))
+    if scope.get('case') and not covered(scope['case']):
+        parts.append(memspec.CORE_GEN_SCOPE_CASE.format(case=scope['case']))
+    actions = [value for value in scope.get('actions', [])
+               if _scope_words(value) not in universal_actions and not covered(value)]
+    if actions:
+        parts.append(memspec.CORE_GEN_SCOPE_ACTIONS.format(actions='、'.join(actions)))
+    parts.extend(value for value in scope.get('conditions', []) if not covered(value))
+    exceptions = [value for value in scope.get('exceptions', [])
+                  if _scope_words(value) not in universal_exceptions and not covered(value)]
+    if exceptions:
+        parts.append(memspec.CORE_GEN_SCOPE_EXCEPTIONS.format(exceptions='、'.join(exceptions)))
+    expiry = scope.get('expiry')
+    if expiry and expiry != 'unspecified' and not covered(expiry):
+        parts.append(memspec.CORE_GEN_SCOPE_EXPIRY.format(expiry=expiry))
+    return memspec.CORE_GEN_SCOPE_SUMMARY.format(scope='；'.join(dict.fromkeys(parts))) if parts else ''
+
+
+def _scope_defaults(rules):
+    """Share only the author and a common project; restrictions stay per rule."""
+    selected = [rule for rule in rules if rule["layer"] in memspec.RULE_GENERATED_LAYERS
+                and "previous_rendering" not in rule and rule.get("projection", {}).get("document")
+                and (_content_ready(rule)
+                     or rule.get("provenance", {}).get("source_unavailable"))]
+    if not selected:
+        return None
+    scopes = [rule["projection"]["document"]["scope"] for rule in selected]
+    authors = [rule['projection']['document']['author'] for rule in selected
+               if rule['projection']['document']['kind'] != 'owner-directive']
+    author = max(dict.fromkeys(authors), key=authors.count) if authors else None
+    projects = {value['project'] for value in scopes}
+    return {"author": author,
+            "project": next(iter(projects)) if len(projects) == 1 else None}
+
+
+def assemble(rules, *, recovery=None):
     """核心塊的完整文字。`text` 逐位元組照抄，其餘每一行都來自 memspec 的模板。
 
     共用區（A. floor、B. resident）是兩個宿主都載入的部分；帶 `hosts` 的常駐卡另外
@@ -245,6 +328,7 @@ def assemble(rules):
     底線層一律留在共用區：一條底線只給一邊，另一邊就少一條底線而沒有人會發現，所以
     `floor` 帶 hosts 由 card_lint 判 FAIL，生成器不拿它當分區依據。
     """
+    records = {}
     floor = _of_layer(rules, memspec.RULE_LAYER_FLOOR)
     resident = _of_layer(rules, memspec.RULE_LAYER_RESIDENT)
     shared = [rule for rule in resident if not rule["hosts"]]
@@ -255,25 +339,30 @@ def assemble(rules):
     lines = [memspec.CORE_GEN_OUTPUT_TITLE, note, ""]
     legacy = [rule for rule in rules if rule["layer"] in memspec.RULE_GENERATED_LAYERS
               and "previous_rendering" not in rule
-              and rule.get("provenance", {}).get("status") != "VERIFIED"
+              and not _content_ready(rule)
               and not rule.get("provenance", {}).get("source_unavailable")]
     if legacy:
         manifests = "、".join(str(pack_path(vault)) for vault in sorted({rule["vault"] for rule in legacy}))
-        lines.extend((f"來源未核的舊卡：本生成包共 {len(legacy)} 條；原正文保留，尚未完成原句、作者與範圍遷移。"
-                      "未帶已核來源欄位的條目均屬此類；逐卡狀態見 " + manifests + "。", ""))
-    unavailable = [rule for rule in rules if rule.get("provenance", {}).get("source_unavailable")]
-    defaults = None
+        lines.extend((f"來源未核的舊卡：本生成包共 {len(legacy)} 條，逐條標 UNVERIFIED；原正文保留，逐卡狀態見 "
+                      + manifests + "。", ""))
+    unavailable = [rule for rule in rules if rule["layer"] in memspec.RULE_GENERATED_LAYERS
+                   and "previous_rendering" not in rule and rule.get("provenance", {}).get("source_unavailable")]
+    defaults = _scope_defaults(rules)
     if unavailable:
-        from epitype import rule_provenance
-        defaults = {"scope": {"level": "global", "project": None, "case": None, "actions": ["*"],
-                              "conditions": [], "exceptions": [], "expiry": "unspecified"},
-                    "vault": unavailable[0]["vault"]}
         lines.extend((memspec.CORE_GEN_SHARED_SOURCE.format(
-            count=len(unavailable), scope=rule_provenance.serialize(defaults["scope"])), ""))
+            count=len(unavailable)), ""))
+    if defaults:
+        if defaults['author']:
+            lines.extend((memspec.CORE_GEN_HISTORY_ON_DEMAND.format(author=defaults['author']), ""))
+        reviewed = any(rule.get('provenance', {}).get('status') == 'REVIEWED'
+                       for rule in floor + resident if 'previous_rendering' not in rule)
+        if reviewed:
+            lines.extend((memspec.CORE_GEN_REVIEWED_SUMMARY, ""))
+        if defaults['project']:
+            lines.extend((memspec.CORE_GEN_SHARED_PROJECT.format(project=defaults['project']), ""))
     directories = sorted({rule["vault"] for rule in rules if rule["layer"] in memspec.RULE_GENERATED_LAYERS})
     if directories:
-        default_vault = defaults["vault"] if defaults else directories[0]
-        lines.extend((memspec.CORE_GEN_SOURCE_DIRECTORY.format(path=default_vault), ""))
+        lines.extend((memspec.CORE_GEN_SOURCE_DIRECTORY.format(path='、'.join(directories)), ""))
     held = [rule for rule in rules if "previous_rendering" in rule]
     if held:
         lines.extend((memspec.HOST_SYNC_HELD_SUMMARY.format(count=len(held)), ""))
@@ -283,18 +372,77 @@ def assemble(rules):
             rendered = memspec.CORE_GEN_FLOOR_LINE.format(number=number, text=_display_rule(rule, defaults))
             lines.append(_rule_marker(rule, rendered))
             lines.append(rendered)
+            records[(_rule_marker(rule, rendered), rendered)] = rule
         lines.append("")
     if shared:
         lines.append(memspec.CORE_GEN_RESIDENT_HEADING)
-        lines.extend(_section_lines(shared, defaults))
+        lines.extend(_section_lines(shared, defaults, records))
     if host_only:
         lines.append(memspec.CORE_GEN_HOST_HEADING)
         for host in _hosts_present(host_only):
             lines.append(memspec.CORE_GEN_HOST_BEGIN.format(host=host))
-            lines.extend(_section_lines([rule for rule in host_only if host in rule["hosts"]], defaults))
+            lines.extend(_section_lines([rule for rule in host_only if host in rule["hosts"]], defaults, records))
             lines.append(memspec.CORE_GEN_HOST_END.format(host=host))
             lines.append("")
-    return "\n".join(lines).rstrip("\n") + "\n"
+    return _compact_output("\n".join(lines).rstrip("\n") + "\n", records, recovery)
+
+
+GLOBAL_SCOPE = {"level": "global", "project": None, "case": None, "actions": ["*"],
+                "conditions": [], "exceptions": [], "expiry": "unspecified"}
+RECOVERY_PREFIX = '<!-- epitype-rules:'
+
+
+def recovery_key(text):
+    lines = text.split('\n', 3)
+    match = re.fullmatch(re.escape(RECOVERY_PREFIX) + r'([0-9a-f]{64}) -->', lines[2]) if len(lines) > 2 else None
+    return match.group(1) if match else None
+
+
+def recovery_digest(manifest):
+    return hashlib.sha256(json.dumps(manifest, ensure_ascii=False, sort_keys=True,
+                                    separators=(',', ':')).encode('utf-8')).hexdigest()
+
+
+def _compact_output(marked, records, recovery):
+    """Keep precise entry boundaries off the startup path, including multiline text."""
+    def view(text):
+        source, plain, entries = text.rstrip('\n').split('\n'), [], []
+        index = 0
+        while index < len(source):
+            marker = source[index]
+            if marker.startswith('<!--r:'):
+                count = int(marker.split()[1])
+                rendered = '\n'.join(source[index + 1:index + 1 + count])
+                rule = records[(marker, rendered)]
+                entry = {key: rule[key] for key in ('vault', 'path', 'layer', 'section', 'order', 'hosts')}
+                entry.update(identity=rule_identity(rule['path']), start=len(plain), count=count)
+                entry['body_lines'] = rule.get('body_lines', len(rule['text'].splitlines()))
+                document = rule.get('projection', {}).get('document')
+                if document and 'previous_rendering' not in rule:
+                    entry.update(scope=document['scope'], author=_author_label(rule, document),
+                                 review=_review_label(rule) if _content_ready(rule) else '')
+                elif isinstance(rule.get('scope'), dict):
+                    entry['scope'] = rule['scope']
+                entries.append(entry)
+                plain.extend(source[index + 1:index + 1 + count])
+                index += count + 1
+            else:
+                plain.append(marker)
+                index += 1
+        body = '\n'.join(plain).strip('\n')
+        return body, {'sha256': hashlib.sha256(body.encode('utf-8')).hexdigest(), 'entries': entries}
+
+    body, _ = view(marked)
+    if not records:
+        return body + '\n'
+    manifest = {'version': 1, 'views': {host: view(host_view(marked, host))[1]
+                                      for host in memspec.RULE_HOSTS}}
+    digest = recovery_digest(manifest)
+    if recovery is not None:
+        recovery[digest] = manifest
+    lines = body.split('\n')
+    lines.insert(2, RECOVERY_PREFIX + digest + ' -->')
+    return '\n'.join(lines) + '\n'
 
 
 _HOST_BEGIN_PREFIX, _HOST_BEGIN_SUFFIX = memspec.CORE_GEN_HOST_BEGIN.split("{host}")
@@ -445,13 +593,14 @@ def _longest(rules, limit=memspec.CORE_GEN_LONGEST_LISTED):
     ]
 
 
-def _pack(rules, out_path, payload, cap, text):
+def _pack(rules, out_path, payload, cap, text, recovery=None):
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "out": os.fspath(out_path),
         "out_sha256": _sha256(payload),
         "out_bytes": len(payload),
         "cap_bytes": cap,
+        "recovery": recovery or {},
         # 宿主區的大小與「這個宿主實際載入多少」是兩個數字：載入量還含整個共用區，
         # 而上限量的就是載入量。兩個都留在核准包裡，事後才查得出當時擋的是什麼。
         "host_bytes": host_zone_bytes(text),
@@ -472,6 +621,7 @@ def _pack(rules, out_path, payload, cap, text):
                 "authorship": rule.get("authorship", "UNVERIFIED"),
                 "kind": rule.get("kind", "legacy-unverified"),
                 "supersedes": rule.get("supersedes", []),
+                "core_qualification": rule.get("core_qualification"),
             }
             for rule in rules
             if rule["layer"] in memspec.RULE_GENERATED_LAYERS
@@ -500,9 +650,12 @@ def _write(path, payload):
 def generate(vaults, out, cap_bytes=None, dry_run=False, config=None):
     """組裝並（非 dry-run 時）寫出核心塊與核准包。回一份可直接印的結果。"""
     out_path = Path(out).expanduser()
-    rules, errors = collect_rules(vaults)
-    cap = _cap_of(cap_bytes, config if config is not None else memspec.config_options())
-    text = assemble(rules)
+    from epitype import core_qualification
+    options = config if config is not None else memspec.config_options()
+    rules, errors = collect_rules(vaults, minimum_projects=core_qualification.minimum(options))
+    cap = _cap_of(cap_bytes, options)
+    recovery = {}
+    text = assemble(rules, recovery=recovery)
     payload = text.encode("utf-8")
     resident = _of_layer(rules, memspec.RULE_LAYER_RESIDENT)
     loaded = host_loads(text)
@@ -556,7 +709,7 @@ def generate(vaults, out, cap_bytes=None, dry_run=False, config=None):
         _write(out_path, payload)
     result["status"] = STATUS_UNCHANGED if unchanged else STATUS_WRITTEN
 
-    pack = _pack(rules, out_path, payload, cap, text)
+    pack = _pack(rules, out_path, payload, cap, text, recovery)
     target = pack_path(Path(vaults[0]).expanduser().resolve())
     try:
         _write(target, (json.dumps(pack, ensure_ascii=False, indent=1) + "\n").encode("utf-8"))
@@ -566,10 +719,12 @@ def generate(vaults, out, cap_bytes=None, dry_run=False, config=None):
     return result
 
 
-def check(vaults, out):
+def check(vaults, out, config=None):
     """重組一次並與現有檔逐位元組比對。不寫任何檔案。"""
     out_path = Path(out).expanduser()
-    rules, errors = collect_rules(vaults)
+    from epitype import core_qualification
+    options = config if config is not None else memspec.config_options()
+    rules, errors = collect_rules(vaults, minimum_projects=core_qualification.minimum(options))
     payload = assemble(rules).encode("utf-8")
     result = {
         "status": STATUS_MATCH,

@@ -29,18 +29,26 @@ class ShimDispatchTests(unittest.TestCase):
         self.shim = self.home / ".epitype" / "hooks" / "pretooluse.py"
         self.shim.parent.mkdir()
         self.shim.write_bytes(graft._shim_payloads(REPO)["pretooluse.py"])
+        self.entry_pid = self.root / "entry-pid.txt"
+        self.entry = self.root / "entry.py"
+        self.entry.write_text(
+            "import os, pathlib, runpy, sys\n"
+            "pathlib.Path(sys.argv[1]).write_text(str(os.getpid()))\n"
+            "sys.argv = sys.argv[2:]\n"
+            "runpy.run_path(sys.argv[0], run_name='__main__')\n", encoding="utf-8")
         self.environment = dict(os.environ, HOME=str(self.home), USERPROFILE=str(self.home))
         self.environment["EPITYPE_SHIM_TRACE"] = str(self.root / "trace.jsonl")
 
     def invoke(self, source, arguments=(), payload=""):
         self.adapter.write_text(source, encoding="utf-8")
         with subprocess.Popen(
-            [sys.executable, str(self.shim), *arguments], stdin=subprocess.PIPE,
+            [sys.executable, str(self.entry), str(self.entry_pid), str(self.shim), *arguments], stdin=subprocess.PIPE,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             encoding="utf-8", env=self.environment,
         ) as child:
             stdout, stderr = child.communicate(payload, timeout=10)
-            return child.pid, child.returncode, stdout, stderr
+            # Windows venv launchers have a different outer PID from Python.
+            return int(self.entry_pid.read_text()), child.returncode, stdout, stderr
 
     def test_same_pid_preserves_imports_arguments_and_input(self):
         (self.adapter.parent / "shim_fixture_helper.py").write_text("VALUE = 'sibling'\n", encoding="utf-8")

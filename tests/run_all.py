@@ -8,8 +8,31 @@ import tempfile
 
 
 SELFTESTS = (
+    Path("tests") / "action_advice_precision_regression.py",
+    Path("tests") / "capture_events_regression.py",
+    Path("tests") / "chain_receipt_regression.py",
+    Path("tests") / "compact_receipt_recovery_regression.py",
+    Path("tests") / "compact_resume_regression.py",
+    Path("tests") / "context_delivery_regression.py",
+    Path("tests") / "core_qualification_regression.py",
+    Path("tests") / "core_scope_compaction_regression.py",
+    Path("tests") / "current_content_review_regression.py",
+    Path("tests") / "delivery_unit_regression.py",
+    Path("tests") / "delivery_validity_regression.py",
+    Path("tests") / "native_context_regression.py",
+    Path("tests") / "project_identity_scope_regression.py",
+    Path("tests") / "project_observation_cost_regression.py",
+    Path("tests") / "provenance_zstd_regression.py",
+    Path("tests") / "verification_deadline_regression.py",
+    Path("tests") / "collaboration_runtime_regression.py",
+    Path("tests") / "reliability_sequence_regression.py",
+    Path("tests") / "shim_dispatch_regression.py",
+    Path("tests") / "fixed_load_regression.py",
+    Path("tests") / "fixed_load_hook_regression.py",
+    Path("tests") / "memory_index_regression.py",
     Path("tests") / "rule_binding_regression.py",
     Path("tests") / "rule_sync_dedup_regression.py",
+    Path("tests") / "core_compact_metadata_regression.py",
     Path("tests") / "dupes_regression.py",
     Path("epitype") / "memspec.py",
     Path("epitype") / "memsearch.py",
@@ -44,7 +67,6 @@ SELFTESTS = (
     Path("adapters") / "codex" / "config_guard.py",
     Path("adapters") / "codex" / "hook_trust.py",
     Path("install") / "graft.py",
-    Path("tests") / "shim_dispatch_regression.py",
     Path("install") / "scar_scan.py",
     Path("exam") / "exam_runner.py",
     Path("tests") / "capture_precision.py",
@@ -101,6 +123,7 @@ SELFTESTS = (
     Path("tests") / "background_check_regression.py",
     Path("tests") / "ramguard_notice_regression.py",
     Path("tests") / "sessionstart_segment_budget_regression.py",
+    Path("tests") / "startup_cache_regression.py",
     Path("tests") / "handoff_regression.py",
     Path("tests") / "pending_lint_regression.py",
     Path("tests") / "quote_exemption_count_regression.py",
@@ -139,6 +162,7 @@ SELFTESTS = (
     Path("tests") / "owner_attribution_regression.py",
     Path("tests") / "harvest_owner_regression.py",
     Path("tests") / "context_rotation_regression.py",
+    Path("tests") / "context_meter_notice_regression.py",
     Path("tests") / "rewrite_cost_regression.py",
     Path("tests") / "wrapped_commands_regression.py",
     Path("tests") / "tool_evidence_regression.py",
@@ -155,6 +179,7 @@ SELFTESTS = (
     Path("tests") / "lifecycle_fail_open_regression.py",
     Path("tests") / "recall_advisory_regression.py",
     Path("tests") / "stop_advisory_regression.py",
+    Path("tests") / "stop_claim_precision_regression.py",
     Path("tests") / "recall_successor_regression.py",
     Path("tests") / "prompt_block_regression.py",
     Path("tests") / "owner_annotation_spans_regression.py",
@@ -276,6 +301,8 @@ def main(argv=None):
     if unregistered:
         print("RESULT FAIL regression files never run (add to SELFTESTS, or to NOT_SUITES with a reason): "
               + ", ".join(unregistered), file=sys.stderr)
+    else:
+        print("RESULT PASS regression files registered")
     # CI 另跑全倉隱私掃描；本機只跑 selftest 的話，v1.4.0 那種只在 CI 紅的情況會再發生。
     scan = subprocess.run(
         [sys.executable, str(repo_root / "tests" / "privacy_lint.py")],
@@ -286,6 +313,8 @@ def main(argv=None):
     _emit(scan.stderr, sys.stderr)
     if scan.returncode != 0:
         print("RESULT FAIL privacy scan of tracked files", file=sys.stderr)
+    else:
+        print("RESULT PASS privacy scan of tracked files")
     print(f"TOTAL PASS {passed}/{len(SELFTESTS)}")
     return (0 if passed == len(SELFTESTS) and not offenders and not unregistered
             and scan.returncode == 0 else 1)

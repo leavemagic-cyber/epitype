@@ -23,6 +23,8 @@ class FinalCallers(unittest.TestCase):
         fixture.setUp()
         self.addCleanup(fixture.doCleanups)
         self.fixture = fixture
+        self.transcript = fixture.root / 'recall.jsonl'
+        self.transcript.write_text('{}\n', encoding='utf-8')
 
     def test_runtime_alias_change_needs_complete_review_but_routing_maintenance_does_not(self):
         f = self.fixture
@@ -62,7 +64,8 @@ class FinalCallers(unittest.TestCase):
     def recall(self, budget, *, session='budget-test', markers=None):
         config = recall.load_config(time.monotonic())
         config['budget_bytes'] = budget
-        value = recall._recall({'prompt': 'aliasold', 'cwd': str(self.fixture.root), 'session_id': session},
+        value = recall._recall({'prompt': 'aliasold', 'cwd': str(self.fixture.root), 'session_id': session,
+                               'transcript_path': str(self.transcript)},
                                time.monotonic(), config, markers)
         return (value or {}).get('hookSpecificOutput', {}).get('additionalContext', '')
 
@@ -70,7 +73,12 @@ class FinalCallers(unittest.TestCase):
         f = self.fixture
         f.card(kind='ai-derived')
         memsearch.build_index(f.vault)
-        for budget in (200, 400, 600):
+        complete = self.recall(10240)
+        self.assertIn(f.document['text'], complete)
+        # Current reviews omit historical quotations. Force the pointer boundary
+        # from the actual complete unit, independently of temp-path length.
+        pointer_budget = len(complete.encode('utf-8')) - 1
+        for budget in (200, 400, pointer_budget):
             with self.subTest(budget=budget):
                 markers = []
                 context = self.recall(budget, session='low-' + str(budget), markers=markers)
@@ -81,22 +89,34 @@ class FinalCallers(unittest.TestCase):
                 self.assertNotIn(f.document['text'], context)
                 self.assertNotIn(f.document['quote'], context)
                 self.assertFalse(any(digest.startswith('card-') for _session, digest in markers))
+                if budget == pointer_budget:
+                    self.assertIn('V1/decision.md', context)
+                    self.assertIn(str(f.vault), context)
+                    self.assertTrue(any(session and digest.startswith('pointer-')
+                                        for session, digest in markers))
 
     def test_pointer_delivery_does_not_suppress_later_complete_source_delivery(self):
         f = self.fixture
         f.card(kind='ai-derived')
         memsearch.build_index(f.vault)
         markers = []
-        low = self.recall(600, markers=markers)
+        complete_size = len(self.recall(10240).encode('utf-8'))
+        low = self.recall(complete_size - 1, markers=markers)
         self.assertIn('decision.md', low)
         self.assertTrue(any(digest.startswith('pointer-') for _session, digest in markers))
         for session, digest in markers:
-            recall._claim_marker(session, digest)
-        complete = self.recall(10240)
+            self.assertTrue(session)
+            self.assertTrue(recall._claim_marker(session, digest))
+        complete_markers = []
+        complete = self.recall(10240, markers=complete_markers)
         self.assertIn(f.document['text'], complete)
-        self.assertIn(f.document['quote'], complete)
+        self.assertNotIn(f.document['quote'], complete)
         self.assertIn('synthetic-read-ai', complete)
         self.assertIn('適用範圍', complete)
+        self.assertTrue(any(session and digest.startswith('card-') for session, digest in complete_markers))
+        for session, digest in complete_markers:
+            self.assertTrue(recall._claim_marker(session, digest))
+        self.assertEqual(self.recall(10240), '')
 
     def test_impossibly_small_budget_reports_stderr_and_claims_no_delivery(self):
         f = self.fixture

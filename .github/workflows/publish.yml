@@ -18,7 +18,7 @@ jobs:
         with:
           python-version: '3.13'
       - name: Install release frontends
-        run: python -m pip install --upgrade build twine
+        run: python -m pip install --upgrade build twine ".[test]"
       - name: Require a matching version and a green source tree
         run: |
           python -c "import epitype, json, os, sys; expected = os.environ['GITHUB_REF_NAME'].removeprefix('v'); npm = json.load(open('package.json', encoding='utf-8'))['version']; sys.exit(0 if epitype.__version__ == expected == npm else f'tag {expected} != package {epitype.__version__} / package.json {npm}')"
@@ -55,7 +55,7 @@ jobs:
 
   release:
     name: Attach distributions to the GitHub Release
-    needs: build
+    needs: [build, publish]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -69,6 +69,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          notes="docs/releases/$GITHUB_REF_NAME.md"
+          if [ -f "$notes" ]; then
+            if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+              gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+              gh release edit "$GITHUB_REF_NAME" --notes-file "$notes"
+            else
+              gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --notes-file "$notes"
+            fi
+            exit 0
+          fi
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" dist/* --clobber
           else

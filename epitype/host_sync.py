@@ -36,7 +36,7 @@ from epitype import capture_route, core_gen, host_native, memspec
 Region = namedtuple("Region", "name text present current unrecognised", defaults=(0,))
 # key：狀態表的鍵。全域宿主檔一個宿主一個檔，用宿主名就分得開；專案根的檔案名兩個專案
 # 會一模一樣（都叫 AGENTS.md），所以那一種用絕對路徑。None＝這是全域宿主檔。
-Plan = namedtuple("Plan", "host path regions problems damaged key notices", defaults=(None, ()))
+Plan = namedtuple("Plan", "host path regions problems damaged key notices recovery", defaults=(None, (), None))
 
 STATE_FILENAME = "host_sync_state.json"
 
@@ -126,25 +126,137 @@ def contract_vaults(vaults, home=None):
     return [Path(vault) for vault in vaults if _dir_key(Path(vault).expanduser().resolve()) == key][:1]
 
 
-def rules_text(vaults, host, home=None, current="", notices=None):
+def rules_text(vaults, host, home=None, current="", notices=None, *, recovery=None):
     """這個宿主實際該載入的規則塊：共用區加它自己的宿主區。
 
     走 core_gen 的 `host_view`，與 `epitype core-gen` 是同一條判斷；兩邊若各寫一份，
     同一張卡會在產生時屬於一個宿主、在同步時屬於另一個。
     """
-    return _rules_text(contract_vaults(vaults, home), host, current, notices)
+    from epitype import core_qualification
+    config = os.environ.get(memspec.EPITYPE_CONFIG_ENV)
+    if not config and home is not None:
+        config = Path(home) / ".epitype" / "config.json"
+    return _rules_text(contract_vaults(vaults, home), host, current, notices,
+                       minimum_projects=core_qualification.minimum(memspec.config_options(config)),
+                       home=home, recovery=recovery)
 
 
-def _previous_rules(current, host):
+def _recovery_path(digest, home=None):
+    return (Path(home) if home else Path.home()) / '.epitype' / 'host_rule_recovery' / (digest + '.json')
+
+
+def _card_scope(entry):
+    """Read the authoritative card, retaining the verified snapshot if it is broken.
+
+    Recovery is used when a card fails validation. An invalid edit must not replace
+    its last accepted scope, and display prose is never a machine scope source.
+    """
+    from epitype import rule_pipeline
+    try:
+        path = Path(entry['vault']) / entry['path']
+        fields, problem = memspec.frontmatter_fields(path)
+        if not problem:
+            projected = rule_pipeline.projection(fields, path, allow_unavailable_sources=True)
+            if projected.get('document'):
+                return projected['document']['scope']
+    except (OSError, UnicodeError, ValueError, KeyError, TypeError):
+        pass
+    return entry.get('scope')
+
+
+def _compact_previous(current, host, digest, recovery, home):
+    """A manifest is usable only for the exact prior host view, never a text guess."""
+    try:
+        manifest = (recovery or {}).get(digest)
+        if manifest is None:
+            manifest = json.loads(_recovery_path(digest, home).read_text(encoding='utf-8'))
+        if manifest.get('version') != 1 or core_gen.recovery_digest(manifest) != digest:
+            raise ValueError('recovery manifest digest mismatch')
+        body_lines = current.strip('\n').split('\n')
+        del body_lines[2]
+        body = '\n'.join(body_lines)
+        view = manifest['views'][host]
+        if hashlib.sha256(body.encode('utf-8')).hexdigest() != view['sha256']:
+            raise ValueError('recovery host view mismatch')
+        lines, entries = body.split('\n'), []
+        for saved in view['entries']:
+            entry = dict(saved, hosts=tuple(saved['hosts']), inherits_defaults=False)
+            start, count = entry.pop('start'), entry.pop('count')
+            if start < 0 or count < 1 or start + count > len(lines):
+                raise ValueError('recovery span outside host view')
+            rendered = lines[start:start + count]
+            first = re.match(r'^(?:- |\d+\. )(.*)', rendered[0])
+            if not first:
+                raise ValueError('recovery span does not start at a rule')
+            rendered[0] = first.group(1)
+            # Scope comes from the card (or its last accepted recovery snapshot),
+            # never from the startup display. Preserve literal body lines intact.
+            scope = _card_scope(entry)
+            summary = ''
+            if isinstance(scope, dict):
+                entry['scope'] = scope
+                text_lines = entry.get('body_lines', 0)
+                prefixes = ('範圍覆寫：', 'Scope overrides: ', '適用範圍（卡片記載）：',
+                            'Recorded scope: ', '適用：', 'Applies: ')
+                rendered = rendered[:text_lines] + [line for line in rendered[text_lines:]
+                                                     if not line.startswith(prefixes)]
+                summary = core_gen.scope_summary(scope, '\n'.join(rendered[:text_lines]))
+            for field in ('author', 'review'):
+                label = entry.pop(field, '')
+                if label and label not in rendered:
+                    rendered.append(label)
+            if summary and summary not in rendered:
+                rendered.append(summary)
+            entry['previous_rendering'] = '\n'.join(rendered).rstrip('\n')
+            entries.append(entry)
+        return entries
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, IndexError) as exc:
+        raise ValueError('無法核對舊規則的 recovery 狀態；保留宿主檔：' + str(exc)) from exc
+
+
+def _previous_rules(current, host, *, recovery=None, home=None):
     """Recover individual entries from both the old and the indexed renderer."""
+    digest = core_gen.recovery_key(current)
+    if digest:
+        return _compact_previous(current, host, digest, recovery, home)
+    if core_gen.RECOVERY_PREFIX in '\n'.join(current.splitlines()[:3]):
+        raise ValueError(memspec.HOST_SYNC_ENTRY_MARKERS_INVALID)
     entries, active = [], None
     layer, section, hosts = "resident", "", ()
     indexed = any(prefix in current for prefix in ("<!--r:", "<!-- epr:", "<!-- epitype-rule:"))
     remaining = 0
+    scope_base = None
 
     def finish():
         if active is not None:
-            active["previous_rendering"] = "\n".join(active.pop("lines")).rstrip("\n")
+            lines = active.pop("lines")
+            # A held entry must be self-contained if the next generation has a different base.
+            deltas = [(i, prefix) for i, line in enumerate(lines)
+                      for prefix in ("範圍覆寫：", "Scope overrides: ") if line.startswith(prefix)]
+            if deltas:
+                from epitype import rule_provenance
+                if scope_base is None or len(deltas) != 1:
+                    raise ValueError(memspec.HOST_SYNC_ENTRY_MARKERS_INVALID)
+                index, prefix = deltas[0]
+                delta = json.loads(lines[index][len(prefix):])
+                if not isinstance(delta, dict):
+                    raise ValueError(memspec.HOST_SYNC_ENTRY_MARKERS_INVALID)
+                active['scope'] = {**scope_base, **delta}
+                lines[index] = core_gen.scope_summary(active['scope'], '\n'.join(lines[:index]))
+                active["inherits_defaults"] = False
+            else:
+                for index, line in enumerate(lines):
+                    for prefix in ('適用範圍：', 'Source scope: ', memspec.CORE_GEN_CARD_SCOPE.split('{scope}')[0]):
+                        if line.startswith(prefix):
+                            active['scope'] = json.loads(line[len(prefix):])
+                            lines[index] = core_gen.scope_summary(active['scope'], '\n'.join(lines[:index]))
+                if 'scope' not in active and scope_base is not None:
+                    active['scope'] = dict(scope_base)
+                    summary = core_gen.scope_summary(active['scope'], '\n'.join(lines))
+                    if summary:
+                        lines.append(summary)
+                    active['inherits_defaults'] = False
+            active["previous_rendering"] = "\n".join(lines).rstrip("\n")
             entries.append(active)
 
     for line in current.splitlines():
@@ -160,6 +272,13 @@ def _previous_rules(current, host):
                 finish()
                 active = None
             continue
+        for prefix in ("來源範圍基底：", "共用範圍：", "Source scope base: "):
+            if line.startswith(prefix):
+                from epitype import rule_provenance
+                candidate, _ = json.JSONDecoder().raw_decode(line[len(prefix):])
+                if not isinstance(candidate, dict) or any(key not in rule_provenance.SCOPE_KEYS for key in candidate):
+                    raise ValueError(memspec.HOST_SYNC_ENTRY_MARKERS_INVALID)
+                scope_base = {**core_gen.GLOBAL_SCOPE, **candidate}
         marker = re.fullmatch(r"<!--(?:r:| (?:epr|epitype-rule):)([0-9a-f]{16}) ([1-9]\d*) (x|-?\d+)( U)? ?-->", line)
         if line.startswith(("<!--r:", "<!-- epr:", "<!-- epitype-rule:")) and marker is None:
             raise ValueError(memspec.HOST_SYNC_ENTRY_MARKERS_INVALID)
@@ -201,15 +320,22 @@ def _failed_cards(notices):
     return any(notice.startswith(prefix) for notice in notices for prefix in prefixes)
 
 
-def _rules_text(vaults, host, current="", notices=None):
+def _rules_text(vaults, host, current="", notices=None, *, minimum_projects=0, project_root=None,
+                home=None, recovery=None):
     failures = []
-    rules, unreadable = core_gen.collect_rules(vaults, failures=failures)
+    rules, unreadable = core_gen.collect_rules(vaults, failures=failures, minimum_projects=minimum_projects)
     if len(unreadable) != len(failures):
         raise ValueError(memspec.HOST_SYNC_VAULT_UNREADABLE.format(errors="；".join(unreadable)))
-    previous = _previous_rules(current, host) if failures else []
+    previous = _previous_rules(current, host, recovery=recovery, home=home) if failures else []
     for vault, relative, reason, fields in failures:
         path = Path(vault) / relative
-        candidates = [item for item in previous if item.get("identity") == core_gen.rule_identity(relative)
+        if reason.startswith('[core qualification] '):
+            if notices is not None:
+                notices.append(memspec.HOST_SYNC_CARD_OMITTED.format(card=path, reason=reason))
+            continue
+        candidates = [item for item in previous
+                      if (item.get('vault') == vault and item.get('path') == relative)
+                      or (not item.get('vault') and item.get("identity") == core_gen.rule_identity(relative))
                       or str(path) in item["previous_rendering"]]
         if not candidates:
             # Older plain blocks have no path labels. Match only an exact text
@@ -234,13 +360,12 @@ def _rules_text(vaults, host, current="", notices=None):
             # A retained entry must not lose facts it previously inherited from
             # the shared header, even if every other such card has disappeared.
             if candidates[0]["inherits_defaults"]:
-                from epitype import rule_provenance
                 if memspec.CORE_GEN_CARD_AUTHOR.split("{author}")[0] not in rendering:
                     rendering += "\n" + memspec.CORE_GEN_CARD_AUTHOR.format(author="claude")
-                if memspec.CORE_GEN_CARD_SCOPE.split("{scope}")[0] not in rendering:
-                    scope = {"level": "global", "project": None, "case": None, "actions": ["*"],
-                             "conditions": [], "exceptions": [], "expiry": "unspecified"}
-                    rendering += "\n" + memspec.CORE_GEN_CARD_SCOPE.format(scope=rule_provenance.serialize(scope))
+                candidates[0].setdefault('scope', dict(core_gen.GLOBAL_SCOPE))
+            scope = _card_scope(dict(candidates[0], vault=vault, path=relative))
+            if isinstance(scope, dict):
+                candidates[0]['scope'] = scope
             held = dict(candidates[0], vault=vault, path=relative,
                         order=candidates[0]["order"] if candidates[0].get("identity") else core_gen._order_of(fields),
                         text=rendering, previous_rendering=rendering,
@@ -252,7 +377,16 @@ def _rules_text(vaults, host, current="", notices=None):
         if notices is not None:
             notices.append(message.format(card=path, reason=reason))
     rules.sort(key=core_gen._sort_key)
-    return _normalised(core_gen.host_view(core_gen.assemble(rules), host))
+    if project_root is not None:
+        from . import rule_context
+        def belongs(rule):
+            if isinstance(rule.get('scope'), dict):
+                return rule_context.applicability(rule['scope'], {'cwd': str(project_root)})[0] != 'OUTSIDE'
+            if 'previous_rendering' in rule:
+                return capture_route.reference_owner_matches(rule['vault'], project_root) is not False
+            return _project_card_allowed(Path(rule['vault']) / rule['path'], project_root)
+        rules = [rule for rule in rules if belongs(rule)]
+    return _normalised(core_gen.host_view(core_gen.assemble(rules, recovery=recovery), host))
 
 
 def _index_of(vault):
@@ -274,29 +408,145 @@ def index_text(vaults, home=None):
         text = _index_of(vault)
         if text is None:
             continue
-        return text
+        return _absolute_index_links(text, vault)
     return ""
 
 
-def project_rules_text(vault, host, current="", notices=None):
+def project_rules_text(vault, host, current="", notices=None, *, root=None, home=None, recovery=None):
     """這個專案庫自己的規則塊；一張規則卡都沒有就回空字串（不建空塊）。
 
     只收這一個庫；壞卡只能沿用這個宿主目前區塊中的舊版本。
     """
-    text = _rules_text([Path(vault)], host, current, notices)
-    return text if "<!--r:" in text else ""
+    generated = recovery if recovery is not None else {}
+    text = _rules_text([Path(vault)], host, current, notices, project_root=root, home=home, recovery=generated)
+    digest = core_gen.recovery_key(text)
+    return text if digest and generated[digest]['views'][host]['entries'] else ""
 
 
-def project_index_text(vault):
+def _project_card_allowed(path, root):
+    from . import rule_context, rule_pipeline, rule_provenance
+    try:
+        fields, problem = memspec.frontmatter_fields(path)
+        if problem or not memspec.card_is_current(fields):
+            return False
+        event = {'cwd': str(root)}
+        if rule_provenance.FIELD in fields:
+            projected = rule_pipeline.projection(fields, path, allow_unavailable_sources=True)
+            return not projected['expired'] and rule_context.applicability(
+                projected['document']['scope'], event)[0] != 'OUTSIDE'
+        return rule_context.reference_applicability(fields, path, event)[0] != 'OUTSIDE'
+    except (OSError, ValueError, UnicodeError):
+        return False
+
+
+def _local_index_path(vault, target):
+    target = target.strip().removeprefix('<').removesuffix('>')
+    if target.startswith('#') or (re.match(r'^[A-Za-z][A-Za-z0-9+.-]*:', target)
+                                   and not Path(target).is_absolute()):
+        return None
+    from urllib.parse import unquote
+    return (Path(vault) / unquote(target.split('#', 1)[0])).resolve()
+
+
+_INDEX_LINK = re.compile(
+    r'\[[^\]\n]*\]\([ \t]*(?P<target><[^>\n]*>|(?:\\.|[^\s()\\]|\((?:\\.|[^()\\])*\))+)'
+    r'(?:[ \t]+(?:"(?:\\.|[^"\n])*"|\'(?:\\.|[^\'\n])*\'|\((?:\\.|[^)\n])*\)))?[ \t]*\)')
+
+
+def _index_lines(text):
+    fence = None
+    for line in text.splitlines(keepends=True):
+        marker = re.match(r'^ {0,3}(`{3,}|~{3,})(.*)', line)
+        protected = fence is not None
+        if marker:
+            run, suffix = marker.groups()
+            if fence is None and not (run[0] == '`' and '`' in suffix):
+                fence = (run[0], len(run))
+                protected = True
+            elif fence is not None and run[0] == fence[0] and len(run) >= fence[1] and not suffix.strip():
+                fence = None
+        yield line, protected
+
+
+def _index_link_matches(line):
+    """Keep token offsets while masking inline code; use the same parser at both outlets."""
+    masked = list(line)
+    position = 0
+    for opening in re.finditer(r'`+', line):
+        if opening.start() < position:
+            continue
+        before = line[:opening.start()]
+        if (len(before) - len(before.rstrip('\\'))) % 2:
+            continue
+        closing = re.search(r'(?<!`)' + re.escape(opening.group()) + r'(?!`)', line[opening.end():])
+        if closing:
+            position = opening.end() + closing.end()
+            masked[opening.start():position] = ' ' * (position - opening.start())
+    for match in _INDEX_LINK.finditer(''.join(masked)):
+        before = line[:match.start()]
+        if not (len(before) - len(before.rstrip('\\'))) % 2:
+            yield match
+
+
+def _absolute_index_links(text, vault):
+    """Resolve active link destinations while keeping titles and code examples intact."""
+    output = []
+    for line, protected in _index_lines(text):
+        if not protected:
+            for match in reversed(list(_index_link_matches(line))):
+                target = match.group('target')
+                path = _local_index_path(vault, target)
+                if path is None:
+                    continue
+                anchor = target.strip('<>').partition('#')[2]
+                located = path.as_posix() + ('#' + anchor if anchor else '')
+                start, end = match.span('target')
+                line = line[:start] + '<' + located + '>' + line[end:]
+        output.append(line)
+    return ''.join(output)
+
+
+def project_index_text(vault, *, root=None):
     """這個專案庫的短索引：它自己的 MEMORY.md，去掉第一行標題。"""
-    return _index_of(vault) or ""
+    text = _index_of(vault) or ""
+    if root is None:
+        return _absolute_index_links(text, vault)
+    strict = capture_route.reference_owner_matches(vault, root) is False
+    lines = []
+    for raw, protected in _index_lines(text):
+        line = raw.rstrip('\r\n')
+        targets = [match.group('target') for match in _index_link_matches(line)] if not protected else []
+        allowed = True
+        for target in targets:
+            path = _local_index_path(vault, target)
+            if path is None:
+                if strict:
+                    allowed = False
+                continue
+            try:
+                relative = path.relative_to(Path(vault).resolve())
+            except ValueError:
+                relative = None
+            if strict and (relative is None or any(
+                    part.startswith(('_', '.')) for part in relative.parts)):
+                allowed = False
+            elif path.is_file() and path.suffix.lower() == '.md':
+                allowed = allowed and _project_card_allowed(path, root)
+            elif strict:
+                allowed = False
+        if allowed and (not strict or targets):
+            lines.append(line)
+    return _normalised(_absolute_index_links('\n'.join(lines), vault))
 
 
-def project_index_pointer(vault):
+def project_index_pointer(vault, *, root=None):
     """索引超過每場固定成本上限時改放的短指標：完整索引留在庫裡，用到才讀。
 
     拒寫會讓專案根留著上一版索引，已作廢的規則每一場照樣被載入。
     """
+    if root is not None:
+        return (f"- 專案記憶庫：`{Path(vault).resolve().as_posix()}`；專案：`{Path(root).resolve().as_posix()}`。\n"
+                "- 按本專案完整路徑搜尋相關來源；不全文展開共用總索引。")
     index = (Path(vault).resolve() / memspec.HOST_SYNC_INDEX_FILENAME).as_posix()
     return (f"- 專案記憶索引：`{index}`\n"
             "- 需要這個專案的記憶時先讀這個檔；它超過每場固定成本上限，所以不整份放在這裡。")
@@ -388,9 +638,9 @@ def render(raw, name, wanted):
 
 def plan_for(host, vaults, home=None):
     """這個宿主檔要改什麼：每塊的現況與應有內容，以及擋住寫入的問題。"""
-    return _plan(host, host, None, host_path(host, home), lambda raw, notices: {
+    return _plan(host, host, None, host_path(host, home), lambda raw, notices, recovery: {
         memspec.HOST_SYNC_RULES_REGION: rules_text(vaults, host, home,
-            _current_rules(raw, memspec.HOST_SYNC_RULES_REGION), notices),
+            _current_rules(raw, memspec.HOST_SYNC_RULES_REGION), notices, recovery=recovery),
         memspec.HOST_SYNC_INDEX_REGION: index_text(vaults, home),
     }, home, contextual=True)
 
@@ -410,8 +660,9 @@ def _plan(host, label, key, path, wanted_of, home=None, over_cap=None, contextua
     raw = raw or ""
     regions, problems, notices = [], [], []
     damaged = False
+    recovery = {}
     try:
-        wanted = wanted_of(raw, notices) if contextual else wanted_of()
+        wanted = wanted_of(raw, notices, recovery) if contextual else wanted_of()
     except Exception as exc:
         return Plan(label, path, [], [f"組不出要寫的內容：{type(exc).__name__}: {exc}"], False, key)
 
@@ -498,7 +749,7 @@ def _plan(host, label, key, path, wanted_of, home=None, over_cap=None, contextua
         )
         regions.append(Region(name, text, found is not None, inner, unrecognised))
     problems.extend(_budget_problems(host, path, raw, regions, home))
-    return Plan(label, path, regions, problems, damaged, key, tuple(notices))
+    return Plan(label, path, regions, problems, damaged, key, tuple(notices), recovery)
 
 
 PROJECT_SKIP_NO_ROOT = "找不到專案根（對話紀錄無 cwd 或目錄已不在）"
@@ -528,9 +779,9 @@ def _known_project_roots(home=None):
     for vault in capture_route.native_vaults(home):
         if not _native_project_vault(vault):
             continue  # 家目錄底下那幾個不綁專案的庫沒有專案根可言
-        root = capture_route.project_root_of(vault)
-        if root is not None:
-            roots.setdefault(_dir_key(root), root)
+        for root in capture_route.project_roots_of(vault):
+            if root.is_dir():
+                roots.setdefault(_dir_key(root), root)
     return roots
 
 
@@ -575,11 +826,11 @@ def project_targets(vaults, hosts=None, home=None):
             # 路徑形狀推不出專案根的庫（自己開在別處的庫）不在這條路徑上；它的規則仍由
             # 兩道閘讀設定裡的庫清單執行，只是沒有專案根可以寫。
             continue
-        root = capture_route.project_root_of(vault)
-        if root is None:
+        roots = [root for root in capture_route.project_roots_of(vault) if root.is_dir()]
+        if not roots:
             skipped.append((vault, PROJECT_SKIP_NO_ROOT))
             continue
-        found.append((vault, root, _dir_key(root)))
+        found.extend((vault, root, _dir_key(root)) for root in roots)
     targets = []
     shared = {}
     for vault, root, key in found:
@@ -623,11 +874,12 @@ def project_plan(host, root, vault, home=None):
     path = Path(root) / memspec.HOST_SYNC_PROJECT_FILES[host]
     label = f"project:{Path(root).name}/{path.name}"
 
-    def wanted_of(raw, notices):
+    def wanted_of(raw, notices, recovery):
         builders = {
             memspec.HOST_SYNC_PROJECT_RULES_REGION: lambda: project_rules_text(vault, host,
-                _current_rules(raw, memspec.HOST_SYNC_PROJECT_RULES_REGION), notices),
-            memspec.HOST_SYNC_PROJECT_INDEX_REGION: lambda: project_index_text(vault),
+                _current_rules(raw, memspec.HOST_SYNC_PROJECT_RULES_REGION), notices, root=root,
+                home=home, recovery=recovery),
+            memspec.HOST_SYNC_PROJECT_INDEX_REGION: lambda: project_index_text(vault, root=root),
         }
         # 沒內容的那一塊整塊不要：這個庫沒有規則卡，就不該在別人的專案根長出一個空殼區
         # 塊——空塊看起來像「規則是空的」，而實際上是「這裡沒有規則這回事」。
@@ -639,7 +891,7 @@ def project_plan(host, root, vault, home=None):
         return wanted
 
     return _plan(host, label, os.fspath(path), path, wanted_of, home, over_cap={
-        memspec.HOST_SYNC_PROJECT_INDEX_REGION: project_index_pointer(vault)}, contextual=True)
+        memspec.HOST_SYNC_PROJECT_INDEX_REGION: project_index_pointer(vault, root=root)}, contextual=True)
 
 
 def _plans(vaults, hosts=None, home=None):
@@ -884,6 +1136,18 @@ def apply(vaults, hosts=None, home=None, output=sys.stdout, actor=memspec.HOST_S
         changed = [region.name for region in item.regions if not region.present or _drifted(region)]
         for region in item.regions:
             updated = render(updated, region.name, region.text)
+        try:
+            # Save boundaries before publishing text that depends on them, also
+            # repairing lost state when a valid block itself is already current.
+            for digest, manifest in (item.recovery or {}).items():
+                target = _recovery_path(digest, home)
+                data = json.dumps(manifest, ensure_ascii=False).encode('utf-8')
+                if not target.is_file() or target.read_bytes() != data:
+                    atomic_write(target, data)
+        except OSError as exc:
+            print(f"REFUSE {item.host}: recovery 狀態寫入失敗 {type(exc).__name__}: {exc}", file=output)
+            refused += 1
+            continue
         if updated == raw:
             if _failed_cards(item.notices):
                 print(memspec.HOST_SYNC_PARTIAL_OK.format(targets=item.host), file=output)
@@ -1084,12 +1348,16 @@ def _selftest():
             claude = host_path("claude", home)
             body = claude.read_text(encoding="utf-8")
             begin, end = memspec.HOST_SYNC_MARKERS[memspec.HOST_SYNC_RULES_REGION]
+            index_begin, index_end = memspec.HOST_SYNC_MARKERS[memspec.HOST_SYNC_INDEX_REGION]
+            expected_link = "[一張卡](<" + (vault / "a.md").as_posix() + ">)"
             checks.append((
                 "第一次 apply 連檔案一起建，規則與索引各一塊",
                 code == EXIT_OK and claude.is_file()
                 and body.count(begin) == 1 and body.count(end) == 1
                 and "Honesty governs this contract." in body
-                and "[一張卡](a.md)" in body,
+                and body.count(index_begin) == 1 and body.count(index_end) == 1
+                and expected_link in body
+                and expected_link in host_path("codex", home).read_text(encoding="utf-8"),
             ))
             checks.append((
                 "索引去掉了 MEMORY.md 的標題行",
@@ -1464,6 +1732,7 @@ def _managed_vaults(config_path=None):
     )
 
 
+@capture_route.observation_window()
 def main(argv=None, output=sys.stdout):
     arguments = list(sys.argv[1:] if argv is None else argv)
     if arguments == ["--selftest"]:

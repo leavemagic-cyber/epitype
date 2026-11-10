@@ -33,7 +33,7 @@ def _is_link(entry, info):
     return entry.is_symlink() or bool(getattr(info, "st_file_attributes", 0) & _REPARSE_POINT)
 
 
-def scan_vault(vault):
+def scan_vault(vault, *, strict=False):
     """每一張卡：(庫內相對 posix 路徑, 路徑, mtime_ns, 大小, ctime_ns)。
 
     建立時間一起帶回來，呼叫端就不必為了它再 stat 一次；Windows 的目錄列表本來
@@ -58,12 +58,16 @@ def scan_vault(vault):
                         if not entry.is_file(follow_symlinks=False):
                             continue
                     except OSError:
+                        if strict:
+                            raise
                         continue
                     if not name.lower().endswith(".md") or name == memspec.MEMORY_INDEX_FILENAME:
                         continue
                     found.append((prefix + name, Path(entry.path), info.st_mtime_ns,
                                   info.st_size, info.st_ctime_ns))
         except OSError:
+            if strict:
+                raise
             continue
     found.sort(key=lambda item: item[0].casefold())
     return found

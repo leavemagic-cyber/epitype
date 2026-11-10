@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+## 1.11.0 (2026-11-11)
+
+- Turn automatic prompt matching off by default to reduce unrelated memory injection. Opt in with `proactive_recall: true`; explicit search, event capture, pending notices and compaction recovery remain available independently.
+- When proactive recall is enabled, check project ownership before ranking, exclude resident rules, and prevent inactive or ineligible cards from bringing linked cards into context. Apply the same scope checks during compaction recovery.
+- Improve lexical recall across writing systems and let explicit search find current cards by complete original phrases after summaries change. Ambiguous matches and missed paraphrases remain possible.
+- Isolate delivery receipts by host and parent or child context, acknowledge only successfully emitted content, and retain newly relevant passages after a summary was already delivered.
+- Restore short working state after compaction, with a must-read handoff pointer when the full state cannot fit. Keep child-agent recovery separate and detect overwritten handoffs.
+- Review rules by their current meaning, scope and execution fields. Historical conversation audits remain explicit and optional; generated advice stays bound to reviewed content.
+- Compact generated rule metadata and scope descriptions while preserving complete rule text and machine-readable recovery data. Advisory size targets no longer leave obsolete rules in place.
+- Add `epitype memory-index` for configurable, lossless index budgeting, with preview, lint and explicit apply modes.
+- Add `epitype fixed-load` for advisory startup-load reports, separating static estimates from observed runtime and MCP load without disabling tools or blocking work.
+- Cache maintenance lint results and warm action guards incrementally. Keep card-cleanup, alias and fixed-load maintenance notices out of working conversations.
+- Support token-based Claude Code compaction windows and keep learned thresholds tied to the window that produced them.
+- Save unreviewed human events as searchable drafts without granting rule authority. Skip capture in non-interactive Codex exec sessions and exclude tool results and compaction summaries.
+- Narrow completion-claim and deletion reminders to relevant actions, preserve localized Stop messages, and distinguish delegation from verification.
+- Share one collaboration skill across Claude Code and Codex, update public guides, and register all regression suites in the test runner.
+- Known limit: Codex sessions without a local transcript cannot deliver Stop reminders and may repeat tool reminders. Literal action matching remains a guardrail; host permissions govern irreversible actions.
+
 ## 1.10.1 (2026-10-29)
 
 - Link the changelog and release notes from the PyPI project page, and ship `CHANGELOG.md`, homepage and issue links with the npm package. No code changes.

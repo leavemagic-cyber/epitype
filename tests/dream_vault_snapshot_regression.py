@@ -21,13 +21,12 @@ class VaultSnapshot(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="epitype-snapshot-")
         self.addCleanup(temporary.cleanup)
-        # The CLI resolves vaults, including Windows temp paths with 8.3 aliases.
-        self.root = Path(temporary.name).resolve()
+        self.root = Path(temporary.name)
         self.vault = self.root / "vault"
         self.vault.mkdir()
         self.today = date(2026, 10, 28)
         self.git("init", "-q")
-        for key, value in (("user.name", "Snapshot Test"), ("user.email", "snapshot-fixture@localhost"),
+        for key, value in (("user.name", "Snapshot Test"), ("user.email", "test@example.com"),
                            ("commit.gpgsign", "false"), ("core.autocrlf", "false")):
             self.git("config", key, value)
         (self.vault / ".gitignore").write_text(

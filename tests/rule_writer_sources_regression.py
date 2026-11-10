@@ -169,16 +169,21 @@ class WriterSources(unittest.TestCase):
         self.assertEqual(routed['status'], capture_route.ROUTE_OK)
 
     def test_capture_assistant_quote_is_not_owner_source(self):
-        event = self.reviewed_event()
+        event=self.reviewed_event()
         self.mutate_source(event)
-        path = self.capture(event)
-        self.assertEqual(self.replay.status, capture.STATUS_PENDING)
-        self.assertIn('captured_pending', path.parts)
+        path=self.capture(event)
+        self.assertEqual(self.replay.status,capture.STATUS_WRITTEN)
+        fields,_=memspec.frontmatter_fields(path)
+        self.assertEqual(rule_pipeline.inspect_card(fields,path).status,'REVIEWED')
+        self.assertFalse(rule_pipeline.inspect_card(fields,path,audit_originals=True).verified)
 
     def test_capture_source_hash_change_is_not_published(self):
-        event = self.reviewed_event()
-        Path(event[rule_provenance.FIELD]['sources'][0]['path']).write_text('changed\n')
-        self.assertIn('captured_pending', self.capture(event).parts)
+        event=self.reviewed_event()
+        Path(event[rule_provenance.FIELD]['sources'][0]['path']).write_text('changed')
+        path=self.capture(event)
+        self.assertEqual(self.replay.status,capture.STATUS_WRITTEN)
+        fields,_=memspec.frontmatter_fields(path)
+        self.assertFalse(rule_pipeline.inspect_card(fields,path,audit_originals=True).verified)
 
     def test_capture_bound_body_cannot_acquire_extra_rule(self):
         event = self.reviewed_event()
@@ -269,8 +274,10 @@ class WriterSources(unittest.TestCase):
         path.write_text(path.read_text(encoding='utf-8').replace(old,
                         json.dumps(document, ensure_ascii=False)), encoding='utf-8')
         counts, _ = harvest.reevaluate(path.parent, self.vault, apply=True)
-        self.assertEqual(counts['held'], 1)
-        self.assertTrue(path.exists())
+        self.assertEqual(counts['moved'], 1)
+        target=self.vault / memspec.CORRECTION_DIRECTORY / path.name
+        fields,_=memspec.frontmatter_fields(target)
+        self.assertFalse(rule_pipeline.inspect_card(fields,target,audit_originals=True).verified)
 
     def test_harvest_historical_marker_cannot_hide_execution_or_owner_claim(self):
         for extra in ('owner_quote: 不要再亂改介面\n', 'forbidden: [bad]\n'):
@@ -374,7 +381,9 @@ class WriterSources(unittest.TestCase):
         # Stale hash and role independently invalidate the original.
         written, _ = starter._install(self.vault, cards, False, io.StringIO())
         self.assertNotIn(cards[0].name, written)
-        self.assertNotIn(cards[1].name, written)
+        self.assertIn(cards[1].name, written)
+        original_fields,_=memspec.frontmatter_fields(cards[1])
+        self.assertFalse(rule_pipeline.inspect_card(original_fields,cards[1],audit_originals=True).verified)
 
     def test_starter_nonrule_and_unchanged_foreign_files_are_preserved(self):
         source = self.root / 'plain.md'

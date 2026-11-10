@@ -53,15 +53,32 @@ def find_text_exec(command):
     """回傳 [(rule, offset, snippet)]，依發現順序；沒有就是空串列。
 
     offset 是 command 裡的字元位置；反引號區段裡再找到的東西，offset 記在那個反引號上。"""
-    if not isinstance(command, str) or not command:
-        return []
+    return list(_scan(command).findings)
+
+
+def has_unquoted_heredoc_backslash(command):
+    """Use the same bounded quote parser; text outside the heredoc body does not count."""
+    return _scan(command).unquoted_heredoc_backslash
+
+
+def simple_commands(command):
+    """Literal command words and operands; quoted data and heredoc bodies stay data.
+
+    This is a bounded lexical projection, without variable expansion or execution.
+    """
+    return _scan(command).commands
+
+
+def _scan(command):
+    if not isinstance(command, str):
+        command = ""
     size = len(command.encode("utf-8", errors="replace"))
     if size > memspec.WRITE_GATE_MAX_CONTENT_BYTES:
         raise ScanLimitExceeded(
             f"command is {size} bytes, over the {memspec.WRITE_GATE_MAX_CONTENT_BYTES}-byte scan limit")
     scan = _Scan(command)
     scan.run()
-    return list(scan.findings)
+    return scan
 
 
 def is_document_path(word):
@@ -75,12 +92,13 @@ class _Command:
     """一個簡單指令讀到哪裡：下一個字是不是指令字、是不是重導向的目標……"""
 
     __slots__ = ("command_position", "started", "redirect", "shell", "shell_start", "skip_next",
-                 "options_done", "condition", "function_name")
+                 "options_done", "condition", "function_name", "words")
 
     def __init__(self, command_position=True):
         self.reset(command_position)
 
     def reset(self, command_position):
+        self.words = None
         self.command_position = command_position
         # 這個簡單指令已經讀過字、指派或重導向：此後的 ( 在 Bash 是語法錯誤，不是子殼層。
         self.started = False
@@ -100,7 +118,9 @@ class _Scan:
         self.base = base
         self.pending = []
         if root is None:
+            self.commands = []
             self.findings = []
+            self.unquoted_heredoc_backslash = False
             self.seen = set()
             self.steps = 0
             self.budget = memspec.SHELL_TEXT_EXEC_STEP_BUDGET
@@ -326,6 +346,8 @@ class _Scan:
                 self._add("R3", start, stop)
                 return
             name = re.split(r"[\\/]", literal)[-1].casefold()
+            state.words = [literal]
+            self.root.commands.append(state.words)
             if name.endswith(".exe"):
                 name = name[:-4]
             if name in _SHELL_NAMES:
@@ -333,6 +355,8 @@ class _Scan:
             elif literal in _SOURCE_NAMES:
                 state.shell, state.shell_start = "source", start
             return
+        if state.words is not None:
+            state.words.append(literal)
         if not state.shell:
             return
         if state.skip_next:
@@ -614,6 +638,8 @@ class _Scan:
                     break
                 pos = end if newline < 0 else newline + 1
             if not quoted:
+                if "\\" in text[start:body_end]:
+                    self.root.unquoted_heredoc_backslash = True
                 self._heredoc_body(start, body_end, depth + 1)
         return pos
 

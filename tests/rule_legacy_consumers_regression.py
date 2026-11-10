@@ -95,7 +95,8 @@ class LegacyConsumers(unittest.TestCase):
         self.card()
         fields, _problem = memspec.frontmatter_fields(self.target)
         projected = rule_pipeline.projection(fields, self.target)
-        self.assertEqual(projected['provenance']['status'], 'VERIFIED')
+        self.assertEqual(projected['provenance']['status'], 'REVIEWED')
+        self.assertEqual(projected['provenance']['source_audit_status'], 'NOT_REQUESTED')
         self.assertFalse(projected['provenance']['action_authorization'])
 
     def test_enrolled_rule_cannot_escape_by_removing_classification_fields(self):
@@ -120,17 +121,24 @@ class LegacyConsumers(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'changed after its reviewed snapshot'):
                 rule_pipeline.projection(fields, self.target, card_text=text)
 
-    def test_stale_caller_fields_cannot_verify_a_changed_source_envelope(self):
+    def test_stale_caller_fields_use_current_review_and_explicit_audit_checks_changed_envelope(self):
         for host in ('claude', 'codex'):
             text = self.card(host=host)
             fields, _problem = memspec.frontmatter_fields(self.target)
+            self.assertEqual(rule_pipeline.inspect_card(fields, self.target, audit_originals=True).status, 'VERIFIED')
             changed = copy.deepcopy(self.document)
             changed['sources'][0]['record_sha256'] = '0' * 64
             replacement = 'rule_provenance: ' + json.dumps(json.dumps(changed, ensure_ascii=False), ensure_ascii=False)
             self.target.write_text('\n'.join(replacement if line.startswith('rule_provenance:') else line
                 for line in text.splitlines()) + '\n', encoding='utf-8')
-            with self.assertRaisesRegex(ValueError, 'rule provenance INVALID'):
-                rule_pipeline.projection(fields, self.target)
+            projected = rule_pipeline.projection(fields, self.target)
+            self.assertEqual(projected['provenance']['status'], 'REVIEWED')
+            self.assertEqual(projected['document']['sources'][0]['record_sha256'], '0' * 64)
+            self.assertEqual(projected['provenance']['source_audit_status'], 'NOT_REQUESTED')
+            current, _ = memspec.frontmatter_fields(self.target)
+            audited = rule_pipeline.inspect_card(current, self.target, audit_originals=True)
+            self.assertEqual(audited.status, 'INVALID')
+            self.assertEqual(audited.issues, ['original source identity, record boundary or role validation failed'])
 
 
 if __name__ == '__main__':

@@ -346,7 +346,7 @@
         "vault_cards": [
           {
             "path": "decisions/pinboard.md",
-            "content": "---\nname: 合成置頂裁定\ndescription: 合成練習的置頂示例\ndecision_key: synthetic-pinboard\nstatus: active\ncurrent_decision_at: 2026-07-01\ndecided_by: owner-explicit\nowner_quote: 合成置頂卡要帶原話\nscope: data\n---\n本卡正文提到 pinboardmarker，用於合成置頂練習。\n"
+            "content": "---\nname: 合成置頂裁定\ndescription: 合成練習的置頂示例\naliases: [pinboardmarker]\ndecision_key: synthetic-pinboard\nstatus: active\ncurrent_decision_at: 2026-07-01\ndecided_by: owner-explicit\nowner_quote: 合成置頂卡要帶原話\nscope: data\n---\n本卡正文提到 pinboardmarker，用於合成置頂練習。\n"
           },
           {
             "path": "notes/strong-1.md",

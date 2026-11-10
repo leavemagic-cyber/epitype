@@ -209,11 +209,11 @@ class NativeSourceConsumers(unittest.TestCase):
                 result = host_sync.apply(self.vaults, hosts=['claude', 'codex'],
                     home=self.home, output=report)
                 self.assertEqual(result, host_sync.EXIT_OK, report.getvalue())
-                self.assertIn('UNVERIFIED', report.getvalue())
+                self.assertNotIn('UNVERIFIED original', report.getvalue())
                 for target in (self.home / '.claude' / 'CLAUDE.md', self.home / '.codex' / 'AGENTS.md'):
                     rendered = target.read_text(encoding='utf-8')
                     self.assertIn(self.document['text'], rendered)
-                    self.assertIn('原始對話無法讀取', rendered)
+                    self.assertIn('現行內容已審 REVIEWED', rendered)
                 self.assertEqual(self.call(host_native.check)[0], (0, 0))
                 settings = json.loads(self.settings.read_text(encoding='utf-8'))
                 self.assertIn('Read(user-file)', settings['permissions']['deny'])
@@ -265,7 +265,7 @@ class NativeSourceConsumers(unittest.TestCase):
         self.install()
         owned_before = json.loads(host_native.state_path(self.home).read_text(encoding='utf-8'))
         config_before, rules_before = self.config.read_bytes(), self.rules.read_bytes()
-        self.equal_stat_replace(self.source, b'adopt native', b'adapt native')
+        self.equal_stat_replace(self.path, b'per_session: 4', b'per_session: 8')
         self.card(path=second, native=depth.format(3))
 
         checked, report = self.call(host_native.check)
@@ -300,15 +300,20 @@ class NativeSourceConsumers(unittest.TestCase):
         self.assertGreaterEqual(retained, 3)
 
         # 卡修好之後一切照舊：沒有衝突、沒有遺失的所有權，再同步一次什麼都不用改。
-        self.equal_stat_replace(self.source, b'adapt native', b'adopt native')
+        self.equal_stat_replace(self.path, b'per_session: 8', b'per_session: 4')
         applied, report = self.call()
         self.assertEqual(applied, (0, 0), report)
 
     def test_same_stat_source_tamper_refuses_and_retains_all_owned_settings(self):
         self.card()
         self.install()
-        self.equal_stat_replace(self.source, b'adopt native', b'adapt native')
-        self.assert_refuses_preserving()
+        before=self.snapshot()
+        self.equal_stat_replace(self.source,b'adopt native',b'adapt native')
+        self.assertEqual(self.call(host_native.check)[0],(0,0))
+        self.assertEqual(self.call()[0],(0,0))
+        self.assertEqual(self.snapshot(),before)
+        fields,_=memspec.frontmatter_fields(self.path)
+        self.assertFalse(rule_pipeline.inspect_card(fields,self.path,audit_originals=True).verified)
 
     def test_same_stat_native_execution_field_tamper_refuses(self):
         self.card()
@@ -325,13 +330,13 @@ class NativeSourceConsumers(unittest.TestCase):
     def test_provenance_envelope_change_is_fresh_even_when_meaning_unchanged(self):
         self.card()
         self.install()
-        # Scope metadata is not in the separately bound card meaning, but its
-        # source-bound scope review still must match the original record.
-        old = self.path.read_text(encoding='utf-8')
-        changed = old.replace('Synthetic fixture only:', 'Synthetic forgery only:')
-        self.assertNotEqual(old, changed)
-        self.path.write_text(changed, encoding='utf-8')
-        self.assert_refuses_preserving()
+        old=self.path.read_text(encoding='utf-8')
+        changed=old.replace('Synthetic fixture only:','Synthetic forgery only:')
+        self.assertNotEqual(old,changed)
+        self.path.write_text(changed,encoding='utf-8')
+        self.assertEqual(self.call(host_native.check)[0],(0,0))
+        fields,_=memspec.frontmatter_fields(self.path)
+        self.assertFalse(rule_pipeline.inspect_card(fields,self.path,audit_originals=True).verified)
 
     def test_missing_scope_does_not_promote_card_to_global_or_clear_owned_values(self):
         self.card()
@@ -426,8 +431,12 @@ class NativeSourceConsumers(unittest.TestCase):
         self.card()
         self.install()
         self.card(status='retired')
-        self.equal_stat_replace(self.source, b'adopt native', b'adapt native')
-        self.assert_refuses_preserving()
+        self.equal_stat_replace(self.source,b'adopt native',b'adapt native')
+        self.assertEqual(self.call()[0],(3,0))
+        self.assertEqual(json.loads(self.settings.read_text()),json.loads(USER_SETTINGS))
+        self.assertEqual(self.user_rules.read_text(),USER_RULES)
+        fields,_=memspec.frontmatter_fields(self.path)
+        self.assertFalse(rule_pipeline.inspect_card(fields,self.path,audit_originals=True).verified)
 
     def test_source_verified_retired_card_releases_owned_keys(self):
         self.card()
@@ -535,7 +544,7 @@ class NativeSourceConsumers(unittest.TestCase):
             for function in (host_native.check, host_native.apply):
                 result, report = self.call(function)
                 self.assertEqual(result, (0, 0), report)
-                self.assertIn('UNVERIFIED original source unavailable', report)
+                self.assertNotIn('UNVERIFIED original source unavailable', report)
                 self.assertEqual(self.snapshot(), before)
 
     def test_failed_vault_scan_is_not_an_empty_desired_set(self):

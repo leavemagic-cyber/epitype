@@ -310,7 +310,7 @@ def collect(vaults, *, event=None, diagnostics=None, seconds=5.0, owned_cards=()
                     card_problem(relative, memspec.HOST_NATIVE_CARD_INVALID_REASON.format(
                         card=relative, problem='UNVERIFIED rule scope: ' + reason))
                     continue
-            if projected['provenance']['status'] != 'VERIFIED':
+            if projected['provenance']['status'] not in ('VERIFIED', 'REVIEWED'):
                 source = ('original source unavailable; synchronization continues with bound card content'
                           if projected['provenance'].get('source_unavailable') else 'legacy source')
                 diagnostics.append(f'{relative}: UNVERIFIED {source}; compatibility is not Owner authorship or scope proof')

@@ -257,7 +257,10 @@ class ActionGuardRegression(unittest.TestCase):
             )
         self.heredoc_card()  # sorts after the fillers, so one call cannot reach it
         self.assertIsNone(self.denial(self.call("Bash", {"command": HEREDOC_WITH_BACKSLASH})))
-        pretool.warm_guard_cache([self.vault], time.monotonic())
+        # This test isolates the discovery slice; startup deadline behavior has
+        # its own deterministic tests in sessionstart_segment_budget_regression.
+        pretool.warm_guard_cache([self.vault], time.monotonic(),
+                                deadline=time.monotonic() + 60.0)
         self.assertIsNotNone(self.denial(self.call("Bash", {"command": HEREDOC_WITH_BACKSLASH})))
 
     def test_no_card_means_no_opinion_about_any_command(self):
@@ -578,7 +581,8 @@ class ReadWaste(unittest.TestCase):
         payload = {"file_path": str(self.target)}
         payload.update(extra)
         return pretool._handle(
-            {"tool_name": "Read", "tool_input": payload, "session_id": "waste-test"},
+            {"tool_name": "Read", "tool_input": payload, "session_id": "waste-test",
+             "transcript_path": str(self.root / "read.jsonl")},
             time.monotonic(), [],
         )
 
@@ -778,6 +782,7 @@ class RequireWhenThen(unittest.TestCase):
         self.session = "req-" + str(id(message))
         return stop_gate._handle(
             {"session_id": self.session, "stop_hook_active": False,
+             "transcript_path": str(self.root / "thread.jsonl"),
              "last_assistant_message": message},
             time.monotonic(), [],
         )
@@ -977,14 +982,15 @@ class RequireWhenThen(unittest.TestCase):
         self.assertEqual(self.noted(), [])
 
     def test_a_completion_claim_without_evidence_is_noted(self):
-        # 回合照常結束，下一則提示帶一則提醒。提醒只記卡片與檢查名稱、不帶舊的改寫指令；
-        # 舊理由的「不用重貼前文」由「這一則不用重送」接手。
+        # 回合照常結束；只留現行規則，不重播引句或要求重送回覆。
         self.assertIsNone(self.block("這批已完成，可以進下一步。"))
         self.assertEqual(self.noted(), [("completion-carries-evidence", "require")])
-        notes = common.take_notes(common.load_config(time.monotonic()), self.session)
+        from epitype import hook_context
+        key = hook_context.identity({"session_id": self.session, "transcript_path": str(self.root / "thread.jsonl")})
+        notes = common.take_notes(common.load_config(time.monotonic()), key)
         self.assertEqual(len(notes), 1, notes)
         self.assertIn("completion-carries-evidence", notes[0])
-        self.assertIn("這一則不用重送", notes[0])
+        self.assertIn("說做完了就要同時寫出查了什麼", notes[0])
         self.assertNotIn("owner", notes[0])
 
     def test_the_same_claim_with_evidence_passes(self):

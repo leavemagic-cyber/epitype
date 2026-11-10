@@ -14,9 +14,10 @@ import time
 import unittest
 from unittest.mock import patch
 
-from epitype import decision_lint, memspec, rule_context, rule_pipeline
+from epitype import decision_lint, memspec, rule_context, rule_pipeline, rule_provenance
 import _hook_common as common
 import stop_gate as stop
+import pretooluse_gate as pretool
 
 
 class SourceConsumers(unittest.TestCase):
@@ -102,6 +103,39 @@ class SourceConsumers(unittest.TestCase):
     def decisions(self, event=None, defects=None):
         return stop._decisions(self.vault, time.monotonic(), defects, event=event)
 
+    def test_budget_limited_source_keeps_bound_content_but_not_a_changed_payload(self):
+        self.card()
+        fields,_=memspec.frontmatter_fields(self.target)
+        with patch.object(rule_provenance,'_original',side_effect=AssertionError('No historic IO')):
+            projected=rule_pipeline.projection(fields,self.target)
+            self.assertEqual(projected['provenance']['status'],'REVIEWED')
+            self.assertEqual(projected['text'],self.document['text'])
+            self.target.write_text(self.target.read_text(encoding='utf-8')+'Unreviewed new execution rule.',encoding='utf-8')
+            with self.assertRaisesRegex(ValueError,'not bound'):
+                rule_pipeline.projection(fields,self.target)
+
+    def test_pattern_only_ai_guard_reminds_but_owner_guard_can_block(self):
+        for kind in ('ai-derived', 'owner-directive'):
+            with self.subTest(kind=kind):
+                text = self.card(kind=kind)
+                document = copy.deepcopy(self.document)
+                document.pop('restriction_evidence', None)
+                lines = [line for line in text.splitlines() if not line.startswith('rule_provenance:')]
+                lines[1:1] = ['guard_tool: Bash', 'guard_all_of: [badold]', 'on_hit: block']
+                text = '\n'.join(lines)+'\n'
+                document = rule_pipeline.bind_payload(document, text, reviewer='synthetic-read-reviewer')
+                text = text.replace('---\n', '---\nrule_provenance: '
+                    + json.dumps(json.dumps(document, ensure_ascii=False), ensure_ascii=False)+'\n', 1)
+                self.target.write_text(text, encoding='utf-8')
+                value = pretool._handle({'tool_name':'Bash', 'tool_input':{'command':'echo badold'},
+                    'session_id':'pattern-guard-'+kind}, time.monotonic(), [])
+                output = (value or {}).get('hookSpecificOutput', {})
+                if kind == 'ai-derived':
+                    self.assertNotEqual(output.get('permissionDecision'), 'deny')
+                    self.assertIn('AI 程序僅作提醒', output.get('additionalContext', ''))
+                else:
+                    self.assertEqual(output.get('permissionDecision'), 'deny')
+
     def restore(self, event=None, diagnostics=None):
         destination = self.root / 'compact.md'
         rule_context.record(self.vault, 'session', self.target.name)
@@ -115,34 +149,36 @@ class SourceConsumers(unittest.TestCase):
                 self.card(host=host)
                 found = self.decisions()
                 self.assertEqual(len(found), 1)
-                self.assertEqual(found[0].source_status, 'VERIFIED')
-                self.assertEqual(found[0].source_original_quote, self.document['quote'])
+                self.assertEqual(found[0].source_status, 'REVIEWED')
+                self.assertEqual(found[0].source_original_quote, '')
                 self.assertEqual(found[0].source_scope, self.document['scope'])
                 self.assertEqual(decision_lint.lint_vault(self.vault).exit_code, 0)
                 event = {'session_id': host + '-source-read', 'hook_event_name': 'Stop',
+                         'transcript_path': str(self.root / ('.claude' if host == 'claude' else '.codex') / 'session.jsonl'),
                          'cwd': str(self.root), 'last_assistant_message': 'badold'}
                 notices = []
                 with patch.object(stop, 'leave_note', side_effect=lambda _config, _session, text:
                                   notices.append(text)):
                     self.assertIsNone(stop._handle(event, time.monotonic(), notices))
                 self.assertTrue(any(found[0].key in notice for notice in notices), notices)
-                self.assertTrue(any('來源' in notice for notice in notices), notices)
+                self.assertEqual(notices, ['Epitype 提醒（synthetic-read-rule）：採用本測試規則。'])
+                notice = notices[0]
+                self.assertNotIn('\n', notice)
+                for omitted in (self.document['quote'], 'badold', '作者', '來源',
+                                json.dumps(self.document['scope'], ensure_ascii=False),
+                                str(self.source)):
+                    self.assertNotIn(omitted, notice)
 
     def test_original_changes_invalidate_cached_ruling_with_unchanged_card(self):
         self.card()
-        self.assertEqual(len(self.decisions()), 1)
         stale = stop._read_decision(self.target)
-        before = self.target.stat()
         source_stat = self.source.stat()
         self.source.write_bytes(self.source.read_bytes().replace(b'badold', b'badevil'))
         os.utime(self.source, ns=(source_stat.st_atime_ns, source_stat.st_mtime_ns))
-        self.assertEqual(self.target.stat().st_mtime_ns, before.st_mtime_ns)
-        self.assertIsNone(stop._decision_from_ruling(self.vault, self.target.name, stale))
-        defects = []
-        self.assertEqual(self.decisions(defects=defects), [])
-        self.assertTrue(any('來源' in item for item in defects))
-        self.assertEqual(self.restore(), '')
-        self.assertTrue(any(item.rule == 'source' for item in decision_lint.lint_vault(self.vault).failures))
+        self.assertIsNotNone(stop._decision_from_ruling(self.vault, self.target.name, stale))
+        self.assertEqual(len(self.decisions()), 1)
+        fields,_=memspec.frontmatter_fields(self.target)
+        self.assertFalse(rule_pipeline.inspect_card(fields,self.target,audit_originals=True).verified)
 
     def test_body_and_execution_fields_cannot_bypass_binding(self):
         for change in ('body', 'guard'):
@@ -162,10 +198,10 @@ class SourceConsumers(unittest.TestCase):
         cached['source_status'] = 'UNVERIFIED'
         cached['forbidden'] = ['forged-guard']
         fresh = stop._decision_from_ruling(self.vault, self.target.name, cached)
-        self.assertEqual(fresh.source_status, 'VERIFIED')
+        self.assertEqual(fresh.source_status, 'REVIEWED')
         self.assertEqual(fresh.forbidden, ('badold',))
         self.source.write_bytes(self.source.read_bytes().replace(b'badold', b'badevil'))
-        self.assertIsNone(stop._decision_from_ruling(self.vault, self.target.name, cached))
+        self.assertEqual(stop._decision_from_ruling(self.vault, self.target.name, cached).forbidden, ('badold',))
 
     def test_compact_budget_reports_omission_without_cutting_scope_or_quote(self):
         self.card(kind='ai-derived')
@@ -190,14 +226,16 @@ class SourceConsumers(unittest.TestCase):
         forged = plain.replace('---\n', '---\nrule_provenance: '
             + json.dumps(json.dumps(document, ensure_ascii=False), ensure_ascii=False) + '\n', 1)
         self.target.write_text(forged, encoding='utf-8')
-        self.assertIsNone(stop._read_decision(self.target))
-        self.assertEqual(self.restore(), '')
-        self.assertTrue(decision_lint.lint_vault(self.vault).failures)
+        ruling=stop._read_decision(self.target)
+        self.assertEqual(ruling['source_status'],'REVIEWED')
+        self.assertEqual(ruling['source_original_quote'],'')
+        fields,_=memspec.frontmatter_fields(self.target)
+        self.assertFalse(rule_pipeline.inspect_card(fields,self.target,audit_originals=True).verified)
 
     def test_finite_expiry_is_removed_unspecified_remains_current(self):
         self.card()
         self.assertEqual(len(self.decisions()), 1)
-        self.assertIn('Owner 原話', self.restore())
+        self.assertIn('卡片記載作者：owner', self.restore())
         scope = copy.deepcopy(self.document['scope'])
         scope['expiry'] = '2000-01-01'
         self.card(scope=scope)
@@ -219,7 +257,7 @@ class SourceConsumers(unittest.TestCase):
         restored = self.restore({'cwd': str(self.root)})
         self.assertIn('限定參考', restored)
         self.assertIn('synthetic-read-ai', restored)
-        self.assertIn(self.document['quote'], restored)
+        self.assertNotIn(self.document['quote'], restored)
         self.assertIn('"case":"A"', restored)
         explicit = {'cwd': str(self.root), 'rule_context': {'case': 'A'}}
         self.assertEqual(len(self.decisions(explicit)), 1)

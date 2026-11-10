@@ -98,6 +98,17 @@ def _blocklist_rules(path):
     return tuple(terms)
 
 
+def _reserved_email(address):
+    domain = address.rpartition("@")[2].casefold()
+    return (domain in {"example.com", "example.org", "example.net"}
+            or domain.endswith((".example", ".test", ".invalid")))
+
+
+def _matches(rule, line):
+    return any(rule.name != "email" or not _reserved_email(match.group())
+               for match in rule.regex.finditer(line))
+
+
 def scan_repo(repo, blocklist=None):
     repo = Path(repo).resolve()
     if not (repo / ".git").exists():
@@ -121,7 +132,7 @@ def scan_repo(repo, blocklist=None):
             for rule in rules:
                 if rule.name in allowed:
                     continue
-                if rule.regex.search(line):
+                if _matches(rule, line):
                     violations.append(
                         Finding(Path(relative).as_posix(), line_number, rule.name)
                     )
@@ -153,7 +164,9 @@ def _selftest():
                     "C:" + "\\Users\\" + "SampleName\\notes.txt",
                     "/" + "home" + "/" + "sample-name/notes.txt",
                     "12345678" + "-1234-4234-9234-123456789abc",
-                    "sample" + "@" + "example.test",
+                    # Build a non-reserved poison address without embedding one
+                    # in the scanner's own tracked source.
+                    "sample@example.com".replace("example.com", "synthetic-mail.org"),
                     "orchard-private-marker",
                 )
             )
@@ -180,11 +193,15 @@ def _selftest():
             clean = root / "clean"
             clean.mkdir()
             (clean / "notes.txt").write_text(
-                "Portable synthetic notes without private identifiers.\n",
+                "Portable synthetic notes without private identifiers.\n"
+                "fixture@example.com fixture@example.org fixture@example.net\n"
+                "fixture@sub.example fixture@sub.test fixture@sub.invalid\n"
+                "fixture@EXAMPLE.COM fixture@nested.sub.test\n",
                 encoding="utf-8",
             )
             (clean / "LICENSE").write_text(
-                "Contact " + "license" + "@" + "example.test for this synthetic fixture.\n",
+                "Contact license@example.test for this synthetic fixture.\n".replace(
+                    "example.test", "synthetic-mail.org"),
                 encoding="utf-8",
             )
             removed = clean / "removed.md"
@@ -199,11 +216,28 @@ def _selftest():
                     not any(finding.path == "LICENSE" for finding in clean_violations),
                 )
             )
+            email = next(rule for rule in _BUILTIN_RULES if rule.name == "email")
+            checks.append(("reserved email domains pass", all(
+                not _matches(email, address) for address in (
+                    "fixture@example.com", "fixture@example.org", "fixture@example.net",
+                    "fixture@sub.example", "fixture@sub.test", "fixture@sub.invalid",
+                    "fixture@nested.sub.example", "fixture@EXAMPLE.COM"))))
+            # Reject suffix lookalikes and a real-domain address even when a
+            # reserved fixture address appears earlier on the same line.
+            checks.append(("non-reserved email domains are blocked", all(
+                _matches(email, "fixture@example.com " + "fixture@example.com".replace(
+                    "example.com", domain)) for domain in (
+                    "synthetic-mail.org", "notexample.com", "example.com.synthetic-mail.org",
+                    "test.synthetic-mail.org", "example.synthetic-mail.org",
+                    "invalid.synthetic-mail.org"))))
+            checks.append(("local blocklist still blocks reserved emails",
+                           _matches(Rule("blocklist:1", re.compile(re.escape(
+                               "fixture@example.com"))), "fixture@example.com")))
     except Exception as exc:
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 3
+    total = 6
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

@@ -18,6 +18,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "adapters" / "claude"))
 
+import contextlib
+import io
 import json
 import os
 import tempfile
@@ -25,7 +27,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from epitype import memspec
+from epitype import hook_context, memspec
 
 import _hook_common as common
 import recall_hook
@@ -71,6 +73,7 @@ class NoteInsteadOfBlock(unittest.TestCase):
     def stop(self, message, session="note-1"):
         return stop_gate._handle(
             {"session_id": session, "cwd": str(self.root),
+             "transcript_path": str(self.root / "turn.jsonl"),
              "last_assistant_message": message}, time.monotonic(), [])
 
     def log_kinds(self):
@@ -80,16 +83,22 @@ class NoteInsteadOfBlock(unittest.TestCase):
         return [json.loads(line)["kind"] for line in path.read_text(encoding="utf-8").splitlines()]
 
     def prompt(self, session="note-1"):
-        return recall_hook._handle(
-            {"session_id": session, "cwd": str(self.root), "prompt": "下一件事"},
-            time.monotonic(), [])
+        event = {"session_id": session, "cwd": str(self.root), "prompt": "下一件事",
+                 "transcript_path": str(self.root / "turn.jsonl")}
+        output = io.StringIO()
+        with patch.object(sys, "stdin", io.StringIO(json.dumps(event))), \
+             patch.object(sys, "argv", ["recall"]), \
+             patch.object(recall_hook, "_STARTED_AT", time.monotonic()), \
+             contextlib.redirect_stdout(output):
+            self.assertEqual(recall_hook.main(), 0)
+        return json.loads(output.getvalue()) if output.getvalue() else None
 
     def test_unmarked_card_is_noted_like_a_note_card(self):
         self.card("no-flattery")
         self.assertIsNone(self.stop("好問題，我來看看。"), "回合閘不擋，沒標處置的卡也一樣")
         self.assertEqual(self.log_kinds(), [memspec.STOP_NOTE_LOG_KIND])
         context = self.prompt()["hookSpecificOutput"]["additionalContext"]
-        self.assertIn("no-flattery 的 forbidden", context)
+        self.assertIn("Epitype 提醒（no-flattery）：對 owner 不說客套話", context)
 
     def test_note_card_lets_the_turn_end(self):
         self.card("no-flattery", "on_hit: note\n")
@@ -107,8 +116,8 @@ class NoteInsteadOfBlock(unittest.TestCase):
         first = self.prompt()
         self.assertIsNotNone(first)
         context = first["hookSpecificOutput"]["additionalContext"]
-        # 提醒寫卡名與檢查名，不把命中的字或舊的改寫指令送回模型。
-        self.assertIn("no-flattery 的 forbidden", context)
+        # 提醒只送卡名與現行規則，不重播命中字或要求改寫。
+        self.assertIn("Epitype 提醒（no-flattery）：對 owner 不說客套話", context)
         self.assertIn("不用重寫", context)
         second = self.prompt()
         text = "" if second is None else second["hookSpecificOutput"]["additionalContext"]
@@ -118,6 +127,9 @@ class NoteInsteadOfBlock(unittest.TestCase):
         self.card("no-flattery", "on_hit: note\n")
         self.assertIsNone(self.stop("查過了，檔案在這裡。"))
         self.assertEqual(self.log_kinds(), [])
+        loaded = common.load_config(time.monotonic())
+        self.assertEqual(common.take_notes(loaded, hook_context.notification_identity({
+            "session_id": "note-1", "transcript_path": str(self.root / "turn.jsonl")})), [])
         value = self.prompt()
         text = "" if value is None else value["hookSpecificOutput"]["additionalContext"]
         self.assertNotIn("不用重寫", text)
@@ -131,14 +143,15 @@ class NoteInsteadOfBlock(unittest.TestCase):
         self.assertIsNone(self.stop("好問題，這樣應該可以。"))
         self.assertEqual(self.log_kinds(), [memspec.STOP_NOTE_LOG_KIND])
         context = self.prompt()["hookSpecificOutput"]["additionalContext"]
-        self.assertEqual(context.count("Epitype 提醒：回覆命中"), 1, context)
+        self.assertEqual(context.count("Epitype 提醒（"), 1, context)
 
     def test_notes_do_not_pile_up(self):
         self.card("no-flattery", "on_hit: note\n")
         for index in range(memspec.STOP_NOTE_MAX_PENDING + 4):
             self.stop("好問題，第 %d 次。" % index)
         loaded = common.load_config(time.monotonic())
-        self.assertLessEqual(len(common.take_notes(loaded, "note-1")),
+        self.assertLessEqual(len(common.take_notes(loaded, hook_context.identity(
+            {"session_id": "note-1", "transcript_path": str(self.root / "turn.jsonl")}))),
                              memspec.STOP_NOTE_MAX_PENDING)
 
     def test_unknown_value_is_reported_and_still_noted(self):

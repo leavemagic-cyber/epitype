@@ -75,7 +75,7 @@ class CaptureIntegrationRegression(unittest.TestCase):
                 self.assertEqual(kind, expected)
                 # owner 2026-09-09 Q5「C」：白名單過關的進 <kind>/，其餘只寫提案；線上
                 # 與回放判的是同一句（owner 自己那半），所以落點也必須一樣。
-                admitted, _template = capture.auto_admitted(capture.owner_side(body, summary))
+                admitted, _template = capture.auto_admitted(prompt)
                 if admitted:
                     self.assertEqual(cards[0].parent.name, directory)
                 else:
@@ -246,7 +246,16 @@ class CaptureIntegrationRegression(unittest.TestCase):
         prompt = '不要再亂改介面'
         self.assertTrue(capture.auto_admitted(prompt)[0])
         event = self.event('source-missing', prompt, None)
+        # The prompt arrives before its human record; later tool/stop hooks
+        # capture that stable message identity rather than an anonymous prompt.
         recall._handle(event, time.monotonic(), [])
+        self.assertEqual(list(vault.rglob('*.md')), [])
+        transcript_path = Path(event['transcript_path'])
+        with transcript_path.open('a', encoding='utf-8') as stream:
+            stream.write(json.dumps({'type': 'user', 'uuid': 'synthetic-later-prompt',
+                'message': {'content': prompt}}, ensure_ascii=False) + '\n')
+        with patch.object(common, 'capture_vault', return_value=vault):
+            common.capture_transcript_events({}, event, time.monotonic())
         cards = list(vault.rglob('*.md'))
         self.assertEqual(len(cards), 1)
         self.assertIn('captured_pending', cards[0].parts)

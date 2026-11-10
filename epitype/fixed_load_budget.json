@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "mode": "advisory",
+  "reason": "Prevent silently recurring global prompt cost; preserve required capabilities.",
+  "reconsider_when": "Same-host rendered inventory establishes a different required floor.",
+  "baseline": {"tools": 41374, "mcp": 18743, "memory": 11369, "skills": 6274, "system": 4799},
+  "targets": {"tools": 30000, "mcp": 4000, "memory": 9000, "skills": 2200, "system": 4799},
+  "source_targets": {"agent": 35, "skill": 40, "index": 1000},
+  "index_cap_bytes": 1526,
+  "core_cap_bytes": 14523,
+  "agent_catalog_target": 315,
+  "owner_required": ["approved resident core", "PowerShell", "Bash", "ToolSearch"],
+  "placement": {
+    "default_scope": "project",
+    "promotion_min_distinct_projects": 2,
+    "project_identity": "Git common directory or explicit named project; scratch aliases do not count",
+    "kinds": ["tool", "skill", "agent", "connector", "rule"],
+    "reason": "Only shared capabilities should incur machine-wide recurring cost.",
+    "reconsider_when": "Two distinct named projects use the capability."
+  },
+  "sources": [],
+  "basis": "PLACEMENT1/DESIGN_FIXED_LOAD_BUDGET.md, 2026-11-08; provisional engineering targets, not owner rules or measured savings"
+}

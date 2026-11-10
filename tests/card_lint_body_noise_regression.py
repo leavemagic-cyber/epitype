@@ -29,29 +29,29 @@ class BodyNoise(unittest.TestCase):
                 if rule == 'body-noise' and level == card_lint.FAIL]
 
     def test_work_records_fail_in_rule_like_cards(self):
-        for fragment in ('提交 abcdef0', 'session ' + '00000000' + '-0000-4000-8000-000000000000',
-                         '備份 sample.json.bak_20260101_fixture', 'C:' + '\\Users\\' + 'SyntheticFixture' + r'\AppData\Local\Temp\fixture\a',
-                         'rollout-2026-01-01T00-00-00-0000'):
+        for fragment in ('提交 1a2b3c4', 'session ' + str(__import__('uuid').UUID(int=0)),
+                         '備份 config.json.bak_20260101_trim', 'C:' + r'\Users\Example\AppData\Local\Temp\claude\a',
+                         'rollout-2026-10-14T10-27-39-01a1'):
             with self.subTest(fragment=fragment):
                 reasons = self.noise(card('feedback', '做法：先查來源。' + fragment))
                 self.assertEqual(len(reasons), 1)
 
     def test_rules_dates_quotes_and_examples_pass(self):
-        body = ('**Why:** synthetic owner 2026-01-01「範例食譜的版本是 abcdef0」。\n'
-                '範例備份副檔名是 .bak；日期 20260101。\n'
-                '```\ngit show abcdef0\n```\n')
+        body = ('**Why:** owner 2026-01-01「這個提交是誰做的？1a2b3c4 不是我做的」。\n'
+                '清掉自己留的 .bak（先比對內容）；日期 20260101。\n'
+                '```\ngit show 1a2b3c4\n```\n')
         self.assertEqual(self.noise(card('feedback', body)), [])
 
     def test_pointer_and_retired_cards_are_out_of_scope(self):
-        record = '提交 abcdef0'
+        record = '提交 1a2b3c4'
         self.assertEqual(self.noise(card('reference', record)), [])
         self.assertEqual(self.noise(card('project', record)), [])
         self.assertEqual(self.noise(card('feedback', record, status='superseded')), [])
 
     def test_date_joined_to_id_is_not_read_as_hash(self):
-        reasons = self.noise(card('decision', '來源 20260101-abcdef012345'))
+        reasons = self.noise(card('decision', '來源 20260907-9f156894953d'))
         self.assertEqual(len(reasons), 1)
-        self.assertNotIn('20260101', reasons[0])
+        self.assertNotIn('20260907', reasons[0])
 
 
 if __name__ == '__main__':
