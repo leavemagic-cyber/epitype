@@ -6,6 +6,7 @@ import json
 import multiprocessing
 import os
 from pathlib import Path
+import queue
 import subprocess
 import tempfile
 import threading
@@ -17,13 +18,19 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from epitype import dream, memspec
 
+# 子行程何時就緒、跑完沒有上限可言：spawn 每次都是新直譯器，run_all 又關掉 bytecode
+# （PYTHONDONTWRITEBYTECODE），epitype.dream 每次從原始碼重編（閒置約 1.2 秒），三個
+# 一起起、套件又併行時實測 8–10 秒。以前用固定 10／30 秒當「就緒／跑完」的判準，滿載
+# 就假紅。現在判準是「子行程還活著就等」；這個上限只防整份套件卡死，不是正確性條件。
+HANG_GUARD_SECONDS = 600
+
 
 def contender(vault, ready, go, finish, results):
     ready.put(os.getpid())
-    go.wait(10)
+    go.wait()  # 父行程一定會 set（或測試結束時 terminate）；逾時先跑會讓「同時搶」悄悄變成依序搶。
     token = dream.acquire_lock(vault)
     results.put(bool(token))
-    finish.wait(10)
+    finish.wait()  # 擁有者要撐到父行程驗完「別人搶不到」；逾時先放鎖會讓那一題假紅。
     if token:
         dream.release_lock(vault, token)
 
@@ -74,6 +81,30 @@ class DreamLockRegression(unittest.TestCase):
             process.terminate()
         process.join(5)
 
+    def reports(self, channel, processes, count):
+        """從 channel 收 count 筆（每個子行程在這條 channel 至多送一筆）。還欠的筆數不超過
+        活著的子行程數就一直等；超過了＝有子行程沒送就退出，判失敗。"""
+        values = []
+        deadline = time.monotonic() + HANG_GUARD_SECONDS
+        while len(values) < count:
+            try:
+                values.append(channel.get(timeout=0.2))
+                continue
+            except queue.Empty:
+                pass
+            alive = sum(process.exitcode is None for process in processes)
+            if count - len(values) > alive:
+                # 退出前送出的那筆已經在管線裡（Queue 退出時會先送完）：再收一次，收不到才算死在半路。
+                try:
+                    values.append(channel.get(timeout=1))
+                    continue
+                except queue.Empty:
+                    self.fail("child exited before reporting: exit codes "
+                              f"{[process.exitcode for process in processes]}")
+            if time.monotonic() >= deadline:
+                self.fail(f"children alive but silent for {HANG_GUARD_SECONDS}s")
+        return values
+
     def test_dream_preserves_the_callers_explicit_verification_mode(self):
         from epitype import rule_provenance
         seen = []
@@ -112,16 +143,15 @@ class DreamLockRegression(unittest.TestCase):
         for process in processes:
             process.start()
             self.addCleanup(self.stop_process, process)
-        for _ in processes:
-            ready.get(timeout=10)
+        self.reports(ready, processes, len(processes))
         go.set()
         try:
-            self.assertEqual(sum(results.get(timeout=10) for _ in processes), 1)
+            self.assertEqual(sum(self.reports(results, processes, len(processes))), 1)
             self.assertFalse(dream.acquire_lock(self.vault))
         finally:
             finish.set()
         for process in processes:
-            process.join(10)
+            process.join(HANG_GUARD_SECONDS)
             self.assertEqual(process.exitcode, 0)
         self.assertFalse(self.path.exists())
 
@@ -141,7 +171,7 @@ class DreamLockRegression(unittest.TestCase):
         process = self.ctx.Process(target=guard_holder, args=(self.vault, ready))
         process.start()
         self.addCleanup(self.stop_process, process)
-        self.assertTrue(ready.get(timeout=10))
+        self.assertEqual(self.reports(ready, [process], 1), [True])
         started = time.monotonic()
         self.assertFalse(dream.acquire_lock(self.vault))
         self.assertLess(time.monotonic() - started, 1)
@@ -173,7 +203,7 @@ class DreamLockRegression(unittest.TestCase):
         process = self.ctx.Process(target=lease_holder, args=(self.vault, ready))
         process.start()
         self.addCleanup(self.stop_process, process)
-        self.assertTrue(ready.get(timeout=10))
+        self.assertEqual(self.reports(ready, [process], 1), [True])
         later = time.time() + memspec.DREAM_LOCK_STALE_SECONDS + 1
         self.assertFalse(dream.acquire_lock(self.vault, now=later))
         self.stop_process(process)
@@ -199,8 +229,8 @@ class DreamLockRegression(unittest.TestCase):
             self.assertEqual(value["pid"], children[0].pid)
             self.assertTrue(value["handoff"])
             go.set()
-            code, output = results.get(timeout=30)
-        children[0].join(10)
+            (code, output), = self.reports(results, children, 1)
+        children[0].join(HANG_GUARD_SECONDS)
         self.assertEqual(children[0].exitcode, 0)
         self.assertEqual(code, 0)
         self.assertIn("DREAM PACK", output)
@@ -213,7 +243,9 @@ class DreamLockRegression(unittest.TestCase):
         def launcher(argv, log_path):
             child = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                      text=True, encoding="utf-8")
-            out, err = child.communicate(timeout=30)
+            # 完整跑一場夢，滿載時沒有固定上限：逾時會被 spawn 當成起不來而放掉 lease，
+            # 回 False，與「子行程先跑完」這個題目無關。只留防卡死的上限。
+            out, err = child.communicate(timeout=HANG_GUARD_SECONDS)
             captured.append((argv, child.returncode, out, err))
             return child.pid  # Child already finished and released before this note.
         with patch.dict(os.environ, {memspec.EPITYPE_CONFIG_ENV: str(config)}):

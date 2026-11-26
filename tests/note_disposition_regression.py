@@ -154,6 +154,29 @@ class NoteInsteadOfBlock(unittest.TestCase):
             {"session_id": "note-1", "transcript_path": str(self.root / "turn.jsonl")}))),
                              memspec.STOP_NOTE_MAX_PENDING)
 
+    def test_rule_drop_the_full_queue_refused_is_said_on_a_later_stop(self):
+        import pretooluse_gate
+
+        markers = patch.object(pretooluse_gate, "notice_marker_directory",
+                               lambda session: self.root / "notice" / common.session_component(session))
+        markers.start()
+        self.addCleanup(markers.stop)
+        event = {"session_id": "note-1", "cwd": str(self.root), "hook_event_name": "Stop",
+                 "transcript_path": str(self.root / "turn.jsonl")}
+        recipient = hook_context.notification_identity(event)
+        drops = [(self.vault / ("dropped-%d.md" % index), "rule-source INVALID: 合成")
+                 for index in range(memspec.STOP_NOTE_MAX_PENDING + 1)]
+        config = common.load_config(time.monotonic())
+        said = []
+        for _night in range(2):
+            stop_gate._tell_drops(config, event, drops)
+            notes = common.peek_notes(config, recipient)
+            common.consume_notes(config, recipient, notes)
+            said.extend(notes)
+        names = sorted(path.name for path, _reason in drops if any(path.name in note for note in said))
+        self.assertEqual(names, sorted(path.name for path, _reason in drops))
+        self.assertEqual(len(said), len(drops), "每張卡仍然只說一次")
+
     def test_unknown_value_is_reported_and_still_noted(self):
         from epitype import card_lint
 

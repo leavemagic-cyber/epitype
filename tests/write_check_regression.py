@@ -57,8 +57,8 @@ class WriteCheckRegression(unittest.TestCase):
 
     def test_card_contract_and_new_files(self):
         _type, findings = card_lint.check_card(self.card, self.card.name)
-        self.assertFalse(any(rule == "unarmed" or level == card_lint.FAIL
-                             for level, rule, _reason in findings), findings)
+        self.assertFalse(any(level == card_lint.FAIL
+                             for level, _rule, _reason in findings), findings)
         target = self.root / "new.ps1"
         self.assertTrue(self.verdict("Write", {"file_path": str(target), "content": "# 中文\n"}))
         self.assertFalse(self.verdict("Write", {"file_path": str(target),

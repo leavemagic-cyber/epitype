@@ -5,7 +5,8 @@ RAMGuard 撞到 AI 對話的程序數或記憶體上限時，會在 alerts.jsonl
 撞過上限、還沒處理的，任何一個新的 Claude 或 Codex 對話一開始就要知道，並主動問要不要
 調高上限。開場（SessionStart，兩邊共用）讀設定鍵 ``ramguard_alerts_path`` 指的檔案尾端，
 列出最近 7 天、還沒確認的告警；``python -m epitype ramguard-ack`` 把目前最新的告警時間
-記成已確認。這是提醒，不擋任何事；任何錯誤都當作沒有告警，不能影響開場。
+記成已確認。同一批告警只給第一個開場的對話（2026-11-19 owner：不能每個 task 都問一樣的問題），
+其他對話不再列出，直到有更新的告警。這是提醒，不擋任何事；任何錯誤都當作沒有告警，不能影響開場。
 解除條件見 memspec.CONFIG_RAMGUARD_ALERTS_FIELD 旁的註解。
 """
 
@@ -152,16 +153,43 @@ def notice_text(alerts, repo=REPO_ROOT):
     return text[: memspec.RAMGUARD_NOTICE_MAX_CHARS - 1] + "…"
 
 
+def claim_path(state_dir=None):
+    """Which alerts a session has already been told to raise, next to the acknowledgement file."""
+    base = Path(state_dir) if state_dir is not None else memspec.config_path().parent
+    return base / memspec.RAMGUARD_CLAIM_FILENAME
+
+
+def _claim(path, latest, now):
+    """Record that the alerts up to `latest` were handed to one session to raise with the owner."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    staging = path.with_name("." + path.name + ".tmp-%d" % os.getpid())
+    staging.write_text(json.dumps({
+        "acked_through_epoch": latest, "acked_through": _iso(latest), "claimed_at": _iso(now),
+    }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.replace(staging, path)
+
+
 def startup_notice(config, now=None, state_dir=None):
-    """The SessionStart line, or None. Never raises: a failure here must not touch the opening."""
+    """The SessionStart line, or None. Never raises: a failure here must not touch the opening.
+
+    Only the first session to open after a new alert gets the line (owner 2026-11-19: every
+    running task asked the same question although it had already been handled). Showing the
+    line claims those alerts; later sessions skip them until a newer alert arrives."""
     try:
         path = alerts_path((config or {}).get(memspec.CONFIG_RAMGUARD_ALERTS_FIELD))
         if path is None or not path.is_file():
             return None
         now = time.time() if now is None else now
-        pending = unacknowledged(parse_alerts(read_tail(path)), now,
-                                 acked_through(ack_path(state_dir)))
-        return notice_text(pending)
+        seen = [value for value in (acked_through(ack_path(state_dir)),
+                                    acked_through(claim_path(state_dir))) if value is not None]
+        pending = unacknowledged(parse_alerts(read_tail(path)), now, max(seen) if seen else None)
+        text = notice_text(pending)
+        if text:
+            try:
+                _claim(claim_path(state_dir), max(alert["epoch"] for alert in pending), now)
+            except OSError:
+                pass  # Unclaimed only means the next session repeats the line; the opening goes on.
+        return text
     except Exception:
         return None
 

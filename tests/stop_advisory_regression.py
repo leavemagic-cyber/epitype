@@ -225,18 +225,69 @@ class StopNoteSaysWhatToDo(unittest.TestCase):
         self.assertNotIn("forbidden-text", notes[0])
 
 
-class DocumentedStopBehaviour(unittest.TestCase):
-    """FAILURE_MODES §10 is what an operator reads to learn what Stop does; it must not
-    describe the veto that was removed on 2026-10-03."""
+@unittest.skipIf(BASELINE, "owner 2026-11-13 delivery block")
+class DeliveryBlock(unittest.TestCase):
+    """The one Stop veto: a delivery card with an owner-set blocking basis, once."""
+    setUp = fixtures.ActionGuardRegression.setUp
+    event = StopAdvisory.event
+    verdict = StopAdvisory.verdict
 
-    def test_section_10_describes_the_note_not_a_block(self):
+    def card(self, **overrides):
+        fields = dict(key="core-04", quote="CORE-04. 交付前照實說還有哪些沒驗證。",
+                      require_when="已上線", require_text="沒驗證|還缺",
+                      require_on_hit="block", source_status="REVIEWED",
+                      source_blocking_basis=True)
+        fields.update(overrides)
+        return turn_fixtures.decision(**fields)
+
+    def test_delivery_without_gap_blocks_with_the_rule_line(self):
+        value = self.verdict(self.card(), "兩項都已上線，也實測過。")
+        self.assertEqual(value["decision"], "block")
+        self.assertIn("已上線", value["reason"])
+        self.assertIn("CORE-04. 交付前照實說還有哪些沒驗證。", value["reason"])
+        self.assertTrue(stop._emits(value, time.monotonic()))
+
+    def test_delivery_that_states_its_gap_passes(self):
+        self.assertIsNone(self.verdict(self.card(), "已上線。還缺真機那一項，沒驗證。"))
+
+    def test_without_blocking_basis_or_review_it_stays_a_note(self):
+        for overrides in ({"source_blocking_basis": False}, {"source_status": "UNVERIFIED"},
+                          {"require_on_hit": ""}):
+            with self.subTest(**overrides):
+                self.assertIsNone(self.verdict(self.card(**overrides), "已上線。"))
+
+    def test_only_the_final_message_and_not_fenced_code_is_the_delivery(self):
+        # Mid-turn progress text is in the joined message; the final message has no gap.
+        event = self.event("已上線。")
+        self.assertEqual(self.verdict(self.card(), "還缺一項\n\n已上線。", event=event)["decision"],
+                         "block")
+        pasted = "下面這段直接貼上：\n```\n已上線\n```\n"
+        self.assertIsNone(self.verdict(self.card(), pasted))
+
+    def test_subagent_rewrite_and_late_blocks_never_veto(self):
+        child = self.event("已上線。", hook_event_name=memspec.SUBAGENT_STOP_EVENT)
+        self.assertIsNone(self.verdict(self.card(), "已上線。", event=child))
+        with patch.object(stop, "_decisions", return_value=[self.card()]):
+            self.assertIsNone(stop._handle(self.event("已上線。", stop_hook_active=True),
+                                           time.monotonic(), []))
+        with patch.object(stop, "expired", return_value=True):
+            self.assertFalse(stop._emits({"decision": "block", "reason": "late"},
+                                         time.monotonic()))
+
+
+class DocumentedStopBehaviour(unittest.TestCase):
+    """FAILURE_MODES §10 is what an operator reads to learn what Stop does: notes by
+    default (2026-10-03) and the single delivery block the owner set on 2026-11-13."""
+
+    def test_section_10_describes_the_note_and_the_one_delivery_block(self):
         text = (Path(__file__).resolve().parents[1] / "docs" / "FAILURE_MODES.md").read_text(
             encoding="utf-8")
         section = text.split("\n## 10. ", 1)[1].split("\n## 11. ", 1)[0]
         self.assertIn("never blocks", section)
         self.assertIn(memspec.STOP_NOTE_LOG_KIND, section)
-        for stale in ('"decision": "block"', memspec.STOP_GATE_LOG_KIND, "blocks the turn"):
-            self.assertNotIn(stale, section)
+        self.assertIn("require_on_hit: block", section)
+        self.assertIn("at most once", section)
+        self.assertNotIn("blocks the turn", section)
 
 
 if __name__ == "__main__":

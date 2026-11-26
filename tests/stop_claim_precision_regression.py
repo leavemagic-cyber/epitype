@@ -32,6 +32,33 @@ class ClaimPrecision(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertIsNotNone(self.gap(text))
 
+    def test_conditional_future_action_is_not_a_claim(self):
+        # 2026-11-13 replay of real final replies: these two were blocked as deliveries.
+        # Trigger shaped like rule-core-04's require_when (a delivery claim must end the phrase).
+        card = decision(require_when=r'(?:已經?|都|全部|皆)?(?:完成|修好|上線|交付)(?:了|好了)?'
+                                     r'(?=[，。、；：！!）)*\s]|$)', require_text=r'未驗證')
+        for text in ('等 Codex 回覆後只審修改的部分，通過才讓它上線，上線後再實測。',
+                     'Codex 修好後我只審修改的那一段，沒問題就批准讓他上線，上線後我再實測。'):
+            with self.subTest(text=text):
+                self.assertIsNone(stop._requirement_gap(card, text, []))
+        for text in ('這批已經完整上線，我在正式環境實測全部通過。',
+                     '修好後就上線了。', '審完就上線了，結果寫在文件。'):
+            with self.subTest(text=text):
+                self.assertIsNotNone(stop._requirement_gap(card, text, []))
+
+    def test_future_hui_action_is_not_a_claim(self):
+        # 2026-11-13 本對話：預告「會合併成一次上線」被當成交付宣稱擋下。
+        card = decision(require_when=r'(?:已經?|都|全部|皆)?(?:完成|修好|上線|交付)(?:了|好了)?'
+                                     r'(?=[，。、；：！!）)*\s]|$)', require_text=r'未驗證')
+        for text in ('上面幾件程式修正會合併成一次上線，只在上線前跑一次完整測試。',
+                     '這批改動明天會一起上線。'):
+            with self.subTest(text=text):
+                self.assertIsNone(stop._requirement_gap(card, text, []))
+        for text in ('已經上線了。', '上線完成。', '這批會合併後已經上線了。',
+                     '修正會合併成一次上線了。', '開會前已上線。', '會議上已經上線，結果寫在文件。'):
+            with self.subTest(text=text):
+                self.assertIsNotNone(stop._requirement_gap(card, text, []))
+
     def test_required_evidence_still_works(self):
         self.assertIsNone(self.gap('我修好了，根因是索引錯位。'))
 

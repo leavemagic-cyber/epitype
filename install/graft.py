@@ -26,6 +26,8 @@ import xml.etree.ElementTree as ET
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MARKER_VALUE = "epitype"
 MARKER_FIELDS = ("id", "comment")
+# 宿主不認得、改寫設定檔時會丟掉的單支掛鉤欄位；比對登記時兩邊都不看。
+HOST_INERT_HOOK_KEYS = {"claude": ("additionalContextLimit",), "codex": ()}
 # SubagentStop 用的是同一支 stop.py：回合閘看 hook_event_name 分流，子代理結束時
 # 只落檔、不判擋。2026-09-20 Codex 審查抓到這裡漏了它——程式寫好了、標準安裝沒接上。
 EVENTS = ("SessionStart", "UserPromptSubmit", "PreCompact", "PreToolUse", "PostToolUse", "Stop",
@@ -56,6 +58,8 @@ DREAM_MODES = ("piggyback", "nightly", "off")
 DREAM_DEFAULT_MODE = "piggyback"
 DREAM_DEFAULT_INTERVAL_HOURS = 24
 DREAM_DEFAULT_AT = "03:30"
+DREAM_RETRY_EVERY_MINUTES = 30                 # 忙就延後：排程每 30 分鐘再叫一次
+DREAM_RETRY_WINDOW_MINUTES = 210               # 從 at 起 3.5 小時（03:30 → 07:00）
 DREAM_AT_REGEX = re.compile(r"(?:[01]\d|2[0-3]):[0-5]\d")
 DREAM_DIRECTORY = ".epitype"
 DREAM_STATE_FILENAME = "dream_state.json"
@@ -79,11 +83,11 @@ HOOK_SPECS = {
 SHIM_NAMES = tuple(dict.fromkeys(shim_name for shim_name, _ in HOOK_SPECS.values()))
 # Pin every rendered shim so installer verification detects template drift.
 SHIM_SHA256 = {
-    "sessionstart.py": "85c9d5cc7af7b332cf6fc01c53cd592adb959b7ac25c85091849e3c6dc8ce1b9",
-    "recall.py": "4bb3eecd4b2de1e8447f1040b4add446461e50bbd7364ddadbcd61467e0fad3a",
-    "precompact.py": "db122dde2652638f530b0c57cc4445b2714d8cc6e25211a86e77e20944c56bb4",
-    "pretooluse.py": "5a29a6512a54597c7ace05de6e9b5978edce9e7ce9feef6f04dcb57e7981dcbd",
-    "stop.py": "fe6d773403d780e90a51cff866dbbc41b320f2de8dcd1e36d3684631b814cab5",
+    "sessionstart.py": "b3cc496a1a92493e397461ac8d2329467fc38e961faa55cf69c3cfce081add39",
+    "recall.py": "2e62b8f387915ebc1e310c073200fc6873d141961091ade7e5ca3a91b048b918",
+    "precompact.py": "00a25bb75d112a22b4bb3256958fd3c5f3a99525344c7bb903c4f55562144bbf",
+    "pretooluse.py": "29674371dce105ffb9ac33f265d3126b5f34add64f7713e4cf448ceca6f23c2f",
+    "stop.py": "17f78288b08405b7cbc013bf8407367d6f1e13c0af6c97236ad6a193dd9d5962",
 }
 SHIM_REASON_CODES = frozenset((
     "config_missing",
@@ -332,6 +336,44 @@ def _marked(value):
     )
 
 
+# 宿主改寫自己的設定檔時會丟掉它不認得的鍵：2026-11-12 Claude Code 裝外掛重寫
+# settings.json，七筆登記的 "id": "epitype" 全被拿掉，掛鉤照跑，但只認標記的判斷
+# 全部當成「沒登記」——夜間檢查誤報，重裝還會每個時機點再加一筆（掛鉤跑兩次）。
+# 所以「這筆是不是我們的」不能只靠標記：每支指令都在跑 Epitype 掛鉤目錄裡的程式，
+# 也算我們的。只提到 epitype 字樣、或混了別人指令的那筆不算，免得收走使用者的掛鉤。
+_SCRIPT_HEAD = re.compile(r'^\s*(?:"([^"]+)"|(\S+))(.*)$')
+_TEMPLATE_FLAG = re.compile(r"--[a-z][a-z-]*")
+
+
+def _runs_epitype_shim(command, hooks_root):
+    if not isinstance(command, str):
+        return False
+    python, rest = _split_command(_unwrap_command(command))
+    match = _SCRIPT_HEAD.match(rest or "") if python is not None else None
+    if match is None:
+        return False
+    script = Path(match.group(1) or match.group(2))
+    if script.suffix.lower() != ".py" or not all(
+        _TEMPLATE_FLAG.fullmatch(flag) for flag in match.group(3).split()
+    ):
+        return False
+    root = os.path.normcase(os.path.normpath(Path(hooks_root).resolve()))
+    return os.path.normcase(os.path.normpath(script.parent)) == root
+
+
+def _ours(value, hooks_root):
+    """這筆群組是不是 Epitype 的登記：有標記，或裡面每支指令都跑掛鉤目錄裡的程式。"""
+    if _marked(value):
+        return True
+    if not isinstance(value, dict):
+        return False
+    hooks = value.get("hooks")
+    return isinstance(hooks, list) and bool(hooks) and all(
+        isinstance(hook, dict) and _runs_epitype_shim(hook.get("command"), hooks_root)
+        for hook in hooks
+    )
+
+
 def _replace_array_item(text, node, index, value):
     item = node.items[index]
     pretty = "\n" in text[node.start : node.end] or "\r" in text[node.start : node.end]
@@ -368,6 +410,9 @@ def _hook_template(codex, hooks_root, repo_root=REPO_ROOT, python_executable=Non
             raw = raw.replace("{{PYTHON_EXECUTABLE}}", _shell_token(python_text))
             if not codex:
                 raw = raw.replace(" --codex", "")
+                # Codex 範本的欄位；Claude Code 不認得，改寫設定檔時會丟掉，寫了也沒作用。
+                for key in HOST_INERT_HOOK_KEYS["claude"]:
+                    command.pop(key, None)
             command["command"] = raw
             command.pop("commandWindows", None)
             if '"' in raw:
@@ -390,7 +435,7 @@ def _shell_token(text):
     return text if _PLAIN_TOKEN.fullmatch(text) else f'"{text}"'
 
 
-def _merge_hooks(raw, entries):
+def _merge_hooks(raw, entries, hooks_root):
     bom = raw.startswith(b"\xef\xbb\xbf")
     text = raw.decode("utf-8-sig")
     json.loads(text)
@@ -424,7 +469,7 @@ def _merge_hooks(raw, entries):
             if event_member.value.kind != "array":
                 raise InstallError(f"hooks.{event} must be an array")
             values = [json.loads(text[item.start : item.end]) for item in event_member.value.items]
-            marked_indices = [index for index, value in enumerate(values) if _marked(value)]
+            marked_indices = [index for index, value in enumerate(values) if _ours(value, hooks_root)]
             if marked_indices:
                 if len(marked_indices) == 1 and values[marked_indices[0]] == entries[event]:
                     continue
@@ -434,7 +479,7 @@ def _merge_hooks(raw, entries):
                     hooks_node = _member(root, "hooks").value
                     event_member = _member(hooks_node, event)
                     values = [json.loads(text[item.start : item.end]) for item in event_member.value.items]
-                    marked_indices = [index for index, value in enumerate(values) if _marked(value)]
+                    marked_indices = [index for index, value in enumerate(values) if _ours(value, hooks_root)]
                 text = _replace_array_item(text, event_member.value, marked_indices[0], entries[event])
                 locations.append(f"hooks.{event}[id=epitype]")
                 continue
@@ -447,7 +492,7 @@ def _merge_hooks(raw, entries):
     return encoded, created_hooks, created_events, locations
 
 
-def _unmerge_hooks(raw, target_state):
+def _unmerge_hooks(raw, target_state, hooks_root):
     bom = raw.startswith(b"\xef\xbb\xbf")
     text = raw.decode("utf-8-sig")
     json.loads(text)
@@ -462,7 +507,7 @@ def _unmerge_hooks(raw, target_state):
         if event_member is None or event_member.value.kind != "array":
             continue
         values = [json.loads(text[item.start : item.end]) for item in event_member.value.items]
-        indices = [index for index, value in enumerate(values) if _marked(value)]
+        indices = [index for index, value in enumerate(values) if _ours(value, hooks_root)]
         if indices:
             text = _remove_array_items(text, event_member.value, indices)
             removed.append(f"hooks.{event}[id=epitype]")
@@ -949,13 +994,13 @@ def _run_billing_guard(home, apply_changes, dry_run, transaction, output, repo_r
         print(f"APPLY TARGET: {config}", file=output)
 
 
-def _marker_count(path):
+def _marker_count(path, hooks_root):
     value = json.loads(path.read_text(encoding="utf-8"))
     hooks = value.get("hooks", {}) if isinstance(value, dict) else {}
     counts = {}
     for event in EVENTS:
         entries = hooks.get(event, []) if isinstance(hooks, dict) else []
-        counts[event] = sum(1 for entry in entries if _marked(entry)) if isinstance(entries, list) else 0
+        counts[event] = sum(1 for entry in entries if _ours(entry, hooks_root)) if isinstance(entries, list) else 0
     return counts
 
 
@@ -979,14 +1024,26 @@ def _split_command(command):
     return match.group(1) or match.group(2), match.group(3).strip()
 
 
-def _entry_matches(actual, expected):
+def _entry_matches(actual, expected, host="codex"):
     """A registration matches when everything but the interpreter token is the
     rendered template and the token names an interpreter that exists: the bare
     PATH name older installs registered, or a resolvable executable. Doctor is
     run from whichever Python is at hand, so requiring the exact path of the
-    running interpreter would fail every working install."""
-    if not isinstance(actual, dict) or set(actual) != set(expected):
+    running interpreter would fail every working install.
+
+    Only keys a host drops when it rewrites its file are let go: a missing marker
+    (ownership is decided by `_ours`), and the host's inert per-hook keys. A marker
+    that is present must still be ours; command, timeout, matcher and type are
+    compared as before."""
+    if not isinstance(actual, dict):
         return False
+    expected = {
+        key: value for key, value in expected.items()
+        if not (key in MARKER_FIELDS and key not in actual)
+    }
+    if set(actual) != set(expected):
+        return False
+    inert = HOST_INERT_HOOK_KEYS.get(host, ())
     for key, value in expected.items():
         if key != "hooks":
             if actual.get(key) != value:
@@ -996,7 +1053,11 @@ def _entry_matches(actual, expected):
         if not isinstance(actual_hooks, list) or len(actual_hooks) != len(value):
             return False
         for actual_hook, expected_hook in zip(actual_hooks, value):
-            if not isinstance(actual_hook, dict) or set(actual_hook) != set(expected_hook):
+            if not isinstance(actual_hook, dict):
+                return False
+            actual_hook = {k: v for k, v in actual_hook.items() if k not in inert}
+            expected_hook = {k: v for k, v in expected_hook.items() if k not in inert}
+            if set(actual_hook) != set(expected_hook):
                 return False
             for hook_key, hook_value in expected_hook.items():
                 if hook_key not in ("command", "commandWindows"):
@@ -1014,13 +1075,13 @@ def _entry_matches(actual, expected):
     return True
 
 
-def _marked_entries(path):
+def _marked_entries(path, hooks_root):
     value = json.loads(path.read_text(encoding="utf-8"))
     hooks = value.get("hooks", {}) if isinstance(value, dict) else {}
     result = {}
     for event in EVENTS:
         entries = hooks.get(event, []) if isinstance(hooks, dict) else []
-        result[event] = [entry for entry in entries if _marked(entry)] if isinstance(entries, list) else []
+        result[event] = [entry for entry in entries if _ours(entry, hooks_root)] if isinstance(entries, list) else []
     return result
 
 
@@ -1313,13 +1374,29 @@ def _run_scheduler(argv, stdin_text=None):
     )
 
 
+def _retry_duration_minutes():
+    """schtasks 重複的持續時間。多一分鐘：重複在持續時間的終點不保證觸發，
+    少了它最後那一次（at＋窗口，夢不論忙不忙都跑的那一次）可能根本不會被叫。"""
+    return DREAM_RETRY_WINDOW_MINUTES + 1
+
+
+def _attempt_times(at):
+    """每一次嘗試的 (hour, minute)：at、at+30、…、at+窗口；跨午夜就繞回。"""
+    hour, _, minute = at.partition(":")
+    start = int(hour) * 60 + int(minute)
+    return [divmod((start + offset) % (24 * 60), 60)
+            for offset in range(0, DREAM_RETRY_WINDOW_MINUTES + 1, DREAM_RETRY_EVERY_MINUTES)]
+
+
 def _schedule_argv(repo_root, at, python_executable=None):
-    """Windows：schtasks 一行搞定。POSIX：crontab 要先讀再追加，所以這裡只回傳那一行。"""
+    """Windows：schtasks 一行搞定（每日觸發加重複）。POSIX：crontab 要先讀再追加，
+    所以這裡只回傳每次嘗試各一行。"""
     command = _dream_command_text(_dream_command(repo_root, python_executable))
     if os.name == "nt":
-        return ["schtasks", "/Create", "/SC", "DAILY", "/TN", DREAM_TASK_NAME, "/TR", command, "/ST", at, "/F"]
-    hour, _, minute = at.partition(":")
-    return [f"{int(minute)} {int(hour)} * * * {command} {DREAM_CRON_MARKER}"]
+        duration = _retry_duration_minutes()
+        return ["schtasks", "/Create", "/SC", "DAILY", "/TN", DREAM_TASK_NAME, "/TR", command, "/ST", at,
+                "/RI", str(DREAM_RETRY_EVERY_MINUTES), "/DU", f"{duration // 60:04d}:{duration % 60:02d}", "/F"]
+    return [f"{minute} {hour} * * * {command} {DREAM_CRON_MARKER}" for hour, minute in _attempt_times(at)]
 
 
 def _crontab_without_dream(runner):
@@ -1348,15 +1425,15 @@ def _register_nightly(repo_root, at, dry_run, output, runner=None, python_execut
             return True
         result = runner(argv, None)
     else:
-        line = argv[0]
-        print(f"{'DRY-RUN schedule' if dry_run else 'SCHEDULE'}: crontab + {line}", file=output)
+        for line in argv:
+            print(f"{'DRY-RUN schedule' if dry_run else 'SCHEDULE'}: crontab + {line}", file=output)
         if dry_run:
             return True
         kept = _crontab_without_dream(runner)
         if kept is None:
             print(CRONTAB_UNREADABLE_WARN.format(action="schedule"), file=output)
             return False
-        result = runner(["crontab", "-"], "\n".join([*kept, line]) + "\n")
+        result = runner(["crontab", "-"], "\n".join([*kept, *argv]) + "\n")
     if getattr(result, "returncode", 1) != 0:
         detail = (getattr(result, "stderr", "") or "").strip().splitlines()
         print(f"WARN nightly dream schedule failed: {detail[0] if detail else 'unknown error'}", file=output)
@@ -1443,17 +1520,35 @@ def _read_nightly(runner):
         command = [python.strip('"'), *(item.strip('"') for item in args)]
         boundary = triggers[0].findtext("{*}StartBoundary") or ""
         at = datetime.fromisoformat(boundary).strftime("%H:%M")
-        return {"command": command, "at": at}
+        retry = (_iso_minutes(triggers[0].findtext("{*}Repetition/{*}Interval")) == DREAM_RETRY_EVERY_MINUTES
+                 and _iso_minutes(triggers[0].findtext("{*}Repetition/{*}Duration")) == _retry_duration_minutes())
+        return {"command": command, "at": at, "retry": retry}
     lines = body.splitlines()
     own = [index for index, line in enumerate(lines) if _is_dream_cron(line)]
-    if len(own) != 1:
-        raise InstallError("nightly schedule must contain exactly one Epitype cron entry")
-    fields = lines[own[0]][:-len(DREAM_CRON_MARKER)].split(None, 5)
-    if (len(fields) != 6 or fields[2:5] != ["*", "*", "*"]
-            or not fields[0].isdigit() or not fields[1].isdigit()):
-        raise InstallError("nightly cron entry is not a daily schedule")
-    at = f"{int(fields[1]):02d}:{int(fields[0]):02d}"
-    return {"command": shlex.split(fields[5]), "at": at, "lines": lines, "index": own[0]}
+    if not own:
+        raise InstallError("nightly schedule has no Epitype cron entry")
+    entries, commands = [], []
+    for index in own:
+        fields = lines[index][:-len(DREAM_CRON_MARKER)].split(None, 5)
+        if (len(fields) != 6 or fields[2:5] != ["*", "*", "*"]
+                or not fields[0].isdigit() or not fields[1].isdigit()):
+            raise InstallError("nightly cron entry is not a daily schedule")
+        entries.append((index, int(fields[1]), int(fields[0])))
+        commands.append(shlex.split(fields[5]))
+    if any(command != commands[0] for command in commands):
+        raise InstallError("Epitype cron entries run different commands")
+    at = f"{entries[0][1]:02d}:{entries[0][2]:02d}"
+    retry = [(hour, minute) for _index, hour, minute in entries] == _attempt_times(at)
+    return {"command": commands[0], "at": at, "retry": retry, "lines": lines, "entries": entries}
+
+
+def _iso_minutes(value):
+    """Task Scheduler 的 ISO 8601 期間（PT30M、PT3H31M、P1D）換成分鐘；讀不懂回 None。"""
+    match = re.fullmatch(r"P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?", (value or "").strip())
+    if not match or not any(match.groups()):
+        return None
+    days, hours, minutes, seconds = (int(part or 0) for part in match.groups())
+    return days * 1440 + hours * 60 + minutes + seconds / 60
 
 
 def _check_nightly(config, output, runner, require_script=True):
@@ -1466,6 +1561,8 @@ def _check_nightly(config, output, runner, require_script=True):
             or not Path(command[0]).is_file() or (require_script and not expected.is_file())
             or state["at"] != config[DREAM_CONFIG_FIELD].get(DREAM_AT_FIELD, DREAM_DEFAULT_AT)):
         raise InstallError("nightly schedule target, time, or executable does not match config")
+    if not state["retry"]:
+        raise InstallError("nightly schedule lacks the busy-retry repetition; rerun install --dream nightly")
     print("DREAM SCHEDULE: PASS", file=output)
     return state
 
@@ -1479,10 +1576,8 @@ def _replace_nightly_command(expected, command, runner):
     if os.name == "nt":
         result = runner(["schtasks", "/Change", "/TN", DREAM_TASK_NAME, "/TR", rendered], None)
     else:
-        hour, minute = current["at"].split(":")
-        current["lines"][current["index"]] = (
-            f"{int(minute)} {int(hour)} * * * {rendered} {DREAM_CRON_MARKER}"
-        )
+        for index, hour, minute in current["entries"]:
+            current["lines"][index] = f"{minute} {hour} * * * {rendered} {DREAM_CRON_MARKER}"
         result = runner(["crontab", "-"], "\n".join(current["lines"]) + "\n")
     if getattr(result, "returncode", 1) != 0:
         raise InstallError("nightly schedule update failed")
@@ -1506,12 +1601,12 @@ def registration_gaps(home, hosts=None, hooks_root=None, repo_root=None):
             if name == "claude"
             else home / ".codex" / "hooks.json"
         )
-        actual = _marked_entries(hook_path)
+        actual = _marked_entries(hook_path, hooks_root)
         expected = _hook_template(name == "codex", hooks_root, repo_root)
         mismatches = [
             event
             for event in EVENTS
-            if len(actual[event]) != 1 or not _entry_matches(actual[event][0], expected[event])
+            if len(actual[event]) != 1 or not _entry_matches(actual[event][0], expected[event], name)
         ]
         if mismatches:
             gaps[name] = mismatches
@@ -1520,6 +1615,12 @@ def registration_gaps(home, hosts=None, hooks_root=None, repo_root=None):
 
 def _doctor(home, dry_run=False, output=sys.stdout, clear_shim_status=False, scheduler=None,
             strict_native=True):
+    # 直接跑 `python install/graft.py doctor` 時 sys.path[0] 是 install\：下面每一個
+    # `from epitype import ...`（session_scope、lead_transfer、memspec、host_native、
+    # host_sync）都匯不進來，整個 doctor 只會印一行 ModuleNotFoundError——而那正是
+    # 文件與安裝器自己印出來的呼叫形式。install 會過，只是因為它更早就碰巧插過路徑。
+    if str(REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(REPO_ROOT))
     hosts = _detect_hosts(home)
     print("HOSTS: " + (", ".join(hosts) if hosts else "none"), file=output)
     if dry_run:
@@ -1548,6 +1649,9 @@ def _doctor(home, dry_run=False, output=sys.stdout, clear_shim_status=False, sch
         language = language.strip() if isinstance(language, str) else ""
         print("LANGUAGE: " + (language or f"{LANGUAGE_ZH} (default, field not set)"),
               file=output)
+        from epitype import session_scope
+        for line in session_scope.doctor_lines(config, home):
+            print(line, file=output)
         vaults = config.get("vaults") if isinstance(config, dict) else None
         if not isinstance(vaults, list) or not vaults or not all(Path(item).is_dir() for item in vaults):
             raise ValueError("config vaults must be existing directories")
@@ -1806,7 +1910,7 @@ def _install(
         for name, path, entries in targets:
             existed = path.is_file()
             source = path.read_bytes() if existed else b"{}\n"
-            merged, created_hooks, created_events, locations = _merge_hooks(source, entries)
+            merged, created_hooks, created_events, locations = _merge_hooks(source, entries, hooks_root)
             _merge_target_state(state, name, path, created_hooks, created_events,
                                 created_file=not existed)
             for location in locations:
@@ -2028,7 +2132,7 @@ def _uninstall(home, dry_run=False, output=sys.stdout, scheduler=None):
             if not path.is_file():
                 continue
             target_state = state.get("targets", {}).get(name, {})
-            updated, removed = _unmerge_hooks(path.read_bytes(), target_state)
+            updated, removed = _unmerge_hooks(path.read_bytes(), target_state, config_dir / HOOK_DIRECTORY)
             for location in removed:
                 print(f"{'DRY-RUN remove' if dry_run else 'REMOVE'} {path}: {location}", file=output)
             # 整個檔都是我們建的、拿掉之後只剩一個空殼，就把檔一起刪掉。宿主檔那邊已經
@@ -2172,16 +2276,16 @@ def _selftest():
                 claude_value["permissions"]["deny"] == ["SyntheticDanger"]
                 and claude_value["hooks"]["SessionStart"][0]["id"] == "existing"
                 and codex_value["hooks"]["PreToolUse"][0]["comment"] == "existing"
-                and all(_marker_count(claude)[event] == 1 for event in EVENTS)
-                and all(_marker_count(codex_hooks)[event] == 1 for event in EVENTS),
+                and all(_marker_count(claude, home / CONFIG_DIRECTORY / HOOK_DIRECTORY)[event] == 1 for event in EVENTS)
+                and all(_marker_count(codex_hooks, home / CONFIG_DIRECTORY / HOOK_DIRECTORY)[event] == 1 for event in EVENTS),
             ))
             hooks_root = home / CONFIG_DIRECTORY / HOOK_DIRECTORY
             expected_claude = _hook_template(False, hooks_root, old_repo)
             expected_codex = _hook_template(True, hooks_root, old_repo)
             checks.append((
                 "install registers stable shims instead of repo adapters",
-                _marked_entries(claude) == {event: [expected_claude[event]] for event in EVENTS}
-                and _marked_entries(codex_hooks) == {event: [expected_codex[event]] for event in EVENTS}
+                _marked_entries(claude, hooks_root) == {event: [expected_claude[event]] for event in EVENTS}
+                and _marked_entries(codex_hooks, hooks_root) == {event: [expected_codex[event]] for event in EVENTS}
                 and all(
                     (hooks_root / shim_name).read_bytes() == payload
                     for shim_name, payload in _shim_payloads(old_repo).items()
@@ -2297,8 +2401,8 @@ def _selftest():
                 and claude.read_bytes() == installed_claude
                 and codex_hooks.read_bytes() == installed_codex
                 and _tree_digest(hooks_root) == installed_shims
-                and all(_marker_count(claude)[event] == 1 for event in EVENTS)
-                and all(_marker_count(codex_hooks)[event] == 1 for event in EVENTS),
+                and all(_marker_count(claude, home / CONFIG_DIRECTORY / HOOK_DIRECTORY)[event] == 1 for event in EVENTS)
+                and all(_marker_count(codex_hooks, home / CONFIG_DIRECTORY / HOOK_DIRECTORY)[event] == 1 for event in EVENTS),
             ))
 
             curated_home = root / "curated-home"
@@ -2644,6 +2748,7 @@ def _selftest():
                     self.calls = []
                     self.command = []
                     self.at = "03:30"
+                    self.repeat = None
                     self.cron = ""
 
                 def __call__(self, argv, stdin_text=None):
@@ -2652,6 +2757,10 @@ def _selftest():
                     if argv[:2] == ["schtasks", "/Create"]:
                         self.command = [part.strip('"') for part in shlex.split(argv[argv.index("/TR") + 1], posix=False)]
                         self.at = argv[argv.index("/ST") + 1]
+                        if "/RI" in argv and "/DU" in argv:
+                            hours, minutes = argv[argv.index("/DU") + 1].split(":")
+                            self.repeat = (f"PT{int(argv[argv.index('/RI') + 1])}M",
+                                           f"PT{int(hours)}H{int(minutes)}M")
                     elif argv[:2] == ["schtasks", "/Query"]:
                         task = ET.Element("Task")
                         action = ET.SubElement(ET.SubElement(task, "Actions"), "Exec")
@@ -2660,6 +2769,10 @@ def _selftest():
                         trigger = ET.SubElement(ET.SubElement(task, "Triggers"), "CalendarTrigger")
                         ET.SubElement(trigger, "StartBoundary").text = f"2026-01-01T{self.at}:00"
                         ET.SubElement(ET.SubElement(trigger, "ScheduleByDay"), "DaysInterval").text = "1"
+                        if self.repeat:
+                            repetition = ET.SubElement(trigger, "Repetition")
+                            ET.SubElement(repetition, "Interval").text = self.repeat[0]
+                            ET.SubElement(repetition, "Duration").text = self.repeat[1]
                         body = ET.tostring(task, encoding="unicode")
                     elif argv == ["crontab", "-"]:
                         self.cron = stdin_text
@@ -2726,16 +2839,22 @@ def _selftest():
                     and registered[registered.index("/SC") + 1] == "DAILY"
                     and registered[registered.index("/TN") + 1] == DREAM_TASK_NAME
                     and registered[registered.index("/ST") + 1] == "04:15"
+                    and registered[registered.index("/RI") + 1] == "30"
+                    and registered[registered.index("/DU") + 1] == "0003:31"
                     and registered[registered.index("/TR") + 1].endswith(DREAM_SCHEDULED_FLAG)
                 )
             else:
+                cron_lines = registered_stdin.strip().splitlines()
                 registered_ok = (
                     registered == ["crontab", "-"]
-                    and registered_stdin.strip().splitlines()[-1].startswith("15 4 * * *")
-                    and registered_stdin.strip().endswith(DREAM_CRON_MARKER)
+                    and [line.split(None, 2)[:2] for line in cron_lines]
+                    == [["15", "4"], ["45", "4"], ["15", "5"], ["45", "5"],
+                        ["15", "6"], ["45", "6"], ["15", "7"], ["45", "7"]]
+                    and all(line.endswith(DREAM_CRON_MARKER) for line in cron_lines)
                 )
             checks.append((
-                "install --dream nightly records the mode in config and registers one daily task",
+                "install --dream nightly records the mode in config and registers one daily task "
+                "that repeats every 30 minutes until at+210 (busy retry)",
                 dream_code == 0
                 and dream_config_value[DREAM_CONFIG_FIELD]
                 == {DREAM_MODE_FIELD: "nightly", DREAM_INTERVAL_HOURS_FIELD: 24, DREAM_AT_FIELD: "04:15"}
@@ -2809,6 +2928,8 @@ def _selftest():
                 and DREAM_DEFAULT_MODE == _memspec.DREAM_DEFAULT_MODE
                 and DREAM_DEFAULT_INTERVAL_HOURS == _memspec.DREAM_DEFAULT_INTERVAL_HOURS
                 and DREAM_DEFAULT_AT == _memspec.DREAM_DEFAULT_AT
+                and DREAM_RETRY_EVERY_MINUTES == _memspec.DREAM_RETRY_EVERY_MINUTES
+                and DREAM_RETRY_WINDOW_MINUTES == _memspec.DREAM_RETRY_WINDOW_MINUTES
                 and DREAM_DIRECTORY == _memspec.DREAM_DIRECTORY
                 and DREAM_STATE_FILENAME == _memspec.DREAM_STATE_FILENAME
                 and DREAM_SCHEDULED_FLAG == _memspec.DREAM_SCHEDULED_FLAG
@@ -2849,7 +2970,7 @@ def _selftest():
             checks.append((
                 "repeat install upgrades legacy absolute adapter registrations",
                 legacy_code == 0
-                and _marked_entries(legacy_settings)
+                and _marked_entries(legacy_settings, legacy_root)
                 == {event: [legacy_expected[event]] for event in EVENTS}
                 and "old-repo" not in legacy_settings.read_text(encoding="utf-8"),
             ))
@@ -2876,7 +2997,7 @@ def _selftest():
                 and later_after_value["sentinel"] == "keep"
                 and later_after_value["hooks"]["SessionStart"] == [later_entry]
                 and not any(
-                    _marked(entry)
+                    _ours(entry, later_home / CONFIG_DIRECTORY / HOOK_DIRECTORY)
                     for entries in later_after_value["hooks"].values()
                     for entry in entries
                 ),

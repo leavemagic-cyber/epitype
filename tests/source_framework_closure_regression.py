@@ -196,12 +196,12 @@ class FrameworkClosure(unittest.TestCase):
         self.assertIn("- " + original, text)
         out = self.root / "never-written-core.md"
         result = core_gen.generate([self.vault], out, dry_run=True, config={"core_cap_bytes": 1})
-        # The core size cap is a reminder since 6f6fce1: the dry run keeps its own status and
-        # reports the overflow instead of refusing.
+        # The absolute core cap is retired (owner 2026-11-17): the key is parsed, ignored and
+        # named in a notice; growth is judged against the accepted baseline instead.
         self.assertEqual(result["status"], core_gen.STATUS_DRY_RUN)
-        self.assertTrue(result["over_cap"])
-        self.assertEqual(result["cap"], 1)
-        self.assertTrue(result["offenders"])
+        self.assertFalse(result["over_cap"])
+        self.assertIsNone(result["cap"])
+        self.assertTrue(any("core_cap_bytes" in n for n in result["notices"]))
         self.assertFalse(out.exists())
         self.assertEqual(result["measured"], len(text.encode("utf-8")))
 

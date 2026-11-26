@@ -109,11 +109,14 @@ def owner_text(item):
             if record is not None and record[0] in ("U", "Q") else None)
 
 
-def utterances(path):
+def utterances(path, status=None):
     """Yield (line_number, owner text, preceding assistant text, record).
 
     The assistant text is the ruling question window: it resets at every user-shaped
     record, exactly as the online tail reader stops walking back at one.
+    `status["unreadable"]` is set when the file could not be opened or read to the
+    end, so the caller does not record it as harvested (2026-11-12: a locked file
+    was fingerprinted unread and skipped until it changed).
     """
     if capture.is_codex_exec_transcript(path):
         return
@@ -122,9 +125,17 @@ def utterances(path):
     try:
         stream = Path(path).open("rb")
     except OSError:
+        if status is not None:
+            status["unreadable"] = True
         return
     with stream:
-        for number, raw in enumerate(stream, 1):
+        yield from _utterance_rows(stream, pending, session_cwd, status)
+
+
+def _utterance_rows(stream, pending, session_cwd, status):
+    try:
+        rows = enumerate(stream, 1)
+        for number, raw in rows:
             raw = raw.rstrip(b"\r\n")
             if len(raw) > memspec.COMPACT_MAP_MAX_LINE_BYTES:
                 continue  # a 2MB line is a pasted payload, not a sentence
@@ -157,6 +168,9 @@ def utterances(path):
                     # 補在紀錄上，落點與卡上的 cwd 欄位就與線上捕捉同一個來源。
                     item["cwd"] = session_cwd
                 yield number, owner, question, item
+    except OSError:
+        if status is not None:
+            status["unreadable"] = True
 
 
 CARD_DIRECTORIES = {
@@ -420,7 +434,8 @@ def harvest(home, vaults, docs=(), since=None, limit=None, dry_run=False,
         counts["files"] += 1
         fallback = _utc_stamp(fingerprint["mtime_ns"] / 1_000_000_000)
         session_id = path.stem
-        for number, text, question, item in utterances(path):
+        read_status = {}
+        for number, text, question, item in utterances(path, read_status):
             counts["utterances"] += 1
             found = candidates(text, question)
             if not found:
@@ -500,6 +515,8 @@ def harvest(home, vaults, docs=(), since=None, limit=None, dry_run=False,
                     counts["duplicates"] += 1
                 else:
                     counts["rejected"] += 1
+        if read_status.get("unreadable"):
+            continue  # not read to the end: leave it for the next harvest
         seen[key] = fingerprint
 
     for directory in docs:

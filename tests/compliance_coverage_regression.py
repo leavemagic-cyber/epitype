@@ -373,13 +373,13 @@ class CheckpointCatchesUp(Fixture):
         self.assertIsNone(scan.frontier)
 
     def test_frontier_that_cannot_move_is_an_error_and_keeps_the_checkpoint(self):
-        # 窗口起點之前出生、至今還在寫的紀錄比單晚上限還多：接續點推不動，要講出來。
+        # 窗口內最早的事就落在窗口起點上的紀錄比單晚上限還多：接續點推不動，要講出來。
         vault = self.claude_vault()
         projects = self.home / ".claude" / "projects" / "p"
         for name in ("x", "y"):
             write_jsonl(projects / f"{name}.jsonl",
                         [*claude_turn(name, self.T0 - self.HOUR, "舊", "舊話。"),
-                         *claude_turn(name, self.T0 + self.HOUR, "問", f"{BANNED}。")],
+                         *claude_turn(name, self.T0, "問", f"{BANNED}。")],
                         mtime=self.T0 + self.HOUR + 10)
         with patch.object(compliance, "MAX_TRANSCRIPTS", 1):
             result = self.section(vault, self.T0, until=self.T0 + 4 * self.HOUR)
@@ -391,6 +391,107 @@ class CheckpointCatchesUp(Fixture):
                                self.T0 + 4 * self.HOUR)
         saved = json.loads(state.read_text(encoding="utf-8"))
         self.assertEqual(saved[dream.COMPLIANCE_CHECKPOINT_FIELD], self.T0)
+
+    def test_old_sessions_still_written_advance_the_checkpoint(self):
+        # 窗口起點之前出生、窗口內才又寫的紀錄比單晚上限還多：照出生時刻排的話它們全擠在
+        # 窗口起點，接續點永遠推不動（2026-11-10 實機每晚重算同一段）。照窗口內最早的事排，
+        # 兩晚讀完，不漏也不重算。
+        vault = self.claude_vault()
+        projects = self.home / ".claude" / "projects" / "p"
+        for name, hours in (("x", 1), ("y", 2)):
+            write_jsonl(projects / f"{name}.jsonl",
+                        [*claude_turn(name, self.T0 - self.HOUR, "舊", "舊話。"),
+                         *claude_turn(name, self.T0 + hours * self.HOUR, "問", f"{BANNED}。")],
+                        mtime=self.T0 + hours * self.HOUR + 10)
+        night1 = self.T0 + 4 * self.HOUR
+        with patch.object(compliance, "MAX_TRANSCRIPTS", 1):
+            first = self.section(vault, self.T0, until=night1)
+        self.assertEqual(first["errors"], [])
+        counts = first["counts"]
+        self.assertEqual((counts["transcripts"], counts["transcripts_skipped"]), (1, 1))
+        self.assertEqual(counts["compliance_frontier"], self.T0 + 2 * self.HOUR)
+        self.assertEqual([item["session"] for item in first["examples"]], ["x"])
+        state = vault / ".epitype" / memspec.DREAM_STATE_FILENAME
+        state.parent.mkdir(parents=True, exist_ok=True)
+        state.write_text(json.dumps({dream.COMPLIANCE_CHECKPOINT_FIELD: self.T0}), encoding="utf-8")
+        dream._write_run_state(state, report_with(first), vault / "pack.md", 1.0, night1)
+        since2 = dream._previous_compliance_start(state, self.T0 + 28 * self.HOUR)
+        self.assertEqual(since2, self.T0 + 2 * self.HOUR)
+        with patch.object(compliance, "MAX_TRANSCRIPTS", 1):
+            second = self.section(vault, since2, until=self.T0 + 28 * self.HOUR)
+        self.assertEqual(second["errors"], [])
+        # x 在第二晚的窗口裡已經沒有事：不讀、也不算進總數，覆蓋率才是完整。
+        self.assertEqual((second["counts"]["transcripts"], second["counts"]["transcripts_skipped"]),
+                         (1, 0))
+        self.assertEqual([item["session"] for item in second["examples"]], ["y"])
+        self.assertEqual(first["counts"]["missed"] + second["counts"]["missed"], 2)
+
+    def test_window_start_reads_the_whole_file_not_the_tail(self):
+        projects = self.home / ".claude" / "projects" / "p"
+        self.claude_vault()
+        # 只是被碰過修改時間：窗口內沒有任何事，不算進總數。
+        write_jsonl(projects / "touched.jsonl", claude_turn("t", self.T0 - 2 * self.HOUR, "舊", "舊話。"),
+                    mtime=self.T0 + 5 * self.HOUR)
+        # 時間不遞增：檔尾比窗口起點早，中段卻有窗口內的事。只看檔尾會把它丟掉。
+        write_jsonl(projects / "shuffled.jsonl",
+                    [*claude_turn("s", self.T0 - 2 * self.HOUR, "舊", "舊話。"),
+                     *claude_turn("s", self.T0 + 3 * self.HOUR, "問", f"{BANNED}。"),
+                     *claude_turn("s", self.T0 - 3 * self.HOUR, "舊", "抄回來的舊話。")],
+                    mtime=self.T0 + 5 * self.HOUR)
+        # 一個時間都沒有：讀不出起點，照舊排最前面、每晚都讀。
+        write_jsonl(projects / "timeless.jsonl", [{"type": "summary", "summary": "x"}],
+                    mtime=self.T0 + 5 * self.HOUR)
+        write_jsonl(projects / "fresh.jsonl", claude_turn("f", self.T0 + self.HOUR, "問", "好。"),
+                    mtime=self.T0 + self.HOUR + 10)
+        roots = dream._transcript_roots([self.home / ".claude" / "projects" / "p" / "memory"])
+        scan = compliance.transcripts_for(roots, since_stamp=self.T0, limit=2)
+        paths, available = scan
+        self.assertEqual(available, 3)
+        self.assertEqual([path.name for path in paths], ["timeless.jsonl", "fresh.jsonl"])
+        self.assertEqual(scan.frontier, self.T0 + 3 * self.HOUR)
+        self.assertEqual(compliance._window_start(projects / "touched.jsonl", self.T0), (True, None))
+        self.assertEqual(compliance._window_start(projects / "timeless.jsonl", self.T0), (False, None))
+
+    def test_window_start_accepts_any_json_whitespace_around_the_colon(self):
+        # 完整重放用 json 解得到的時間欄，預掃也要看得到：空白再寬、跨過讀塊邊界都一樣。
+        path = self.home / "wide.jsonl"
+        old = json.dumps({"type": "user", "timestamp": iso(self.T0 - self.HOUR)}).encode() + b"\n"
+        stamp = iso(self.T0 + 3 * self.HOUR).encode()
+        for spaces in (12, 300):
+            with self.subTest(spaces=spaces):
+                path.write_bytes(old + b'{"type": "user", "timestamp":' + b" \t" * spaces
+                                 + b'"' + stamp + b'"}\n')
+                with patch.object(compliance, "WINDOW_SCAN_CHUNK_BYTES", len(old) + 100):
+                    self.assertEqual(compliance._window_start(path, self.T0),
+                                     (True, self.T0 + 3 * self.HOUR))
+
+    def test_one_night_pass_matches_separate_passes(self):
+        vault = self.backlog()
+        roots = dream._transcript_roots([vault])
+        paths = compliance.transcripts_for(roots, since_stamp=self.T0)[0]
+        rules = compliance.armed_rules(vault)
+        self.assertTrue(rules)
+        since, until = self.T0, self.T0 + 3.6 * self.HOUR
+        hits, finals, chances = compliance.replay_night([rules, [], rules], paths, since, until)
+        separate = compliance.replay(rules, paths, since=since, until=until)
+        self.assertTrue(separate)
+        self.assertEqual(hits, [separate, [], separate])
+        self.assertEqual(finals, compliance.final_messages(paths))
+        self.assertEqual(chances, compliance.opportunities(paths, since=since, until=until))
+
+    def test_rehearsal_counts_every_tool_a_guard_covers(self):
+        # 分母跟重放認命中用同一個比對：多工具卡把各工具的呼叫加總，MCP 萬用字元收整組。
+        def guard(card, tool):
+            return compliance.Rule(card, "guard", "", 0, (), "", "", tool, ("rm",))
+        chances = {"turns": 9, "tools": {"edit": 3, "bash": 2, "powershell": 4,
+                                         "mcp__fs__write": 5, "mcp__fs__read": 1, "mcp__web__get": 7}}
+        hits = [compliance.Hit("multi", "guard", "s", "", "rm", "d", True, "rm")]
+        measured = compliance.rehearse(
+            [guard("multi", "Edit|Bash"), guard("mcp", "mcp__fs__*"), guard("none", "Write")],
+            hits, chances)
+        self.assertEqual(measured["multi"], (1, 5, 0.2))
+        self.assertEqual(measured["mcp"], (0, 6, 0.0))
+        self.assertEqual(measured["none"], (0, 0, 0.0))
 
     def test_vault_error_does_not_freeze_the_checkpoint(self):
         # 一個壞掉的庫每晚都會出錯；錯誤照報，但接續點不能因此永遠停在原地。

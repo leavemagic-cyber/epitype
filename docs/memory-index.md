@@ -1,23 +1,22 @@
 # Short memory indexes
 
-`epitype memory-index` keeps each vault's `MEMORY.md` within the same raw UTF-8
-byte budget, including its header and CRLF line endings. The default is **1,526
-bytes**. Set `index_cap_bytes` in `~/.epitype/config.json` to change it:
+`epitype memory-index` keeps each vault's `MEMORY.md` within the host's real
+load limit, not a number Epitype chose. Claude Code loads only **the first 200
+lines or the first 25 KB** of `MEMORY.md` at session start, whichever comes first;
+the rest is never read ([Claude Code memory](https://code.claude.com/docs/en/memory)).
+Epitype counts lines as `str.splitlines()` does and bytes as the raw file, including
+its header, BOM and CRLF line endings. The limit is 200 lines or 25,000 bytes and
+applies equally to project vaults and the shared governance vault (owner decisions
+2026-10-10 and 2026-11-17). It is defined once, as `HOST_INDEX_MAX_LINES` /
+`HOST_INDEX_MAX_BYTES` in `epitype/memory_index.py`; change it only if Claude Code
+changes its load limit.
 
-```json
-{"index_cap_bytes": 1526}
-```
-
-The old `shared_index_cap_bytes` key is accepted as a migration alias, now for
-every vault. `index_cap_bytes` takes precedence if both exist. A missing setting
-uses the same default on a new installation; there is no machine-specific mode.
-Core rule budgets and resident rule blocks are unaffected.
-
-The default reuses the established shared-index target. A read-only measurement
-of 15 existing indexes on 2026-11-08 left 9 unchanged and reduced the combined
-index footprint from 36,552 to 15,666 bytes by moving 92 lines in 6 indexes. This
-is a byte measurement, not an estimated token count. The budget is configurable
-because a vault's handwritten introduction can itself be larger than the default.
+No configuration key can lower it. The old `index_cap_bytes` and
+`shared_index_cap_bytes` keys (1,526 bytes by default before 2026-11-17) are still
+parsed so old configurations keep working, but they are ignored: when either is
+set, the command, the nightly cap report and `epitype sync` print one line saying
+it is no longer used. `core_cap_bytes` is ignored the same way; core rules are compared with their last
+accepted size instead (`epitype core-baseline`).
 
 ## Preview, lint, apply
 
@@ -30,29 +29,30 @@ epitype memory-index --projects /path/to/.claude/projects --apply
 ```
 
 Without `--apply`, the command writes nothing. `--check` exits 1 for an index
-over the cap, 2 for an input/configuration error, and 0 otherwise. Missing indexes
+over the host limit, 2 for an input/configuration error, and 0 otherwise. Missing indexes
 are reported as `no-index`; they are not created. Without paths, the command uses
 the configured `vaults`. `--projects` includes every direct `*/memory` directory,
 including ones with no index, and does not enter linked project/memory directories.
-`epitype cards <vault> --deep` and the nightly cap report use the same raw-file
-budget. The pre-existing host sync's explicit `shared_index_cap_bytes` check
-still applies separately to the loaded global host region, which excludes the
-title. This command does not add a default refusal to host sync: file shortening
+`epitype cards <vault> --deep`, the nightly cap report and `epitype fixed-load`
+use the same limit function (`memory_index.limit_of`). Host sync no longer limits
+the shared index region by a configured number; it judges the whole host file by
+the host's own behaviour (see [Architecture](ARCHITECTURE.md)). File shortening
 and syncing resident host regions are separate operations.
 
 ## Selection and preservation
 
-Only over-cap indexes are shortened. The handwritten introduction (before the
-first list entry or next heading) and reference-link definitions stay verbatim.
-The remaining units are ranked deterministically: those containing `⚠` first,
-then the newest explicit `YYYY-MM-DD`, `YYYY_MM_DD` or `YYYYMMDD` date in the unit,
-then the later source position. Dates are textual index dates, not card mtimes.
-Each whole unit that fits is selected, with its heading hierarchy, and selected
-units retain their original order. List continuations, prose paragraphs and
-fenced blocks stay together. The generated full-index link counts against the
-budget. If the required handwritten introduction/reference definitions and link
-cannot fit, the command reports the required size and leaves that vault unchanged;
-other vaults still run. It does not truncate handwriting to claim success.
+Only indexes over the host limit are shortened; below it nothing moves, and there
+is no slimming to a smaller target. The handwritten introduction (before the first
+list entry or next heading) and reference-link definitions stay verbatim. Units
+then leave by validity, not position: first those linking to a card that is
+superseded, closed, retired, archived, deprecated or historical, has
+`superseded_by`, or whose `expires_at`/`valid_until` has passed (bottom-up), then
+the remaining units from the bottom, until the short index plus the full-index
+link fits. Kept units retain their original order and heading hierarchy. List
+continuations, prose paragraphs and fenced blocks stay together. If the required
+handwritten introduction/reference definitions and link cannot fit, the command
+reports it and leaves that vault unchanged; other vaults still run. It does not
+truncate handwriting to claim success.
 
 Before the first rewrite, `_MEMORY_BACKUP.md` receives the exact original bytes
 and is never overwritten. `_MEMORY_FULL.md` contains the entire original index,

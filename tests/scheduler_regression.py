@@ -30,6 +30,7 @@ class Scheduler:
         self.at, self.cron, self.fail_change = "03:30", "", False
         self.other_setting = "preserve me"
         self.extra_trigger = self.extra_action = False
+        self.repeat = None
 
     def __call__(self, argv, stdin_text=None):
         self.calls.append((argv, stdin_text))
@@ -41,6 +42,9 @@ class Scheduler:
                 self.command = [part.strip('"') for part in shlex.split(argv[argv.index("/TR") + 1], posix=False)]
                 if "/ST" in argv:
                     self.at = argv[argv.index("/ST") + 1]
+                if "/RI" in argv and "/DU" in argv:
+                    hours, minutes = argv[argv.index("/DU") + 1].split(":")
+                    self.repeat = (f"PT{int(argv[argv.index('/RI') + 1])}M", f"PT{int(hours)}H{int(minutes)}M")
         elif argv[:2] == ["schtasks", "/Query"]:
             task = ET.Element("Task", xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task")
             action = ET.SubElement(ET.SubElement(task, "Actions"), "Exec")
@@ -49,6 +53,10 @@ class Scheduler:
             trigger = ET.SubElement(ET.SubElement(task, "Triggers"), "CalendarTrigger")
             ET.SubElement(trigger, "StartBoundary").text = f"2026-01-01T{self.at}:00"
             ET.SubElement(ET.SubElement(trigger, "ScheduleByDay"), "DaysInterval").text = "1"
+            if self.repeat:
+                repetition = ET.SubElement(trigger, "Repetition")
+                ET.SubElement(repetition, "Interval").text = self.repeat[0]
+                ET.SubElement(repetition, "Duration").text = self.repeat[1]
             if self.extra_trigger:
                 ET.SubElement(task.find("Triggers"), "EventTrigger")
             if self.extra_action:
@@ -146,6 +154,23 @@ class RelocationTests(unittest.TestCase):
         self.scheduler.extra_trigger, self.scheduler.extra_action = False, True
         self.assertEqual(graft._doctor(self.home, output=io.StringIO(), scheduler=self.scheduler), 1)
 
+    def test_install_registers_busy_retry_and_doctor_rejects_a_task_without_it(self):
+        created = [argv for argv, _stdin in self.scheduler.calls if argv[:2] == ["schtasks", "/Create"]][-1]
+        self.assertEqual(created[created.index("/ST") + 1:], ["03:30", "/RI", "30", "/DU", "0003:31", "/F"])
+        self.assertEqual(graft._doctor(self.home, output=io.StringIO(), scheduler=self.scheduler), 0)
+        self.scheduler.repeat = None  # 舊安裝：每日只叫一次
+        output = io.StringIO()
+        self.assertEqual(graft._doctor(self.home, output=output, scheduler=self.scheduler), 1)
+        self.assertIn("busy-retry", output.getvalue())
+        self.scheduler.repeat = ("PT30M", "PT3H30M")  # 終點那一次不保證觸發
+        self.assertEqual(graft._doctor(self.home, output=io.StringIO(), scheduler=self.scheduler), 1)
+
+    def test_relocate_keeps_the_repetition(self):
+        repeat = self.scheduler.repeat
+        self.assertEqual(self.relocate(), 0)
+        self.assertEqual(self.scheduler.repeat, repeat)
+        self.assertTrue(graft._read_nightly(self.scheduler)["retry"])
+
     def test_dry_run_changes_neither_config_nor_schedule(self):
         self.scheduler.calls.clear()
         self.assertEqual(graft._relocate(self.home, self.new, dry_run=True, scheduler=self.scheduler, output=io.StringIO()), 0)
@@ -173,6 +198,34 @@ class PosixRelocationTests(unittest.TestCase):
             with self.assertRaises(graft.InstallError):
                 graft._replace_nightly_command(updated, command, scheduler)
             self.assertEqual(scheduler.cron, unchanged)
+
+    def test_one_line_per_attempt_reinstall_replaces_them_and_relocate_rewrites_all(self):
+        scheduler = Scheduler()
+        marker = graft.DREAM_CRON_MARKER
+        scheduler.cron = f"0 1 * * * backup\n30 3 * * * /python /old/dream.py --scheduled {marker}\n"
+        with patch.object(graft, "os", Platform("posix")):
+            legacy = graft._read_nightly(scheduler)
+            self.assertEqual((legacy["at"], legacy["retry"]), ("03:30", False))
+            for _ in range(2):
+                self.assertTrue(graft._register_nightly(graft.REPO_ROOT, "03:30", False, io.StringIO(), scheduler,
+                                                        python_executable="/python"))
+            own = [line for line in scheduler.cron.splitlines() if line.endswith(marker)]
+            self.assertEqual([line.split(None, 2)[:2] for line in own],
+                             [["30", "3"], ["0", "4"], ["30", "4"], ["0", "5"],
+                              ["30", "5"], ["0", "6"], ["30", "6"], ["0", "7"]])
+            self.assertIn("backup", scheduler.cron)
+            state = graft._read_nightly(scheduler)
+            self.assertEqual((state["at"], state["retry"]), ("03:30", True))
+            command = ["/python", "/new/dream.py", "--scheduled"]
+            graft._replace_nightly_command(state, command, scheduler)
+            updated = graft._read_nightly(scheduler)
+            self.assertEqual((updated["command"], updated["at"], updated["retry"]), (command, "03:30", True))
+            scheduler.cron = scheduler.cron.replace("0 7 * * * /python /new/", "0 7 * * * /python /other/")
+            with self.assertRaises(graft.InstallError):
+                graft._read_nightly(scheduler)
+
+    def test_attempts_wrap_past_midnight(self):
+        self.assertEqual(graft._attempt_times("22:00")[-3:], [(0, 30), (1, 0), (1, 30)])
 
 
 if __name__ == "__main__":

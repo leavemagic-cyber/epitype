@@ -14,6 +14,7 @@ import json
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 
 # Hypothesis also caches parser constants; keep those out of the checkout.
 _STORAGE = tempfile.TemporaryDirectory(prefix="epitype-hypothesis-")
@@ -64,7 +65,11 @@ class IndexEdits(RuleBasedStateMachine):
         self.memory = self.vault / "MEMORY.md"
         self.card = self.vault / "card.md"
         self.card.write_bytes(b"unchanged card\n")
-        self.config = {"index_cap_bytes": 320}
+        self.config = {}
+        # 小索引模擬宿主載入上限（真實為 200 行或 25,000 B）。
+        self.cap = 320
+        self.limit = patch.object(memory_index, "HOST_INDEX_MAX_BYTES", self.cap)
+        self.limit.start()
         self.expected = Counter()
         self.serial = 0
 
@@ -160,7 +165,7 @@ class IndexEdits(RuleBasedStateMachine):
         archive = full.read_bytes()
         assert archive.startswith(memory_index.FULL_HEADER + self.original)
         assert backup.read_bytes() == self.original
-        assert len(short) <= self.config["index_cap_bytes"]
+        assert len(short) <= self.cap
         assert records(archive) >= self.expected, self.expected - records(archive)
         assert records(memory_index._without_pointer(short)) <= current
         assert self.card.read_bytes() == b"unchanged card\n"
@@ -170,6 +175,7 @@ class IndexEdits(RuleBasedStateMachine):
         assert saved == {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in paths}
 
     def teardown(self):
+        self.limit.stop()
         self.temp.cleanup()
 
 

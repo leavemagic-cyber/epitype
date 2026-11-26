@@ -329,7 +329,8 @@ class Accounting(unittest.TestCase):
         self.policy["sources"] = [{"path": str(path), "kind": "instruction", "move_to": str(self.root / "elsewhere"),
                                    "rollback": str(path), "author": "fixture", "purpose": "required rules"}]
         value = self.run_report()
-        self.assertTrue(any(x["code"] == "CORE_OVER_BUDGET_PRESERVE_REQUIRED_RULES" for x in value["findings"]))
+        # No absolute core budget any more; growth is judged against the accepted baseline.
+        self.assertFalse(any(x["code"].startswith("CORE_OVER_BUDGET") for x in value["findings"]))
         self.assertEqual(path.read_bytes(), before)
         self.assertFalse((self.root / "elsewhere").exists())
         obligations = " ".join(value["sources"][0]["move_obligations"])
@@ -350,11 +351,23 @@ class Accounting(unittest.TestCase):
         from epitype import memory_index
         vault = self.root / "vault"
         path = self.file(vault / "MEMORY.md", "")
-        path.write_bytes(b"# Index\r\n" + b"- x\r\n" * 310)
+        # 150 lines of 167 B with CRLF = 25,059 B (> host 25,000 B); with LF it would be 24,908 B.
+        path.write_bytes(b"# Index\r\n" + (b"- " + b"x" * 163 + b"\r\n") * 150)
         value = self.run_report(vaults=[vault])
         issue = next(x for x in value["findings"] if x["code"] == "INDEX_OVER_BUDGET")
-        self.assertEqual(issue["actual"], path.stat().st_size)
+        self.assertEqual((issue["actual"], issue["target"], issue["unit"]),
+                         (path.stat().st_size, 25_000, "bytes"))
+        self.assertLess(path.stat().st_size - 151, 25_000)
         self.assertEqual(memory_index.lint(vault, {})["status"], "over-cap")
+        # Line limit: Claude Code loads only the first 200 lines.
+        path.write_bytes(b"# Index\n" + b"- x\n" * 200)
+        value = self.run_report(vaults=[vault])
+        issue = next(x for x in value["findings"] if x["code"] == "INDEX_OVER_BUDGET")
+        self.assertEqual((issue["actual"], issue["target"], issue["unit"]), (201, 200, "lines"))
+        # 1,526 B is no longer a budget for any vault.
+        path.write_bytes(b"# Index\n" + b"- x" * 600 + b"\n")
+        value = self.run_report(vaults=[vault])
+        self.assertFalse([x for x in value["findings"] if x["code"] == "INDEX_OVER_BUDGET"])
 
     def test_isolation_preserves_synthetic_parent_inheritance(self):
         parent = self.file(self.root / ".claude/agents/parent.md", "---\ndescription: parent\n---\n")

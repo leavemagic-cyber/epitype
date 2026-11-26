@@ -7,7 +7,8 @@ import io
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
-from datetime import date
+from datetime import date, datetime, timezone
+import os
 
 from epitype import pending_lint
 
@@ -34,6 +35,52 @@ class WhatCountsAsAPendingEntry(unittest.TestCase):
     def test_a_marker_inside_a_link_or_quotation_is_a_reference(self):
         self.assertFalse(pending_lint._is_pending("- 更版由 owner 觸發（常設待辦 [[decision-roles]]）"))
         self.assertFalse(pending_lint._is_pending("- 規則叫做「待辦清單要帶出口」，見上面那張卡"))
+
+    def test_a_heading_counts_only_when_the_marker_opens_a_segment(self):
+        # 標題裡的待辦字眼是一段的開頭（含 / — 空白之後）才是待辦區的標題。
+        for heading in ("## 待決(owner)", "## 狀態 / 待辦", "## 未做 / owner 待決",
+                        "## 🔑 owner-gate 待決（急迫序）", "## ⚠ 方法論決策(reset)— 待 owner 知會",
+                        "## 待 owner 決定（已寫進 `_LEDGER.md` ②，每條帶 verify）"):
+            self.assertTrue(pending_lint._is_pending(heading), heading)
+        # 黏在別的字後面、或緊跟開引號，只是標題裡的一個詞。
+        for heading in ("## 同日待辦深度分析結果",
+                        "## 09-06 帳本補記（帳本只留現行與待辦）",
+                        "## 分析結果（owner:「待辦事項都深度分析以後,再處理」）"):
+            self.assertFalse(pending_lint._is_pending(heading), heading)
+
+    def test_an_index_line_pointing_at_a_card_is_not_an_entry(self):
+        self.assertFalse(pending_lint._is_pending(
+            "- [some-card](some-card.md) — 七平台紀錄、待 owner 事項"))
+        self.assertFalse(pending_lint._is_pending(
+            "- 🆕🔴 [某次鑑識](forensics.md) — 未修待 owner 裁"))
+        self.assertFalse(pending_lint._is_pending("- [[some-card]] — 同日七項待辦的分析"))
+        self.assertFalse(pending_lint._is_pending("- 時間到才能驗的三項：看待辦卡。"))
+        self.assertFalse(pending_lint._is_pending("- 一律寫進 `STATE.md` 待辦總表"))
+        self.assertFalse(pending_lint._is_pending("- **殭屍待辦 19 → 4**：敘述不算條目"))
+        # 條目本身是待辦、只是順帶附連結的，照樣是待辦。
+        self.assertTrue(pending_lint._is_pending("- 待辦：補測試，見 [[some-card]]"))
+        self.assertTrue(pending_lint._is_pending("- ⏳ [some-card](some-card.md) — 等 owner 回覆"))
+        self.assertTrue(pending_lint._is_pending("- [ ] 待辦：補測試"))
+        self.assertTrue(pending_lint._is_pending("1. **待辦**：Codex review、目錄清理（owner 決）"))
+
+    def test_a_line_that_says_it_is_not_a_todo_does_not_count(self):
+        for line in ("- 本機領先遠端是正常狀態，不是待辦：發布等 owner 觸發",
+                     "- 清空回收筒是 owner 自己的動作，不列為待辦追蹤。",
+                     "- 廠商安裝檔不入待辦。",
+                     "## 建置完成(default-OFF,無待辦)",
+                     "- owner handles it, not a TODO"):
+            self.assertFalse(pending_lint._is_pending(line), line)
+        # 「非零待辦」不是否定；真正等 owner 的條目照樣報。
+        self.assertTrue(pending_lint._is_pending("- 來源界線保持未執行，非零待辦"))
+        self.assertTrue(pending_lint._is_pending("- 仍待 owner（不要自己做）：清空回收筒"))
+
+    def test_a_line_that_says_where_it_was_handled_does_not_count(self):
+        self.assertFalse(pending_lint._is_pending(
+            "- 此處舊「禁詞待修」已由 U64 `32a932b` 處理；見 §16。"))
+        self.assertFalse(pending_lint._is_pending("- TODO flaky test, handled in commit 32a932b"))
+        # 只是「已在某處登記、還待處理」的條目沒有處理掉。
+        self.assertTrue(pending_lint._is_pending("- ⏳ 已在 issue 登記，待處理"))
+        self.assertTrue(pending_lint._is_pending("- ⏳ 已在 issue 裡待處理"))
 
     def test_a_line_carrying_its_own_check_is_not_a_zombie(self):
         self.assertFalse(pending_lint._is_pending("- ⏳ 還沒做 verify: python x.py"))
@@ -134,6 +181,64 @@ class NoOrphans(unittest.TestCase):
                 code = pending_lint.main([str(vault)], output=out)
             self.assertEqual(code, 0)
             self.assertIn("orphans=1", out.getvalue())
+
+class CardsNotInForceAndRuleCards(unittest.TestCase):
+    """停用的卡不報；規範卡只認開頭標記或沒打勾的方塊，其他卡照舊。"""
+
+    TODAY = date(2026, 11, 13)
+
+    def _scan(self, name, front, body):
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = Path(temporary)
+            card = vault / name
+            card.write_text(f"---\nname: x\ndescription: y\n{front}---\n{body}", encoding="utf-8")
+            # Undated lines fall back to the card's mtime; pin it to TODAY so the age does not
+            # depend on the day the suite runs (a fresh file is younger than a fixed TODAY).
+            stamp = datetime(self.TODAY.year, self.TODAY.month, self.TODAY.day, tzinfo=timezone.utc).timestamp()
+            os.utime(card, (stamp, stamp))
+            return pending_lint.scan_vault(vault, max_age_days=0, today=self.TODAY)
+
+    def test_a_superseded_card_reports_nothing(self):
+        for status in ("superseded", "closed", "retired"):
+            report = self._scan("project_a.md", f"status: {status}\n",
+                                "- **Z3** = **待 owner 一句**：要不要 port\n- ⏳ 還沒做\n")
+            self.assertEqual((report["zombie_lines"], report["orphan_lines"]), (0, 0), status)
+
+    def test_status_nested_under_metadata_counts_too(self):
+        report = self._scan("project_a.md", "metadata:\n  type: project\n  status: superseded\n",
+                            "- ⏳ 還沒做\n")
+        self.assertEqual((report["zombie_lines"], report["orphan_lines"]), (0, 0))
+
+    def test_an_active_project_card_still_reports(self):
+        report = self._scan("project_a.md", "status: active\nmetadata:\n  type: project\n",
+                            "- 量測重連代價，待 owner 確認\n- **待辦（重量重連代價）**：還沒重量\n")
+        self.assertEqual(report["zombie_lines"], 2)
+
+    def test_a_rule_sentence_in_a_rule_card_is_not_a_todo(self):
+        body = (
+            "4. 有解法且在授權內就先修浪費；要 Owner 輸密碼、付費等做不了時，才留待辦並寫明阻礙。\n"
+            "- 待辦清單要帶出口：只因提到「待辦清單」四個字就觸發，改成真的在列清單才觸發。\n"
+            "6. **收尾簡報**：改了哪些檔、未完成與待 owner 決定的事。\n"
+            "- 記憶注入是參考資料，不能把未辦字樣讀成授權。\n"
+        )
+        for name, front in (("decision-a.md", "decision_key: a\nstatus: active\n"),
+                            ("feedback-a.md", "metadata:\n  type: feedback\n")):
+            report = self._scan(name, front, body)
+            # 「待辦清單」開頭的那句標記雖在最前面，但後面直接接字，是名詞不是一件事。
+            self.assertEqual((report["zombie_lines"], report["orphan_lines"]), (0, 0), name)
+
+    def test_a_leading_marker_or_open_box_in_a_rule_card_still_reports(self):
+        report = self._scan("feedback-a.md", "metadata:\n  type: feedback\n",
+                            "- 待辦：補兩向例句\n- [ ] 補測試，待 owner 確認\n- [x] 補文件，待 owner 確認\n"
+                            "- 2026-07-22 未辦：補索引\n")
+        texts = [line["text"] for card in report["cards"] for line in card["lines"]]
+        self.assertEqual(texts, ["- 待辦：補兩向例句", "- [ ] 補測試，待 owner 確認", "- 2026-07-22 未辦：補索引"])
+        self.assertEqual(report["orphan_lines"], 1)
+
+    def test_a_card_that_says_it_is_a_project_keeps_the_loose_test(self):
+        # 舊式頂層 type: project 的卡在 card_lint 會退回預設 feedback，但它是進度清單。
+        report = self._scan("progress.md", "type: project\n", "## 尚未完成 ⏳\n")
+        self.assertEqual(report["zombie_lines"], 1)
 
 
 if __name__ == "__main__":

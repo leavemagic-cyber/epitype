@@ -33,14 +33,17 @@ def _is_link(entry, info):
     return entry.is_symlink() or bool(getattr(info, "st_file_attributes", 0) & _REPARSE_POINT)
 
 
-def scan_vault(vault, *, strict=False):
+def scan_vault(vault, *, strict=False, out_of_time=None):
     """每一張卡：(庫內相對 posix 路徑, 路徑, mtime_ns, 大小, ctime_ns)。
 
     建立時間一起帶回來，呼叫端就不必為了它再 stat 一次；Windows 的目錄列表本來
-    就有這一欄，不多花任何系統呼叫。"""
+    就有這一欄，不多花任何系統呼叫。`out_of_time`（無參數、回 True 表示時間到）在每進
+    一個目錄前問一次，時間到就丟 TimeoutError——走一半的清單不能被當成整個庫。"""
     found = []
     pending = [(os.fspath(vault), "")]
     while pending:
+        if out_of_time is not None and out_of_time():
+            raise TimeoutError(os.fspath(vault))
         directory, prefix = pending.pop()
         try:
             with os.scandir(directory) as entries:

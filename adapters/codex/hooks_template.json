@@ -48,7 +48,7 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "^(mcp__claude-in-chrome__|mcp__Claude_Browser__|mcp__computer-use__|mcp__cua_repl(?:__|\\.))",
+        "matcher": "^(mcp__claude-in-chrome__|mcp__Claude_Browser__|mcp__computer-use__|mcp__cua_repl(?:__|\\.)|(?:Write|Edit|MultiEdit)$)",
         "hooks": [
           {
             "type": "command",

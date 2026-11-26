@@ -4,9 +4,11 @@ import sys; sys.dont_write_bytecode = True
 RAMGuard (C:\\projects\\ramguard\\ramguard_ai_jobs.py) appends an alert row with kind
 ai_session_process_limit or ai_session_memory_limit to alerts.jsonl when an AI session hits
 its process or memory limit. The shared SessionStart hook reads only the file's tail, lists
-the last 7 days' unacknowledged hits in one line of at most 300 characters and asks the AI
-to tell the owner and offer to raise the limit; `python -m epitype ramguard-ack` records the
+the last 7 days' unacknowledged hits in one line of at most 300 characters and tells the AI
+to tell the owner after the fact (no question about raising it); `python -m epitype ramguard-ack` records the
 newest alert as acknowledged. Every failure means no line, never a broken opening.
+Since 2026-11-19 (owner: every task asked the same question) only the first conversation to open
+after a new alert gets the line; it claims those alerts in ramguard_claim.json.
 """
 from datetime import datetime, timezone
 import io
@@ -111,8 +113,8 @@ class Parsing(Fixture):
         self.assertIn("上限 400）", text)
         self.assertIn("上限 8192 MiB", text)
         self.assertIn(notice._stamp(process_alert(1)["ts_epoch"]), text)
-        self.assertIn("問要不要調高上限", text)
-        self.assertIn("python -m epitype ramguard-ack", text)
+        self.assertIn("新程式開不起來", text)
+        self.assertIn("不要問要不要調高", text)
         # Newest group first.
         self.assertLess(text.index("Claude"), text.index("Codex"))
 
@@ -123,7 +125,7 @@ class Parsing(Fixture):
         text = self.line()
         self.assertLessEqual(len(text), memspec.RAMGUARD_NOTICE_MAX_CHARS)
         self.assertIn("另有", text)
-        self.assertIn("ramguard-ack", text)
+        self.assertIn("事後通知", text)
 
 
 class Window(Fixture):
@@ -260,9 +262,23 @@ class SessionStart(Fixture):
         self.write_alerts([process_alert(1)])
         claude = self.context(self.event())
         self.assertTrue(claude.splitlines()[0].startswith("⚠ RAMGuard"), claude)
+        (self.state / memspec.RAMGUARD_CLAIM_FILENAME).unlink()  # as if Claude had not opened first
         codex = self.event(turn_id="t0")
         codex["transcript_path"] = str(self.root / ".codex" / "sessions" / "rollout-x.jsonl")
         self.assertTrue(self.context(codex).splitlines()[0].startswith("⚠ RAMGuard"))
+
+    def test_only_the_first_conversation_after_an_alert_asks(self):
+        # owner 2026-11-19: every running task asked the same question although it was handled.
+        self.write_alerts([process_alert(1)])
+        self.assertIn("RAMGuard", self.context(self.event()))
+        codex = self.event(turn_id="t0")
+        codex["transcript_path"] = str(self.root / ".codex" / "sessions" / "rollout-x.jsonl")
+        self.assertNotIn("RAMGuard", self.context(codex))
+        self.assertNotIn("RAMGuard", self.context(self.event()))
+        self.write_alerts([process_alert(1), memory_alert(0.5)])  # a newer alert is asked about again, alone
+        text = self.context(self.event())
+        self.assertIn("Codex 記憶體 1 次", text)
+        self.assertNotIn("Claude 程序數", text)
 
     def test_a_compacted_conversation_is_not_a_new_one(self):
         self.write_alerts([process_alert(1)])

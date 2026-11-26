@@ -162,18 +162,36 @@ Approval and size checks have different effects:
 - **No approval, no generation.** A card in a generated layer without `approved_by`
   and `approved_at` stops the whole run and is listed. A core block is the wrong place
   to discover that one sentence was never approved.
-- **Over the size target, warn and retain complete rules.** `--cap-bytes`, else
-  `core_cap_bytes` from the config, measures each host's loaded view; unset means
-  no size warning. Generation and `epitype sync` report the excess while writing
-  the complete current rules. Source, approval, marker and ownership checks
+- **Grown since the last accepted size, warn and retain complete rules.** There is
+  no absolute core cap (owner 2026-11-17). Each host's loaded view is compared with
+  the last accepted baseline in `<governance vault>/.epitype/core_size_baseline.json`
+  (per-host loads, block sha256, per-card bytes, who accepted it and why). Only the
+  governance vault's own rules are measured, whatever vaults a run names; a project
+  vault never gets a baseline. The first run records it silently only when neither
+  the baseline nor a pending file exists; an unreadable or deleted baseline is
+  reported and kept pending until accepted with a reason, never rebuilt at the
+  grown size. Any byte of growth makes generation and `epitype sync` name each added
+  or grown card with its delta and approver, and write `core_growth_pending.json`
+  while still writing the complete current rules; SessionStart shows one line while
+  that file exists. Equal or smaller moves the baseline and clears pending. Growth
+  is accepted only with `epitype core-baseline --accept --reason <text>`.
+  `--cap-bytes` and `core_cap_bytes` are still parsed and only say they are no
+  longer used. Source, approval, marker and ownership checks
   still apply; a size warning does not override them.
 
-`shared_index_cap_bytes` optionally limits the normalised governance `MEMORY.md`
-payload written into either global host's index region. Nightly cap checks measure
-that same payload, excluding its first heading. Project indexes retain their own
-scope; this setting does not impose the governance limit on every managed vault.
-Omitting the setting introduces no additional limit. `index_cap_bytes` retains its
-existing raw-file monitoring meaning for all selected vaults.
+Size limits follow what each host actually does, never a number Epitype chose
+(owner 2026-11-17). Every `MEMORY.md`, shared or project, is held to Claude Code's
+load limit of 200 lines or 25,000 bytes ([memory-index](memory-index.md)).
+`shared_index_cap_bytes` and `index_cap_bytes` are still parsed but no longer used;
+if set, sync and the nightly report print one line saying so. `epitype sync`
+judges the whole host file after the sync, each limit defined once in `memspec.py`:
+a `CLAUDE.md` over 4 MiB is a problem because Claude Code skips the file entirely,
+and over 200 lines only a notice (an official recommendation,
+[Claude Code memory](https://code.claude.com/docs/en/memory)); a project
+`AGENTS.md` over Codex `project_doc_max_bytes` (32 KiB by default) is a problem
+because Codex truncates the tail, while the global `~/.codex/AGENTS.md` over it is
+only a notice, because Codex does not truncate it and only warns (openai/codex
+`codex-rs/core/src/agents_md.rs`).
 
 A successful run also writes an approval pack to `<vault>/.epitype/core_gen_latest.json`:
 per card the vault, path, layer, section, order, approver, and the SHA-256 of its
@@ -205,8 +223,8 @@ comment-delimited zone per host; a card naming both hosts appears once in each z
 loads — the shared sections plus its own zone, with the other zones and every marker
 removed. Writing that into a host file is still not the product's job; the point is
 that the generator and a downstream sync script share one definition of "what this host
-loads" instead of keeping two. That same number is what `--cap-bytes` measures — the
-largest single host load, not the size of the file, because no session ever pays for
+loads" instead of keeping two. That same per-host number is what the core baseline compares — each
+host's own load, not the size of the file, because no session ever pays for
 both zones — and the run prints every host's load. The approval pack records each
 card's `hosts`, the bytes of each zone, and each host's load.
 
@@ -287,14 +305,14 @@ Five later sections answer a different question from the first seven: not "what 
 - **§8 pocket vaults.** Registered vaults cannot answer "how many places are producing unfiled memory", so this counts from disk instead: every `<home>/.claude/projects/*/memory/` directory that is not registered and holds at least one `*.md` card is listed as a filing candidate with its path, card count, and newest mtime. The home directory is never hardcoded — it is recognised from a registered vault's own path (`.claude/projects` walking up) and only falls back to `HOME`. Only that shape counts: taking "the registered vault's grandparent is the root" would make a vault at `C:\a\b` scan every directory under `C:\`.
 - **§9 draft aging.** `_drafts/**` per registered vault: total, older than 7 days, older than 30, grouped by first-level subdirectory, and the five oldest with their age in days. §4 counts how many drafts are waiting; this counts how long they have waited (the backlog measured 370 files on 2026-09-09).
 - **§10 mixed cards.** One card is one memory or one rule. Three shape signals, any one of which lists a split candidate: two or more `## ` headings in the body (fenced code is skipped, since cards quote markdown), a body over `memspec.CARD_BODY_MIXED_BYTES`, or a `description` over 160 characters that strings several things together with `＋`/`；`. Fifty rows per vault; past that only the total. Human review outranks the shapes: a card carrying `memspec.MIXED_REVIEWED_FIELD` (any value — only the key is read, so no language is hardcoded), a `status: superseded` card, and a card with `split_from` that is now one heading and under the byte cap are skipped and counted instead, reported as 「已審過略過 N 張」; the skip is counted only for a card the shapes would otherwise have listed, so the number is exactly what review took off the list, and a split-out card that grew two headings or ran over the cap is listed again on its own account.
-- **§11 caps.** Three optional config keys — `index_cap_bytes`, `core_files` (absolute paths), `core_cap_bytes`. A missing key writes one "unset" line and judges nothing: a cap the product guessed, reported as "over cap", would read as the owner's own threshold. What is over is listed with its size, cap, and overage; no file is touched. A core file is measured the way core-gen and `epitype sync` measure it — the bytes one host actually loads (shared block plus that host's zone) — so the three never disagree about "over". The same `core_files` list is also compared against a fresh assembly from the governance vault's rule cards (the same vault `epitype sync` takes rules from; assembling from every registered vault would mix project rules in and report drift every night), and a block that no longer matches is listed as a drift candidate — report-only, and skipped entirely when there are no rule cards to assemble from (see [Core generation](#core-generation-rule-cards--the-resident-block)).
+- **§11 caps.** Every `MEMORY.md` is checked against the host load limit (200 lines or 25,000 bytes; `index_cap_bytes` is ignored with a one-line notice). One optional config key — `core_files` (absolute paths); `core_cap_bytes` is ignored with a one-line notice, and the generated core is instead reported when it has grown past the accepted baseline, card by card. A missing `core_files` writes one "unset" line and judges nothing: a cap the product guessed, reported as "over cap", would read as the owner's own threshold. What is over is listed with its size, cap, and overage; no file is touched. Core growth is measured once, one way, for every writer: core-gen, `epitype sync`, this section and `epitype core-baseline --accept` all assemble only the governance vault's rule cards (`global_vault`, else the first configured vault; `core_baseline.governance_vault`) and compare the bytes each host loads (shared block plus that host's zone) with the baseline stored in that vault alone. Measuring a wider view in one writer and a narrower one in another would lower the baseline in one and report growth in the next, forever. This section only reports; it writes neither baseline nor pending, and the SessionStart line for core growth comes only from the pending file, not from the dream notice. The same `core_files` list is also compared against a fresh assembly from the governance vault's rule cards (the same vault `epitype sync` takes rules from; assembling from every registered vault would mix project rules in and report drift every night), and a block that no longer matches is listed as a drift candidate — report-only, and skipped entirely when there are no rule cards to assemble from (see [Core generation](#core-generation-rule-cards--the-resident-block)).
 - **§12 quotes no decision card carries.** Recall serves `rulings`/`corrections`/`grants` cards under the `⚖ owner 裁決：`/`⚠ owner 曾糾正：` prefixes, and only a card that declares `verified: false` is demoted to a historical capture. So an event card that is still trusted, but that no `type: decision` card mentions — in its body or its `source`/`superseded_by`/`aliases` — reads like a standing ruling with nobody behind it. Those are listed newest first (path, `captured_at`, a suspected-noise column, first 80 characters), thirty per vault. The match is on the full filename and the `decision_key`, never a bare stem: `carried` is a substring of `uncarried`, and a stem match would report "carried" for a quote nobody carries. Naming is only one of **three carry routes**, because most cards carry a quote without ever writing its filename: a decision card that quotes the sentence verbatim in `owner_quote` carries it (both texts are normalised to letters and digits — NFKC first, then every separator, quote and punctuation dropped, so no language's punctuation is hardcoded — and the overlap must run at least twelve characters, since a four-character overlap happens in any two Chinese sentences), and so does an event card that names its carrier in its own `carried_by` field (whether that card exists is `epitype cards`' question, not this section's). The noise column marks a row whose body matches one of `memspec.EVENT_NOISE_MARKERS` — the fixed cross-CLI transport-probe templates that auto-capture files as rulings; marking only, nothing is changed or deleted.
 
 Section 4 carries one more piggyback task, ahead of its own count: the run replays `epitype/harvest.py` over the host transcripts in drafts-only mode (`harvest(..., drafts_only=True)`, or `--drafts-only` on the CLI), so a sentence the online capture missed while a session was running still reaches the vault the same night. Drafts-only closes the admission gate outright — every captured sentence lands in `_drafts/captured_pending/`, no card reaches `grants`/`corrections`/`rulings`, and no index is rebuilt or aged — because nobody is watching that run. Its cursor is harvest's own per-file fingerprint manifest, not a date: a file is recorded only after it has been read end to end, so a run that stops early leaves the rest for the next one. It stops on a `memspec.DREAM_HARVEST_BUDGET_SECONDS` (30 s) deadline, or the packet's own deadline if that comes first, and it stops between files, never inside one. A failure costs the section one error line and nothing else; `--dry-run` is passed straight through, so a dry run counts what it would propose and writes nothing. The packet reports the number actually added (`harvest_new_drafts`, with `harvest_files` scanned) as 「本次 harvest 新增 N 張草稿」.
 
 The inventory itself is read-only, but the run carries two piggyback tasks that write into each vault: it regenerates `_views/` (nothing is rewritten when the input fingerprint is unchanged), and then it shapes `MEMORY.md` back into a short entry point, reporting both in the packet. Shaping runs second on purpose — "the catalogue already carries this card" is its only test, and a stale catalogue would answer it wrongly.
 
-Apart from those two tasks, the background run's own output stays inside `<governance vault>/.epitype/`: `dream_pack_latest.md`, `dream_pack_latest.json`, `dream_state.json` (completion time, per-section counts, elapsed seconds) and `dream.log`. It gives itself a ten-minute budget and marks any section it did not reach rather than dropping it silently. The next session — but not one resuming after a compaction — opens with one line, once, and only when someone has to act: the run left headline numbers to review, or it did not finish. A dream that finished clean says nothing; what distinguishes "clean" from "never ran" is the other line, which appears when the dream is past its `interval_hours` and no unexpired lock says one is running (failure mode 35). None of this calls a model: the model half of dreaming stays manual, so an installed Epitype never spends model budget on its own.
+Apart from those two tasks, the background run's own output stays inside `<governance vault>/.epitype/`: `dream_pack_latest.md`, `dream_pack_latest.json`, `dream_state.json` (completion time, per-section counts, per-section seconds, elapsed seconds) and `dream.log`. It gives itself a ten-minute budget and marks any section it did not reach rather than dropping it silently. The next session — but not one resuming after a compaction — opens with one line, once, and only when someone has to act: the run left headline numbers to review, or it did not finish. A dream that finished clean says nothing; what distinguishes "clean" from "never ran" is the other line, which appears when the dream is past its `interval_hours` and no unexpired lock says one is running (failure mode 35). None of this calls a model: the model half of dreaming stays manual, so an installed Epitype never spends model budget on its own.
 
 ```powershell
 python epitype/dream.py --selftest

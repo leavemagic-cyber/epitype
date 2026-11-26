@@ -22,11 +22,13 @@ def run():
                 print('BEFORE: exact authorized rule output refused solely by product cap.')
                 return
             assert out.is_file() and result['status'] == core_gen.STATUS_WRITTEN
-            assert result['over_cap'] and result['cap'] == 10
+            # The absolute cap is retired (owner 2026-11-17): parsed, ignored, one notice.
+            assert not result['over_cap'] and result['cap'] is None
+            assert any('core_cap_bytes' in n and '已不再使用' in n for n in result['notices'])
             assert out.read_text(encoding='utf-8') == result['text']
             log = io.StringIO()
             core_gen._print(result, log)
-            assert 'NOTE' in log.getvalue() and '10' in log.getvalue()
+            assert 'NOTE' in log.getvalue() and '已不再使用' in log.getvalue()
             with patch.object(memspec, 'config_options', return_value={'core_cap_bytes': 10}):
                 plan = host_sync._plan('claude', 'claude', None, root / 'CLAUDE.md',
                     lambda: {memspec.HOST_SYNC_RULES_REGION: result['text']}, home=root)
@@ -47,7 +49,7 @@ def run():
                 refused = host_sync._plan('claude', 'claude', None, damaged,
                     lambda: {memspec.HOST_SYNC_RULES_REGION: result['text']}, home=root)
             assert refused.damaged and refused.problems and not refused.regions
-            print('PASS: over-cap writes complete rules with notice; missing approval and damaged markers still refuse.')
+            print('PASS: retired cap writes complete rules with notice; missing approval and damaged markers still refuse.')
 
 
 if __name__ == '__main__':

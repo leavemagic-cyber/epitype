@@ -556,7 +556,7 @@ def _admitted_card(hit, vault, event, quiet):
                 source_projection = rule_pipeline.projection(current_fields, Path(path), allow_deferred=True)
             if source_projection['expired']:
                 return None
-            state, _reason = rule_context.applicability(source_projection['document']['scope'], event)
+            state, _reason = rule_context.applicability(source_projection['document']['scope'], event, card=Path(path))
         else:
             state, _reason = rule_context.reference_applicability(current_fields, Path(path), event)
         if state == 'OUTSIDE':

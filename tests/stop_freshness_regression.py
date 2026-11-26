@@ -160,10 +160,10 @@ class StopFreshnessRegression(unittest.TestCase):
         reads = 0
         original = stop._read_decision
 
-        def read(path):
+        def read(path, *arguments):
             nonlocal reads
             reads += 1
-            return original(path)
+            return original(path, *arguments)
 
         with patch.object(stop, "_read_decision", read), patch.object(stop, "expired", lambda _: reads > 0):
             self.assertEqual(self.decisions(), [])

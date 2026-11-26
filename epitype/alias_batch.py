@@ -55,7 +55,10 @@ def _export_candidates(vault, only_missing, limit):
             continue
         if not fields["is_card"]:
             continue
-        aliases_now = [item for item in fields[memspec.ALIASES_FIELD].split("\n") if item]
+        # 與 card_lint 同一條：已結案／取代／退役的卡不再被喚回，不列成要補別名的卡。
+        if (fields.get(memspec.DECISION_STATUS_FIELD) or "").strip() in memspec.STOP_GATE_SILENT_STATUSES:
+            continue
+        aliases_now =[item for item in fields[memspec.ALIASES_FIELD].split("\n") if item]
         if only_missing:
             if aliases_now:
                 continue
@@ -551,6 +554,16 @@ def _selftest():
                 "--only-missing 進一步只留完全沒有別名的卡",
                 "no-alias.md" in only_missing_paths and "one-alias.md" not in only_missing_paths,
             ))
+            _write_fixture(vault, "closed-no-alias.md", (
+                "---\nname: closed-no-alias\ndescription: 2026-09-06 已結案沒別名\nstatus: closed\n---\nbody\n"
+            ))
+            checks.append((
+                "已結案／取代／退役的卡不列成缺別名（與 card_lint 同一條）",
+                "closed-no-alias.md" not in {
+                    item["card_path"] for item in _export_candidates(vault, only_missing=True, limit=None)}
+                and "no-alias.md" in {
+                    item["card_path"] for item in _export_candidates(vault, only_missing=True, limit=None)},
+            ))
 
             def run_apply(review_entries, dry_run=False):
                 out = io.StringIO()
@@ -692,7 +705,7 @@ def _selftest():
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 14
+    total = 15
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":

@@ -1,4 +1,4 @@
-"""Narrow owner-authorized A01-A04/A14-A25/A38 regressions.
+"""Narrow owner-authorized A01-A04/A14-A25/A38/A40 regressions.
 
 EPITYPE_GATE_BASELINE may name the unchanged checkout for before/after evidence.
 All state, files, Git repositories and subprocesses belong to temporary fixtures.
@@ -289,13 +289,32 @@ class AdvisoryRegression(unittest.TestCase):
         cases = [
             ("A17", {"forbidden": (self.vault, "old-forbidden", "historical wording")}),
             ("A18", {"lint": ("card format FAIL", None)}),
-            ("A19", {"recurrence": gate._deny_value("unarmed recurrence")}),
+            ("A19", {"recurrence": "unarmed recurrence"}),
         ]
         for item, values in cases:
             self.before_block(item, lambda: self.review(old, target, **values)[0])
             value, notices = self.review(gate, target, **values)
             self.changed(item, value)
             self.assertTrue(notices)
+
+    def test_a40_recurrence_review_is_a_reminder_not_a_deny(self):
+        # CORE-08: a regex match on narration has no consent to block; its own text says
+        # the write proceeds, so the review hands back reminder text, never a deny value.
+        body = "Run 按鈕區塊必須是一條完整的 PowerShell 指令。\n"
+        target = self.vault / "feedback-run-button.md"
+        target.write_text("---\nname: feedback-run-button\ndescription: 2026-09-01 Run 按鈕只能一條指令\n"
+                          "unenforceable: 判斷型\nmetadata:\n  type: feedback\n---\n" + body, encoding="utf-8")
+        after = target.read_text(encoding="utf-8") + "**再犯（2026-09-25，排程停機事故）**：Run 區塊又拆成兩條指令。\n"
+        with mock.patch.object(gate, "_write_marker", return_value=True):
+            reminder = gate._recurrence_review((self.vault, target.name), target, [after], after,
+                                               None, time.monotonic(), "recurrence")
+            value, notices = gate._review_one_target({"session_id": "recurrence"}, self.config, target,
+                                                     [after], after, time.monotonic(), "recurrence")
+        self.assertIsInstance(reminder, str)
+        self.assertIn("feedback-run-button.md", reminder)
+        self.assertIn("寫入仍放行", reminder)
+        self.changed("A40", value)
+        self.assertTrue(any(note.startswith(memspec.WRITE_NOTE_RECURRENCE_LABEL) for note in notices), notices)
 
     def test_a20_native_managed_safety_key_is_still_protected(self):
         target = self.root / memspec.HOST_NATIVE_CODEX_RULES_FILENAME

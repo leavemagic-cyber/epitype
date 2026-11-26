@@ -112,6 +112,24 @@ class CaptureEventsRegression(unittest.TestCase):
         self.assertEqual(len(self.cards()), 3)
         self.assertEqual(cardscan.card_files(self.vault), [])
 
+    def test_judged_draft_search_hit_says_so_and_hold_stays_unreviewed(self):
+        case = next(case for case in RECORDS if case["expected"])
+        role, text = transcript.source_record(case["record"])
+        event = {**self.event, "source_message_id": case["record"]["uuid"],
+                 "source_role": role, "message_index": case["line"]}
+        path = capture.capture_event(text, self.vault, event, None, question="",
+                                     replay=capture.Replay(stamp=case["record"]["timestamp"]))
+        original = path.read_text(encoding="utf-8")
+        for triaged, expected in (("expired", "EXPIRED"), ("hold", "UNREVIEWED")):
+            with self.subTest(triaged=triaged):
+                path.write_text(original.replace("---\n", "---\ntriaged: %s\n" % triaged, 1), encoding="utf-8")
+                memsearch.build_index(self.vault)
+                hit = next(hit for hit in memsearch.query_index(self.vault, case["needle"])["results"]
+                           if Path(hit["path"]) == path)
+                self.assertEqual(hit["capture_review"], expected)
+                self.assertEqual(hit["authority"], "none")
+                self.assertEqual(hit.get("draft_status"), None if triaged == "hold" else triaged)
+
     def test_incremental_queue_retry_and_distinct_message_identity(self):
         self.write_records([case["record"] for case in RECORDS[:2]])
         capture.capture_transcript(self.vault, self.event, None)

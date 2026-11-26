@@ -60,7 +60,7 @@ def main():
         checks.append(("CLI ledger governance and Markdown/JSON output", code == 0 and written.is_file() and json.loads(written.with_suffix(".json").read_text(encoding="utf-8")) == printed))
         checks.append(("all source card bytes preserved", all(p.read_bytes() == content for p, content in before.items())))
         checks.append(("report contains owner policy and fields", "owner" in written.read_text(encoding="utf-8") and "forbidden" in written.read_text(encoding="utf-8")))
-        checks.append(("generated reports do not inflate pending-draft or aging counts", dream._drafts_of(b) == ([], 0) and dream._draft_aging_of(b, date(2026, 10, 29)) == []))
+        checks.append(("generated reports do not inflate pending-draft or aging counts", dream._drafts_of(b) == ([], 0) and dream._draft_ages(b, dream._drafts_of(b)[0], date(2026, 10, 29)) == []))
         c = root / "signals"
         c.mkdir()
         card(c, "key-left", "甲乙丙丁", "decision_key: one\n")
@@ -154,7 +154,7 @@ def main():
         (home / ".claude").mkdir()
         config.write_text(json.dumps({"vaults": [str(a), str(b)]}), encoding="utf-8")
         env = dict(os.environ, HOME=str(home), USERPROFILE=str(home), EPITYPE_CONFIG=str(config), CODEX_HOME=str(home / ".codex"), PYTHONIOENCODING="utf-8")
-        result = subprocess.run([sys.executable, "epitype/dream.py", "--scheduled", "--today", "2026-10-29"], cwd=Path(__file__).resolve().parents[1], env=env, capture_output=True, text=True, encoding="utf-8")
+        result = subprocess.run([sys.executable, "epitype/dream.py", "--scheduled", "--today", "2026-10-29", "--json-out", str(b / memspec.DREAM_DIRECTORY / memspec.DREAM_PACK_JSON_FILENAME)], cwd=Path(__file__).resolve().parents[1], env=env, capture_output=True, text=True, encoding="utf-8")
         nightly = b / "_drafts" / "duplicates" / "20261029.json"
         pack = b / memspec.DREAM_DIRECTORY / memspec.DREAM_PACK_JSON_FILENAME
         checks.append(("real isolated scheduled dream writes duplicate report and pack summary", result.returncode == 0 and nightly.is_file() and pack.is_file() and json.loads(pack.read_text(encoding="utf-8"))["duplicates"]["path"] == str(nightly.with_suffix(".md"))))

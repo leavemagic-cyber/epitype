@@ -498,6 +498,72 @@ class GuardSources(unittest.TestCase):
         self.assertFalse(gate._guard_matched(guard, defects, None))
         self.assertEqual(defects, ['[c] guard source UNVERIFIED: x'])
 
+    def drop_event(self, session, command='echo unrelated'):
+        transcript = self.root / (session + '.jsonl')
+        transcript.touch()
+        return {**self.event(), 'session_id': session, 'transcript_path': str(transcript),
+                'tool_input': {'command': command}}
+
+    def tamper(self):
+        raw = self.card_path.read_text(encoding='utf-8')
+        self.assertIn('隔離測試建議。', raw)
+        self.card_path.write_text(raw.replace('隔離測試建議。', '隔離測試改過。'), encoding='utf-8')
+
+    def test_tampered_guard_card_is_told_once_per_session(self):
+        self.card()
+        intact = self.allowed_context(self.call(self.drop_event('drop-a')))
+        self.assertNotIn('Epitype：規則卡', intact)
+        self.tamper()
+        first = self.allowed_context(self.call(self.drop_event('drop-a')))
+        self.assertIn('Epitype：規則卡 guard.md 已停用（INVALID', first)
+        # 給 AI 的提示不叫它自己重綁：只動正文由 Epitype 重綁，動到原話或規則欄位就還原或交主責。
+        self.assertNotIn('bind_payload', first)
+        self.assertIn('交主責', first)
+        self.assertLessEqual(len(first.splitlines()[0]), memspec.STOP_NOTE_MAX_CHARS)
+        # Once per card per session: another target in the same session stays quiet.
+        for command in ('echo unrelated', 'echo other target'):
+            again = self.allowed_context(self.call(self.drop_event('drop-a', command)))
+            self.assertNotIn('Epitype：規則卡', again)
+        self.assertIn('Epitype：規則卡 guard.md',
+                      self.allowed_context(self.call(self.drop_event('drop-b'))))
+
+    def test_core_only_binding_keeps_a_tampered_noncore_card_quiet(self):
+        self.card()
+        self.tamper()
+        config = json.loads(self.config.read_text(encoding='utf-8'))
+        config[memspec.CONFIG_CORE_ONLY_BINDING_FIELD] = True
+        self.config.write_text(json.dumps(config), encoding='utf-8')
+        context = self.allowed_context(self.call(self.drop_event('drop-core-only')))
+        self.assertNotIn('Epitype：規則卡', context)
+
+    def test_stop_drop_is_left_once_for_the_next_prompt(self):
+        import stop_gate
+        self.card(fields={'description': '隔離測試建議。', 'require_when': 'stop-hit-marker',
+                          'require_text': 'stop-required-text', 'guard_tool': 'Bash',
+                          'guard_all_of': ['guard-hit-marker'], 'guard_advice': '隔離測試建議。'})
+        event = {**self.drop_event('drop-stop'), 'hook_event_name': 'Stop'}
+        config = common.load_config(time.monotonic())
+        from epitype import hook_context
+        session = hook_context.notification_identity(event)
+        stop_gate._verdict(event, '說明。', config, time.monotonic(), [])
+        self.assertEqual(common.peek_notes(config, session), [])
+        self.tamper()
+        defects = []
+        stop_gate._verdict(event, '說明。', config, time.monotonic(), defects)
+        notes = common.peek_notes(config, session)
+        self.assertEqual(len(notes), 1)
+        self.assertIn('Epitype：規則卡 guard.md 已停用（INVALID', notes[0])
+        self.assertTrue(any('來源裁定未採用' in line for line in defects))
+        common.consume_notes(config, session, notes)
+        stop_gate._verdict(event, '說明。', config, time.monotonic(), [])
+        self.assertEqual(common.peek_notes(config, session), [])
+        # The card also arms a guard: its next tool call in that session stays quiet,
+        # while another session is told.
+        context = self.allowed_context(self.call(self.drop_event('drop-stop')))
+        self.assertNotIn('Epitype：規則卡', context)
+        self.assertIn('Epitype：規則卡 guard.md',
+                      self.allowed_context(self.call(self.drop_event('drop-stop-other'))))
+
 if __name__ == '__main__':
     if '--selftest' in sys.argv:
         sys.argv.remove('--selftest')

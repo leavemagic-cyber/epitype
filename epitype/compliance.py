@@ -34,6 +34,15 @@ MAX_TRANSCRIPTS = 250
 # 排序只要知道每份紀錄從幾點開始：讀開頭幾列就夠，不整份讀。
 FIRST_EVENT_MAX_LINES = 64
 FIRST_EVENT_MAX_BYTES = 4 * 1024 * 1024
+# 窗口起點之前出生的紀錄，要整份掃過時間欄才知道它在窗口裡最早的一件事是幾點。只比對
+# 位元組、不解 JSON；值裡含反斜線的（被當成字串包起來的 JSON）不算，那不是這一列的時間。
+# 冒號兩側的空白照 JSON 的定義不設上限：完整重放解得到的列，這裡也得掃得到，否則窗口內
+# 的事被當成不存在，接續點就越過它。
+_TIMESTAMP_FIELD = re.compile(rb'"timestamp"[ \t\r\n]*:[ \t\r\n]*"([^"\\]{1,64})"')
+# 塊尾一個還沒收完的欄位（空白可以任意長），從它的開頭帶進下一塊。
+_TIMESTAMP_FIELD_TAIL = re.compile(rb'"timestamp"[ \t\r\n]*(?::[ \t\r\n]*(?:"[^"\\]{0,64})?)?')
+_TIMESTAMP_FIELD_OVERLAP = 128
+WINDOW_SCAN_CHUNK_BYTES = 8 * 1024 * 1024
 # 窗口內讀到幾成以下，這一晚的第 13 節就不算數得完整。
 COVERAGE_COMPLETE_PERCENT = 80
 COVERAGE_STATUS_COMPLETE = "完整"
@@ -293,58 +302,64 @@ def replay(rules, transcripts, epoch=None, since=None, until=None):
     hits = []
     cache = {}
     for path in transcripts:
-        for session, stamp, final_text, all_texts, calls in _turns(path):
-            happened = _epoch_of(stamp)
-            # 一個今天動過的對話檔，裡面裝的是好幾天份的內容。重放的時間窗必須照事件
-            # 本身的時間切，不能照檔案的修改時間——否則會跟稽核帳的起算日對不齊，把
-            # 窗外早就擋過的事算成漏擋（2026-09-17 第一次實跑就是這樣多報一條）。
-            if since is not None and happened is not None and happened < since:
-                continue
-            if until is not None and happened is not None and happened >= until:
-                continue
-            if happened is None:
-                happened = epoch
-            for rule in rules:
-                if happened is not None and rule.mtime > happened:
-                    continue
-                if rule.kind == "guard":
-                    # 必填欄位型的守衛（fragments 空）重放不了：重放手上只有呼叫的字串，
-                    # 看不到「少了哪個欄位」。這裡必須明寫 `rule.fragments and`——空序列的
-                    # all() 是真，照原樣走下去會把每一次同類呼叫都算成命中，夜間報表整排變假。
-                    if not rule.fragments:
-                        continue
-                    for tool, payload, called in calls:
-                        if not payload or not memspec.action_guard_tool_matches(rule.tool, tool):
-                            continue
-                        if all(fragment in payload for fragment in rule.fragments):
-                            hits.append(Hit(rule.card, "guard", session, called,
-                                            "＋".join(rule.fragments), _digest(payload), True, payload))
-                    continue
-                if rule.kind in ("turn_check", memspec.FENCE_SHELL_RULE):
-                    # 內建檢查重放不了：長度要看 owner 那一次有沒有要求完整，引用要看
-                    # 那一場的工具往來附記，兩樣都不在這裡的文字裡。夜間要知道它們擋了
-                    # 幾次，讀閘門紀錄，不要從文字重猜——猜出來的數字比沒有數字更糟。
-                    continue
-                text = final_text  # 閘看的是整個回合，重放也是
-                if not text:
-                    continue
-                if rule.kind == "forbidden":
-                    for pattern in rule.forbidden:
-                        found = _blocks_outside_quotes(pattern, text, cache)
-                        if found is not None:
-                            hits.append(Hit(rule.card, "forbidden", session, stamp,
-                                            _one_line(found.group(0))[:80], _digest(text), True, text))
-                            break
-                elif rule.kind == "require":
-                    trigger = _blocks_outside_quotes(rule.require_when, text, cache)
-                    # 觸發要在引號外找，**證據要在整則裡找**——跟閘一模一樣（stop_gate.
-                    # _requirement_gap，2026-09-19 改的）。這裡當時沒跟著改，於是「原話要附
-                    # 引號原文」這種證據本身就是引文的規則，閘放行、重放卻算成漏擋：
-                    # 2026-09-20 實測三天 10 次命中，多數句子明明附了引文。
-                    if trigger is not None and not _present_anywhere(rule.require_text, text, cache):
-                        hits.append(Hit(rule.card, "require", session, stamp,
-                                        _one_line(trigger.group(0))[:80], _digest(text), True, text))
+        for turn in _turns(path):
+            _replay_turn(rules, turn, hits, cache, epoch, since, until)
     return hits
+
+
+def _replay_turn(rules, turn, hits, cache, epoch=None, since=None, until=None):
+    """一個回合對上這些卡，命中接到 hits 後面。`replay` 與 `replay_night` 共用這一份判讀。"""
+    session, stamp, final_text, _all_texts, calls = turn
+    happened = _epoch_of(stamp)
+    # 一個今天動過的對話檔，裡面裝的是好幾天份的內容。重放的時間窗必須照事件
+    # 本身的時間切，不能照檔案的修改時間——否則會跟稽核帳的起算日對不齊，把
+    # 窗外早就擋過的事算成漏擋（2026-09-17 第一次實跑就是這樣多報一條）。
+    if since is not None and happened is not None and happened < since:
+        return
+    if until is not None and happened is not None and happened >= until:
+        return
+    if happened is None:
+        happened = epoch
+    for rule in rules:
+        if happened is not None and rule.mtime > happened:
+            continue
+        if rule.kind == "guard":
+            # 必填欄位型的守衛（fragments 空）重放不了：重放手上只有呼叫的字串，
+            # 看不到「少了哪個欄位」。這裡必須明寫 `rule.fragments and`——空序列的
+            # all() 是真，照原樣走下去會把每一次同類呼叫都算成命中，夜間報表整排變假。
+            if not rule.fragments:
+                continue
+            for tool, payload, called in calls:
+                if not payload or not memspec.action_guard_tool_matches(rule.tool, tool):
+                    continue
+                if all(fragment in payload for fragment in rule.fragments):
+                    hits.append(Hit(rule.card, "guard", session, called,
+                                    "＋".join(rule.fragments), _digest(payload), True, payload))
+            continue
+        if rule.kind in ("turn_check", memspec.FENCE_SHELL_RULE):
+            # 內建檢查重放不了：長度要看 owner 那一次有沒有要求完整，引用要看
+            # 那一場的工具往來附記，兩樣都不在這裡的文字裡。夜間要知道它們擋了
+            # 幾次，讀閘門紀錄，不要從文字重猜——猜出來的數字比沒有數字更糟。
+            continue
+        text = final_text  # 閘看的是整個回合，重放也是
+        if not text:
+            continue
+        if rule.kind == "forbidden":
+            for pattern in rule.forbidden:
+                found = _blocks_outside_quotes(pattern, text, cache)
+                if found is not None:
+                    hits.append(Hit(rule.card, "forbidden", session, stamp,
+                                    _one_line(found.group(0))[:80], _digest(text), True, text))
+                    break
+        elif rule.kind == "require":
+            trigger = _blocks_outside_quotes(rule.require_when, text, cache)
+            # 觸發要在引號外找，**證據要在整則裡找**——跟閘一模一樣（stop_gate.
+            # _requirement_gap，2026-09-19 改的）。這裡當時沒跟著改，於是「原話要附
+            # 引號原文」這種證據本身就是引文的規則，閘放行、重放卻算成漏擋：
+            # 2026-09-20 實測三天 10 次命中，多數句子明明附了引文。
+            if trigger is not None and not _present_anywhere(rule.require_text, text, cache):
+                hits.append(Hit(rule.card, "require", session, stamp,
+                                _one_line(trigger.group(0))[:80], _digest(text), True, text))
 
 
 def _digest(text):
@@ -686,6 +701,42 @@ def _first_event_epoch(path, max_lines=FIRST_EVENT_MAX_LINES, max_bytes=FIRST_EV
     return None
 
 
+def _window_start(path, since):
+    """(有沒有讀到任何時間, 不早於 since 的最早時刻)。整份都早於 since 時是 (True, None)；
+    一個時間都讀不到、或讀到一半出錯時是 (False, None)，呼叫端照「讀不出起點」處理。
+
+    必須整份掃，不能只看檔尾或二分搜尋：同一份紀錄裡的時間不保證遞增（2026-11-13 實測
+    一份 23 MB 的紀錄有上千列比前一列早一小時以上），抽樣會把窗口內的事當成不存在，
+    接續點就越過它們。巢狀物件裡的同名欄位也會被算進來，那只會讓起點更早，或讓一份其實
+    沒有窗口內事件的紀錄被讀——多讀，不會漏。
+    """
+    seen, earliest = False, None
+    try:
+        with io.open(path, "rb") as stream:
+            carry = b""
+            while True:
+                chunk = stream.read(WINDOW_SCAN_CHUNK_BYTES)
+                if not chunk:
+                    break
+                data = carry + chunk
+                for match in _TIMESTAMP_FIELD.finditer(data):
+                    happened = _epoch_of(match.group(1).decode("ascii", "replace"))
+                    if happened is None:
+                        continue
+                    seen = True
+                    if happened >= since and (earliest is None or happened < earliest):
+                        earliest = happened
+                # 跨塊的欄位在下一塊開頭補讀；同一個欄位讀到兩次不影響最小值。
+                cut = len(data) - _TIMESTAMP_FIELD_OVERLAP
+                last = data.rfind(b'"timestamp"')
+                if 0 <= last < cut and _TIMESTAMP_FIELD_TAIL.fullmatch(data, last):
+                    cut = last
+                carry = data[max(cut, 0):]
+    except OSError:
+        return False, None
+    return seen, earliest
+
+
 def _reconcile_rows(hits, rows, stopped=()):
     """逐列對帳。先認指紋：同場、同卡、同一段話的那一列就是它當場被擋的紀錄。沒有指紋
     （舊列、寫入閘）或指紋算法跟重放對不上（Codex 的 exec 內層指令、閘只讀到回合尾段）
@@ -775,6 +826,17 @@ def transcripts_for(roots, since_stamp=None, limit=None):
             if since_stamp is not None and info.st_mtime < since_stamp:
                 continue
             born = _first_event_epoch(path)
+            if since_stamp is not None and (born is None or born < since_stamp):
+                # 窗口起點之前出生、修改時間卻在窗口內的紀錄：照出生時刻排，它就排在窗口
+                # 起點，只要沒讀到一份，接續點就推不過窗口起點。這種紀錄一多過單晚上限，
+                # 每晚都重算同一段、永遠追不上（2026-11-10 實測 416 份，其中 383 份窗口內
+                # 根本沒有事，只是被碰過修改時間）。改照它在窗口裡最早的一件事排：沒讀的
+                # 紀錄裡窗口內的事都不早於這一刻，接續點之前的照樣一定全在已讀的檔裡。
+                seen, start = _window_start(path, since_stamp)
+                if seen and start is None:
+                    continue  # 整份都在窗口起點之前：窗口內沒有事可重放，也不算進總數。
+                if seen:
+                    born = start
             # 讀不出起點的排最前面：寧可每晚都讀它，也不能讓它排到接續點後面而讓接續點
             # 越過它裡面的事。
             found.append((0.0 if born is None else born, info.st_mtime, os.fspath(path), path))
@@ -869,10 +931,15 @@ def final_messages(transcripts):
     """
     order = {}
     for path in transcripts:
-        for session, _stamp, final_text, _all_texts, _calls in _turns(path):
-            if final_text:
-                order.setdefault(session, []).append((_digest(final_text), final_text))
+        for turn in _turns(path):
+            _add_final(turn, order)
     return order
+
+
+def _add_final(turn, order):
+    session, _stamp, final_text, _all_texts, _calls = turn
+    if final_text:
+        order.setdefault(session, []).append((_digest(final_text), final_text))
 
 
 def _sentence_around(text, fragment):
@@ -929,22 +996,49 @@ def opportunities(transcripts, since=None, until=None):
     命中次數本身說不出一條樣式寬不寬——heredoc 那條 36 小時攔了 8 次，因為我真的犯了
     8 次。要看的是比例：在幾次機會裡命中了幾次。
     """
-    turns = 0
-    tools = {}
+    chances = {"turns": 0, "tools": {}}
     for path in transcripts:
-        for _session, stamp, final_text, _all_texts, calls in _turns(path):
-            happened = _epoch_of(stamp)
-            if since is not None and happened is not None and happened < since:
-                continue
-            if until is not None and happened is not None and happened >= until:
-                continue
-            if final_text:
-                turns += 1
-            for tool, payload, _called in calls:
-                if payload:
-                    key = tool.casefold()
-                    tools[key] = tools.get(key, 0) + 1
-    return {"turns": turns, "tools": tools}
+        for turn in _turns(path):
+            _count_opportunity(turn, chances, since, until)
+    return chances
+
+
+def _count_opportunity(turn, chances, since=None, until=None):
+    _session, stamp, final_text, _all_texts, calls = turn
+    happened = _epoch_of(stamp)
+    if since is not None and happened is not None and happened < since:
+        return
+    if until is not None and happened is not None and happened >= until:
+        return
+    if final_text:
+        chances["turns"] += 1
+    tools = chances["tools"]
+    for tool, payload, _called in calls:
+        if payload:
+            key = tool.casefold()
+            tools[key] = tools.get(key, 0) + 1
+
+
+def replay_night(rule_sets, transcripts, since=None, until=None):
+    """夜跑一趟讀完：(每組規則各自的命中, final_messages, opportunities)。
+
+    結果與分開呼叫 `replay`（每組一次）、`final_messages`、`opportunities` 完全相同，但每份
+    紀錄只解析一次。分開呼叫時每個庫各讀一遍：17 個庫、單份 1 GB 以上的紀錄，2026-11-10
+    那晚第 13 節跑了 4.8 小時。回合邊讀邊丟，記憶體只多一個回合，不會整份紀錄留在手上。
+    """
+    rule_sets = [list(rules) for rules in rule_sets]
+    hits = [[] for _rules in rule_sets]
+    caches = [{} for _rules in rule_sets]
+    finals = {}
+    chances = {"turns": 0, "tools": {}}
+    for path in transcripts:
+        for turn in _turns(path):
+            for rules, found, cache in zip(rule_sets, hits, caches):
+                if rules:
+                    _replay_turn(rules, turn, found, cache, since=since, until=until)
+            _add_final(turn, finals)
+            _count_opportunity(turn, chances, since, until)
+    return hits, finals, chances
 
 
 def rehearse(rules, hits, chances):
@@ -965,7 +1059,10 @@ def rehearse(rules, hits, chances):
     result = {}
     for rule in rules:
         if rule.kind == "guard":
-            chance = chances["tools"].get(rule.tool.casefold(), 0)
+            # 分母要跟重放認命中的是同一個比對（多工具 "Edit|Bash"、MCP 萬用字元）。拿卡上
+            # 的整串去查表永遠是 0，比率就永遠是 0，太寬的卡永遠不會被降級。
+            chance = sum(count for tool, count in chances["tools"].items()
+                         if memspec.action_guard_tool_matches(rule.tool, tool))
         else:
             chance = chances["turns"]
         matches = counted.get(rule.card, 0)
@@ -1235,28 +1332,55 @@ def _selftest():
     import time
     import uuid
 
+    from epitype import rule_pipeline, rule_provenance
+
+    def reviewed_card(path, front, body, *, key, quote=None):
+        # 武裝規則卡要有現行內容審查才會被正式讀者採用；沒審過、也不在凍結基準裡的卡
+        # 一律不武裝。夾具照正式卡的樣子綁審查，自測結果才不隨本機有沒有設基準而變。
+        text = "---\n" + front + "---\n" + body + "\n"
+        document = {
+            "version": rule_provenance.VERSION, "key": key,
+            "kind": "owner-directive" if quote else "ai-derived",
+            "author": "owner" if quote else "compliance-selftest",
+            "text": quote or body,
+            "scope": {"level": "global", "project": None, "case": None, "actions": ["*"],
+                      "conditions": [], "expiry": "unspecified", "exceptions": []},
+            "supersedes": [],
+        }
+        if quote:
+            document["quote"] = quote
+        document = rule_pipeline.bind_payload(
+            document, text, reviewer="compliance-selftest",
+            rationale="Selftest fixture: reviewed the complete interpretation and execution fields.")
+        line = rule_provenance.FIELD + ": " + json.dumps(
+            rule_provenance.serialize(document), ensure_ascii=False) + "\n"
+        path.write_text(text.replace("---\n", "---\n" + line, 1), encoding="utf-8")
+
     checks = []
     try:
         with tempfile.TemporaryDirectory(prefix="epitype-compliance-") as temp_dir:
             root = Path(temp_dir).resolve()
             vault = root / "vault"
             vault.mkdir()
-            (vault / "decision-x.md").write_text(
-                "---\nname: 測試裁定\ndescription: 說明\ndecision_key: probe\nstatus: active\n"
+            reviewed_card(
+                vault / "decision-x.md",
+                "name: 測試裁定\ndescription: 說明\ndecision_key: probe\nstatus: active\n"
                 "current_decision_at: 2026-09-16\ndecided_by: owner-explicit\nowner_quote: 不准講這句\n"
-                "aliases: [甲名, 乙名]\nforbidden:\n  - 這句話不准講\n---\nbody\n",
-                encoding="utf-8",
+                "aliases: [甲名, 乙名]\nforbidden:\n  - 這句話不准講\n",
+                "body", key="probe", quote="不准講這句",
             )
-            (vault / "scar-y.md").write_text(
-                '---\nname: 測試守衛\ndescription: 說明\nguard_tool: Bash\n'
-                'guard_all_of:\n  - "<<"\n  - "\\\\"\n---\nbody\n',
-                encoding="utf-8",
+            reviewed_card(
+                vault / "scar-y.md",
+                'name: 測試守衛\ndescription: 說明\nguard_tool: Bash\n'
+                'guard_all_of:\n  - "<<"\n  - "\\\\"\n',
+                "body", key="測試守衛",
             )
-            (vault / "decision-z.md").write_text(
-                "---\nname: 測試要求\ndescription: 說明\ndecision_key: needs\nstatus: active\n"
+            reviewed_card(
+                vault / "decision-z.md",
+                "name: 測試要求\ndescription: 說明\ndecision_key: needs\nstatus: active\n"
                 "current_decision_at: 2026-09-16\ndecided_by: owner-explicit\nowner_quote: 要帶證據\n"
-                "aliases: [丙名, 丁名]\nrequire_when: (已完成)\nrequire_text: (實測)\n---\nbody\n",
-                encoding="utf-8",
+                "aliases: [丙名, 丁名]\nrequire_when: (已完成)\nrequire_text: (實測)\n",
+                "body", key="needs", quote="要帶證據",
             )
             rules = armed_rules(vault)
             kinds = sorted(rule.kind for rule in rules)
@@ -1266,11 +1390,12 @@ def _selftest():
             ))
             fence_vault = root / "fence-vault"
             fence_vault.mkdir()
-            (fence_vault / "run-button.md").write_text(
-                "---\nname: 執行鍵\ndescription: 2026-09-25 指令區塊\naliases: [執行鍵]\n"
+            reviewed_card(
+                fence_vault / "run-button.md",
+                "name: 執行鍵\ndescription: 2026-09-25 指令區塊\naliases: [執行鍵]\n"
                 f"{memspec.FENCE_SHELL_FIELD}: {memspec.FENCE_SHELL_POWERSHELL}\n"
-                "metadata:\n  type: feedback\n---\nbody\n",
-                encoding="utf-8",
+                "metadata:\n  type: feedback\n",
+                "body", key="執行鍵",
             )
             checks.append((
                 "只帶 fence_shell 的卡也算武裝，不會被夜間報表數成沒武裝",
@@ -1386,13 +1511,15 @@ def _selftest():
             newer.write_text(json.dumps({"type": "user", "timestamp": "2026-09-17T00:00:00+00:00"})
                              + "\n", encoding="utf-8")
             os.utime(newer, (time.time(), time.time()))
-            picked, available = transcripts_for([root], since_stamp=time.time() - 3600)
+            # 起算點要早於紀錄裡的事：窗口內一件事都沒有的紀錄只是被碰過修改時間，不是候選。
+            since = _epoch_of("2026-09-01T00:00:00+00:00")
+            picked, available = transcripts_for([root], since_stamp=since)
             checks.append((
                 "只挑起算時間之後動過的紀錄檔，先開始的排前面（積壓時最舊的不會永遠輪不到），"
                 "並回報符合條件的總數",
                 picked == [transcript, newer] and available == len(picked),
             ))
-            few, total = transcripts_for([root], since_stamp=time.time() - 3600, limit=1)
+            few, total = transcripts_for([root], since_stamp=since, limit=1)
             checks.append((
                 "上限砍掉幾個檔要數得出來，不能靜靜少讀",
                 len(few) == 1 and total >= 2 and total > len(few),

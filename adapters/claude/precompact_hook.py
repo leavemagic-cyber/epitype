@@ -77,6 +77,26 @@ def _is_subagent(event):
     return hook_context.is_subagent(event)
 
 
+def _other_context(event, config, transcript):
+    """An auto compaction while the parent sits far below its threshold is a subagent's.
+
+    Claude Code sends a subagent's PreCompact with the parent's transcript_path and no
+    agent_id (a project session, 2026-11-12): it cleared the parent's recall markers, rewrote its map
+    and taught the meter 122k and 211k thresholds. Unknown usage or limit -> not other."""
+    trigger = event.get("trigger") or event.get("triggered_by")
+    if trigger != "auto" or hook_context.event_host(event) != "claude":
+        return False
+    try:
+        from epitype import context_meter
+
+        tokens = context_meter.current_tokens(transcript)
+        limit, _source = context_meter.threshold(
+            memspec.config_options(), context_meter.state_path(governance_vault(config, for_write=True)))
+    except Exception:
+        return False
+    return bool(tokens and limit and tokens < limit * memspec.COMPACT_OTHER_CONTEXT_RATIO)
+
+
 def _learn_threshold(event, vault, transcript):
     """自動壓縮的這一刻就是門檻：記下當下用量給用量計學。手動壓縮不記（時點是人選的）。
 
@@ -116,6 +136,9 @@ def _handle(event, started_at, learn=True, trace=None):
         trace["outcome"] = "transcript-missing"
         return None
     session_id = event.get("session_id", event.get("sessionId", ""))
+    if learn and _other_context(event, config, transcript):
+        trace["outcome"] = "other-context-compact"
+        return None
     # Only this model context loses its receipts; a shared parent ID proves nothing.
     context_id = hook_context.identity(event)
     if context_id:

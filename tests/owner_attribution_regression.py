@@ -616,9 +616,22 @@ class OwnerAttributionRegression(unittest.TestCase):
         target.write_text(old, encoding='utf-8')
         event = {**self.event, 'tool_name': 'Edit', 'tool_input': {
             'file_path': str(target), 'old_string': old, 'new_string': '# 表格\n'+old}}
+        # 子程序啟動在滿載機器上就超過 2 秒，整段計時會看機器忙不忙而時過時不過。
+        # 兩道 2 秒上限：閘門同程序處理這份內容；整條掛鉤路徑扣掉同一支掛鉤處理小內容
+        # 的時間（直譯器啟動兩邊抵銷），main() 將來若多了跟內容大小有關的工作也抓得到。
+        start = time.monotonic()
+        self.assertIsNone(self.handled(pretool, event))
+        self.assertLess(time.monotonic()-start, 2.0)
+        small = target.with_name('small.md')
+        small.write_text('| a | b |\n', encoding='utf-8')
+        baseline_event = {**self.event, 'tool_name': 'Edit', 'tool_input': {
+            'file_path': str(small), 'old_string': '| a | b |\n', 'new_string': '# 表格\n| a | b |\n'}}
+        start = time.monotonic()
+        self.surface(baseline_event, 'pretooluse_gate.py')
+        baseline = time.monotonic()-start
         start = time.monotonic()
         output, stderr, finding = self.surface(event, 'pretooluse_gate.py')
-        self.assertLess(time.monotonic()-start, 2.0)
+        self.assertLess(time.monotonic()-start-baseline, 2.0)
         self.assertIsNone(finding, (output, stderr))
 
     def test_hard_deadline_terminates_and_reaps_cpu_bound_worker(self):

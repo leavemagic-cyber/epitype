@@ -1,4 +1,4 @@
-"""Configured shared-index limit at the actual global host payload boundary."""
+"""The shared index follows the host load limit too; old cap keys only produce a notice."""
 import sys
 sys.dont_write_bytecode = True
 from pathlib import Path
@@ -30,36 +30,35 @@ class SharedIndexScope(unittest.TestCase):
         return host_sync._plan(host, host, str(self.project) if project else None,
                                self.root / (host + ".md"), lambda: {region: payload}, self.root)
 
-    def test_shared_overflow_blocks_both_global_hosts_without_limiting_project_index(self):
+    def test_old_shared_cap_key_blocks_nothing_and_says_it_is_unused(self):
         with patch.object(memspec, "config_options", return_value=self.config):
             for host in ("claude", "codex"):
-                self.assertTrue(any("shared_index_cap_bytes" in p for p in self.plan(host).problems))
+                plan = self.plan(host)
+                self.assertFalse(plan.problems)
+                self.assertTrue(any("shared_index_cap_bytes" in n and "已不再使用" in n for n in plan.notices))
                 self.assertFalse(self.plan(host, project=True).problems)
 
-    def test_nightly_measures_every_raw_file_with_one_cap(self):
+    def test_nightly_uses_host_limit_for_shared_and_project_alike(self):
         with patch.object(memspec, "config_options", return_value=self.config):
             result = dream._section_caps([self.project, self.shared], date.today(), None, self.config)
-            entries = [e for e in result["examples"] if e.get("kind") == "index-file"]
-            self.assertEqual(len(entries), 2)
-            self.assertEqual({Path(e["path"]).parent for e in entries}, {self.shared, self.project})
-            for entry in entries:
-                self.assertEqual(entry["bytes"], Path(entry["path"]).stat().st_size)
-                self.assertEqual(entry["cap"], 250)
+            self.assertFalse([e for e in result["examples"] if e.get("kind") == "index-file"])
+            self.assertIn("已不再使用", result["note"])
             self.assertFalse(result["errors"])
+        self.shared.joinpath("MEMORY.md").write_text("# Index\n" + "- x\n" * 200, encoding="utf-8")
+        with patch.object(memspec, "config_options", return_value=self.config):
+            result = dream._section_caps([self.project, self.shared], date.today(), None, self.config)
+        entries = [e for e in result["examples"] if e.get("kind") == "index-file"]
+        self.assertEqual([Path(e["path"]).parent for e in entries], [self.shared])
+        self.assertEqual((entries[0]["cap"], entries[0]["cap_lines"], entries[0]["over_lines"]),
+                         (25_000, 200, 1))
 
-    def test_optional_host_region_budget_and_raw_file_budget_are_distinct(self):
+    def test_without_old_keys_there_is_no_notice(self):
         self.config.pop("shared_index_cap_bytes")
         with patch.object(memspec, "config_options", return_value=self.config):
             self.assertFalse(self.plan("codex").problems)
-        self.config["shared_index_cap_bytes"] = 250
-        self.shared.joinpath("MEMORY.md").write_text("# " + "字" * 3000 + "\n短索引\n", encoding="utf-8")
-        with patch.object(memspec, "config_options", return_value=self.config):
-            self.assertFalse(self.plan("claude").problems)
+            self.assertFalse([n for n in self.plan("codex").notices if "已不再使用" in n])
             result = dream._section_caps([self.project, self.shared], date.today(), None, self.config)
-            entries = [e for e in result["examples"] if e.get("kind") == "index-file"]
-            self.assertEqual(len(entries), 2)
-            shared = next(e for e in entries if Path(e["path"]).parent == self.shared)
-            self.assertEqual(shared["bytes"], self.shared.joinpath("MEMORY.md").stat().st_size)
+            self.assertFalse(result["note"] and "已不再使用" in result["note"])
 
 
 if __name__ == "__main__":

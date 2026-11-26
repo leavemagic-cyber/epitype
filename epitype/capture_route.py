@@ -133,8 +133,13 @@ def native_cwd_vaults(cwd, home=None):
     return found
 
 
-def capture_vault(cwd, governance, home=None):
+def capture_vault(cwd, governance, home=None, *, config=None, event=None):
     """自動捕捉的事件卡該寫進哪個庫：專案的進專案庫，其餘進治理庫。"""
+    if config is not None:
+        from epitype import session_scope
+        project = session_scope.session_project(event if isinstance(event, dict) else {"cwd": cwd}, config, home)
+        if project is not None:
+            return project.vault
     for vault in native_cwd_vaults(cwd, home):
         if reference_owner_matches(vault, cwd) is not False:
             return vault
@@ -282,7 +287,13 @@ def _project_roots_of(vault, *, max_rows=PROJECT_TRANSCRIPT_ROWS):
             else:
                 incomplete = True
             after = transcript.stat()
-            if (after.st_mtime_ns, after.st_size) == (before.st_mtime_ns, before.st_size):
+            if (prior and root is not None and prior[3] == str(root)
+                    and (after.st_dev, after.st_ino) == (before.st_dev, before.st_ino)):
+                # A live session's transcript grows on every call but its header
+                # cwd does not; keeping the old entry avoids a locked cache rewrite
+                # per tool call. Only this one header is re-read next time.
+                files[transcript.name] = prior
+            elif (after.st_mtime_ns, after.st_size) == (before.st_mtime_ns, before.st_size):
                 files[transcript.name] = [*stamp, str(root) if root is not None else None]
             elif (root is not None and after.st_size >= before.st_size
                   and (after.st_dev, after.st_ino) == (before.st_dev, before.st_ino)):

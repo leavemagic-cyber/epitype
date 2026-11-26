@@ -50,8 +50,15 @@ _RECALL_PART = re.compile(f"[{_CJK_RANGE}]+|[^\\s{_CJK_RANGE}，。！？：；�
 # Trigram FTS cannot match two-codepoint terms. A private-use prefix makes CJK
 # bigrams indexable while the cards table and returned hit fields stay raw.
 _CJK_BIGRAM_PREFIX = "\ue000"
+# One Latin letter written against a CJK word names one thing: C槽, D 槽, A股.
+# Split into parts, the lone letter was dropped and the CJK side often fell to
+# the particle filter, so 「為什麼c槽又被你塞滿」 searched only 緊急/處理
+# (2026-11-12: the C-drive lessons were never recalled). Indexed and searched
+# as one lowercase token, with or without a space.
+_MIXED_PAIR = re.compile(f"(?<![0-9A-Za-z])([A-Za-z]) ?([{_CJK_RANGE}])")
+_MIXED_TERM = re.compile(f"[a-z][{_CJK_RANGE}]")
 _FTS_FORMAT_KEY = "fts_format"
-_FTS_FORMAT_VERSION = "10"
+_FTS_FORMAT_VERSION = "11"
 _CURRENT_DECISION_GUIDANCE = "此題現行決定="
 
 
@@ -466,6 +473,15 @@ def _ensure_schema(connection):
     return rebuild
 
 
+def _mixed_pairs(text):
+    seen = set()
+    for match in _MIXED_PAIR.finditer(text or ""):
+        term = (match.group(1) + match.group(2)).casefold()
+        if term not in seen:
+            seen.add(term)
+            yield term
+
+
 def _cjk_bigrams(text):
     seen = set()
     for match in _CJK_RUN.finditer(text or ""):
@@ -497,7 +513,8 @@ def _source_quote_phrases(value):
 
 def _fts_document(text):
     value = text or ""
-    encoded = " ".join(_CJK_BIGRAM_PREFIX + term for term in _cjk_bigrams(value))
+    encoded = " ".join(_CJK_BIGRAM_PREFIX + term
+                       for term in (*_cjk_bigrams(value), *_mixed_pairs(value)))
     return value if not encoded else value + "\n" + encoded
 
 
@@ -766,8 +783,8 @@ def _substantive(term):
 
 
 def _recall_terms(prompt):
-    priority_terms = []
-    priority_seen = set()
+    priority_terms = list(_mixed_pairs(prompt))
+    priority_seen = set(priority_terms)
     cjk_terms = []
     for match in _RECALL_PART.finditer(prompt):
         part = match.group(0)
@@ -807,7 +824,7 @@ def _recall_terms(prompt):
 
 
 def _recall_fts_term(term):
-    if len(term) == 2 and _CJK_RUN.fullmatch(term):
+    if len(term) == 2 and (_CJK_RUN.fullmatch(term) or _MIXED_TERM.fullmatch(term.casefold())):
         return _CJK_BIGRAM_PREFIX + term
     return term
 
@@ -843,6 +860,8 @@ def _short_latin_pattern(key):
 
 
 def _recall_pattern(key, automatic=False):
+    if _MIXED_TERM.fullmatch(key):
+        return re.compile(r"(?<![0-9a-z])" + re.escape(key[0]) + " ?" + re.escape(key[1]))
     if automatic and len(key) > 3 and key.isalpha() and not _CJK_RUN.fullmatch(key):
         return re.compile(r'(?<![^\W_])' + re.escape(key))
     return _short_latin_pattern(key)
@@ -921,6 +940,11 @@ def _recall_units(prompt, terms):
     text = prompt.casefold()
     spans = []
     pending = {term.casefold() for term in terms}
+    for key in [key for key in pending if _MIXED_TERM.fullmatch(key)]:
+        found = _recall_pattern(key).search(text)
+        if found:
+            spans.append(found.span())
+            pending.remove(key)
     for part in _RECALL_PART.finditer(text):
         value = part.group(0)
         if _CJK_RUN.fullmatch(value):
@@ -1078,6 +1102,12 @@ def _result(vault, row, hits):
     if memspec.is_pending_capture(card_path):
         result.update(capture_review="UNREVIEWED", authority="none",
                       evidence_notice="未審事件，僅供查證；不是授權、規則或動作提醒。")
+        # The index does not store `triaged`; read it only for these rare hits so an
+        # expired or already-judged draft is not shown as still waiting for review.
+        fields, _problem = memspec.frontmatter_fields(vault / card_path)
+        triaged = str(fields.get(memspec.DRAFT_TRIAGED_FIELD) or "").strip()
+        if triaged and triaged.lower() not in memspec.DRAFT_TRIAGED_PENDING_VALUES:
+            result.update(capture_review=triaged.upper(), draft_status=triaged)
     return result
 
 
@@ -1462,6 +1492,63 @@ def recall_index(vault, prompt, include_superseded=False, include_noncard=False,
     if warnings:
         payload["warnings"] = warnings
     return payload
+
+
+def _card_query_lines(text):
+    """Identity line (description + aliases) then the substantive body lines of a card."""
+    lines = str(text).lstrip("﻿").splitlines()
+    body = lines
+    identity = ""
+    if lines and lines[0].strip() == "---":
+        closing = next((i for i, line in enumerate(lines[1:], 1)
+                        if line.strip() in ("---", "...")), None)
+        if closing is not None:
+            front = _parse_frontmatter("\n".join(lines[1:closing]))
+            identity = " ".join(part for part in (
+                front.get("description") or "", front.get(memspec.ALIASES_FIELD) or "") if part)
+            body = lines[closing + 1:]
+    queries = [identity] if identity.strip() else []
+    queries.extend(line.strip() for line in body
+                   if len(line.strip()) >= memspec.SAME_CLASS_MIN_LINE_CHARS)
+    return queries[:memspec.SAME_CLASS_MAX_QUERIES]
+
+
+_SAME_CLASS_FIELDS = frozenset(_IDENTITY_FIELDS) | {"description"}
+
+
+def similar_cards(vault, text, *, exclude=(), limit=None, deadline=None):
+    """Current cards closest to a whole card text, for "update the existing card".
+
+    Each line is its own recall query and a card earns (window - rank) for every line
+    that ranks it in the window. One query over the whole text keeps only the first
+    RECALL_MAX_TERMS terms: on the real 2026-11-12 case (a new card about device test
+    packages filling C, written while the worktree card about filling C already
+    existed) it did not list the old card at all, and identity-text overlap scored
+    that pair 0.14, below most unrelated pairs. Line voting ranked it first.
+    Superseded cards, pending captures and the excluded paths never count.
+    Stops early at `deadline` (time.monotonic()) and returns what it has."""
+    import time
+    limit = memspec.SAME_CLASS_LIMIT if limit is None else limit
+    window = memspec.SAME_CLASS_WINDOW
+    skipped = {str(path).replace("\\", "/") for path in exclude}
+    votes = {}
+    found = {}
+    for query in _card_query_lines(text):
+        if deadline is not None and time.monotonic() >= deadline:
+            break
+        result = recall_index(vault, query, limit=window * 2, automatic=True)
+        # A hit only in the body is a shared word, not a shared topic: on a new card
+        # about subtitle fonts, body-only hits listed three unrelated cards.
+        hits = [hit for hit in result.get("results", ())
+                if hit.get("is_card") and not memspec.is_pending_capture(hit["card_path"])
+                and hit["card_path"] not in skipped and not _is_superseded(hit)
+                and set(hit.get("hit_fields") or ()) & _SAME_CLASS_FIELDS]
+        for rank, hit in enumerate(hits[:window]):
+            votes[hit["card_path"]] = votes.get(hit["card_path"], 0) + window - rank
+            found.setdefault(hit["card_path"], hit)
+    ranked = sorted((path for path in votes if votes[path] >= memspec.SAME_CLASS_MIN_VOTES),
+                    key=lambda path: (-votes[path], path))[:limit]
+    return [dict(found[path], votes=votes[path]) for path in ranked]
 
 
 def _write_card(path, frontmatter, body):

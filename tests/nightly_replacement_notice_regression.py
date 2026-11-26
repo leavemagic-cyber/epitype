@@ -159,15 +159,15 @@ def main():
                 [{"id": 14, "counts": night["counts"]}])),
         ))
 
-    # 規則超過設定的 core_cap_bytes：上限只提醒（6f6fce1，CORE-25），規則塊與索引都照寫，
-    # 這一晚不算不乾淨，但夜報要講出上限。
+    # 設了舊的 core_cap_bytes：只換來「已不再使用」提醒（CORE-25），規則塊與索引都照寫，
+    # 這一晚不算不乾淨，但夜報要講出這個鍵。
     with tempfile.TemporaryDirectory(prefix="epitype-nightly-capped-") as temp_dir:
         root = Path(temp_dir).resolve()
         home, vault, host_path = _fixture(root, "我的開頭\n")
         capped = _night(home, vault, '{"core_cap_bytes": 10}')
         written = host_path.read_text(encoding="utf-8")
         checks.append((
-            "規則超上限的夜晚：索引照寫、規則塊照寫、夜報提醒講出上限",
+            "設了舊上限鍵的夜晚：索引照寫、規則塊照寫、夜報提醒講出這個鍵",
             "一張卡" in written and rules_begin in written
             and "Honesty governs this contract." in written
             and capped["errors"] == []

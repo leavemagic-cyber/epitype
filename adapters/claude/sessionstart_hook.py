@@ -225,12 +225,15 @@ def _dream_finished_notice(governance, state, deliveries=None):
         return None
     if state.get(memspec.DREAM_STATE_NOTIFIED_FIELD) == completed:
         return None
-    headline = state.get(memspec.DREAM_STATE_HEADLINE_FIELD)
-    headline = headline if isinstance(headline, dict) else {}
-    numbers = {}
-    for field in memspec.DREAM_HEADLINE_FIELDS:
-        value = headline.get(field)
-        numbers[field] = value if isinstance(value, int) and not isinstance(value, bool) else 0
+    count = state.get(memspec.DREAM_STATE_REVIEW_ITEMS_FIELD)
+    if not isinstance(count, int) or isinstance(count, bool):
+        # 舊版 state 沒有待判斷清單：退回 headline 三個數字的和，只用來決定要不要出聲。
+        headline = state.get(memspec.DREAM_STATE_HEADLINE_FIELD)
+        headline = headline if isinstance(headline, dict) else {}
+        count = sum(
+            value for value in (headline.get(field) for field in memspec.DREAM_HEADLINE_FIELDS)
+            if isinstance(value, int) and not isinstance(value, bool)
+        )
     when = state.get(memspec.DREAM_STATE_DATE_FIELD)
     when = when if isinstance(when, str) and when else completed[:10]
     pack = state.get(memspec.DREAM_STATE_PACK_FIELD)
@@ -247,10 +250,10 @@ def _dream_finished_notice(governance, state, deliveries=None):
     elif (state.get(memspec.DREAM_STATE_COMPLETE_FIELD) is not True
             or state.get(memspec.DREAM_STATE_ERRORS_FIELD)):
         notice = memspec.DREAM_NOTICE_INCOMPLETE_LINE.format(date=when, pack=pack)
-    elif not any(numbers.values()):
+    elif count <= 0:
         notice = None
     else:
-        notice = memspec.DREAM_NOTICE_LINE.format(date=when, pack=pack, **numbers)
+        notice = memspec.DREAM_NOTICE_LINE.format(date=when, pack=pack, count=count)
     # 有限開場輸出若裁掉這一行，不能當作已送達；保留給下一場。
     if notice and deliveries is not None:
         deliveries.append((notice, governance, state, completed))
@@ -260,7 +263,7 @@ def _dream_finished_notice(governance, state, deliveries=None):
 
 
 def _dream_overdue_notice(governance, state, settings):
-    """夢到期卻沒跑：一行，帶上次完成的日期與可跑的命令。
+    """夢到期卻沒跑：一行，帶上次完成的日期；不給命令，補跑交給排程，不叫代理手動跑。
     沒有登記模式（mode 不是 piggyback／nightly）不說，那台機器沒有人在等夢；
     正在跑（lock 還沒逾時）也不說——起了夢的那一場說「沒跑」是假話。"""
     if settings.get(memspec.DREAM_MODE_FIELD) not in (
@@ -321,13 +324,25 @@ def _compact_map_line(event, governance, trace=None):
     return compact_map.map_notice(destination)
 
 
+def _resume_failure(destination):
+    """Why the handoff on disk did not come back as content."""
+    try:
+        with Path(destination).open("rb") as stream:
+            head = stream.read(memspec.COMPACT_RESUME_MAX_BYTES * 2)
+    except OSError:
+        return memspec.COMPACT_RESUME_UNREADABLE
+    return (compact_map.resume_problem(head.decode("utf-8", errors="ignore"))
+            or memspec.COMPACT_RESUME_UNREADABLE)
+
+
 def _handoff_line(event, governance):
     """壓縮續場交回模型自己寫的交接檔：(那一行, 已交付紀錄路徑, 交接檔 mtime_ns)，或 None。
 
     跟地圖同一套純函式算路徑；檔不在或是空的就什麼都不加——空檔是「提醒到了、還沒寫」，
     叫下一段去讀一個空檔只是多付一次讀檔。已交付紀錄記著上次真的送出去時交接檔的
-    mtime_ns：一樣就代表這份已經交回過、之後沒重寫，不再交回第二次（下一段會照著一份
-    過期的「下一步」做）；重寫過就照常交回。檔案本身從不刪。"""
+    mtime_ns：一樣就代表這份已經交回過、之後沒重寫——壓縮續場仍交回路徑，但標明可能過期
+    （下一段才不會照著一份過期的「下一步」直接做），其他來源就不再交回；重寫過就照常交回。
+    檔案本身從不刪。"""
     transcript = event.get("transcript_path") if isinstance(event, dict) else None
     if not isinstance(transcript, str) or not transcript.strip():
         return None
@@ -346,9 +361,11 @@ def _handoff_line(event, governance):
             delivered = None
         # Explicit working state must survive each compaction even when unchanged.
         # Legacy narrative handoffs retain their existing stale-next-step dedupe.
-        if delivered == info.st_mtime_ns and not (
-            event.get("source") == "compact" and compact_map.handoff_resume(destination)
-        ):
+        stale = delivered == info.st_mtime_ns and not (
+            event.get("source") == "compact" and compact_map.handoff_resume(destination))
+        # 壓縮續場不能什麼都不給：2026-11-12 某專案22:06 交接檔沒改寫，這段就連路徑都沒有，
+        # 接著被說「跟失憶一樣」。照舊帶回路徑，但標明可能過期。
+        if stale and event.get("source") != "compact":
             return None
     except (OSError, RuntimeError, ValueError):
         return None
@@ -356,6 +373,8 @@ def _handoff_line(event, governance):
     # exceeds the optional single-line notice cap. Never truncate the path.
     line = compact_map.handoff_notice(destination) or memspec.CONTEXT_METER_HANDOFF_NOTICE.format(
         path=os.fspath(destination))
+    if stale:
+        line += "\n" + memspec.COMPACT_HANDOFF_STALE
     return line, record, info.st_mtime_ns
 
 
@@ -496,6 +515,8 @@ def _handle(event, started_at, deliveries=None, trace=None, notice_claims=None):
         vaults = resolved  # no ledger anywhere: scan every configured vault
     else:
         vaults = [vault for vault in resolved if vault in native or vault == governance]
+    from epitype import session_scope
+    vaults = session_scope.candidates(vaults, event, config)
 
     source = event.get("source") if isinstance(event, dict) else None
     handoff = None
@@ -529,9 +550,13 @@ def _handle(event, started_at, deliveries=None, trace=None, notice_claims=None):
                 else:
                     # The model still needs to read its working state if we
                     # cannot carry the complete state in this output.
-                    handoff_content = handoff[0]
+                    handoff_content = handoff[0] + "\n" + memspec.COMPACT_RESUME_PATH_ONLY.format(
+                        reason=memspec.COMPACT_RESUME_OVER_BUDGET.format(
+                            size=len(resume.encode("utf-8")), budget=budget))
             else:
-                handoff_content = handoff[0]
+                # 只帶回路徑時說出原因，模型才知道該去讀檔，下次也知道要改哪裡（2026-11-12 某專案）。
+                handoff_content = handoff[0] + "\n" + memspec.COMPACT_RESUME_PATH_ONLY.format(
+                    reason=_resume_failure(destination))
             if handoff_content != resume:
                 # Recovery must remain reachable when the complete state does not fit.
                 pieces.append(handoff_content)
@@ -561,8 +586,36 @@ def _handle(event, started_at, deliveries=None, trace=None, notice_claims=None):
         if ramguard_line:
             pieces.append(ramguard_line)
 
+    # bind_also_cards 寫錯（不是清單、帶 .md、大小寫不同）時那張卡就靜靜不觸發；同名多張
+    # 則每一張都綁。開場把這些說出來（epitype.bind_also），只提醒、不改綁定。看的庫與閘門
+    # 同一個範圍（scoped_vaults），走訪有自己的時間上限，逾時說一行「沒查完」。
+    if not child and source != "compact":
+        check_seconds = _segment_budget(started_at, memspec.BIND_ALSO_CHECK_BUDGET_SECONDS)
+        if check_seconds is not None:
+            try:
+                from epitype import bind_also
+
+                check_deadline = time.monotonic() + check_seconds
+                pieces.extend(bind_also.startup_notices(
+                    scoped_vaults(config, event),
+                    out_of_time=lambda: time.monotonic() >= check_deadline))
+            except Exception:
+                pass
+
     if source != "compact":
         _startup_segments(pieces, vaults, config, started_at, event=event, trace=trace)
+
+    # 核心規則比上次確認變大、還沒處理：新對話開場一行（壓縮續場與 resume 是同一場，不重講）。
+    # 只讀待處理檔，不重組核心塊；讀不到就當沒有。落點用寫入端同一支解析
+    # （core_baseline.governance_vault），不是工作帳本所在的庫——兩者可以不同。
+    if not child and source not in ("compact", "resume") and _soft_remaining(started_at) > 0:
+        try:
+            from epitype import core_baseline
+            growth_line = core_baseline.surface_line(core_baseline.governance_vault())
+        except Exception:
+            growth_line = None
+        if growth_line:
+            pieces.append(growth_line)
 
     # 夢的一行跟其他一行摘要放在一起：它是狀態，不是規則。
     notice_deliveries = []
@@ -596,7 +649,8 @@ def _handle(event, started_at, deliveries=None, trace=None, notice_claims=None):
     trace["lines"] = [name for line in sent
                       for name, pointer in (("map", map_line),
                                             ("handoff", handoff[0] if handoff else None))
-                      if pointer and line == pointer]
+                      # The handoff piece may carry a path-only reason after its pointer line.
+                      if pointer and (line == pointer or line.startswith(pointer + "\n"))]
     trace["outcome"] = "ok" if context else "empty"
     return payload("SessionStart", context) if context else None
 
@@ -1035,6 +1089,7 @@ def _selftest():
                     memspec.DREAM_STATE_ERRORS_FIELD: {},
                     memspec.DREAM_STATE_PACK_FIELD: os.fspath(dream_dir / memspec.DREAM_PACK_FILENAME),
                     memspec.DREAM_STATE_HEADLINE_FIELD: headline,
+                    memspec.DREAM_STATE_REVIEW_ITEMS_FIELD: sum(headline.values()),
                     memspec.DREAM_STATE_NOTIFIED_FIELD: notified,
                 }
                 dream_state_file.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
@@ -1109,7 +1164,7 @@ def _selftest():
             expected_notice = memspec.DREAM_NOTICE_LINE.format(
                 date="2026-09-06",
                 pack=os.fspath(dream_dir / memspec.DREAM_PACK_FILENAME),
-                **full_headline,
+                count=sum(full_headline.values()),
             )
             checks.append(
                 (
@@ -1316,17 +1371,20 @@ def _selftest():
                 and handoff_expected not in handoff_startup_context,
             ))
 
-            # 已交付紀錄：兩次壓縮之間沒重寫就不再交回；重寫過（mtime 變了）就照常交回。
+            # 已交付紀錄：兩次壓縮之間沒重寫，壓縮續場仍交回路徑但標明可能過期；重寫過（mtime 變了）就照常交回。
             handoff_record = compact_map.handoff_delivered_path(handoff_file)
             first_mtime = handoff_file.stat().st_mtime_ns
             recorded_first = handoff_record.read_text(encoding="ascii").strip() == str(first_mtime)
             again_run, again_context = map_run(claude_shape)
+            again_lines = again_context.splitlines()
             checks.append((
-                "兩次壓縮之間交接檔沒重寫：第二次不再交回，地圖那行照舊，交接檔本身不刪",
+                "兩次壓縮之間交接檔沒重寫：第二次照樣交回路徑並標明可能過期，地圖那行照舊，交接檔本身不刪",
                 recorded_first
                 and again_run.returncode == 0
-                and handoff_expected not in again_context
-                and expected_line in again_context.splitlines()
+                and handoff_expected in again_lines
+                and memspec.COMPACT_HANDOFF_STALE in again_lines
+                and memspec.COMPACT_HANDOFF_STALE not in handoff_context
+                and expected_line in again_lines
                 and handoff_file.is_file(),
             ))
 
@@ -1346,8 +1404,11 @@ def _selftest():
 
             # 預算只放得下一行：先保必要交接，不讓原文備查指標取代接續入口。
             cut_mtime = rewrite_handoff(10)
-            one_line_budget = next(n for n in range(100, 2000)
-                if payload_fits("SessionStart", handoff_expected + "\n"
+            # 沒有短狀態區塊的交接檔：交接那一段是路徑加上「只帶回路徑」的原因，一起進出預算。
+            handoff_block = handoff_expected + "\n" + memspec.COMPACT_RESUME_PATH_ONLY.format(
+                reason=_resume_failure(handoff_file))
+            one_line_budget = next(n for n in range(100, 4000)
+                if payload_fits("SessionStart", handoff_block + "\n"
                     + memspec.CONTEXT_TRUNCATED_SUFFIX.format(dropped=1), n))
             one_line_config = root / "one-line-config.json"
             write_config(one_line_config, [map_vault], budget=one_line_budget)
@@ -1355,15 +1416,15 @@ def _selftest():
             checks.append((
                 "預算只放得下一行時，保留必要交接並記帳，原文備查地圖被省略",
                 one_line_run.returncode == 0
-                and not payload_fits("SessionStart", expected_line + "\n" + handoff_expected, one_line_budget)
+                and not payload_fits("SessionStart", expected_line + "\n" + handoff_block, one_line_budget)
                 and expected_line not in one_line_context
                 and handoff_expected in one_line_context.splitlines()
                 and handoff_record.read_text(encoding="ascii").strip() == str(cut_mtime),
             ))
             # 被預算裁掉的不算交付：紀錄不動，下一次壓縮續場照樣交回。
             retry_mtime = rewrite_handoff(10)
-            no_handoff_budget = next(n for n in range(100, 2000)
-                if payload_fits("SessionStart", handoff_expected, n)) - 1
+            no_handoff_budget = next(n for n in range(100, 4000)
+                if payload_fits("SessionStart", handoff_block, n)) - 1
             no_handoff_config = root / "no-handoff-config.json"
             write_config(no_handoff_config, [map_vault], budget=no_handoff_budget)
             cut_run, cut_context = map_run(claude_shape, no_handoff_config)
@@ -1420,6 +1481,9 @@ def _selftest():
             codex_handoff.write_text("使用者原話：…\n下一步：…\n", encoding="utf-8")
             codex_map_line = compact_map.map_notice(codex_map)
             codex_handoff_line = compact_map.handoff_notice(codex_handoff)
+            # 交接檔沒有短狀態區塊：路徑後面緊跟一行「只帶回路徑」的原因。
+            codex_expected_lines = [codex_handoff_line, memspec.COMPACT_RESUME_PATH_ONLY.format(
+                reason=_resume_failure(codex_handoff)), codex_map_line]
             codex_event = {
                 "hook_event_name": "SessionStart", "session_id": codex_session,
                 "transcript_path": os.fspath(rollout), "cwd": os.fspath(root),
@@ -1427,12 +1491,12 @@ def _selftest():
             }
             codex_run, codex_context = map_run(codex_event)
             checks.append((
-                "Codex 形狀（rollout 路徑、PreCompact --codex）：壓縮續場交回地圖與交接，同兩行、同順序",
+                "Codex 形狀（rollout 路徑、PreCompact --codex）：壓縮續場交回交接（附只帶路徑的原因）與地圖，同順序",
                 codex_precompact.returncode == 0
                 and codex_map.is_file()
                 and bool(codex_map_line) and bool(codex_handoff_line)
                 and codex_run.returncode == 0
-                and codex_context.splitlines() == [codex_handoff_line, codex_map_line],
+                and codex_context.splitlines() == codex_expected_lines,
             ))
 
             # Both startup and compact have paired traces; compact records recovery delivery.
@@ -1504,7 +1568,7 @@ def _selftest():
             checks.append((
                 "compact preserves recovery without maintenance; startup reads lint results and warms guards",
                 compact_spied == []
-                and compact_text.splitlines() == [codex_handoff_line, codex_map_line]
+                and compact_text.splitlines() == codex_expected_lines
                 and {"lint-result", "warm", "notices"} <= set(startup_spied),
             ))
 

@@ -44,6 +44,10 @@ A recalled ruling is context, not proof of compliance. Content checks examine ap
 
 The Stop hook never blocks. A finding emits nothing on stdout, records a `stop_note` audit event, and leaves a bounded reminder for the next prompt. UserPromptSubmit delivers that reminder in context. Missing configuration, unreadable cards and the hook deadline let the turn end.
 
+One narrow exception covers delivery. A requirement card that declares `require_on_hit: block` and whose reviewed source carries a blocking basis is checked against the turn's final message. When that message claims delivery without the required text, the hook blocks once with the card's rule line; the rewrite skips card checks, so a delivery is blocked at most once. Subagent stops, cards without the basis, an expired basis and the hook deadline fall back to the note.
+
+With `"bind_only_core_rules": true` in the config, Stop and PreToolUse take triggers only from core-rule cards. Other cards keep their trigger fields as memory and fire nothing.
+
 ## 11. The gate reads commands, and the violation is written to a file
 
 Write checks inspect the proposed file content as well as tool arguments. An opaque program that creates content outside the visible tool payload remains a coverage limit.
@@ -182,7 +186,7 @@ Tool-time advice can deliver a bounded excerpt of an applicable text rule. Advic
 
 ## 45. 規則再犯時: the card grew and still could not block (2026-09-25)
 
-Appending another incident to a behavior card does not strengthen its executable condition. Recurrence review distinguishes operative field changes from narrative growth and preserves legitimate quotations.
+Appending another incident to a behavior card does not strengthen its executable condition. Recurrence review distinguishes operative field changes from narrative growth and preserves legitimate quotations. The review is a reminder attached to the write, never a refusal.
 
 ## 46. The host rewrote the card and the card stopped blocking (2026-09-30)
 

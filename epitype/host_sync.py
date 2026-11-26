@@ -108,21 +108,27 @@ def atomic_write(path, data):
             pass
 
 
+def _options(home=None):
+    config = os.environ.get(memspec.EPITYPE_CONFIG_ENV)
+    if not config and home is not None:
+        config = Path(home) / ".epitype" / "config.json"
+    return memspec.config_options(config)
+
+
 def contract_vaults(vaults, home=None):
     """CLI 清單只決定本輪範圍，不授予全域身分。
 
     既有設定以 vaults 首項指定全域庫；global_vault 可明確指定。設定缺失或本輪沒有
     選到該庫時不產生全域目標，避免清空既有全域內容與原生受管設定。
     """
-    config = os.environ.get(memspec.EPITYPE_CONFIG_ENV)
-    if not config and home is not None:
-        config = Path(home) / ".epitype" / "config.json"
-    options = memspec.config_options(config)
-    configured = options.get(memspec.CONFIG_VAULTS_FIELD)
-    selected = options.get("global_vault") or (configured[0] if isinstance(configured, list) and configured else None)
-    if not isinstance(selected, str) or not selected.strip():
+    try:
+        from . import core_baseline
+    except ImportError:
+        import core_baseline
+    selected = core_baseline.governance_vault(_options(home))
+    if selected is None:
         return []
-    key = _dir_key(Path(selected).expanduser().resolve())
+    key = _dir_key(selected)
     return [Path(vault) for vault in vaults if _dir_key(Path(vault).expanduser().resolve()) == key][:1]
 
 
@@ -666,12 +672,17 @@ def _plan(host, label, key, path, wanted_of, home=None, over_cap=None, contextua
     except Exception as exc:
         return Plan(label, path, [], [f"組不出要寫的內容：{type(exc).__name__}: {exc}"], False, key)
 
-    # 自訂 core 預算只提醒，不能因此漏掉已授權的新指示；宿主載入與標記完整性另查。
+    # 舊的自訂上限鍵照讀、只提醒已不再使用；核心規則變大改由 core_baseline 跟基準比。
     configured = memspec.config_options()
-    rules_cap = core_gen._cap_of(None, configured)
-    shared_index_cap = configured.get(memspec.CONFIG_SHARED_INDEX_CAP_BYTES_FIELD)
-    if isinstance(shared_index_cap, bool) or not isinstance(shared_index_cap, int) or shared_index_cap <= 0:
-        shared_index_cap = None
+    if key is None:
+        try:
+            from . import core_baseline, memory_index
+        except ImportError:
+            import core_baseline
+            import memory_index
+        for legacy in (memory_index.legacy_cap_notice(configured), core_baseline.legacy_notice(configured)):
+            if legacy:
+                notices.append(legacy)
     for name, text in wanted.items():
         size = len(text.encode("utf-8"))
         if size > memspec.HOST_SYNC_REGION_CAP_BYTES and (over_cap or {}).get(name):
@@ -687,27 +698,6 @@ def _plan(host, label, key, path, wanted_of, home=None, over_cap=None, contextua
                 f"{name} 有 {size} 位元組，超過每場固定成本上限 "
                 f"{memspec.HOST_SYNC_REGION_CAP_BYTES}；仍整塊寫入，請考慮瘦身"
             )
-        # render 在規則與 END 標記之間保留一個換行；與 core_gen.host_loads 的量法一致。
-        rules_size = len((text.rstrip("\n") + "\n").encode("utf-8")) if text else 0
-        if name == memspec.HOST_SYNC_RULES_REGION and rules_cap is not None and rules_size > rules_cap:
-            try:
-                from . import cap_consolidation
-            except ImportError:
-                import cap_consolidation
-            notices.append(
-                f"常駐規則實際載入 {rules_size} bytes，上限 {rules_cap} bytes"
-                f"（{memspec.CONFIG_CORE_CAP_BYTES_FIELD}），超過 {rules_size - rules_cap} bytes；"
-                f"已保留完整新規則。整理材料：{cap_consolidation.material_path(configured)}；"
-                f"若夢報告尚未更新，先跑 python epitype/dream.py --scheduled；{cap_consolidation.NEXT_STEP}"
-            )
-        if (key is None and name == memspec.HOST_SYNC_INDEX_REGION
-                and shared_index_cap is not None and size > shared_index_cap):
-            problems.append(
-                f"{name} 有 {size} 位元組，超過設定的 "
-                f"{memspec.CONFIG_SHARED_INDEX_CAP_BYTES_FIELD} {shared_index_cap}；"
-                "請縮短共用索引或調整其上限"
-            )
-            continue
         # 要寫進去的內容自己含標記，寫下去就會讓這個檔永遠有兩組標記，之後每次都拒絕、
         # 只能人工手改才救得回來。寧可現在就說不。
         # 比對每一塊的標記，不只自己那一塊：索引的內容裡出現規則的標記，一樣會把這個
@@ -748,7 +738,9 @@ def _plan(host, label, key, path, wanted_of, home=None, over_cap=None, contextua
             inner, text, key or host, name, home, legacy=_legacy
         )
         regions.append(Region(name, text, found is not None, inner, unrecognised))
-    problems.extend(_budget_problems(host, path, raw, regions, home))
+    budget_problems, budget_notices = _budget_problems(host, path, raw, regions, home, project=key is not None)
+    problems.extend(budget_problems)
+    notices.extend(budget_notices)
     return Plan(label, path, regions, problems, damaged, key, tuple(notices), recovery)
 
 
@@ -929,27 +921,35 @@ def _codex_configured_budget(home=None):
     return value if value > 0 else None
 
 
-def _budget_problems(host, path, raw, regions, home=None):
-    """整個檔同步後會不會超過宿主的載入上限。
+def _budget_problems(host, path, raw, regions, home=None, *, project=False):
+    """(problems, notices) for the whole host file after the sync, per real host behaviour.
 
-    只守自己那兩塊是不夠的：宿主載入的是整個檔，使用者自己的內容加上去之後超過上限，
-    被安靜丟掉的那一段可能正是規則塊——而代理看起來還是「讀了整份」。
-
-    上限優先讀使用者自己設的值，讀不到才用官方預設；沒有公告上限的宿主不編一個出來。
+    宿主載入的是整個檔：使用者自己的內容加上去之後超過，受害的可能正是規則塊。
+    只有宿主真的會丟內容（Claude 整份跳過、Codex 截專案檔尾段）才算問題；其餘只提醒。
     """
-    budget = memspec.HOST_BUDGET_BYTES.get(host)
-    if host == "codex":
-        budget = _codex_configured_budget(home) or budget
-    if not budget:
-        return []
     updated = raw
     for region in regions:
         updated = render(updated, region.name, region.text)
     size = len(updated.encode("utf-8"))
-    if size <= budget:
-        return []
-    return [memspec.HOST_BUDGET_NOTICE.format(
-        path=path, size=size, host=host, budget=budget)]
+    problems, notices = [], []
+    if host == "claude":
+        if size > memspec.CLAUDE_MD_SKIP_BYTES:
+            problems.append(memspec.HOST_CLAUDE_SKIP_NOTICE.format(
+                path=path, size=size, budget=memspec.CLAUDE_MD_SKIP_BYTES))
+        lines = len(updated.splitlines())
+        if lines > memspec.CLAUDE_MD_RECOMMENDED_LINES:
+            notices.append(memspec.HOST_CLAUDE_LINES_NOTICE.format(
+                path=path, lines=lines, recommended=memspec.CLAUDE_MD_RECOMMENDED_LINES))
+    elif host == "codex":
+        budget = _codex_configured_budget(home) or memspec.CODEX_PROJECT_DOC_MAX_BYTES
+        if size > budget:
+            if project:
+                problems.append(memspec.HOST_BUDGET_NOTICE.format(
+                    path=path, size=size, host=host, budget=budget))
+            else:
+                notices.append(memspec.HOST_CODEX_GLOBAL_NOTICE.format(
+                    path=path, size=size, budget=budget))
+    return problems, notices
 
 
 def _state_path(home=None):
@@ -1051,8 +1051,31 @@ def _report_dropped(vaults, output):
         )
 
 
+def _report_core_growth(vaults, home, output, *, write):
+    """核心規則跟上次確認的大小比，一輪只講一次；變大只提醒，規則照寫（CORE-25）。"""
+    contract = contract_vaults(vaults, home)
+    if not contract:
+        return None
+    try:
+        try:
+            from . import cap_consolidation, core_baseline
+        except ImportError:
+            import cap_consolidation
+            import core_baseline
+        report = core_baseline.check_vaults(contract, write=write, config=_options(home))
+    except Exception as exc:  # 量不到只說一聲，不連累同步
+        print(f"NOTE   core-baseline: 比對失敗 {type(exc).__name__}: {exc}", file=output)
+        return None
+    if report and report["notice"]:
+        print(f"NOTE   core-baseline: {report['notice']}；整理材料："
+              f"{cap_consolidation.material_path(memspec.config_options())}；"
+              f"夢報告由下一次排程更新，不要手動跑整趟夢；{cap_consolidation.NEXT_STEP}", file=output)
+    return report
+
+
 def check(vaults, hosts=None, home=None, output=sys.stdout):
     _report_dropped(vaults, output)
+    _report_core_growth(vaults, home, output, write=False)
     plans, skipped = _plans(vaults, hosts, home)
     _report_skipped(skipped, output)
     drift = refused = 0
@@ -1109,6 +1132,7 @@ def _targets_word(plans):
 
 def apply(vaults, hosts=None, home=None, output=sys.stdout, actor=memspec.HOST_SYNC_ACTOR_MANUAL):
     _report_dropped(vaults, output)
+    _report_core_growth(vaults, home, output, write=True)
     plans, skipped = _plans(vaults, hosts, home)
     _report_skipped(skipped, output)
     refused = written = 0
@@ -1673,7 +1697,7 @@ def _selftest():
                 and "使用者自己的索引" in log and "由 測試用的取代者 取代" in log,
             ))
 
-            # 自訂 core 預算只提醒，不因容量丟掉已核的新規則。
+            # 舊的 core_cap_bytes 只換來「已不再使用」，不因容量丟掉已核的新規則。
             fresh("corecap", "序言\n")
             if _state_path(home).exists():
                 _state_path(home).unlink()
@@ -1683,7 +1707,7 @@ def _selftest():
             code = apply([vault], hosts=["claude"], home=home, output=report)
             written = (home / ".claude" / "CLAUDE.md").read_text(encoding="utf-8")
             checks.append((
-                "規則塊超過 core_cap_bytes 仍完整寫入，指名容量提醒",
+                "設了舊的 core_cap_bytes 仍完整寫入，只提醒它已不再使用",
                 code == EXIT_OK and memspec.CONFIG_CORE_CAP_BYTES_FIELD in report.getvalue()
                 and begin in written and "一張卡" in written,
             ))
@@ -1759,9 +1783,13 @@ def main(argv=None, output=sys.stdout):
             vaults = _managed_vaults()
             if not vaults:
                 parser.error("要比對或寫入時必須給至少一個記憶庫路徑")
-        if parsed.apply:
-            return apply(vaults, hosts=parsed.host, output=output, actor=parsed.actor)
-        return check(vaults, hosts=parsed.host, output=output)
+        # 手動同步不在掛鉤裡、沒有回應時限：原生設定的查證不套 5 秒上限。實測整批卡片
+        # 要 4–15 秒，套上限時會不定時整批拒寫（2026-11-17）。
+        from epitype import rule_provenance
+        with rule_provenance.unbounded_verification():
+            if parsed.apply:
+                return apply(vaults, hosts=parsed.host, output=output, actor=parsed.actor)
+            return check(vaults, hosts=parsed.host, output=output)
     except Exception as exc:
         print(f"ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
         return EXIT_REFUSED

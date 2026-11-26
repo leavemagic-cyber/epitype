@@ -7,7 +7,7 @@ from pathlib import Path
 from epitype import memspec, rule_pipeline, rule_provenance
 
 
-def source_bound_card(text, card_path, *, source_root, case_id, host='codex'):
+def source_bound_card(text, card_path, *, source_root, case_id, host='codex', supersedes=()):
     """Keep fixture behavior intact; bind its own original record and scoped AI author."""
     card_path = Path(card_path)
     source_root = Path(source_root)
@@ -63,7 +63,7 @@ def source_bound_card(text, card_path, *, source_root, case_id, host='codex'):
             'expiry': 'unspecified', 'exceptions': []},
         'scope_basis': {'source': 0, 'quote': quote, 'reviewed_by': 'synthetic-test-reviewer',
             'reviewed_at': stamp, 'rationale': 'Synthetic source declares this single isolated test case.'},
-        'supersedes': [],
+        'supersedes': list(supersedes),
     }
     if rule_provenance._RESTRICTION.search(interpretation):
         document['restriction_evidence'] = {
@@ -77,7 +77,7 @@ def source_bound_card(text, card_path, *, source_root, case_id, host='codex'):
     return text.replace('---\n', '---\nrule_provenance: ' + encoded + '\n', 1)
 
 
-def owner_bound_card(text, card_path, *, source_root, case_id):
+def owner_bound_card(text, card_path, *, source_root, case_id, quote=None):
     """Bind a guard fixture to a verified owner directive with global scope.
 
     Only a VERIFIED source may deny (CORE-08/CORE-25), so a fixture that pins a
@@ -88,7 +88,8 @@ def owner_bound_card(text, card_path, *, source_root, case_id):
     digest = hashlib.sha256((str(card_path) + '\n' + case_id + '\n' + text).encode()).hexdigest()
     sid = 'synthetic-owner-guard-' + digest[:24]
     mid = 'synthetic-owner-message-' + digest[:24]
-    quote = '隔離測試 host 全域所有動作：採用 ' + case_id + ' 測試守衛規則。'
+    # A card carrying its own `text:` (a core rule) must quote exactly that text.
+    quote = quote or '隔離測試 host 全域所有動作：採用 ' + case_id + ' 測試守衛規則。'
     source = source_root / (digest + '.jsonl')
     row = {'type': 'response_item', 'payload': {'type': 'message', 'role': 'user', 'id': mid,
            'content': [{'type': 'input_text', 'text': quote}]}}

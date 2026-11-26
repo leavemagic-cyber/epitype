@@ -123,8 +123,9 @@ class DreamStatusRegression(unittest.TestCase):
         with patch.object(dream, "_SECTIONS", sections), patch.object(
                 dream, "_section_review_pack", side_effect=lambda *_args: section(15)()):
             report = dream.build_report([self.vault], today=date(2026, 9, 27), config={})
-        self.assertEqual(order, [14, *range(1, 13), 15, 13])
-        self.assertEqual([part["id"] for part in report["sections"]], list(range(1, 16)))
+        # 9 is unused: drafts are reported once, in section 4.
+        self.assertEqual(order, [14, 1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 15, 13])
+        self.assertEqual([part["id"] for part in report["sections"]], [*range(1, 9), *range(10, 16)])
 
     def test_compliance_checkpoint_survives_partial_retry(self):
         prior = {memspec.DREAM_STATE_COMPLETED_EPOCH_FIELD: 1000.0,

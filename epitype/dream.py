@@ -72,11 +72,12 @@ VAULT_SNAPSHOT_HEADING = "## 記憶庫快照"
 VAULT_SNAPSHOT_LINE = "- {vault}｜{status}｜{detail}"
 VAULT_SNAPSHOT_LABELS = {
     "committed": "已提交", "clean": "沒有變更", "busy": "另一場持鎖，今晚略過",
-    "not-git": "不是 git 記憶庫", "error": "快照失敗",
+    "not-git": "不是 git 記憶庫", "error": "快照失敗", "codex-native": "Codex 原生記憶，不提交",
 }
 VAULT_SNAPSHOT_CLEAN = "沒有需要提交的變更"
 VAULT_SNAPSHOT_BUSY = "快照鎖未超過 120 秒"
 VAULT_SNAPSHOT_NOT_GIT = "沒有 .git 目錄"
+VAULT_SNAPSHOT_CODEX_NATIVE = "Codex 用這個 git 判斷記憶有沒有變動、要不要整併；夢提交會讓它以為沒變而跳過整併"
 VAULT_SNAPSHOT_GIT_ERROR = "git {command} 失敗：{detail}"
 VAULT_SNAPSHOT_CLEANUP_ERROR = "快照鎖清理失敗：{detail}"
 DRAFT_DIRNAME = "_drafts"
@@ -100,7 +101,6 @@ HARVEST_ERROR = "harvest（順手收割）失敗，草稿盤點照跑：{detail}
 DRAFT_AGING_STALE_DAYS = 30
 DRAFT_OLDEST_ROWS = 5
 DRAFT_ROOT_GROUP = "(root)"
-DRAFT_AGING_COMMAND = "人工審閱最舊的那幾份 _drafts/**：轉正、歸檔或留著都行，但要有人看過"
 DRAFT_TTL_ERROR = "草稿到期在 {vault} 出錯（{detail}），這個庫今晚沒有自動過期"
 MIXED_MAX_PER_VAULT = 50
 MIXED_REASON_HEADINGS = "正文有 {count} 個 `## ` 小標"
@@ -116,6 +116,10 @@ CAP_UNSET_NOTE = "{field} 未設定，這一項跳過"
 CAP_COMMAND = "依第 11 節排序清單" + cap_consolidation.NEXT_STEP + "；夢不改規則卡、不提高上限"
 # 同一批 core_files 順路多問一句：這個檔跟規則卡重組出來的生成塊還一不一致。
 # 只列候選——夢不重生成核心塊，那是本機作業（`epitype core-gen`）。
+CAP_SLIMMED_LINE = ("夢已自動精簡：{path}，{bytes_before} → {bytes_after} bytes（上限 {cap}），"
+                    "{moved_lines} 行逐字搬到 {full}；備份在 {backup}")
+CAP_AUTO_SLIM_LINE = "  - 夢沒有自動精簡（{status}）：{reason}"
+CAP_AUTO_SLIM_DRY = "這次是 --dry-run／只組報告，正式跑會用 memory-index 自動精簡"
 CAP_DRIFT_KIND = "generated-block-drift"
 CAP_DRIFT_COMMAND = "人工判斷生成塊漂移：重跑 epitype core-gen，或查誰手改了生成塊；夢不改檔"
 DECISION_CARRIER_FIELDS = ("source", memspec.SUPERSEDED_BY_FIELD, memspec.ALIASES_FIELD)
@@ -136,10 +140,14 @@ REVIEW_PACK_TITLE = "檢討包 / review pack"
 REVIEW_PACK_MAX_ROWS = 50
 # 獨立事故＝不同場次。同一場裡重試同一句話只是同一件事（門檻卡 2026-09-17）。
 REVIEW_PACK_INCIDENT_SESSIONS = 2
-REVIEW_PACK_BLOCK_KINDS = (memspec.STOP_GATE_LOG_KIND, memspec.STOP_NOTE_LOG_KIND,
-                           memspec.WRITE_GATE_LOG_KIND)
+# 只數真的擋下的列：stop_note 只是提醒、不擋，談不上擋錯，也談不上擋了行為沒改。
+REVIEW_PACK_BLOCK_KINDS = (memspec.STOP_GATE_LOG_KIND, memspec.WRITE_GATE_LOG_KIND)
+# 夜報的檢討包要能清空：只看最近這幾天的擋下列，一週沒有新的擋下，那一列就自然退出；
+# 不設窗的話，幾個月前擋過兩場的規則永遠留在待判，門檻永遠成立。
+REVIEW_PACK_WINDOW_DAYS = 7
 REVIEW_PACK_READY_NOTE = "檢討包達門檻（{count}/{trigger}）"
 REVIEW_PACK_BELOW_NOTE = "未達門檻（{count}/{trigger}）"
+REVIEW_PACK_WINDOW_NOTE = "擋下數只算最近 {days} 天（{start} 之後）的 stop_block／write_block"
 REVIEW_PACK_NEXT_STEP = (
     "檢討包達門檻（{count}/{trigger}）→ 由 AI 逐列處理卡片層的修正（別名、武裝、誤擋）；"
     "改層（升常駐、降層）才交 owner 核定；夢只給候選，不判型別、不改卡、不動層"
@@ -192,6 +200,11 @@ def _snapshot_vault(vault, today):
                 command=args[0], detail=(completed.stderr or completed.stdout).strip()))
         return completed
 
+    if _codex_native_vault(vault):
+        # ~/.codex/memories/.git 是 Codex 自己的基準（記憶寫入第二階段比對工作區有沒有變動），
+        # 不是我們的還原點。在那裡提交，Codex 會把新記憶當成「沒有變動」而不整併。
+        result.update(status="codex-native", detail=VAULT_SNAPSHOT_CODEX_NATIVE)
+        return result
     try:
         if not (vault / ".git").is_dir():
             return result
@@ -278,11 +291,16 @@ def _section_missing_aliases(vaults, today, since_date, config):
     entries = []
     for vault, candidates in results:
         for item in candidates:
+            if _codex_native_generated(vault, Path(vault) / item["card_path"]):
+                continue
             entries.append({"vault": str(vault), "card_path": item["card_path"], "aliases_now": item["aliases_now"]})
     entries.sort(key=lambda item: (item["vault"], item["card_path"]))
     commands = [f'epitype aliases export "{vault}"' for vault in vaults] if entries else []
+    by_vault = {}
+    for item in entries:
+        by_vault[item["vault"]] = by_vault.get(item["vault"], 0) + 1
     return {
-        "counts": {"missing_aliases": len(entries)},
+        "counts": {"missing_aliases": len(entries), "by_vault": by_vault},
         "examples": entries[:EXAMPLE_LIMIT],
         "commands": commands,
         "errors": errors,
@@ -292,14 +310,79 @@ def _section_missing_aliases(vaults, today, since_date, config):
 # --------------------------------------------------------------------------- section 2
 
 
-def _section_card_lint(vaults, today, since_date, config):
-    results, errors = _bounded(vaults, lambda v: card_lint.scan_vault(v, today))
+def _scan_and_fix(vault, today, apply_fixes):
+    """掃一個庫，順手補照規則就能補的那一種：由日期推得的 last_verified_at。
+
+    只動 card_lint --fix-dates 本來就會寫的那一行（只新增一行，BOM／CRLF 原樣，暫存檔
+    換名）；排程跑之前記憶庫已做過 git 快照，要撤回從快照取。其餘 FAIL／WARN 都要人
+    判斷意思，夢不改。不套用時只數「會補幾張」。
+    """
+    rules = _rule_self_repair(vault, apply_fixes)
+    report = card_lint.scan_vault(vault, today)
+    if not any(card.get("derived_date") for card in report["cards"]):
+        return report, {"written": 0, "would": 0, "skipped": 0, "rules": rules}
+    try:
+        fixed = card_lint._fix_dates(report, not apply_fixes, io.StringIO())
+    except (OSError, ValueError) as exc:
+        # 寫到一半失敗：重掃讓數字反映磁碟上的實況，錯誤照報，不讓整個庫的盤點消失。
+        return card_lint.scan_vault(vault, today), {
+            "written": 0, "would": 0, "skipped": 0, "rules": rules,
+            "error": f"{vault}: fix-dates {type(exc).__name__}: {exc}"}
+    if fixed["written"]:
+        report = card_lint.scan_vault(vault, today)
+    return report, {**fixed, "rules": rules}
+
+
+def _rule_self_repair(vault, apply_fixes):
+    """被 AI 改壞的規則卡：只改正文或其他欄位的夢自己重綁（rule_repair），其餘列進待判斷清單。
+
+    在卡片檢查之前跑，重綁好的卡就不會再以「規則來源 INVALID」出現在清單上。抓的是掛鉤看不到
+    的修改（Bash／腳本寫檔、別的宿主）；Codex 生成檔與已被取代的卡照既定界線不動。"""
+    from . import rule_repair
+    try:
+        return rule_repair.sweep(vault, apply=apply_fixes)
+    except Exception as exc:
+        return {"rebound": [], "rebindable": [], "unrepaired": [], "skipped": 0,
+                "backfilled": [], "backfillable": [], "backfill_failed": [],
+                "error": f"{vault}: rule self-repair {type(exc).__name__}: {exc}"}
+
+
+def _first_fail(card):
+    for finding in card.get("findings") or ():
+        if finding.get("level") == card_lint.FAIL:
+            return {"rule": finding.get("rule"), "reason": finding.get("reason")}
+    return None
+
+
+def _section_card_lint(vaults, today, since_date, config, context=None):
+    apply_fixes = bool((context or {}).get("apply_fixes"))
+    results, errors = _bounded(vaults, lambda v: _scan_and_fix(v, today, apply_fixes))
     fail = warn = fail_cards = 0
     native_docs_skipped = 0
+    dates_written = dates_would = 0
     cards = []
+    fail_list = []
     layers = {}
     unclassified = []
-    for vault, report in results:
+    bound_dates = []
+    rules_rebound = rules_rebindable = rules_backfilled = rules_backfillable = 0
+    rule_repairs = []
+    for vault, (report, fixed) in results:
+        dates_written += fixed["written"]
+        dates_would += fixed["would"]
+        bound_dates.extend({"vault": str(vault), "path": path} for path in fixed.get("bound") or ())
+        if fixed.get("error"):
+            errors.append(fixed["error"])
+        rules = fixed.get("rules") or {}
+        rules_rebound += len(rules.get("rebound") or ())
+        rules_rebindable += len(rules.get("rebindable") or ())
+        rules_backfilled += len(rules.get("backfilled") or ())
+        rules_backfillable += len(rules.get("backfillable") or ())
+        errors.extend(f"{vault}: 逐欄摘要沒補成 {item['path']}：{item['reason']}"
+                      for item in rules.get("backfill_failed") or ())
+        rule_repairs.extend({"vault": str(vault), **item} for item in rules.get("unrepaired") or ())
+        if rules.get("error"):
+            errors.append(rules["error"])
         for name, count in (report.get("enforce") or {}).items():
             layers[name] = layers.get(name, 0) + count
         unclassified.extend({"vault": str(vault), **item} for item in report.get("unclassified") or ())
@@ -309,14 +392,26 @@ def _section_card_lint(vaults, today, since_date, config):
         native_docs_skipped += report.get("native_docs_skipped", 0)
         for card in report["cards"]:
             cards.append({"vault": str(vault), "path": card["path"], "fail": card["fail"], "warn": card["warn"]})
+            first = _first_fail(card) if card["fail"] else None
+            if first:
+                fail_list.append({"vault": str(vault), "path": card["path"], "fail": card["fail"], **first})
     cards.sort(key=lambda item: (-item["fail"], -item["warn"], item["path"]))
+    fail_list.sort(key=lambda item: (-item["fail"], item["vault"], item["path"]))
     commands = [f'epitype cards "{vault}"' for vault in vaults] if (fail or warn) else []
     return {
         # 執行層：每張行為卡由誰來擋。未分類＝沒有任何一層，只靠代理自己讀。
         "counts": {"fail": fail, "warn": warn, "fail_cards": fail_cards,
                    "native_docs_skipped": native_docs_skipped,
+                   "fixed_dates": dates_written, "fixable_dates": dates_would,
+                   "bound_dates": len(bound_dates),
+                   "rules_rebound": rules_rebound, "rules_rebindable": rules_rebindable,
+                   "rules_unrepaired": len(rule_repairs),
+                   "rules_backfilled": rules_backfilled, "rules_backfillable": rules_backfillable,
                    **{f"enforce_{name}": count for name, count in layers.items()}},
         "examples": cards[:EXAMPLE_LIMIT],
+        "fail_list": fail_list,
+        "bound_dates": bound_dates,
+        "rule_repairs": rule_repairs,
         "unclassified": unclassified[:EXAMPLE_LIMIT],
         "commands": commands,
         "errors": errors,
@@ -326,8 +421,30 @@ def _section_card_lint(vaults, today, since_date, config):
 # --------------------------------------------------------------------------- section 3
 
 
+def _pending_report(vault, today):
+    """pending_lint 的庫報告，扣掉 Codex 自己生成的記憶檔後重算各數字。
+
+    rollout_summaries 是 Codex 抄下來的對話摘要，裡面的「待辦」是當時對話的原文，
+    沒有人會回去收它；算進來只會每晚報同一批孤兒。"""
+    report = pending_lint.scan_vault(vault, today=today)
+    cards = [card for card in report["cards"]
+             if not _codex_native_generated(vault, Path(vault) / card["path"])]
+    orphans = [card for card in report.get("orphans", ())
+               if not _codex_native_generated(vault, Path(vault) / card["path"])]
+    return {
+        **report,
+        "zombie_cards": len(cards),
+        "zombie_lines": sum(len(card["lines"]) for card in cards),
+        "oldest_days": max((card["oldest_days"] for card in cards), default=0),
+        "orphan_cards": len(orphans),
+        "orphan_lines": sum(len(card["lines"]) for card in orphans),
+        "cards": cards,
+        "orphans": orphans,
+    }
+
+
 def _section_pending(vaults, today, since_date, config):
-    results, errors = _bounded(vaults, lambda v: pending_lint.scan_vault(v, today=today))
+    results, errors = _bounded(vaults, lambda v: _pending_report(v, today))
     zombie_cards = zombie_lines = oldest = 0
     orphan_cards = orphan_lines = 0
     entries = []
@@ -424,21 +541,24 @@ def _harvest_drafts(vaults, context):
 
 
 def _section_drafts(vaults, today, since_date, config, context=None):
-    # 收割先跑、盤點後跑：順序反了的話今晚新產的提案要等明晚才被數到。
+    """草稿只在這一節報一次：份數、分布、積了多久、今晚過期幾份。"""
+    # 順序：到期 → 收割 → 盤點。到期先跑，被標過期的不再算待審；收割在盤點之前，今晚新產
+    # 的提案今晚就被數到。盤點最後跑，數字才是這兩步做完之後的狀態。--dry-run 不蓋章，
+    # 所以 expired_tonight 是「正式跑會過期幾份」，那幾份仍算在 total_drafts 裡。
+    expired, ttl_errors = _expire_stale_drafts(vaults, today, context)
     new_drafts, harvested_files, harvest_errors = _harvest_drafts(vaults, context)
     results, errors = _bounded(vaults, _drafts_of)
-    errors = [*harvest_errors, *errors]
+    errors = [*ttl_errors, *harvest_errors, *errors]
     by_subdir = {}
     entries = []
     judged_kept = 0
     for vault, (paths, judged) in results:
         judged_kept += judged
-        for path in paths:
-            relative = path.relative_to(vault).as_posix()
-            parts = relative.split("/")
-            subdir = parts[1] if len(parts) > 2 else "(root)"
-            by_subdir[subdir] = by_subdir.get(subdir, 0) + 1
-            entries.append({"vault": str(vault), "path": relative})
+        for item in _draft_ages(vault, paths, today):
+            by_subdir[item["subdir"]] = by_subdir.get(item["subdir"], 0) + 1
+            entries.append(item)
+    aged = [item for item in entries if item["age_days"] is not None]
+    aged.sort(key=lambda item: (-item["age_days"], item["vault"], item["path"]))
     commands = []
     pending_root = memspec.CAPTURE_PENDING_SUBPATH[-1]
     pruned_root = memspec.INDEX_PRUNED_SUBPATH[-1]
@@ -469,8 +589,13 @@ def _section_drafts(vaults, today, since_date, config, context=None):
             "captured_pending": by_subdir.get(pending_root, 0),
             "harvest_new_drafts": new_drafts,
             "harvest_files": harvested_files,
+            "over_7_days": sum(1 for item in aged if item["age_days"] > DRAFT_AGING_WARN_DAYS),
+            "over_30_days": sum(1 for item in aged if item["age_days"] > DRAFT_AGING_STALE_DAYS),
+            "expired_tonight": expired,
         },
-        "examples": entries[:EXAMPLE_LIMIT],
+        # 最舊的先列；不叫人審：自動捕捉的由上面的到期處理收掉，那個「人工審閱」隊伍
+        # 從來沒有人消化。
+        "examples": aged[:DRAFT_OLDEST_ROWS],
         "commands": commands,
         "errors": errors,
         "note": note,
@@ -565,14 +690,15 @@ def _section_decisions(vaults, today, since_date, config):
 
 def _event_cards_of(vault):
     found = []
-    for path in memsearch.card_files(vault):
+    for path in _card_files(vault):
         relative = path.relative_to(vault).as_posix()
         top_dir = relative.split("/", 1)[0]
         card_type = _EVENT_TYPE_BY_DIR.get(top_dir)
         if card_type is None:
             continue
         fields, _problem = memspec.frontmatter_fields(path)
-        found.append((relative, card_type, fields.get(memspec.CAPTURED_AT_FIELD, "").strip()))
+        found.append((relative, card_type, fields.get(memspec.CAPTURED_AT_FIELD, "").strip(),
+                      fields.get(memspec.CARRIED_BY_FIELD, "").strip()))
     return found
 
 
@@ -595,11 +721,14 @@ def _section_event_aging(vaults, today, since_date, config):
     aging_by_type = {card_type: 0 for card_type in _EVENT_TYPE_BY_DIR.values()}
     candidates = []
     for vault, found in results:
-        for relative, card_type, captured in found:
+        for relative, card_type, captured, carried_by in found:
             counts_by_type[card_type] += 1
             # 已經用完的事件卡不必複核是否歸檔：一次性授權（「跑這一次那個測試」）與
             # 已到期的授權，內容本身就結束了，年齡再大也沒有東西要判（2026-09-19）。
             if _event_card_spent(Path(vault) / relative):
+                continue
+            # 有決策卡承接（第 12 節同一判準）的事件卡是那張卡的原話出處，答案固定是保留。
+            if carried_by:
                 continue
             captured_date = _iso_date_of(captured)
             if captured_date is not None and captured_date < since_date:
@@ -654,7 +783,7 @@ def _git_added_dates(vault):
 def _recent_cards_of(vault):
     git_dates = _git_added_dates(vault)
     entries = []
-    for path in memsearch.card_files(vault):
+    for path in _card_files(vault):
         relative = path.relative_to(vault).as_posix()
         fields, _problem = memspec.frontmatter_fields(path)
         captured_date = _iso_date_of(fields.get(memspec.CAPTURED_AT_FIELD, "").strip())
@@ -837,18 +966,19 @@ def _section_pocket_vaults(vaults, today, since_date, config):
     }
 
 
-# --------------------------------------------------------------------------- section 9
+# --------------------------------------------------------------------------- section 4: draft ages and expiry
 
 
-def _draft_aging_of(vault, today):
+def _draft_ages(vault, paths, today):
+    """待審草稿逐份的子目錄與年齡（天）；讀不到檔案時間的年齡為 None，不進老化統計。"""
     entries = []
-    waiting, _judged = _drafts_of(vault)
-    for path in waiting:
+    for path in paths:
         try:
             stamp = path.stat().st_mtime
         except OSError:
-            continue
-        age = (today - datetime.fromtimestamp(stamp, tz=timezone.utc).date()).days
+            age = None
+        else:
+            age = (today - datetime.fromtimestamp(stamp, tz=timezone.utc).date()).days
         relative = path.relative_to(vault).as_posix()
         parts = relative.split("/")
         entries.append({
@@ -878,45 +1008,6 @@ def _expire_stale_drafts(vaults, today, context=None):
             errors.append(DRAFT_TTL_ERROR.format(
                 vault=Path(vault).name, detail=f"{type(exc).__name__}: {exc}"))
     return expired, errors
-
-
-def _section_draft_aging(vaults, today, since_date, config, context=None):
-    """草稿的年齡分布。第 4 節數的是「有幾份待審」，這一節數的是「積了多久」。
-
-    2026-09-09 實測治理庫積了 370 份草稿沒人管；份數本身不會告訴你那是昨天的一批還是
-    半年前就躺在那裡，而後者才是「沒經過確認的東西回不到該在的層」的樣子。
-    """
-    expired, ttl_errors = _expire_stale_drafts(vaults, today, context)
-    results, errors = _bounded(vaults, lambda vault: _draft_aging_of(vault, today))
-    errors = [*ttl_errors, *errors]
-    entries = []
-    by_subdir = {}
-    for _vault, found in results:
-        for item in found:
-            entries.append(item)
-            bucket = by_subdir.setdefault(item["subdir"], {"total": 0, "over_7": 0, "over_30": 0})
-            bucket["total"] += 1
-            if item["age_days"] > DRAFT_AGING_WARN_DAYS:
-                bucket["over_7"] += 1
-            if item["age_days"] > DRAFT_AGING_STALE_DAYS:
-                bucket["over_30"] += 1
-    entries.sort(key=lambda item: (-item["age_days"], item["vault"], item["path"]))
-    over_7 = sum(1 for item in entries if item["age_days"] > DRAFT_AGING_WARN_DAYS)
-    over_30 = sum(1 for item in entries if item["age_days"] > DRAFT_AGING_STALE_DAYS)
-    return {
-        "counts": {
-            "total_drafts": len(entries),
-            "over_7_days": over_7,
-            "over_30_days": over_30,
-            "expired_tonight": expired,
-            "by_subdir": by_subdir,
-        },
-        "examples": entries[:DRAFT_OLDEST_ROWS],
-        # 剩下來還超齡的，都是人手寫的提案（自動捕捉的已經自己過期了）——那一種才值得
-        # 叫人去看，因為是有人刻意放進來的。
-        "commands": [DRAFT_AGING_COMMAND] if over_7 else [],
-        "errors": errors,
-    }
 
 
 # --------------------------------------------------------------------------- section 10
@@ -973,10 +1064,29 @@ def _mixed_skip_reason(fields, headings, body_bytes):
     return None
 
 
+CODEX_NATIVE_GENERATED_FILES = memspec.CODEX_NATIVE_GENERATED_FILES
+CODEX_NATIVE_GENERATED_DIRS = memspec.CODEX_NATIVE_GENERATED_DIRS
+
+
+# 判斷本身在 memspec：改卡掛鉤也要用，不能為了它載入整個夢模組。
+_codex_native_generated = memspec.codex_native_generated
+
+
+def _codex_native_vault(vault):
+    """這個庫是不是 Codex 自己的記憶資料夾（~/.codex/memories）。"""
+    vault = Path(vault)
+    return vault.name.casefold() == "memories" and vault.parent.name.casefold() == memspec.CODEX_STATE_DIRECTORY
+
+
+def _card_files(vault):
+    """夢各節要量的卡：庫裡的卡檔，扣掉 Codex 自己生成的記憶檔。"""
+    return [path for path in memsearch.card_files(vault) if not _codex_native_generated(vault, path)]
+
+
 def _mixed_cards_of(vault):
     flagged = []
     skipped = {}
-    for path in memsearch.card_files(vault):
+    for path in _card_files(vault):
         try:
             text = path.read_text(encoding="utf-8-sig")
         except (OSError, UnicodeError):
@@ -1064,45 +1174,81 @@ def _positive_int(value):
     return value
 
 
-def _section_caps(vaults, today, since_date, config):
+def _section_caps(vaults, today, since_date, config, context=None):
     """Report one raw MEMORY.md budget for every vault; core budgets stay opt-in.
 
     Index default/legacy migration follow memory-index.
-    This reporting path changes neither indexes nor cards.
+    手寫 MEMORY.md 超過上限時，正式跑（context 的 apply_fixes）由夢自己走 memory-index 的
+    plan／apply_plan（與 `epitype memory-index --apply` 同一條路、同一份 _MEMORY_FULL.md），
+    搬成的不再列給人；搬不了（留下的就超過、來源綁定、會變 INVALID、被併發改過）才照舊列。
+    --dry-run 與只組報告的呼叫端只算不寫。Codex 生成的檔照舊跳過；規則卡與核心檔不動。
     """
     notes = []
     entries = []
     errors = []
+    slimmed = []
+    apply_slim = bool((context or {}).get("apply_fixes"))
     try:
-        from . import cap_consolidation, core_gen, host_sync, memory_index
+        from . import cap_consolidation, card_io as _card_io, core_gen, host_sync, memory_index
     except ImportError:
         import cap_consolidation
+        import card_io as _card_io
         import core_gen
         import host_sync
         import memory_index
-    try:
-        index_cap = memory_index.cap_of(config)
-    except ValueError as exc:
-        errors.append(str(exc))
-        index_cap = None
-    for vault in vaults if index_cap is not None else ():
+    notices = []
+    for vault in vaults:
         path = Path(vault) / memspec.MEMORY_INDEX_FILENAME
-        if not path.exists():
+        if not path.exists() or _codex_native_generated(vault, path):
             continue
         try:
-            size = path.stat().st_size
-            text = path.read_bytes().decode("utf-8") if size > index_cap else None
+            limit = memory_index.limit_of(vault, config)
+        except ValueError as exc:
+            errors.append(str(exc))
+            continue
+        if limit.notice and limit.notice not in notices:
+            notices.append(limit.notice)
+        index_cap = limit.max_bytes
+        try:
+            raw = path.read_bytes()
+            size = len(raw)
+            over = limit.exceeded(raw)
+            text = raw.decode("utf-8") if over else None
         except (OSError, UnicodeError) as exc:
             errors.append(f"{path}: {type(exc).__name__}: {exc}")
             continue
-        if size > index_cap:
+        if over:
+            outcome = {"status": "would-rewrite", "reason": None}
+            try:
+                proposed = memory_index.plan(vault, config)
+                if apply_slim:
+                    backup = memory_index.apply_plan(proposed)
+                    summary = proposed.summary()
+                    slimmed.append({
+                        "path": str(path), "full": str(Path(vault) / memory_index.FULL_FILENAME),
+                        "bytes_before": summary["before_bytes"], "bytes_after": summary["after_bytes"],
+                        "cap": summary["cap_bytes"], "moved_lines": summary["moved_lines"],
+                        "backup": str(backup) if backup else None,
+                    })
+                    continue
+            except memory_index.CannotFit as exc:
+                outcome = {"status": "cannot-fit", "reason": str(exc)}
+            except memory_index.Refused as exc:
+                outcome = {"status": "refused", "reason": str(exc)}
+            except _card_io.CardConflict as exc:
+                outcome = {"status": "abandoned", "reason": str(exc)}
+            except Exception as exc:  # 搬不了只是退回「列給人」，不讓整節失敗
+                outcome = {"status": "error", "reason": f"{type(exc).__name__}: {exc}"}
+            lines = memory_index.line_count(raw)
             entries.append({
-                "path": str(path), "bytes": size, "cap": index_cap, "over": size - index_cap,
-                "kind": "index-file", "reduce_bytes": size - index_cap,
+                "path": str(path), "bytes": size, "cap": index_cap, "over": max(size - index_cap, 0),
+                "lines": lines, "cap_lines": limit.max_lines,
+                "over_lines": max(lines - limit.max_lines, 0),
+                "kind": "index-file", "reduce_bytes": max(size - index_cap, 0),
                 "items": cap_consolidation.ranked_index(text, path),
+                "auto_slim": {"status": outcome.get("status"), "reason": outcome.get("reason")},
             })
     core_files = config.get(memspec.CONFIG_CORE_FILES_FIELD)
-    core_cap = _positive_int(config.get(memspec.CONFIG_CORE_CAP_BYTES_FIELD))
     named = [
         Path(raw).expanduser()
         for raw in (core_files if isinstance(core_files, list) else ())
@@ -1110,44 +1256,55 @@ def _section_caps(vaults, today, since_date, config):
     ]
     if not named:
         notes.append(CAP_UNSET_NOTE.format(field=memspec.CONFIG_CORE_FILES_FIELD))
-    elif core_cap is None:
-        notes.append(CAP_UNSET_NOTE.format(field=memspec.CONFIG_CORE_CAP_BYTES_FIELD))
-    else:
-        rules = None
-        for path in named:
-            try:
-                text = path.read_text(encoding="utf-8").replace("\r\n", "\n")
-                loads = core_gen.host_loads(text)
-                size = max(loads.values())
-            except (OSError, UnicodeError, ValueError) as exc:
-                errors.append(f"{path}: {type(exc).__name__}: {exc}")
-                continue
-            if size > core_cap:
-                if rules is None:
-                    rules, rule_errors = core_gen.collect_rules(host_sync.contract_vaults(vaults))
-                    errors.extend(rule_errors)
+    # 核心規則不再比自訂上限：跟上次確認的大小比（core_baseline，owner 2026-11-17）。
+    # 夢只報不寫基準；基準由 core-gen／sync 維護。
+    try:
+        from . import core_baseline
+    except ImportError:
+        import core_baseline
+    legacy = core_baseline.legacy_notice(config)
+    if legacy:
+        notices.append(legacy)
+    try:
+        # 與 core-gen／sync／accept 同一個量法：只量治理庫自己的規則，基準也只在那裡。
+        measured = core_baseline.measure(vaults, config)
+        if measured:
+            governance, text, rules, rule_errors = measured
+            contract = [governance]
+            errors.extend(rule_errors)
+            report = (core_baseline.evaluate(governance, text, rules, write=False)
+                      if not rule_errors and any(r["layer"] in memspec.RULE_GENERATED_LAYERS for r in rules)
+                      else None)
+            if report and report["status"] == core_baseline.STATUS_GREW:
+                before = report["pending"]["baseline_host_loads"] or {}
+                loads = report["host_loads"]
                 hosts = []
-                for host, loaded in loads.items():
-                    if loaded <= core_cap:
-                        continue
+                for host, delta in report["over"].items():
                     ranked = cap_consolidation.ranked_rules(text, host, rules)
-                    hosts.append({"host": host, "bytes": loaded, "cap": core_cap,
-                                  "reduce_bytes": loaded - core_cap, "rules": ranked,
+                    hosts.append({"host": host, "bytes": loads[host], "cap": before.get(host, 0),
+                                  "reduce_bytes": delta, "rules": ranked,
                                   "unmapped_rules": sum(r["card_path"] is None for r in ranked),
-                                  "overhead_bytes": loaded - sum(r["bytes"] for r in ranked)})
+                                  "overhead_bytes": loads[host] - sum(r["bytes"] for r in ranked)})
+                over = max(report["over"].values())
+                worst = max(report["over"], key=report["over"].get)
                 entries.append({
-                    "path": str(path), "bytes": size, "cap": core_cap, "over": size - core_cap,
-                    "kind": "core-rules", "reduce_bytes": size - core_cap,
-                    "host_loads": loads, "hosts": hosts,
+                    "path": str(core_baseline.baseline_path(contract[0])), "bytes": loads[worst],
+                    "cap": before.get(worst, 0), "over": over, "kind": "core-rules",
+                    "reduce_bytes": over, "host_loads": loads, "baseline_host_loads": before,
+                    "growth": report["growth"], "hosts": hosts, "notice": report["notice"],
                 })
-    entries.sort(key=lambda item: -item["over"])
+    except (OSError, UnicodeError, ValueError) as exc:
+        errors.append(f"core-baseline: {type(exc).__name__}: {exc}")
+    entries.sort(key=lambda item: (-item["over"], -item.get("over_lines", 0)))
     drift = _core_drift(vaults, named)
     return {
-        "counts": {"over_cap": len(entries), "unset_keys": len(notes), "drift": len(drift)},
+        "counts": {"over_cap": len(entries), "unset_keys": len(notes), "drift": len(drift),
+                   "slimmed": len(slimmed)},
         "examples": entries + drift,
+        "slimmed": slimmed,
         "commands": ([CAP_COMMAND] if entries else []) + ([CAP_DRIFT_COMMAND] if drift else []),
         "errors": errors,
-        "note": "；".join(notes) if notes else None,
+        "note": "；".join(notes + notices) if notes or notices else None,
     }
 
 
@@ -1239,7 +1396,7 @@ def _decision_carriers(vault):
     """
     chunks = []
     fragments = set()
-    for path in memsearch.card_files(vault):
+    for path in _card_files(vault):
         try:
             text = path.read_text(encoding="utf-8-sig")
         except (OSError, UnicodeError):
@@ -1386,7 +1543,7 @@ def _decision_carrier_list(vault):
     身分用 decision_key，與閘門紀錄的 `decision` 欄同一個值，事件和攔截才會落在同一列。
     """
     carriers = []
-    for path in memsearch.card_files(vault):
+    for path in _card_files(vault):
         try:
             text = path.read_text(encoding="utf-8-sig")
         except (OSError, UnicodeError):
@@ -1411,7 +1568,7 @@ def _review_events_of(vault):
     """
     rows = []
     carriers = None
-    for path in memsearch.card_files(vault):
+    for path in _card_files(vault):
         relative = path.relative_to(vault).as_posix()
         if _EVENT_TYPE_BY_DIR.get(relative.split("/", 1)[0]) is None:
             continue
@@ -1494,7 +1651,8 @@ def _section_review_pack(vaults, today, since_date, config, sections):
     """檢討包：被證據指到的每張卡一列，加上「有幾件事在等人判」。
 
     來源四種：事件卡（`matched_card`／`event_id`／`verified`）、閘門紀錄的 stop_block
-    與 write_block、考題結果檔的失敗題、以及第 8–12 節的候選計數。
+    與 write_block（只算最近 REVIEW_PACK_WINDOW_DAYS 天）、考題結果檔的失敗題、以及第 4、8、
+    10–12 節的候選計數。
 
     「待判問題」＝列出來的卡數，因為檢討場是逐列判的：一列＝一張卡＋它身上所有的證據。
     兩種東西刻意不進這個數字，否則同一件事會被算兩次、門檻也會永遠成立——(1) 第 8–12
@@ -1537,11 +1695,14 @@ def _section_review_pack(vaults, today, since_date, config, sections):
 
     block_results, block_errors = _bounded(vaults, _review_blocks_of)
     errors.extend(block_errors)
+    window_start = (today - timedelta(days=REVIEW_PACK_WINDOW_DAYS)).isoformat()
     blocks = 0
     sessions_by_card = {}
     digests_by_card = {}
     for _vault, found in block_results:
         for item in found:
+            if item["date"] <= window_start:
+                continue  # 窗外的擋下列已經過了一週沒再發生，不再算待判
             blocks += 1
             entry = row(item["card"])
             entry["blocks"] += 1
@@ -1573,7 +1734,7 @@ def _section_review_pack(vaults, today, since_date, config, sections):
     by_id = {section["id"]: (section.get("counts") or {}) for section in sections}
     candidates = {
         "pocket_vaults": by_id.get(8, {}).get("pocket_vaults", 0),
-        "drafts_over_7_days": by_id.get(9, {}).get("over_7_days", 0),
+        "drafts_over_7_days": by_id.get(4, {}).get("over_7_days", 0),
         "mixed_cards": by_id.get(10, {}).get("mixed_cards", 0),
         "over_cap": by_id.get(11, {}).get("over_cap", 0),
         "uncarried_quotes": by_id.get(12, {}).get("uncarried_quotes", 0),
@@ -1604,6 +1765,7 @@ def _section_review_pack(vaults, today, since_date, config, sections):
             count=review_items, trigger=trigger
         )
     )
+    notes.append(REVIEW_PACK_WINDOW_NOTE.format(days=REVIEW_PACK_WINDOW_DAYS, start=window_start))
     if background:
         notes.append(REVIEW_PACK_BACKGROUND_NOTE.format(count=background))
     if unmapped:
@@ -1627,6 +1789,8 @@ def _section_review_pack(vaults, today, since_date, config, sections):
             "unverified_events": unverified,
             "unmapped_events": unmapped,
             "blocks": blocks,
+            "window_days": REVIEW_PACK_WINDOW_DAYS,
+            "window_start": window_start,
             "exam_failures": exam_failures,
             "exam_unmapped": exam_unmapped,
             "exam_rules_version": (exam or {}).get("rules_version", ""),
@@ -1653,7 +1817,7 @@ def _harvest_module():
 
 
 def _draft_ttl_module():
-    """lazy import：只有第 9 節讓草稿自己過期時用得到。"""
+    """lazy import：只有第 4 節讓草稿自己過期時用得到。"""
     try:
         from . import draft_ttl
     except ImportError:  # Direct script execution keeps the CLI contract.
@@ -1850,6 +2014,27 @@ def _append_pruned(vault, today, moved, stamp):
         with path.open("ab") as stream:
             stream.write("".join(block).encode("utf-8"))
     return path, written
+
+
+def _resync_hosts_after_shaping(early_sync, shaping, resync):
+    """Host sync runs first so a spent budget cannot leave stale rules, but that
+    copies MEMORY.md before shaping rewrites it; without a second pass the host
+    files carry the pre-shaping index until the next night (2026-11-24)."""
+    if not any(item.get("status") == "moved" for item in shaping):
+        return early_sync
+    began = time.monotonic()
+    try:
+        refreshed = {"id": early_sync.get("id"), "title": early_sync.get("title"),
+                     "error": None, **resync()}
+    except Exception as exc:
+        # The first pass already wrote; keep its result and say the index is stale.
+        refreshed = dict(early_sync)
+        refreshed["error"] = f"index resync after shaping: {type(exc).__name__}: {exc}"
+        return refreshed
+    refreshed["seconds"] = round(
+        (early_sync.get("seconds") or 0) + time.monotonic() - began, 3)
+    refreshed["resynced_after_shaping"] = True
+    return refreshed
 
 
 def shape_index(vault, today, apply=True, stamp=None):
@@ -2082,6 +2267,24 @@ def _section_compliance(vaults, today, since_date, config, context=None):
     except Exception as exc:
         shown = None
         errors.append(f"喚回用量統計失敗 {type(exc).__name__}: {exc}")
+    armed = {}
+    for vault in vaults:
+        try:
+            armed[vault] = compliance.armed_rules(vault)
+        except Exception as exc:
+            armed[vault] = exc
+    # 每個庫的重放、誤擋判讀用的最後訊息、彩排的機會數，同一趟讀完。以前每個庫各讀三遍：
+    # 17 個庫就把同一批對話（單份可達 1 GB 以上）重讀 51 次，2026-11-10 那晚第 13 節跑了
+    # 4.8 小時。沒有可重放規則的庫不必有命中，那一組直接是空的。
+    replayed = [vault for vault in vaults
+                if not isinstance(armed[vault], Exception) and armed[vault]]
+    try:
+        night_hits, finals, chances = compliance.replay_night(
+            [armed[vault] for vault in replayed], transcripts, since=since_stamp, until=until_stamp)
+        night_hits = dict(zip(replayed, night_hits))
+        night_error = None
+    except Exception as exc:
+        night_hits, finals, chances, night_error = {}, None, None, exc
     for vault in vaults:
         if shown is not None and write_health:
             try:
@@ -2092,8 +2295,12 @@ def _section_compliance(vaults, today, since_date, config, context=None):
             except Exception as exc:
                 errors.append(f"{vault}: 喚回靜音名單未更新 {type(exc).__name__}: {exc}")
         try:
-            rules = compliance.armed_rules(vault)
-            vault_hits = compliance.replay(rules, transcripts, since=since_stamp, until=until_stamp)
+            rules = armed[vault]
+            if isinstance(rules, Exception):
+                raise rules
+            if rules and night_error is not None:
+                raise night_error
+            vault_hits = night_hits.get(vault, [])
             # 精確時間、逐列對帳：同場當天較早的一次擋下不能抵掉窗口內真正的一次漏擋。
             rows = compliance.gate_rows(vault, since=since_stamp, until=until_stamp)
             vault_blocked, vault_missed, vault_unseen = compliance.reconcile(vault_hits, rows)
@@ -2105,11 +2312,11 @@ def _section_compliance(vaults, today, since_date, config, context=None):
         try:
             # 誤擋也自動處理：擋完我照原樣重送的那些，就是擋了等於沒擋。把那串字加進
             # 自動放行清單，隔天起不再為它停下來——不必有人判斷，也不必有人看。
-            finals = compliance.final_messages(transcripts)
+            if night_error is not None:
+                raise night_error
             noops = compliance.noop_blocks(vault_blocked, finals)
             # 彩排：每條樣式在累積的歷史上命中率多少。新卡不必等它明天在 owner 面前
             # 出錯，改過的樣式也不能靠舊數字背書——太寬的當晚就自動降級成只計數。
-            chances = compliance.opportunities(transcripts, since=since_stamp, until=until_stamp)
             rehearsed = compliance.rehearse(rules, vault_hits, chances)
             if write_health:
                 compliance.update_health(vault, rules, vault_hits, today, noops, rehearsed)
@@ -2243,6 +2450,7 @@ def _section_host_sync(vaults, today, since_date, config, context=None):
         from . import host_sync
     except ImportError:  # The scheduled child also runs this file directly.
         import host_sync
+    from epitype import rule_provenance
 
     # 取代了認不出的內容時，原文已存進宿主檔旁的紀錄檔並寫明是夜間同步換的；夜報照樣
     # 列出這件事（examples 與計數），但不算這一晚沒跑乾淨。
@@ -2258,7 +2466,10 @@ def _section_host_sync(vaults, today, since_date, config, context=None):
     write_hosts = bool((context or {}).get("write_hosts"))
     report = io.StringIO()
     try:
-        before = host_sync.check(vaults, output=report)
+        # 夜間沒有人在等：原生設定的查證不套掛鉤用的秒數上限。實測整批卡片要 4–15 秒，
+        # 5 秒上限讓那一批原生設定整晚不寫（2026-11-17）。
+        with rule_provenance.unbounded_verification():
+            before = host_sync.check(vaults, output=report)
     except Exception as exc:
         return {"counts": {"drifted": 0, "written": 0}, "examples": [],
                 "commands": [], "errors": [f"{type(exc).__name__}: {exc}"]}
@@ -2279,7 +2490,8 @@ def _section_host_sync(vaults, today, since_date, config, context=None):
     # 不動，其餘照寫。整晚跳過的話，規則一超上限，兩家的索引就跟著停在舊版。
     applied = io.StringIO()
     try:
-        code = host_sync.apply(vaults, output=applied, actor=memspec.HOST_SYNC_ACTOR_NIGHTLY)
+        with rule_provenance.unbounded_verification():
+            code = host_sync.apply(vaults, output=applied, actor=memspec.HOST_SYNC_ACTOR_NIGHTLY)
     except Exception as exc:
         return {"counts": {"drifted": len(drifted), "written": 0},
                 "examples": lines[:EXAMPLE_LIMIT], "commands": [],
@@ -2329,7 +2541,7 @@ def _stale_registrations(context):
 
 
 # 吃 context 的節：第 4 節要家目錄（harvest），第 14 節要知道可不可以寫宿主檔。
-_CONTEXT_SECTIONS = (_section_drafts, _section_host_sync, _section_draft_aging,
+_CONTEXT_SECTIONS = (_section_card_lint, _section_drafts, _section_caps, _section_host_sync,
                      _section_compliance)
 
 _SECTIONS = (
@@ -2341,7 +2553,6 @@ _SECTIONS = (
     (6, "事件卡老化", _section_event_aging),
     (7, "最近 7 天新增卡數", _section_recent),
     (8, "全庫掃描與口袋庫", _section_pocket_vaults),
-    (9, "草稿老化", _section_draft_aging),
     (10, "混雜卡（拆卡候選）", _section_mixed_cards),
     (11, "上限檢查", _section_caps),
     (12, "原話無決策卡承接（升決策卡候選）", _section_uncarried_quotes),
@@ -2376,16 +2587,7 @@ def _next_steps(sections, shaping=()):
     alias = counts(1)
     if alias.get("missing_aliases", 0) > 20:
         steps.append(f"缺別名卡 {alias['missing_aliases']} 張超過門檻，跑別名批次 → epitype aliases export <vault>")
-    draft = counts(4)
-    # 下一步報的是「該動手的那一批」，不是總數。捕捉提案是一條隊伍：今天捕到的明天還在
-    # 排隊很正常，把總數寫成待辦，這一行就永遠清不掉。放超過七天還沒人升的那些才是積壓。
-    stale_drafts = counts(9).get("over_7_days", 0)
-    if stale_drafts > 0:
-        held = draft.get("captured_pending", 0)
-        held_note = f"（隊伍裡共 {held} 份捕捉提案，未核不得當依據）" if held else ""
-        steps.append(
-            f"草稿放超過 {DRAFT_AGING_WARN_DAYS} 天沒審的有 {stale_drafts} 份{held_note} → 人工審閱 _drafts/**"
-        )
+    # 草稿不進下一步：自動捕捉的由第 4 節到期處理收掉，叫人審最舊的那批從來沒人做。
     pending = counts(3)
     if pending.get("zombie_cards", 0) > 0:
         steps.append(f"殭屍待辦 {pending['zombie_lines']} 行／{pending['zombie_cards']} 卡 → epitype pending <vault>")
@@ -2396,17 +2598,12 @@ def _next_steps(sections, shaping=()):
     if event.get("aging_total", 0) > 0:
         steps.append(f"事件卡老化候選 {event['aging_total']} 張 → 人工複核是否歸檔（不刪）")
     # 第 8–12 節一律只列候選：下一步說的是「有幾件事等人判斷」，不是「夢會處理掉」。
+    # 第 11 節超上限的手寫索引夢已先自己搬過，這裡剩下的是搬不了、要人判斷的。
     pocket = counts(8)
     if pocket.get("pocket_vaults", 0) > 0:
         steps.append(
             f"未登記的口袋庫 {pocket['pocket_vaults']} 個（共 {pocket.get('pocket_cards', 0)} 張卡）"
             " → 人工判斷歸戶；夢不搬不改"
-        )
-    aging = counts(9)
-    if aging.get("over_7_days", 0) > 0:
-        steps.append(
-            f"草稿老化：{aging['over_7_days']} 份超過 {DRAFT_AGING_WARN_DAYS} 天、"
-            f"{aging.get('over_30_days', 0)} 份超過 {DRAFT_AGING_STALE_DAYS} 天 → 人工審閱 _drafts/**"
         )
     mixed = counts(10)
     if mixed.get("mixed_cards", 0) > 0:
@@ -2459,7 +2656,7 @@ def _next_steps(sections, shaping=()):
 def build_report(vaults, today=None, since_date=None, deadline=None, shaping=None, config=None,
                  harvest_home=None, dry_run=False, write_hosts=False,
                  compliance_since_stamp=None, write_health=False, host_sync_result=None,
-                 compliance_until_stamp=None, compliance_window_reset=None):
+                 compliance_until_stamp=None, compliance_window_reset=None, apply_fixes=False):
     today = today or datetime.now(timezone.utc).date()
     since_date = since_date or (today - timedelta(days=DEFAULT_EVENT_AGING_DAYS))
     # 設定讀一次就好：第 8 節要「登記了哪些庫」、第 11 節要三個上限鍵。讀不到就是空
@@ -2471,10 +2668,13 @@ def build_report(vaults, today=None, since_date=None, deadline=None, shaping=Non
         # 在一個大庫上跑到天亮（CORE-10：缺口要說出來，不是靜靜少一節）。
         if deadline is not None and time.monotonic() >= deadline:
             return {"id": section_id, "title": title, "error": TIME_BUDGET_ERROR}
+        began = time.monotonic()
         try:
-            return {"id": section_id, "title": title, "error": None, **call()}
+            result = {"id": section_id, "title": title, "error": None, **call()}
         except Exception as exc:
-            return {"id": section_id, "title": title, "error": f"{type(exc).__name__}: {exc}"}
+            result = {"id": section_id, "title": title, "error": f"{type(exc).__name__}: {exc}"}
+        result["seconds"] = round(time.monotonic() - began, 3)
+        return result
 
     # 第 4 節在盤點草稿之前順手跑一趟 harvest，所以它多收一個執行脈絡：家目錄（沒有
     # 就不跑）、夢的 --dry-run 透傳、整體時限。其餘各節的簽章不變。
@@ -2484,6 +2684,8 @@ def build_report(vaults, today=None, since_date=None, deadline=None, shaping=Non
     context = {"home": harvest_home, "dry_run": bool(dry_run), "deadline": deadline,
                "write_hosts": bool(write_hosts),
                "write_health": bool(write_health) and not dry_run,
+               # 第 2 節順手補推得的日期；和寫宿主檔一樣預設關，只有 CLI 正式跑才開。
+               "apply_fixes": bool(apply_fixes) and not dry_run,
                "compliance_since_stamp": compliance_since_stamp,
                "compliance_until_stamp": compliance_until_stamp,
                "compliance_window_reset": compliance_window_reset}
@@ -2501,7 +2703,7 @@ def build_report(vaults, today=None, since_date=None, deadline=None, shaping=Non
     compliance = next(section for section in _SECTIONS if section[0] == 13)
     sections = [host_sync_result if host_sync_result is not None else run_defined(host_sync)]
     sections.extend(run_defined(section) for section in _SECTIONS if section[0] not in (13, 14))
-    # 檢討包只依賴第 8–12 節；在昂貴的重放之前完成。
+    # 檢討包只依賴第 4、8、10–12 節；在昂貴的重放之前完成。
     sections.append(run(
         REVIEW_PACK_SECTION_ID, REVIEW_PACK_TITLE,
         lambda: _section_review_pack(vaults, today, since_date, config, sections),
@@ -2519,6 +2721,257 @@ def build_report(vaults, today=None, since_date=None, deadline=None, shaping=Non
     }
 
 
+# --------------------------------------------------------------------------- 待判斷清單
+#
+# 夢交給主責的只有這一張：照規則就能修的夢自己修（第 2 節補日期），剩下要判斷意思的
+# 才列進來，每項一行「哪裡、為什麼、建議怎麼做」。每組最多 DREAM_REVIEW_GROUP_MAX_ITEMS、
+# 全部最多 DREAM_REVIEW_MAX_ITEMS：清單長到讀不完就等於沒有人讀，沒列到的下一晚還在。
+
+REVIEW_REASON_CHARS = 160
+REVIEW_TITLE = "# 夢的待判斷清單 — {today}"
+REVIEW_FIXED_LINE = "夢已自己修好：{count} 張卡補上由日期推得的 last_verified_at。"
+REVIEW_FIXABLE_LINE = "正式跑時夢會自己修：{count} 張卡補上由日期推得的 last_verified_at。"
+REVIEW_SUMMARY_LINE = "共 {total} 項，列出 {listed} 項（每組最多 {group_max}、全部最多 {cap}）；處理掉的下一晚就不會再出現。"
+REVIEW_EMPTY_LINE = "沒有需要判斷的項目。"
+REVIEW_GROUP_HEADING = "## {group}（共 {total}，列 {listed}）"
+REVIEW_ITEM_LINE = "- {path} — {reason} → {action}"
+REVIEW_CAP_HEADING = "## 第 11 節 上限整理材料"
+REVIEW_FAIL_ACTIONS = {
+    "status": "改成這個型別允許的 status，或改卡片型別",
+    "decided-by": "改成 " + "／".join(memspec.DECIDED_BY_VALUES) + " 之一",
+    "required": "補上缺的必填欄位",
+    "body-noise": "把提交號、場次、暫存路徑這類工作紀錄移出正文",
+    "example": "補武裝欄位讓例句測得到，或刪掉例句",
+    "date": "補 last_verified_at",
+}
+REVIEW_FAIL_DEFAULT_ACTION = "照理由改卡（全部明細：epitype cards <vault>）"
+
+
+def _one_line(text, limit=REVIEW_REASON_CHARS):
+    flat = " ".join(str(text or "").split())
+    return flat if len(flat) <= limit else flat[: limit - 1] + "…"
+
+
+def _card_label(item):
+    vault = item.get("vault")
+    path = item.get("path") or item.get("card_path") or ""
+    return os.fspath(Path(vault) / path) if vault else str(path)
+
+
+def _review_groups(report):
+    """（組名, 候選[, 該節數到的總數]）依處理順序排；每個候選是 path／reason／action 三欄。"""
+    by_id = {section["id"]: section for section in report.get("sections") or ()}
+
+    def section(section_id):
+        return by_id.get(section_id) or {}
+
+    def counted(section_id, *keys):
+        # 範例清單是截過的；組的總數要照該節自己數的，否則 12 張只報 10 張。
+        counts = section(section_id).get("counts") or {}
+        values = [counts.get(key) for key in keys]
+        if all(isinstance(value, int) and not isinstance(value, bool) for value in values):
+            return sum(values)
+        return None
+
+    groups = []
+    failures = []
+    for item in sorted(by_id.values(), key=lambda value: value["id"]):
+        label = f"第 {item['id']} 節 {item.get('title', '')}".strip()
+        action = ("看拒寫原因處理後跑 epitype sync <vault> --apply" if item["id"] == 14
+                  else "查原因修掉；夢由排程下一晚重跑，不要手動跑整趟夢")
+        if item.get("error"):
+            failures.append({"path": label, "reason": item["error"], "action": action})
+        for error in item.get("errors") or ():
+            failures.append({"path": label, "reason": error, "action": action})
+    # 節以外的檢查（近重複、原話索引）出錯一樣讓這一晚不算查完（_report_errors）；
+    # 清單漏列它們就會說「沒有要判斷的」。
+    action = "查原因修掉；夢由排程下一晚重跑，不要手動跑整趟夢"
+    for key, label in (("duplicates", "近重複卡檢查"), ("owner_index", "owner 原話索引")):
+        found = report.get(key)
+        if not isinstance(found, dict):
+            continue
+        reasons = [found.get("error")] + list(found.get("errors") or ())
+        if key == "owner_index":
+            if found.get("unreadable_rows"):
+                reasons.append(f"{len(found['unreadable_rows'])} 列讀不出來")
+            if found.get("skipped_zst"):
+                reasons.append(f"{found['skipped_zst']} 個 .zst 檔沒有讀")
+        for reason in reasons:
+            if isinstance(reason, dict):
+                reason = f"{reason.get('path') or reason.get('source') or ''}: {reason.get('error', '')}"
+            if reason:
+                failures.append({"path": label, "reason": reason, "action": action})
+    groups.append(("夢這一晚沒跑完或出錯", failures))
+
+    # 規則卡失效的那幾張由下面那組帶著「改了哪裡」列出，這裡不重複列一次。
+    repairs = section(2).get("rule_repairs") or ()
+    listed = {(item.get("vault"), item.get("path")) for item in repairs}
+    groups.append(("卡片型別 FAIL", [
+        {"path": _card_label(item), "reason": f"{item.get('rule')}：{item.get('reason')}",
+         "action": REVIEW_FAIL_ACTIONS.get(item.get("rule"), REVIEW_FAIL_DEFAULT_ACTION)}
+        for item in section(2).get("fail_list") or ()
+        if not (item.get("rule") == "rule-source" and (item.get("vault"), item.get("path")) in listed)
+    ]))
+
+    groups.append((memspec.RULE_SELF_REPAIR_DREAM_GROUP, [
+        {"path": _card_label(item), "reason": item.get("reason"),
+         "action": (memspec.RULE_SELF_REPAIR_DREAM_ACTION if item.get("changed")
+                    else memspec.RULE_SELF_REPAIR_DREAM_LEGACY_ACTION if item.get("status") == "legacy"
+                    else memspec.RULE_SELF_REPAIR_DREAM_UNKNOWN_ACTION)}
+        for item in repairs
+    ]))
+
+    groups.append(("來源綁定卡沒有自動補日期", [
+        {"path": _card_label(item), "reason": "補 last_verified_at 會改動綁定內容，規則會失效",
+         "action": "要補就人工補，再用 rule_pipeline.bind_payload 重綁；不補只是 WARN"}
+        for item in section(2).get("bound_dates") or ()
+    ]))
+
+    caps = []
+    for item in section(11).get("examples") or ():
+        if item.get("kind") == CAP_DRIFT_KIND:
+            caps.append({"path": item["path"], "reason": "生成塊與規則卡重組的結果不一致",
+                         "action": CAP_DRIFT_COMMAND})
+        elif item.get("kind") == "core-rules":
+            # 開場那一行由待處理檔負責（core_baseline.surface_line）；這裡只留在報告裡，
+            # 不算進開場的待判斷數，免得同一件事開場講兩次、接受後還掛著。
+            caps.append({"surfaced": True, "path": item["path"], "reason": item.get("notice") or
+                         f"核心規則比上次確認多 {item['over']} bytes",
+                         "action": "材料在本檔第 11 節：" + cap_consolidation.NEXT_STEP
+                         + "；或寫理由接受：epitype core-baseline --accept --reason \"…\""})
+        elif item.get("over", 0) > 0 or item.get("over_lines", 0) > 0:
+            caps.append({"path": item["path"],
+                         "reason": f"{item['bytes']} bytes／{item.get('lines', '?')} 行，超過宿主載入上限 "
+                                   f"{item['cap']} bytes 或 {item.get('cap_lines', '?')} 行",
+                         "action": "材料在本檔第 11 節：" + cap_consolidation.NEXT_STEP})
+    groups.append(("超過上限／生成塊漂移", caps))
+
+    duplicates = report.get("duplicates") or {}
+    clusters = duplicates.get("clusters") if isinstance(duplicates.get("clusters"), int) else 0
+    groups.append(("近重複卡", [{
+        "path": duplicates.get("path") or "（--dry-run 未寫報告）",
+        "reason": f"{clusters} 組近重複卡",
+        "action": "逐組判斷合併、互指或標成不重複",
+    }] if clusters else []))
+
+    groups.append(("決策卡缺 owner_quote／forbidden", [
+        {"path": _card_label(item),
+         "reason": "、".join(name for name, flag in (("缺 owner_quote", item.get("missing_owner_quote")),
+                                                    ("缺 forbidden", item.get("missing_forbidden"))) if flag),
+         "action": "補上；補不出來就改 status"}
+        for item in section(5).get("examples") or ()
+    ], counted(5, "missing_owner_or_forbidden")))
+
+    pending = [
+        {"path": _card_label(item), "reason": f"待辦最久 {item.get('oldest_days')} 天沒動",
+         "action": "做掉、劃掉或交給有人負責的地方"}
+        for item in section(3).get("examples") or ()
+    ] + [
+        {"path": _card_label(item), "reason": f"{item.get('lines')} 行待辦沒有負責人",
+         "action": "指定負責人或劃掉"}
+        for item in section(3).get("orphans") or ()
+    ]
+    groups.append(("殭屍／孤兒待辦", pending, counted(3, "zombie_cards", "orphan_cards")))
+
+    groups.append(("原話無決策卡承接", [
+        {"path": _card_label(item),
+         "reason": ("疑似傳輸探針雜訊；" if item.get("noise") else "") + f"原話「{item.get('excerpt', '')}」沒有決策卡承接",
+         "action": "升成決策卡，或標 verified: false 降級"}
+        for item in section(12).get("examples") or ()
+    ], counted(12, "uncarried_quotes")))
+
+    groups.append(("拆卡候選", [
+        {"path": _card_label(item), "reason": "；".join(item.get("reasons") or ()),
+         "action": "判斷要不要拆成多張卡；看過不拆就加 " + memspec.MIXED_REVIEWED_FIELD}
+        for item in section(10).get("examples") or ()
+    ], counted(10, "mixed_cards")))
+
+    groups.append(("事件卡老化", [
+        {"path": _card_label(item),
+         "reason": f"{item.get('type')} 卡捕捉於 {item.get('captured_at')}，早於 {report.get('since')}",
+         "action": "複核後歸檔（不刪）"}
+        for item in section(6).get("examples") or ()
+    ], counted(6, "aging_total")))
+
+    groups.append(("專案已不在的口袋庫", [
+        {"path": item["path"], "reason": f"{item.get('cards')} 張卡，{POCKET_VAULT_CANDIDATE}",
+         "action": "卡片要留就搬進對應的庫，不留就移走"}
+        for item in section(8).get("examples") or ()
+    ], counted(8, "pocket_vaults")))
+
+    by_vault = (section(1).get("counts") or {}).get("by_vault") or {}
+    groups.append(("缺別名（要模型判斷同義詞）", [
+        {"path": vault, "reason": f"{count} 張卡沒有別名，中文或同義詞提問喚不回",
+         "action": f'epitype aliases export "{vault}" → 填 suggested 後 apply'}
+        for vault, count in sorted(by_vault.items(), key=lambda pair: (-pair[1], pair[0]))
+    ]))
+
+    review = (section(REVIEW_PACK_SECTION_ID).get("counts") or {})
+    groups.append(("檢討包", [{
+        "path": f"第 {REVIEW_PACK_SECTION_ID} 節",
+        "reason": REVIEW_PACK_READY_NOTE.format(count=review.get("review_items", 0),
+                                                trigger=review.get("trigger", memspec.REVIEW_PACK_TRIGGER)),
+        "action": "開一場檢討（夢的 --json-out 有逐筆明細）",
+    }] if review.get("at_threshold") else []))
+    return groups
+
+
+def review_list(report, cap=None, group_cap=None):
+    """把各節候選收成一張短清單：{"items": [...], "groups": [...], "total": n}。"""
+    cap = memspec.DREAM_REVIEW_MAX_ITEMS if cap is None else cap
+    group_cap = memspec.DREAM_REVIEW_GROUP_MAX_ITEMS if group_cap is None else group_cap
+    items = []
+    groups = []
+    total = 0
+    for name, candidates, *counted in _review_groups(report):
+        if not candidates:
+            continue
+        found = max(len(candidates), counted[0] or 0) if counted else len(candidates)
+        total += found
+        take = max(0, min(group_cap, cap - len(items), len(candidates)))
+        for candidate in candidates[:take]:
+            items.append({"group": name, "path": str(candidate["path"]),
+                          "reason": _one_line(candidate["reason"]),
+                          "action": _one_line(candidate["action"], REVIEW_REASON_CHARS * 2),
+                          **({"surfaced": True} if candidate.get("surfaced") else {})})
+        groups.append({"group": name, "total": found, "listed": take})
+    return {"items": items, "groups": groups, "total": total}
+
+
+def _render_review(report, review):
+    lines = [REVIEW_TITLE.format(today=report.get("today", "")), ""]
+    lint = next((section.get("counts") or {} for section in report.get("sections") or ()
+                 if section.get("id") == 2), {})
+    if lint.get("fixed_dates"):
+        lines.append(REVIEW_FIXED_LINE.format(count=lint["fixed_dates"]))
+    if lint.get("fixable_dates"):
+        lines.append(REVIEW_FIXABLE_LINE.format(count=lint["fixable_dates"]))
+    if lint.get("rules_rebound"):
+        lines.append(memspec.RULE_SELF_REPAIR_FIXED_LINE.format(count=lint["rules_rebound"]))
+    if lint.get("rules_rebindable"):
+        lines.append(memspec.RULE_SELF_REPAIR_FIXABLE_LINE.format(count=lint["rules_rebindable"]))
+    if lint.get("rules_backfilled"):
+        lines.append(memspec.RULE_DIGEST_BACKFILLED_LINE.format(count=lint["rules_backfilled"]))
+    if not review["items"]:
+        lines.append(REVIEW_EMPTY_LINE)
+    else:
+        lines.append(REVIEW_SUMMARY_LINE.format(
+            total=review["total"], listed=len(review["items"]),
+            group_max=memspec.DREAM_REVIEW_GROUP_MAX_ITEMS, cap=memspec.DREAM_REVIEW_MAX_ITEMS))
+    for group in review["groups"]:
+        lines.extend(("", REVIEW_GROUP_HEADING.format(**group)))
+        lines.extend(REVIEW_ITEM_LINE.format(**item) for item in review["items"]
+                     if item["group"] == group["group"])
+    # 超上限的整理材料是 sync 與開場那一行指過來的地方，只有它保留全文。
+    material = [item for section in report.get("sections") or () if section.get("id") == 11
+                for item in section.get("examples") or () if item.get("over", 0) > 0]
+    if material:
+        lines.extend(("", REVIEW_CAP_HEADING))
+        for item in material:
+            _render_cap_material(lines, item)
+    return "\n".join(lines) + "\n"
+
+
 def _render_section(lines, section):
     lines.append(f"## {section['id']}. {section['title']}")
     if section.get("error"):
@@ -2528,6 +2981,8 @@ def _render_section(lines, section):
     lines.append("counts: " + json.dumps(section.get("counts", {}), ensure_ascii=False))
     for error in section.get("errors") or ():
         lines.append(f"（部分 vault 略過：{error}）")
+    for item in section.get("slimmed") or ():
+        lines.append(CAP_SLIMMED_LINE.format(**item))
     examples = section.get("examples") or []
     if examples:
         lines.append(f"examples (前 {len(examples)} 筆):")
@@ -2581,12 +3036,23 @@ def _render_section(lines, section):
 
 
 def _render_cap_material(lines, item):
-    lines.append(f"- {item['path']}：{item['bytes']} bytes，上限 {item['cap']} bytes，"
-                 f"至少需縮減 {item['reduce_bytes']} bytes。")
+    if item.get("kind") == "core-rules":
+        lines.append(f"- 核心規則比上次確認變大（基準 {item['path']}）：{item.get('notice') or ''}")
+        for card in item.get("growth") or ():
+            why = card.get("rationale") or "（卡上沒有理由）"
+            lines.append(f"  - {card['card']} +{card['delta']} bytes"
+                         f"{'（新增）' if card.get('added') else ''}｜核准 {card.get('approved_by') or '?'}｜{why}")
+    else:
+        lines.append(f"- {item['path']}：{item['bytes']} bytes／{item.get('lines', '?')} 行，"
+                     f"宿主載入上限 {item['cap']} bytes 或 {item.get('cap_lines', '?')} 行。")
+    auto = item.get("auto_slim") or {}
+    if auto.get("reason") or auto.get("status") == "would-rewrite":
+        lines.append(CAP_AUTO_SLIM_LINE.format(
+            status=auto.get("status"), reason=auto.get("reason") or CAP_AUTO_SLIM_DRY))
     if item.get("kind") == "core-rules":
         for host in item["hosts"]:
-            lines.append(f"  - 宿主 {host['host']} 實際載入 {host['bytes']} bytes，上限 {host['cap']} bytes，"
-                         f"至少需縮減 {host['reduce_bytes']} bytes；條文依載入長度降冪排列（含條文格式與換行）。")
+            lines.append(f"  - 宿主 {host['host']} 實際載入 {host['bytes']} bytes，上次確認 {host['cap']} bytes，"
+                         f"多 {host['reduce_bytes']} bytes；條文依載入長度降冪排列（含條文格式與換行）。")
             lines.append(f"    標題等非條文內容 {host['overhead_bytes']} bytes；"
                          f"無法對應現行卡片的條文 {host['unmapped_rules']} 條。")
             for rule in host["rules"]:
@@ -2698,6 +3164,105 @@ def due(state, interval_hours=memspec.DREAM_DEFAULT_INTERVAL_HOURS, now=None):
     if completed is None:
         return True
     return ((time.time() if now is None else now) - completed) >= interval_hours * 3600
+
+
+def system_cpu_percent(seconds=memspec.DREAM_BUSY_SAMPLE_SECONDS):
+    """整機 CPU 使用率（0–100）；量不到回 None，呼叫端當作不忙。
+
+    Windows 取兩次 GetSystemTimes 相減（kernel 時間已含 idle）；POSIX 用一分鐘
+    load average 除以核心數，不必等。"""
+    try:
+        if os.name == "nt":
+            import ctypes
+            from ctypes import wintypes
+
+            def _sample():
+                times = [wintypes.FILETIME() for _ in range(3)]
+                if not ctypes.windll.kernel32.GetSystemTimes(*(ctypes.byref(item) for item in times)):
+                    raise OSError("GetSystemTimes failed")
+                return [(item.dwHighDateTime << 32) | item.dwLowDateTime for item in times]
+
+            before = _sample()
+            time.sleep(seconds)
+            idle, kernel, user = (after - first for first, after in zip(before, _sample()))
+            if kernel + user <= 0:
+                return None
+            busy = 1 - idle / (kernel + user)
+        else:
+            cpus = os.cpu_count()
+            if not cpus:
+                return None
+            busy = os.getloadavg()[0] / cpus
+        return max(0.0, min(100.0, busy * 100))
+    except Exception:
+        return None
+
+
+def _local_now():
+    return datetime.now().astimezone()
+
+
+def _configured_schedule():
+    """(mode, at)：設定裡的夢模式與每日觸發時刻；缺或壞的 at 用預設。"""
+    block = configured_options().get(memspec.DREAM_CONFIG_FIELD)
+    block = block if isinstance(block, dict) else {}
+    at = block.get(memspec.DREAM_AT_FIELD)
+    if not isinstance(at, str) or not memspec.DREAM_AT_REGEX.fullmatch(at):
+        at = memspec.DREAM_DEFAULT_AT
+    return block.get(memspec.DREAM_MODE_FIELD, memspec.DREAM_DEFAULT_MODE), at
+
+
+def _completed_epoch(state_path):
+    try:
+        state = json.loads(Path(state_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(state, dict):
+        return None
+    completed = state.get(memspec.DREAM_STATE_COMPLETED_EPOCH_FIELD)
+    if isinstance(completed, bool) or not isinstance(completed, (int, float)):
+        completed = _epoch_of(state.get(memspec.DREAM_STATE_COMPLETED_FIELD))
+    return completed
+
+
+def scheduled_gate(governance, state_path, now=None):
+    """排程那一次要不要真的跑。False＝今晚這一次不跑（理由已寫進 dream.log）。
+
+    排程器從 dream.at 起每 DREAM_RETRY_EVERY_MINUTES 叫一次、持續
+    DREAM_RETRY_WINDOW_MINUTES：今晚已經跑完的後續呼叫直接結束；機器忙就等下一次，
+    只有最後一次（容忍一分鐘）不論忙不忙都跑——否則忙一整晚就整晚沒夢。窗口外的
+    呼叫（手動補跑）不延後。窗口跨午夜時，午夜後的嘗試算前一天那一晚。
+    只有 nightly 模式才有這組重試排程；其他模式沒有下一次可等，一律照跑。"""
+    mode, at = _configured_schedule()
+    if mode != memspec.DREAM_MODE_NIGHTLY:
+        return True
+    now = now or _local_now()
+    hour, minute = (int(part) for part in at.split(":"))
+    window = timedelta(minutes=memspec.DREAM_RETRY_WINDOW_MINUTES)
+    tolerance = timedelta(minutes=1)
+    first = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if now < first and now < first - timedelta(days=1) + window + tolerance:
+        first -= timedelta(days=1)
+    last = first + window
+    completed = _completed_epoch(state_path)
+    if completed is not None and completed >= first.timestamp():
+        log(governance, "skipped: already ran this night")
+        return False
+    if not first <= now < last + tolerance:
+        return True
+    percent = system_cpu_percent(memspec.DREAM_BUSY_SAMPLE_SECONDS)
+    limit = memspec.DREAM_BUSY_CPU_PCT
+    if percent is None or percent < limit:
+        return True
+    if now < last - tolerance:
+        every = memspec.DREAM_RETRY_EVERY_MINUTES
+        elapsed = (now - first).total_seconds() / 60
+        upcoming = first + timedelta(minutes=every * (int(elapsed // every) + 1))
+        wait = max(1, round((upcoming - now).total_seconds() / 60))
+        log(governance, f"deferred: system CPU {percent:.0f}% ≥ {limit:g}%; next try in {wait} min")
+        return False
+    log(governance, f"running busy: system CPU {percent:.0f}% ≥ {limit:g}% on the last attempt")
+    return True
 
 
 def _lock_is_stale(path, now):
@@ -3104,6 +3669,20 @@ def _selftest():
                 "decided_by: ai-autonomous\nowner_quote: 就這樣\nforbidden:\n  - 不要這樣做\n"
                 "aliases:\n- k2\n---\nbody\n",
             )
+            # section 5: unenforceable marks a memory-only decision — not
+            # missing forbidden, but the owner quote is still required.
+            _write_card(
+                vault / "memory_only.md",
+                "---\ndecision_key: k3\nstatus: active\ncurrent_decision_at: 2026-06-01\n"
+                "decided_by: ai-autonomous\nowner_quote: 就這樣\nunenforceable: 只作記憶\n"
+                "aliases:\n- k3\n---\nbody\n",
+            )
+            _write_card(
+                vault / "unenforceable_no_quote.md",
+                "---\ndecision_key: k4\nstatus: active\ncurrent_decision_at: 2026-06-01\n"
+                "decided_by: ai-autonomous\nunenforceable: 只作記憶\n"
+                "aliases:\n- k4\n---\nbody\n",
+            )
 
             # section 6 + 7: one old grant (aging candidate), one fresh grant (recent).
             _write_card(
@@ -3125,11 +3704,12 @@ def _selftest():
             report = build_report([vault], today=today)
             by_id = {section["id"]: section for section in report["sections"]}
 
-            section_errors = {i: by_id[i]["error"] for i in range(1, 15)
-                              if by_id[i]["error"] is not None}
+            # 節號不連號（9 空著：草稿只在第 4 節報），照表取，不用 range。
+            section_errors = {i: by_id[i]["error"] for i in _SECTION_IDS
+                              if i != REVIEW_PACK_SECTION_ID and by_id[i]["error"] is not None}
             if section_errors:
                 print(f"selftest section errors: {section_errors}", file=sys.stderr)
-            checks.append(("all 14 deterministic sections present with no error", not section_errors))
+            checks.append(("all deterministic sections present with no error", not section_errors))
             checks.append((
                 "section 13 replays the day and reports zero misses on a fixture with no transcripts",
                 by_id[13]["counts"]["missed"] == 0 and by_id[13]["counts"]["hits"] == 0,
@@ -3142,10 +3722,16 @@ def _selftest():
             checks.append(("section 4 counts both drafts under their subdirectory", by_id[4]["counts"]["total_drafts"] == 2
                 and by_id[4]["counts"]["by_subdir"].get("decisions") == 2))
             checks.append(("section 5 flags the active card missing owner_quote and counts superseded", (
-                by_id[5]["counts"]["active"] == 2
+                by_id[5]["counts"]["active"] == 4
                 and by_id[5]["counts"]["superseded"] == 1
-                and by_id[5]["counts"]["missing_owner_or_forbidden"] == 1
+                and by_id[5]["counts"]["missing_owner_or_forbidden"] == 2
                 and by_id[5]["examples"][0]["path"] == "missing_quote.md"
+            )))
+            checks.append(("section 5 treats unenforceable as not missing forbidden, still needs owner_quote", (
+                not any(item["path"] == "memory_only.md" for item in by_id[5]["examples"])
+                and [(item["missing_owner_quote"], item["missing_forbidden"])
+                     for item in by_id[5]["examples"]
+                     if item["path"] == "unenforceable_no_quote.md"] == [(True, False)]
             )))
             checks.append(("section 5 does not flag a block-list forbidden as missing", not any(
                 item["path"] == "block_forbidden.md" for item in by_id[5]["examples"]
@@ -3191,14 +3777,15 @@ def _selftest():
                 moment = datetime(stamped.year, stamped.month, stamped.day, tzinfo=timezone.utc).timestamp()
                 os.utime(target, (moment, moment))
             drafts_by_id = {s["id"]: s for s in build_report([drafts_vault], today=today)["sections"]}
-            checks.append(("section 9 ages the drafts, groups them by first-level subdirectory, and names the oldest first", (
-                drafts_by_id[9]["counts"]["total_drafts"] == 3
-                and drafts_by_id[9]["counts"]["over_7_days"] == 2
-                and drafts_by_id[9]["counts"]["over_30_days"] == 1
-                and drafts_by_id[9]["counts"]["by_subdir"]["decisions"] == {"total": 2, "over_7": 2, "over_30": 1}
-                and drafts_by_id[9]["counts"]["by_subdir"]["notes"] == {"total": 1, "over_7": 0, "over_30": 0}
-                and drafts_by_id[9]["examples"][0]["path"] == "_drafts/decisions/old.md"
-                and drafts_by_id[9]["examples"][0]["age_days"] == 248
+            checks.append(("section 4 ages the drafts, groups them by first-level subdirectory, and names the oldest first", (
+                9 not in drafts_by_id
+                and drafts_by_id[4]["counts"]["total_drafts"] == 3
+                and drafts_by_id[4]["counts"]["over_7_days"] == 2
+                and drafts_by_id[4]["counts"]["over_30_days"] == 1
+                and drafts_by_id[4]["counts"]["expired_tonight"] == 0
+                and drafts_by_id[4]["counts"]["by_subdir"] == {"decisions": 2, "notes": 1}
+                and drafts_by_id[4]["examples"][0]["path"] == "_drafts/decisions/old.md"
+                and drafts_by_id[4]["examples"][0]["age_days"] == 248
             )))
 
             mixed_vault = Path(temp_dir).resolve() / "mixed"
@@ -3297,18 +3884,25 @@ def _selftest():
                 and unset_by_id[11]["counts"]["unset_keys"] == 1
                 and memspec.CONFIG_CORE_FILES_FIELD in unset_by_id[11]["note"]
             )))
+            # 宿主只載入 MEMORY.md 前 200 行；舊的 index_cap_bytes 只換來一行「已不再使用」。
+            over_host = "- x\n" * 201
+            (cap_vault / memspec.MEMORY_INDEX_FILENAME).write_text(over_host, encoding="utf-8")
             capped_by_id = {s["id"]: s for s in build_report([cap_vault], today=today, config={
                 memspec.CONFIG_INDEX_CAP_BYTES_FIELD: 10,
                 memspec.CONFIG_CORE_FILES_FIELD: [os.fspath(core_file)],
                 memspec.CONFIG_CORE_CAP_BYTES_FIELD: 5,
             })["sections"]}
             capped = {item["path"]: item for item in capped_by_id[11]["examples"]}
-            checks.append(("section 11 with the keys set lists both over-cap files with their overage, and changes neither", (
-                capped_by_id[11]["counts"]["over_cap"] == 2
+            # core_cap_bytes 也只換來「已不再使用」：核心檔不再比絕對數字，改跟確認過的基準比。
+            checks.append(("section 11 lists the index over the host limit, ignores retired caps, and changes nothing", (
+                capped_by_id[11]["counts"]["over_cap"] == 1
                 and capped_by_id[11]["counts"]["unset_keys"] == 0
-                and capped[os.fspath(cap_vault / memspec.MEMORY_INDEX_FILENAME)]["over"] == 40
-                and capped[os.fspath(core_file)]["over"] == 35
-                and (cap_vault / memspec.MEMORY_INDEX_FILENAME).read_text(encoding="utf-8") == "x" * 50
+                and capped[os.fspath(cap_vault / memspec.MEMORY_INDEX_FILENAME)]["over_lines"] == 1
+                and capped[os.fspath(cap_vault / memspec.MEMORY_INDEX_FILENAME)]["cap"] == 25_000
+                and "index_cap_bytes" in capped_by_id[11]["note"]
+                and "core_cap_bytes 已不再使用" in capped_by_id[11]["note"]
+                and os.fspath(core_file) not in capped
+                and (cap_vault / memspec.MEMORY_INDEX_FILENAME).read_text(encoding="utf-8") == over_host
                 and core_file.read_text(encoding="utf-8") == "y" * 40
             )))
 
@@ -3587,13 +4181,14 @@ def _selftest():
                 memspec.CONFIG_INDEX_CAP_BYTES_FIELD: 10,
             })
             five_steps = "\n".join(five_report["next_steps"])
-            checks.append(("the next steps carry all five candidate counts, each as a human call", all(
-                marker in five_steps for marker in ("口袋庫", "草稿老化", "拆卡候選", "未設定", "升決策卡候選")
-            )))
+            # 草稿不再進下一步：自動捕捉的由到期處理收掉，叫人審最舊的那批從來沒人做。
+            checks.append(("the next steps carry the four human-call candidate counts and no draft-review line", all(
+                marker in five_steps for marker in ("口袋庫", "拆卡候選", "未設定", "升決策卡候選")
+            ) and "草稿" not in five_steps))
             five_markdown = _render_markdown(five_report)
             checks.append(("the pack renders sections 8-12 and moves shaping to 13 and the next steps to 14", all(
                 heading in five_markdown for heading in (
-                    "## 8. 全庫掃描與口袋庫", "## 9. 草稿老化", "## 10. 混雜卡（拆卡候選）",
+                    "## 8. 全庫掃描與口袋庫", "## 10. 混雜卡（拆卡候選）",
                     "## 11. 上限檢查", "## 12. 原話無決策卡承接（升決策卡候選）",
                     memspec.INDEX_SHAPING_HEADING, "## 14. 夢的下一步",
                 )
@@ -3626,9 +4221,9 @@ def _selftest():
             # next steps surface the pending/draft/decision findings deterministically.
             # 2026-09-19：草稿那一行改報「放超過門檻沒人審的那些」，不報總數——
             # 捕捉提案是一條隊伍，今天捕到的明天還在排隊很正常，把總數當待辦就永遠清不掉。
-            checks.append(("next steps name the overdue pending line and the stale drafts", any(
+            checks.append(("next steps name the overdue pending line and never ask for a manual draft review", any(
                 "殭屍待辦" in step for step in report["next_steps"]
-            ) and any("草稿放超過" in step for step in report["next_steps"])))
+            ) and not any("草稿" in step for step in report["next_steps"])))
 
             # --dry-run prints to the given stream and writes nothing to disk.
             import io
@@ -3688,6 +4283,11 @@ def _selftest():
                 and isinstance(written_state[memspec.DREAM_STATE_ELAPSED_FIELD], float)
                 and written_state[memspec.DREAM_STATE_PACK_FIELD] == os.fspath(md_out)
             )))
+            section_seconds = written_state.get(memspec.DREAM_STATE_SECTION_SECONDS_FIELD) or {}
+            checks.append(("dream_state.json records seconds for every section that ran", (
+                {"2", "3", "4", "13", "14"} <= set(section_seconds)
+                and all(isinstance(value, (int, float)) and value >= 0 for value in section_seconds.values())
+            )))
 
             # --- U-R2：第 4 節在盤點草稿之前順手跑一趟 harvest（只產草稿）。自帶
             # 家目錄與庫，才不會動到上面每一條對主 fixture 草稿數的斷言。---
@@ -3734,14 +4334,14 @@ def _selftest():
             harvest_pending = sorted(
                 harvest_vault.joinpath(*memspec.CAPTURE_PENDING_SUBPATH).rglob("*.md")
             )
-            harvest_pack = (harvest_vault / ".epitype" / "dream_pack_20260906.md").read_text(encoding="utf-8")
-            checks.append(("the harvested sentence lands as a proposal only, and the pack says how many", (
+            harvest_state = json.loads((harvest_vault / ".epitype" / memspec.DREAM_STATE_FILENAME)
+                                       .read_text(encoding="utf-8"))
+            checks.append(("the harvested sentence lands as a proposal only, and the state says how many", (
                 real_harvest_code == 0
                 and len(harvest_pending) == 1
                 and harvest_sentence in harvest_pending[0].read_text(encoding="utf-8")
                 and not (harvest_vault / memspec.GRANT_DIRECTORY).exists()
-                and "本次 harvest 新增 1 張草稿" in harvest_pack
-                and '"harvest_new_drafts": 1' in harvest_pack
+                and harvest_state[memspec.DREAM_STATE_SECTIONS_FIELD]["4"]["harvest_new_drafts"] == 1
             )))
 
             # harvest 掛掉只花第 4 節一行 errors：其餘各節照跑，草稿盤點本身也照出數字。
@@ -3835,8 +4435,10 @@ def _selftest():
             os.environ[memspec.EPITYPE_CONFIG_ENV] = os.fspath(scheduled_config)
             try:
                 token = acquire_lock(gov, handoff=True)
+                legacy_pack = gov / memspec.DREAM_DIRECTORY / memspec.DREAM_LEGACY_PACK_FILENAMES[0]
+                legacy_pack.write_text("old full pack", encoding="utf-8")
                 scheduled_code = main([memspec.DREAM_SCHEDULED_FLAG, memspec.DREAM_LOCK_HELD_FLAG,
-                                       "--lock-token", token,
+                                       "--lock-token", token, "--json-out", os.fspath(js_out),
                                        "--today", "2026-09-06"], output=io.StringIO())
                 lock_released = not (gov / memspec.DREAM_DIRECTORY / memspec.DREAM_LOCK_FILENAME).exists()
                 scheduled_state = state_file.read_text(encoding="utf-8")
@@ -3849,10 +4451,12 @@ def _selftest():
                     os.environ.pop(memspec.EPITYPE_CONFIG_ENV, None)
                 else:
                     os.environ[memspec.EPITYPE_CONFIG_ENV] = saved_env
-            checks.append(("--scheduled resolves the ledger holder as governance and writes pack, JSON and state there", (
+            checks.append(("--scheduled resolves the ledger holder as governance and writes the review list and state there; the old full pack is removed", (
                 scheduled_code == 0
                 and json.loads(js_out.read_text(encoding="utf-8"))["vaults"] == [os.fspath(vault), os.fspath(gov)]
                 and json.loads(scheduled_state)[memspec.DREAM_STATE_PACK_FIELD] == os.fspath(md_out)
+                and md_out.read_text(encoding="utf-8").startswith(REVIEW_TITLE.format(today="2026-09-06"))
+                and not legacy_pack.exists()
             )))
             checks.append(("--lock-held releases the caller's lock at exit; a held lock makes the next scheduled run a no-op", (
                 lock_released and blocked_code == 0 and blocked_state == scheduled_state
@@ -3945,7 +4549,8 @@ def _selftest():
             )))
 
             shaped_out = io.StringIO()
-            shaped_code = main(["--today", "2026-09-06", os.fspath(shaped)], output=shaped_out)
+            # 寫檔只剩待判斷清單；整形節的全文改從 --json 的完整報告渲染出來比對。
+            shaped_code = main(["--json", "--today", "2026-09-06", os.fspath(shaped)], output=shaped_out)
             after_first = index_path.read_text(encoding="utf-8")
             pruned_text = pruned_file.read_text(encoding="utf-8")
             checks.append(("整形只搬允許段以外、目錄已承載的行；三段短入口一字不動", (
@@ -3964,7 +4569,8 @@ def _selftest():
                 and "pending-card" not in pruned_text
             )))
 
-            second_pack = (shaped / ".epitype" / "dream_pack_20260906.md").read_text(encoding="utf-8")
+            second_pack = _render_markdown(json.loads(
+                (shaped / ".epitype" / "dream_pack_20260906.md").read_text(encoding="utf-8")))
             checks.append(("視圖沒列的那行留在 MEMORY.md，並列進夢報告的整形節", (
                 "- [還沒生成目錄的新卡](pending-card.md)" in after_first
                 and memspec.INDEX_SHAPING_HEADING in second_pack
@@ -3994,10 +4600,11 @@ def _selftest():
             race_out = io.StringIO()
             try:
                 globals()["_index_stat"] = _index_stat_races
-                main(["--today", "2026-09-06", os.fspath(shaped)], output=race_out)
+                main(["--json", "--today", "2026-09-06", os.fspath(shaped)], output=race_out)
             finally:
                 globals()["_index_stat"] = saved_index_stat
-            race_pack = (shaped / ".epitype" / "dream_pack_20260906.md").read_text(encoding="utf-8")
+            race_pack = _render_markdown(json.loads(
+                (shaped / ".epitype" / "dream_pack_20260906.md").read_text(encoding="utf-8")))
             checks.append(("寫入前 mtime 變了就整份放棄：行留在原地、index_pruned 沒長、報告記一行", (
                 len(stat_calls) == 2
                 and "- [moved-one](moved-one.md)\n- [moved-two](moved-two.md)\n"
@@ -4075,7 +4682,7 @@ def _selftest():
                 os.environ[name] = value
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 70
+    total = 72
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     if status != "PASS":
@@ -4136,8 +4743,15 @@ def _main(argv, output):
                     lock_token = parsed.lock_token
                 root = dream_root(governance)
                 out_path = out_path or root / memspec.DREAM_PACK_FILENAME
-                json_out_path = json_out_path or root / memspec.DREAM_PACK_JSON_FILENAME
+                # 完整 JSON 不再預設寫：沒有任何程式讀它。要的人自己給 --json-out。
                 state_path = state_path or root / memspec.DREAM_STATE_FILENAME
+                if not parsed.lock_held:
+                    if not scheduled_gate(governance, state_path):
+                        return 0
+                    # 量 CPU 的取樣不算進這一夜的預算。
+                    started = time.monotonic()
+                    started_epoch = time.time()
+                    deadline = started + parsed.time_budget_seconds if parsed.time_budget_seconds > 0 else None
                 if not lock_token:
                     lock_token = acquire_lock(governance)
                     if not lock_token:
@@ -4164,6 +4778,7 @@ def _main(argv, output):
         # Host files are the rule delivery path. Run their reconciliation before
         # index shaping or view generation can consume the night's budget.
         host_title = next(title for number, title, _fn in _SECTIONS if number == 14)
+        sync_began = time.monotonic()
         try:
             early_sync = {"id": 14, "title": host_title, "error": None,
                           **_section_host_sync(
@@ -4173,7 +4788,8 @@ def _main(argv, output):
         except Exception as exc:
             early_sync = {"id": 14, "title": host_title,
                           "error": f"{type(exc).__name__}: {exc}"}
-        snapshots = [] if parsed.dry_run else [_snapshot_vault(vault, today) for vault in vaults]
+        early_sync["seconds"] = round(time.monotonic() - sync_began, 3)
+        snapshots =[] if parsed.dry_run else [_snapshot_vault(vault, today) for vault in vaults]
         # 順路重生閱讀目錄：夜間整理已經在走每一個庫，而生成本身是「輸入指紋沒變就
         # 不寫」。失敗不影響審核包——目錄過期還有 card_lint --deep 的漏卡檢查會報。
         # 必須排在整形之前：整形的判準是「目錄已經承載這張卡」，判準本身不能是舊的。
@@ -4223,6 +4839,10 @@ def _main(argv, output):
                     "moved_examples": [], "kept_examples": [], "pruned_path": None,
                     "reason": f"{type(exc).__name__}: {exc}",
                 })
+        if not parsed.dry_run:
+            early_sync = _resync_hosts_after_shaping(early_sync, shaping, lambda: _section_host_sync(
+                vaults, today, since_date, None,
+                {"write_hosts": True, "home": Path.home(), "dry_run": False}))
         report = build_report(
             vaults, today=today, since_date=since_date, deadline=deadline, shaping=shaping,
             # 家目錄同源 harvest CLI（沒有 --home 時就是 Path.home()），不另立第二套推導。
@@ -4235,21 +4855,35 @@ def _main(argv, output):
             compliance_until_stamp=started_epoch,
             compliance_window_reset="；".join(window_reset),
             host_sync_result=early_sync,
+            apply_fixes=not parsed.dry_run,
         )
         report["vault_snapshots"] = snapshots
         report["duplicates"] = duplicate_summary
         report["owner_index"] = owner_index_result
+        report["review"] = review_list(report)
         rendered = json.dumps(report, ensure_ascii=False, indent=1)
-        content = rendered if parsed.json else _render_markdown(report)
-        if not parsed.json:
-            content += "\n" + memspec.DUPES_DREAM.format(
-                result=json.dumps(duplicate_summary, ensure_ascii=False)) + "\n"
 
         if parsed.dry_run:
+            # 只印不寫：--json 給完整報告，否則印整份盤點給明確要看的人。
+            if parsed.json:
+                content = rendered
+            else:
+                content = _render_markdown(report) + "\n" + memspec.DUPES_DREAM.format(
+                    result=json.dumps(duplicate_summary, ensure_ascii=False)) + "\n"
             print(content, file=output)
             return 0
 
+        # 寫檔只寫待判斷清單（--json 時寫完整 JSON）；整份盤點沒有讀者，不再落地。
+        content = rendered if parsed.json else _render_review(report, report["review"])
         out_path = out_path or (vaults[0] / memspec.DREAM_DIRECTORY / f"dream_pack_{today.strftime('%Y%m%d')}.md")
+        if parsed.scheduled:
+            for name in memspec.DREAM_LEGACY_PACK_FILENAMES:
+                legacy = out_path.parent / name
+                if legacy not in (out_path, json_out_path) and legacy.is_file():
+                    try:
+                        legacy.unlink()
+                    except OSError:
+                        pass
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(content, encoding="utf-8")
         if json_out_path is not None:
@@ -4328,6 +4962,7 @@ def _write_run_state(path, report, out_path, elapsed, started_epoch=None):
               and not (isinstance(checkpoint, (int, float)) and frontier <= checkpoint)):
             # 被上限截斷：推進到已完整讀完的那一刻，下一晚接著追。
             checkpoint = frontier
+    review = report.get("review") or {}
     value = {
         memspec.DREAM_STATE_COMPLETED_FIELD: now.isoformat(timespec="seconds"),
         memspec.DREAM_STATE_COMPLETED_EPOCH_FIELD: round(now.timestamp(), 3),
@@ -4335,10 +4970,17 @@ def _write_run_state(path, report, out_path, elapsed, started_epoch=None):
         memspec.DREAM_STATE_ELAPSED_FIELD: round(elapsed, 3),
         memspec.DREAM_STATE_PACK_FIELD: os.fspath(out_path),
         memspec.DREAM_STATE_HEADLINE_FIELD: _headline(report),
+        memspec.DREAM_STATE_REVIEW_ITEMS_FIELD: sum(
+            1 for item in review.get("items") or () if not item.get("surfaced")),
+        memspec.DREAM_STATE_REVIEW_TOTAL_FIELD: review.get("total", 0),
         memspec.DREAM_STATE_COMPLETE_FIELD: not errors,
         memspec.DREAM_STATE_ERRORS_FIELD: errors,
         memspec.DREAM_STATE_SECTIONS_FIELD: {
             str(section["id"]): section.get("counts") or {} for section in report["sections"]
+        },
+        memspec.DREAM_STATE_SECTION_SECONDS_FIELD: {
+            str(section["id"]): section["seconds"]
+            for section in report["sections"] if isinstance(section.get("seconds"), (int, float))
         },
         COMPLIANCE_CHECKPOINT_FIELD: checkpoint,
         memspec.DREAM_STATE_NOTIFIED_FIELD: (previous or {}).get(memspec.DREAM_STATE_NOTIFIED_FIELD)
@@ -4362,4 +5004,11 @@ def _write_run_state(path, report, out_path, elapsed, started_epoch=None):
 
 
 if __name__ == "__main__":
+    if not __package__:
+        # 排程直接執行這個檔案；套件裡的相對引用（rule_context 等）在這種身分下全部失敗，
+        # 2026-11-13 實測第 14 節每晚 18 份專案宿主檔都 REFUSE。改用套件身分重新載入再跑。
+        sys.path.insert(0, os.fspath(Path(__file__).resolve().parent.parent))
+        import runpy
+        runpy.run_module("epitype.dream", run_name="__main__", alter_sys=True)
+        raise SystemExit(0)
     raise SystemExit(main())

@@ -7,6 +7,9 @@ from . import __version__
 
 
 _COMMANDS = {
+    "roots": ("epitype.session_scope", "main", ("roots",)),
+    "scope": ("epitype.session_scope", "main", ("scope",)),
+    "core-baseline": ("epitype.core_baseline", "main", ()),
     "fixed-load": ("epitype.fixed_load", "main", ()),
     "search": ("epitype.memsearch", "main", ()),
     "cards": ("epitype.card_lint", "main", ()),

@@ -88,10 +88,12 @@ def summary(entries):
     result = []
     for entry in entries:
         if entry.get("kind") == "core-rules":
-            result.extend({"kind": "core-rules", "host": host, "over": size - entry["cap"]}
-                          for host, size in entry["host_loads"].items() if size > entry["cap"])
-        elif entry.get("over", 0) > 0:
-            result.append({"kind": "index", "path": entry["path"], "over": entry["over"]})
+            # 核心變大的開場行只有一條：core_baseline 的待處理檔。夢的狀態不再帶它，
+            # 否則同一件事開場講兩次，接受之後夢那一行還會掛到下一趟。
+            continue
+        if entry.get("over", 0) > 0 or entry.get("over_lines", 0) > 0:
+            result.append({"kind": "index", "path": entry["path"], "over": entry["over"],
+                           "over_lines": entry.get("over_lines", 0)})
     return result
 
 
@@ -99,7 +101,9 @@ def notice(entries, pack):
     parts = []
     for entry in entries:
         if entry["kind"] == "core-rules":
-            parts.append(f"{entry['host']} 常駐規則超過上限 {entry['over']} bytes")
+            parts.append(f"{entry['host']} 常駐規則比上次確認多 {entry['over']} bytes")
         else:
-            parts.append(f"短索引 {entry['path']} 超過上限 {entry['over']} bytes")
+            over_lines = entry.get("over_lines", 0)
+            parts.append(f"短索引 {entry['path']} 超過上限 {entry['over']} bytes"
+                         + (f"／{over_lines} 行" if over_lines else ""))
     return "🌙 " + "；".join(parts) + f"；整理材料：{pack} 第 11 節；" + NEXT_STEP

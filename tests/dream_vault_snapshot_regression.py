@@ -108,6 +108,32 @@ class VaultSnapshot(unittest.TestCase):
         self.assertTrue(self.pending.exists())
         self.assertFalse(self.lock.exists())
 
+    def test_codex_native_memory_folder_is_never_committed(self):
+        # ~/.codex/memories/.git 是 Codex 判斷記憶有沒有變動的基準；夢提交會讓它跳過整併。
+        codex = self.root / ".codex" / "memories"
+        codex.mkdir(parents=True)
+        run = lambda *args: subprocess.run(
+            ["git", "-C", str(codex), *args], check=True, capture_output=True, text=True,
+            encoding="utf-8", timeout=30,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout.strip()
+        run("init", "-q")
+        for key, value in (("user.name", "Codex"), ("user.email", "codex@example.com"),
+                           ("commit.gpgsign", "false")):
+            run("config", key, value)
+        (codex / "MEMORY.md").write_text("baseline\n", encoding="utf-8")
+        run("add", "-A")
+        run("commit", "-qm", "codex baseline")
+        head = run("rev-parse", "HEAD")
+        (codex / "raw_memories.md").write_text("new memory\n", encoding="utf-8")
+
+        result = dream._snapshot_vault(codex, self.today)
+
+        self.assertEqual(result["status"], "codex-native")
+        self.assertIn(result["status"], dream.VAULT_SNAPSHOT_LABELS)
+        self.assertEqual(run("rev-parse", "HEAD"), head)
+        self.assertEqual(run("status", "--porcelain"), "?? raw_memories.md")
+        self.assertFalse((codex / ".git_snapshot.lock").exists())
+
     def test_plain_vault_is_not_git(self):
         plain = self.root / "plain"
         plain.mkdir()

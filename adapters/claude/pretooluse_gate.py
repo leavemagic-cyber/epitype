@@ -33,6 +33,10 @@ from _hook_common import (
     append_gate_log,
     claim_meter,
     compile_bounded_regex,
+    binds_under_core_only,
+    core_only_binding,
+    core_only_extra_cards,
+    rule_drop_notice,
     config_path,
     declared_frontmatter,
     emit,
@@ -122,10 +126,13 @@ def _sweep_notice_markers(root, now, keep=None):
         pass
 
 
-def _notice_marker(session_id, text):
-    """True the first time this session sees this notice; False afterwards."""
+def _notice_marker(session_id, text, unwritable=True):
+    """True the first time this session sees this notice; False afterwards.
+
+    A marker that cannot be written answers `unwritable`: True lets a reminder through,
+    while a deny claims with False, because a deny with no durable marker would repeat."""
     if not session_id:
-        return True
+        return unwritable
     # 用到才載入：hashlib 要 6 ms，絕大多數呼叫走不到這裡。
     import hashlib
 
@@ -140,8 +147,21 @@ def _notice_marker(session_id, text):
     except FileExistsError:
         return False
     except OSError:
-        return True
+        return unwritable
     return True
+
+
+def _release_notice_marker(session_id, text):
+    """Undo _notice_marker when the notice it claimed was never delivered."""
+    if not session_id:
+        return
+    import hashlib
+
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+    try:
+        (notice_marker_directory(session_id) / digest).unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def _resolve_target(raw, cwd):
@@ -425,7 +445,63 @@ def _vault_card_path(target, vaults):
     return None
 
 
-def _card_review(relative, text, *, before_text=None, source_path=None):
+def _handoff_review(target, prospective):
+    """Notice when a compaction handoff being written would come back as a path only."""
+    if (prospective is None or not target.name.endswith(memspec.COMPACT_HANDOFF_SUFFIX)
+            or target.parent.name != memspec.COMPACT_MAP_DIRECTORY):
+        return None
+    from epitype import compact_map
+    problem = compact_map.resume_problem(prospective)
+    return memspec.COMPACT_RESUME_WRITE_LABEL + problem if problem else None
+
+
+def _same_class_review(card, target, prospective, started_at):
+    """Notice naming the closest current cards when this write creates a new card."""
+    vault, relative = card
+    if prospective is None or memspec.is_pending_capture(relative) or target.exists():
+        return None
+    seconds = min(memspec.SAME_CLASS_BUDGET_SECONDS, attribution_seconds(started_at))
+    if seconds <= 0:
+        return None
+    from epitype import memsearch
+    similar = memsearch.similar_cards(vault, prospective, exclude=(relative,),
+                                      deadline=time.monotonic() + seconds)
+    if not similar:
+        return None
+    cards = "；".join(
+        f"{hit['card_path']}（{' '.join(str(hit.get('description') or '').split())[:60]}）" for hit in similar)
+    return memspec.WRITE_NOTE_SAME_CLASS.format(path=relative, cards=cards)
+
+
+# hooks_template.json 的 PostToolUse 比對到的寫檔工具：這幾個寫完，改卡掛鉤會當場重綁規則卡。
+_SELF_REPAIR_HOOK_TOOLS = frozenset(("Write", "Edit", "MultiEdit"))
+
+
+def _self_repair_preview(findings, text, before_text):
+    """改卡前的「綁定對不上」：寫完會被改卡掛鉤自動重綁的編輯（只動正文或其他欄位）
+    不先警告，免得 AI 以為要自己重綁；改到原話或規則欄位的，改成講清楚寫完不會重綁。
+    只處理整條就是綁定失效的那幾行，其他問題照原樣講。"""
+    from epitype import rule_pipeline
+
+    marked = [index for index, (_level, rule, reason) in enumerate(findings)
+              if rule in ("rule-source", "rule-source-write")
+              and reason.partition("：")[2] == rule_pipeline.PAYLOAD_UNBOUND_ISSUE]
+    if not marked or not before_text:
+        return findings
+    from epitype import rule_repair
+
+    outcome = rule_repair.assess(text, before_texts=(before_text,))
+    if outcome.status == rule_repair.SAFE:
+        return [finding for index, finding in enumerate(findings) if index not in marked]
+    if outcome.status == rule_repair.UNSAFE:
+        level, rule, _reason = findings[marked[0]]
+        line = memspec.RULE_SELF_REPAIR_WRITE_UNSAFE.format(changed=rule_repair.labels(outcome.changed))
+        return [(level, rule, line) if index == marked[0] else finding
+                for index, finding in enumerate(findings) if index == marked[0] or index not in marked]
+    return findings
+
+
+def _card_review(relative, text, *, before_text=None, source_path=None, self_repair=False):
     """(deny reason, advice line) for the card this write would leave on disk.
 
     card_lint.check_card is the single reading of the type contract — a second
@@ -441,6 +517,8 @@ def _card_review(relative, text, *, before_text=None, source_path=None):
             stream.write(text)
         card_type, findings = card_lint.check_card(
             staging, relative, before_text=before_text, source_path=source_path)
+        if self_repair:
+            findings = _self_repair_preview(findings, text, before_text)
     finally:
         try:
             staging.unlink()
@@ -613,10 +691,12 @@ def _incident_line(line):
 
 def _recurrence_review(card, target, additions, prospective, patch, started_at, session_id,
                        context_id=None):
-    """Deny value when this write narrates a recurrence into a behaviour card that it
+    """Reminder text when this write narrates a recurrence into a behaviour card that it
     leaves exactly as unable to block as before; None otherwise (docs/FAILURE_MODES.md
-    §45). `card` is the (vault, relative path) the target already resolved to; `patch`
-    is the envelope entry when the write is a Codex Update File.
+    §45). Never a deny: a surface match on narration has no owner consent to block and
+    detects no wrong result (CORE-08), so the write always proceeds. `card` is the (vault,
+    relative path) the target already resolved to; `patch` is the envelope entry when the
+    write is a Codex Update File.
 
     Judged only on an existing card with frontmatter. A new card, a project/reference/
     decision card, and a named-tool write whose post-write text cannot be known are not
@@ -724,15 +804,18 @@ def _recurrence_review(card, target, additions, prospective, patch, started_at, 
         armed=armed,
         unenforceable=memspec.UNENFORCEABLE_FIELD,
     )
-    return _deny_value(reason[: memspec.WRITE_GATE_REASON_MAX_CHARS])
+    return reason[: memspec.WRITE_GATE_REASON_MAX_CHARS]
 
 
 # scope_reference/source_note are said only when this guard's own conditions match
 # the call; emitting them at discovery put every card's reference into every call.
-_Guard = namedtuple("_Guard", "card tool substrings advice path requires unless when write_check advise_tool advise_fragments advise_text sequence audience on_hit scope_reference source_note", defaults=((), "", "note", (), ""))
+_Guard = namedtuple("_Guard", "card tool substrings advice path requires unless when write_check advise_tool advise_fragments advise_text sequence audience on_hit scope_reference source_note advise_also_tool advise_also_fragments midturn_text midturn_on_hit", defaults=((), "", "note", (), "", "", (), "", "note"))
 
 
-_GUARD_FIELDS = (memspec.ACTION_GUARD_TOOL_FIELD, 'advise_tool', 'require_tool_before', memspec.WRITE_CHECK_FIELD)
+_GUARD_FIELDS = (memspec.ACTION_GUARD_TOOL_FIELD, 'advise_tool', 'advise_also_tool', 'advise_also_any_of',
+                 'advise_on_midturn', 'advise_midturn_text', 'advise_midturn_on_hit',
+                 'require_tool_before', memspec.WRITE_CHECK_FIELD)
+_MIDTURN_FIELDS = ('advise_on_midturn', 'advise_midturn_text', 'advise_midturn_on_hit')
 
 
 def _guard_candidate(path):
@@ -794,6 +877,10 @@ def _read_guard(path):
         if entry.get("advise_text"):
             entry["advise_text"] = " ".join(entry["advise_text"].split())
         entry["source_render"] = entry.get("advise_text") or entry["advice"]
+        entry["core"] = memspec.is_core_rule(fields)
+        if midturn:
+            entry["midturn_text"] = midturn
+            entry["midturn_on_hit"] = midturn_on_hit
         return entry
 
     def one_line(value):
@@ -802,6 +889,21 @@ def _read_guard(path):
     name = one_line(fields.get(memspec.NAME_FIELD)) or path.stem
     tool = one_line(fields.get(memspec.ACTION_GUARD_TOOL_FIELD))
     write_check = one_line(fields.get(memspec.WRITE_CHECK_FIELD))
+    # A mid-turn reminder rides on whatever else the card binds; `false` switches it off.
+    midturn = ""
+    midturn_flag = one_line(fields.get("advise_on_midturn")).casefold()
+    midturn_on_hit = one_line(fields.get("advise_midturn_on_hit")).casefold() or "note"
+    if midturn_flag != "false" and any(key in fields for key in _MIDTURN_FIELDS):
+        midturn = one_line(fields.get("advise_midturn_text"))[:240]
+        if midturn_flag != "true" or not midturn:
+            return memspec.ACTION_GUARD_DEFECT.format(
+                card=name, field="advise_on_midturn" if midturn_flag != "true" else "advise_midturn_text",
+                reason="advise_on_midturn: true 與非空的 advise_midturn_text 必須一起寫")
+        if midturn_on_hit not in ("note", "block"):
+            return memspec.ACTION_GUARD_DEFECT.format(
+                card=name, field="advise_midturn_on_hit", reason="只能是 block 或 note")
+    if not midturn and not any(key in fields for key in _GUARD_FIELDS if key not in _MIDTURN_FIELDS):
+        return None
     if not tool and not write_check and fields.get('require_tool_before') is not None:
         from epitype import action_sequence
         items=sequence_fields(front,('require_tool_before',))['require_tool_before']
@@ -813,15 +915,32 @@ def _read_guard(path):
         return finish({'card':name,'sequence':items,'audience':one_line(fields.get('audience')),
                 'advice':one_line(fields.get('description'))[:240],
                 'expires':one_line(fields.get(memspec.VALID_UNTIL_FIELD))})
-    if not tool and not write_check and fields.get("advise_tool"):
-        fragments = sequence_fields(front, ("advise_all_of",))["advise_all_of"]
-        if any(not isinstance(item, str) or not item.strip() for item in fragments):
+    also_tool = one_line(fields.get("advise_also_tool"))
+    if not tool and not write_check and (
+            fields.get("advise_tool") or also_tool or "advise_also_any_of" in fields):
+        declared = sequence_fields(front, ("advise_all_of", "advise_also_any_of"))
+        fragments = declared["advise_all_of"]
+        also_fragments = declared["advise_also_any_of"]
+        for field, items in (("advise_all_of", fragments), ("advise_also_any_of", also_fragments)):
+            if any(not isinstance(item, str) or not item.strip() for item in items):
+                return memspec.ACTION_GUARD_DEFECT.format(
+                    card=name, field=field, reason="提醒片段必須是非空字串")
+        # The second binding is all or nothing: a tool with no fragments would remind on
+        # every shell call, and fragments with no tool would bind nothing while looking armed.
+        if (also_tool or "advise_also_any_of" in fields) and not (also_tool and also_fragments):
             return memspec.ACTION_GUARD_DEFECT.format(
-                card=name, field="advise_all_of", reason="提醒片段必須是非空字串")
+                card=name, field="advise_also_tool" if not also_tool else "advise_also_any_of",
+                reason="advise_also_tool 與 advise_also_any_of 必須一起寫，且片段非空")
+        if not one_line(fields.get("advise_tool")):
+            return memspec.ACTION_GUARD_DEFECT.format(
+                card=name, field="advise_also_tool", reason="附加觸發需要先有 advise_tool")
         return finish({"card": name, "advise_tool": one_line(fields["advise_tool"]),
                 "advise_fragments": fragments,
+                "advise_also_tool": also_tool, "advise_also_fragments": also_fragments,
                 "advise_text": one_line(fields.get("advise_text") or fields.get("description"))[:240],
                 "expires": one_line(fields.get(memspec.VALID_UNTIL_FIELD))})
+    if not tool and not write_check and midturn:
+        return finish({"card": name, "expires": one_line(fields.get(memspec.VALID_UNTIL_FIELD))})
     if write_check and write_check not in memspec.WRITE_CHECK_VALUES:
         return memspec.ACTION_GUARD_DEFECT.format(
             card=name, field=memspec.WRITE_CHECK_FIELD,
@@ -1002,11 +1121,11 @@ def warm_guard_cache(vaults, started_at, deadline=None):
 _WARM_CAP = 1 << 30
 # 欄位形狀增加 write_check；版本不對就整份重讀。
 # 6：包在 `metadata:` 底下的守衛欄位照頂層讀，舊快取把那些卡記成「沒有守衛」。
-_GUARD_CACHE_VERSION = 10
+_GUARD_CACHE_VERSION = 13
 
 
 def _guards(vault, started_at, defects, cap=None, deadline=None, *, event=None, advisories=None,
-            match_first=False, warm_only=False):
+            match_first=False, warm_only=False, drops=None):
     """Every usable guard in one vault, discovered through a manifest cache.
 
     The cache locates candidates; it never supplies executable evidence. Every
@@ -1014,7 +1133,8 @@ def _guards(vault, started_at, defects, cap=None, deadline=None, *, event=None, 
     Changed and rotating negative candidates have a separate discovery budget.
     A warm call without an actual event only discovers guards, never enforces.
     match_first=True returns ADVISORY-scope guards too, carrying their reference,
-    and defers every per-card note to the caller's own trigger match."""
+    and defers every per-card note to the caller's own trigger match.
+    drops: a list that receives (path, reason) for each card whose guard was dropped."""
     from epitype import cardscan, rule_context
 
     def timed_out():
@@ -1117,13 +1237,23 @@ def _guards(vault, started_at, defects, cap=None, deadline=None, *, event=None, 
     if warm_only:
         return []
     found = []
+    core_only = core_only_binding()
+    extra = core_only_extra_cards() if core_only else frozenset()
     for card_path in sorted(fresh):
         entry = fresh[card_path]
+        if core_only and isinstance(entry, dict) and not binds_under_core_only(
+                card_path, entry.get("core"), extra):
+            # Owner 2026-11-13: only core rules bind; other cards stay memory —
+            # except the few the owner names in bind_also_cards (2026-11-25).
+            continue
         if isinstance(entry, str):
             defects.append(entry)
+            if drops is not None:
+                drops.append((paths[card_path], entry))
         elif isinstance(entry, dict) and (
             entry.get("substrings") or entry.get("requires") or entry.get("when")
             or entry.get("write_check") or entry.get("advise_tool") or entry.get("sequence")
+            or entry.get("midturn_text")
         ):
             if memspec.card_expired(entry.get("expires")):
                 # 過期的守衛不再攔人；時限型的規則要自己停下來，不能靠人記得去拔。
@@ -1133,6 +1263,11 @@ def _guards(vault, started_at, defects, cap=None, deadline=None, *, event=None, 
             on_hit = entry.get("on_hit", "note")
             advice = entry.get("advice", "")
             source_note = ""
+            # CORE-08/CORE-25: a mid-turn deny needs the same owner-backed source as any deny.
+            midturn_on_hit = entry.get("midturn_on_hit", "note")
+            if not (entry.get("source_status") in ("VERIFIED", "REVIEWED")
+                    and entry.get("source_blocking_basis", False)):
+                midturn_on_hit = "note"
             if (on_hit == "block" and entry.get("source_status") in ("VERIFIED", "REVIEWED")
                     and not entry.get("source_blocking_basis", False)):
                 on_hit = "note"
@@ -1150,7 +1285,7 @@ def _guards(vault, started_at, defects, cap=None, deadline=None, *, event=None, 
             scope = entry.get("source_scope")
             scope_reference = ()
             if scope is not None:
-                state, reason = rule_context.applicability(scope, event)
+                state, reason = rule_context.applicability(scope, event, card=paths[card_path])
                 if state == "OUTSIDE":
                     continue
                 if state == "ADVISORY":
@@ -1189,6 +1324,10 @@ def _guards(vault, started_at, defects, cap=None, deadline=None, *, event=None, 
                     on_hit,
                     scope_reference,
                     source_note,
+                    entry.get("advise_also_tool", ""),
+                    tuple(entry.get("advise_also_fragments") or ()),
+                    entry.get("midturn_text", ""),
+                    midturn_on_hit,
                 )
             )
     return found
@@ -1311,7 +1450,7 @@ def _jsonl_delete_matches(card, fields, tool_name, defects):
 
 
 def _guard_review(event, tool_name, tool_input, config, started_at, defects, advisories=None,
-                  delivery_claims=None):
+                  delivery_claims=None, drops=None):
     """(deny value, ()) when a scar card's fragments all appear in this call.
 
     Owner 2026-09-16 lifted §34's "cards may not carry an action condition". What is
@@ -1330,6 +1469,8 @@ def _guard_review(event, tool_name, tool_input, config, started_at, defects, adv
     # 沒有重入問題（它不寫東西，拒絕也不會再觸發自己）。照著讀的話，Stop 閘擋下之後
     # 的那一段續跑，工具守衛整個是關的——而那正是我被逼著換做法、最可能亂動手的時刻。
     folded_tool = tool_name.casefold()
+    sequence_state = None
+    midturn = None
     for vault in resolve_vaults(config, event):
         if expired(started_at):
             defects.append("guard source UNVERIFIED: verification budget exhausted before vault read")
@@ -1339,7 +1480,9 @@ def _guard_review(event, tool_name, tool_input, config, started_at, defects, adv
         # 永遠回空集合，而為了拿一個空集合，每一次工具呼叫都要多載 8.3 ms 的模組。
         demoted = frozenset()
         for guard in _guards(vault, started_at, defects, event=event, advisories=advisories,
-                             match_first=True):
+                             match_first=True, drops=drops):
+            if guard.midturn_text and midturn is None:
+                midturn = guard
             if guard.sequence:
                 from epitype import action_receipts, action_sequence, tool_sequence
                 if not tool_sequence.applies(guard.audience,event): continue
@@ -1348,12 +1491,18 @@ def _guard_review(event, tool_name, tool_input, config, started_at, defects, adv
                 if any(action.kind in mutations for action in actions):
                     if _guard_matched(guard, defects, advisories):
                         continue
-                    facts=action_receipts.read(event,action_receipts.database_path(config_path()))
-                    start=max((max(f.started,f.finished) for f in facts),default=0)+1
-                    # This is a proposed operation, not persisted execution evidence.
-                    proposed=action_receipts.Fact('__proposed__',start,start+1,True,tuple(actions))
-                    judgments=action_sequence.check(guard.sequence,(*facts,proposed),{'__proposed__'},
-                        covered=action_receipts.coverage(event,action_receipts.database_path(config_path())))
+                    # 長對話的回條上萬筆：一次工具呼叫只讀一次、索引一次，各守衛共用（2026-11-12）。
+                    if sequence_state is None:
+                        facts=action_receipts.read_relevant(event,action_receipts.database_path(config_path()),actions=actions)
+                        start=max((max(f.started,f.finished) for f in facts),default=0)+1
+                        # This is a proposed operation, not persisted execution evidence.
+                        proposed=action_receipts.Fact('__proposed__',start,start+1,True,tuple(actions))
+                        all_facts=(*facts,proposed)
+                        sequence_state=(all_facts,action_sequence.prepare(all_facts),
+                            action_receipts.coverage(event,action_receipts.database_path(config_path())))
+                    all_facts,prepared,covered=sequence_state
+                    judgments=action_sequence.check(guard.sequence,all_facts,{'__proposed__'},
+                        covered=covered,prepared=prepared)
                     safety = _sequence_preflight(event, actions, started_at, defects,
                         read_files=any(j.verdict != 'allow' for j in judgments))
                     if safety is not None:
@@ -1379,9 +1528,14 @@ def _guard_review(event, tool_name, tool_input, config, started_at, defects, adv
                         if advisories is not None and guard.advice:
                             advisories.append((guard.path,guard.card,f'未驗證：{unknown.reason}。{guard.advice}'))
                 continue
-            if (guard.advise_text
-                    and memspec.action_guard_tool_matches(guard.advise_tool, folded_tool)
-                    and all(fragment in haystack for fragment in guard.advise_fragments)):
+            # advise_tool + advise_all_of, or the card's second binding: advise_also_tool
+            # with any one advise_also_any_of fragment. Either way the card says one line.
+            if guard.advise_text and (
+                    (memspec.action_guard_tool_matches(guard.advise_tool, folded_tool)
+                     and all(fragment in haystack for fragment in guard.advise_fragments))
+                    or (guard.advise_also_tool
+                        and memspec.action_guard_tool_matches(guard.advise_also_tool, folded_tool)
+                        and any(fragment in haystack for fragment in guard.advise_also_fragments))):
                 if _guard_matched(guard, defects, advisories):
                     continue
                 if advisories is not None:
@@ -1471,7 +1625,211 @@ def _guard_review(event, tool_name, tool_input, config, started_at, defects, adv
             if delivery_claims is not None:
                 delivery_claims.append((hook_context.identity(event), None, guard.path, vault))
             return _deny_value(reason)
+    if midturn is not None and advisories is not None and not expired(started_at):
+        if midturn.midturn_on_hit == "block":
+            return _midturn_block(event, midturn, defects, advisories)
+        _midturn_advice(event, midturn, advisories, defects)
     return None
+
+
+def _midturn_line(event, guard, defects, advisories, answered_by_text=True):
+    """(key, rendered line) for the owner's unanswered mid-turn message, or None.
+
+    An unreadable transcript gives None: this reminder or deny is never worth the call."""
+    try:
+        pending = _midturn_pending(event, answered_by_text)
+    except (OSError, ValueError, UnicodeError):
+        return None
+    if pending is None or _guard_matched(guard, defects, advisories):
+        return None
+    key, message = pending
+    message = " ".join(message.split())
+    if len(message) > memspec.MIDTURN_MESSAGE_MAX_CHARS:
+        message = message[: memspec.MIDTURN_MESSAGE_MAX_CHARS] + "…"
+    return key, guard.midturn_text.replace(memspec.MIDTURN_MESSAGE_PLACEHOLDER, message)
+
+
+def _midturn_block(event, guard, defects, advisories):
+    """Deny the first call after the owner's unanswered mid-turn message, once per message.
+
+    The claim is a per-session marker keyed by the message alone, made before the deny is
+    returned: parallel calls of one response race for it and only the winner is denied;
+    every later call, answered or not, passes with nothing. No session or an unwritable
+    marker means no durable claim, so nothing is denied (a deny that could repeat is a loop).
+
+    AI text after the message does not release it: whether text answers the owner cannot
+    be judged (an unrelated "Re-issuing…" line would pass), and one resend per owner
+    message is cheap. The reason says so, so an AI that did answer just resends."""
+    found = _midturn_line(event, guard, defects, advisories, answered_by_text=False)
+    if found is None:
+        return None
+    key, line = found
+    if not _notice_marker(event.get("session_id"), "tool-block-midturn:" + key, unwritable=False):
+        return None
+    return _deny_value(memspec.ACTION_GUARD_ADVISORY_LINE.format(card=guard.card, excerpt=line)
+                       + " " + memspec.MIDTURN_BLOCK_RETRY)
+
+
+def _midturn_advice(event, guard, advisories, defects):
+    """Put the card's mid-turn line first when the owner's mid-turn message has no reply yet.
+
+    First, so the two-line cap serves it before generic advice. A nested batch step
+    reviews the same call again; one entry per call is enough."""
+    if any(len(item) > 3 for item in advisories):
+        return
+    found = _midturn_line(event, guard, defects, advisories)
+    if found is not None:
+        advisories.insert(0, (guard.path, guard.card, found[1], found[0]))
+
+
+def _midturn_pending(event, answered_by_text=True):
+    """(dedupe key, text) of the owner's latest mid-turn message with no assistant text after
+    it in the tail of this call's transcript; None when there is none.
+
+    With `answered_by_text` false, assistant text does not count; only a new task or a new
+    prompt ends the message's turn, so a stale message never reaches a later turn.
+
+    Claude records it as a human `queued_command` attachment; Codex as a user message whose
+    provenance is the user, arriving after a tool output inside a running task. Only the
+    main thread is asked: the owner's mid-turn words go to it, not to a subagent. Lines are
+    filtered by bytes first and only the few that can matter are parsed: this runs on every
+    tool call once such a message sits in the tail."""
+    path, actor = _background_transcript(event)
+    if path is None or actor or path.parent.name.casefold() == "subagents":
+        return None
+    limit = memspec.MIDTURN_TAIL_BYTES
+    with Path(path).open("rb") as stream:
+        size = stream.seek(0, os.SEEK_END)
+        start = max(0, size - limit)
+        stream.seek(start)
+        data = stream.read(limit)
+    if not any(marker in data for marker in memspec.MIDTURN_TAIL_MARKERS):
+        return None
+    lines = data.splitlines()
+    if start > 0:
+        lines = lines[1:]  # the first line is cut mid-record
+    for index in range(len(lines) - 1, -1, -1):
+        raw = lines[index]
+        if not any(marker in raw for marker in memspec.MIDTURN_TAIL_MARKERS):
+            continue
+        found = _midturn_message(_json_row(raw), lines, index)
+        if found is None:
+            continue
+        # The latest owner message decides: any assistant text or new task after it answers it.
+        for later in lines[index + 1:]:
+            if b'"task_started"' in later and _payload_type(_json_row(later)) == "task_started":
+                return None
+            if answered_by_text:
+                if b'"assistant"' in later and _assistant_text(_json_row(later)):
+                    return None
+            elif b'"user"' in later and _new_prompt(_json_row(later)):
+                return None
+        return found
+    return None
+
+
+def _json_row(raw):
+    try:
+        row = json.loads(raw)
+    except ValueError:
+        return {}
+    return row if isinstance(row, dict) else {}
+
+
+def _new_prompt(row):
+    """A Claude user row that starts a turn (any prompt, notice or summary), not a tool result."""
+    if row.get("type") != "user" or row.get("isSidechain"):
+        return False
+    content = (row.get("message") or {}).get("content")
+    if isinstance(content, str):
+        return True
+    return isinstance(content, list) and not any(
+        isinstance(item, dict) and item.get("type") == "tool_result" for item in content)
+
+
+def _payload_type(row):
+    payload = row.get("payload")
+    return payload.get("type") if isinstance(payload, dict) else None
+
+
+def _assistant_text(row):
+    if row.get("type") == "assistant":
+        return not row.get("isSidechain") and _has_text((row.get("message") or {}).get("content"))
+    payload = row.get("payload")
+    return (row.get("type") == "response_item" and isinstance(payload, dict)
+            and payload.get("type") == "message" and payload.get("role") == "assistant"
+            and _has_text(payload.get("content")))
+
+
+def _midturn_message(row, lines, index):
+    """(key, text) when `row` is an owner message sent mid-turn; else None."""
+    if row.get("type") == "attachment":
+        from epitype import transcript
+        source = transcript.source_record(row)
+        key = (row.get("attachment") or {}).get("source_uuid") or row.get("uuid")
+        text = (_owner_words(source[1]) if source is not None and source[0] == "Q"
+                and isinstance(source[1], str) else "")
+        return ("claude:" + str(key), text) if text and key else None
+    payload = row.get("payload")
+    if (row.get("type") != "response_item" or not isinstance(payload, dict)
+            or payload.get("type") != "message" or payload.get("role") != "user"):
+        return None
+    text = _owner_words(_codex_user_text(payload))
+    if not text:
+        return None
+    # Mid-turn only: a tool output since this task started. The task's opening prompt
+    # has none, and a window that shows neither proves nothing.
+    for earlier in reversed(lines[:index]):
+        if b"_call_output" in earlier and _payload_type(_json_row(earlier)) in (
+                "function_call_output", "custom_tool_call_output"):
+            return "codex:" + str(payload.get("id") or row.get("timestamp")), text
+        if b'"task_started"' in earlier and _payload_type(_json_row(earlier)) == "task_started":
+            return None
+    return None
+
+
+# A slash command typed into the queue (`/goal clear`) is an instruction to the host,
+# not words for the AI to answer.
+_SLASH_COMMAND = re.compile(r"/[A-Za-z][\w:.-]*(?:\s|$)")
+# A whole `<tag …>…</tag>` element is host- or tool-wrapped text: a system reminder,
+# Codex's reply to the AI's own question. Only a balanced element with a matching
+# closing tag counts, so owner text that merely contains `<` is kept. Claude Code's
+# paste block is the exception: what the owner pasted is theirs, so only its tags go
+# (its closing tag repeats the id, and a long paste may lose it).
+_WRAPPED_ELEMENT = re.compile(r"<([A-Za-z][\w-]*)(?:\s[^<>]*)?>.*?</\1(?:\s[^<>]*)?>", re.S)
+_PASTE_TAG = re.compile(r"</?pasted_content(?:\s[^<>]*)?>")
+
+
+def _owner_words(text):
+    """What the owner typed in a mid-turn message, outside slash commands and wrappers."""
+    text = text.strip() if isinstance(text, str) else ""
+    if not text or _SLASH_COMMAND.match(text):
+        return ""
+    return _WRAPPED_ELEMENT.sub(" ", _PASTE_TAG.sub(" ", text)).strip()
+
+
+def _has_text(content):
+    if isinstance(content, str):
+        return bool(content.strip())
+    return isinstance(content, list) and any(
+        isinstance(block, dict) and block.get("type") in ("text", "output_text")
+        and isinstance(block.get("text"), str) and block["text"].strip()
+        for block in content)
+
+
+def _codex_user_text(payload):
+    """The text of a Codex user message the owner typed; "" for harness-injected context."""
+    meta = payload.get("internal_chat_message_metadata_passthrough")
+    items = meta.get("content_item_metadata") if isinstance(meta, dict) else None
+    if not isinstance(items, list) or not items or not all(
+            isinstance(item, dict) and isinstance(item.get("provenance"), dict)
+            and item["provenance"].get("type") == "user" for item in items):
+        return ""
+    content = payload.get("content")
+    if not isinstance(content, list):
+        return ""
+    return "\n".join(block["text"] for block in content if isinstance(block, dict)
+                     and block.get("type") == "input_text" and isinstance(block.get("text"), str)).strip()
 
 
 def _sequence_preflight(event, actions, started_at, notices, *, read_files=False):
@@ -1946,9 +2304,20 @@ for exact source validation; writing a draft is not publishing verified authorit
 
     if expired(started_at):
         return None, notices
+    handoff = _handoff_review(target, prospective)
+    if handoff:
+        notices.append(handoff)
     card = _vault_card_path(target, resolve_vaults(config, event))
     if card is None:
         return None, notices
+    # 同一個教訓另開新卡，舊卡就沒人更新（2026-11-12 某專案：C 槽測試包另寫一張，
+    # 09-25 的 C 槽卡沒動）。只在新建卡片時提醒，不擋；自己壞掉也不影響後面兩條。
+    try:
+        same_class = _same_class_review(card, target, prospective, started_at)
+    except Exception:
+        same_class = None
+    if same_class:
+        notices.append(same_class)
     # 這條自己壞掉，不能連帶讓卡片契約那條也不判，所以單獨接住。
     try:
         recurrence = _recurrence_review(
@@ -1958,13 +2327,14 @@ for exact source validation; writing a draft is not publishing verified authorit
     except Exception:
         recurrence = None
     if recurrence is not None:
-        notices.append(memspec.WRITE_NOTE_RECURRENCE_LABEL + recurrence["hookSpecificOutput"]["permissionDecisionReason"])
+        notices.append(memspec.WRITE_NOTE_RECURRENCE_LABEL + recurrence)
 
     if prospective is None or expired(started_at):
         return None, notices
     vault, relative = card
     reason, advice = _card_review(relative, prospective,
-                                 before_text=locals().get("before", ""), source_path=target)
+                                 before_text=locals().get("before", ""), source_path=target,
+                                 self_repair=patch is None and event.get("tool_name") in _SELF_REPAIR_HOOK_TOOLS)
     if reason is None:
         if advice:
             notices.append(advice)
@@ -2442,11 +2812,14 @@ def _allow_context(event, notices=(), config=None, started_at=None, meter_claims
         if _notice_marker(session_id, notice + "\0" + target):
             lines.append(notice)
     shown = 0
-    for path, card, excerpt in advisories:
+    for item in advisories:
+        path, card, excerpt = item[:3]
         if shown == 2:
             break
         line = memspec.ACTION_GUARD_ADVISORY_LINE.format(card=card, excerpt=excerpt)
-        marker = "tool-advice:" + str(path.resolve()) + "\0" + target + "\0" + line
+        # A mid-turn reminder is said once per owner message, whatever the call targets.
+        marker = ("tool-advice-midturn:" + str(path.resolve()) + "\0" + item[3] if len(item) > 3
+                  else "tool-advice:" + str(path.resolve()) + "\0" + target + "\0" + line)
         if (payload_fits("PreToolUse", "\n".join([*lines, line]),
                          config[memspec.CONFIG_BUDGET_BYTES_FIELD])
                 and _notice_marker(session_id, marker)):
@@ -2899,16 +3272,17 @@ def _handle_review(event, started_at, defects=None, meter_claims=None, advice_cl
     from _hook_common import capture_transcript_events
     capture_transcript_events(config, event, started_at)
     advisories = []
+    drops = []
     try:
         guard_value = _guard_review(
             event, tool_name, event.get("tool_input"), config, started_at, defects, advisories,
-            delivery_claims=advice_claims
+            delivery_claims=advice_claims, drops=drops
         )
         for step_tool, step_input in memspec.nested_tool_calls(tool_name, event.get("tool_input")):
             if guard_value is not None:
                 break
             guard_value = _guard_review(event, step_tool, step_input, config, started_at, defects, advisories,
-                                        delivery_claims=advice_claims)
+                                        delivery_claims=advice_claims, drops=drops)
     except Exception as exc:
         defects.append(f"guard source UNVERIFIED: review failed ({type(exc).__name__}); next check: inspect this exact tool call")
         guard_value = None
@@ -2953,7 +3327,23 @@ def _handle_review(event, started_at, defects=None, meter_claims=None, advice_cl
         return control_value
     if control_notice:
         notices = tuple(notices) + (control_notice,)
-    return _allow_context(event, notices, config, started_at, meter_claims, advisories, advice_claims)
+    return _allow_context(event, _drop_notices(event, drops) + tuple(notices), config, started_at,
+                          meter_claims, advisories, advice_claims)
+
+
+def _drop_notices(event, drops):
+    """A guard dropped for its source or projection, said once per card per session:
+    its defect line alone goes to stderr, which the model never reads. The marker is
+    the one the Stop gate claims for the same card."""
+    session_id = hook_context.identity(event)
+    lines = []
+    for path, reason in dict.fromkeys(drops):
+        if len(lines) == memspec.GATE_DEFECT_MAX_LINES:
+            break
+        line = rule_drop_notice(path, reason)
+        if line and _notice_marker(session_id, "rule-drop:" + str(Path(path).resolve())):
+            lines.append(line)
+    return tuple(lines)
 
 
 def _control_review(event, tool_name, started_at):
@@ -4320,6 +4710,63 @@ def _selftest():
     return 0 if status == "PASS" else 1
 
 
+def _rule_repair_before(tool_name, tool_input, response, current):
+    """改前全文的候選：宿主回傳的原檔，或把這次的 Edit 倒回去。候選只是候選，
+    rule_repair 只採用「自己當時就綁得上」的那一份，倒錯了也不會被當成基準。"""
+    candidates = []
+    if isinstance(response, dict):
+        for key in ("originalFile", "original_file"):
+            if isinstance(response.get(key), str):
+                candidates.append(response[key])
+    if tool_name.casefold() not in (memspec.WRITE_GATE_EDIT_TOOLS | memspec.WRITE_GATE_MULTI_EDIT_TOOLS):
+        return candidates
+    # 宿主比對 old_string 用的是 LF；綁定雜湊不看換行字元，倒回去也用 LF。
+    texts = [current.replace("\r\n", "\n")]
+    for old, new, replace_all in reversed(_edit_items(tool_name, tool_input)):
+        if not isinstance(old, str) or not isinstance(new, str) or not new:
+            return candidates
+        following = []
+        for text in texts:
+            if replace_all:
+                following.append(text.replace(new, old))
+                continue
+            start = text.find(new)
+            while start >= 0 and len(following) < 8:
+                following.append(text[:start] + old + text[start + len(new):])
+                start = text.find(new, start + 1)
+        texts = following[:8]
+    return candidates + texts
+
+
+def _rule_self_repair(event, started_at):
+    """PostToolUse：AI 剛用寫檔工具改了一張規則卡。只改正文或其他欄位就由 Epitype 當場重綁；
+    改到原話或規則欄位、或判斷不出改了什麼就不綁，回一行給改卡的 AI（不是給 owner）。
+    壞了只在 stderr 講一句，不擋工作：這張卡夢的夜間掃描還會再看一次。"""
+    try:
+        config = load_config(started_at)
+        tool_input = event.get("tool_input")
+        if config is None or not isinstance(tool_input, dict):
+            return None
+        target = _write_target(tool_input, event.get("cwd"))
+        if target is None or not target.is_file():
+            return None
+        card = _vault_card_path(target, resolve_vaults(config, event))
+        if card is None or memspec.codex_native_generated(card[0], target):
+            return None
+        from epitype import rule_repair
+        current = target.read_bytes().decode("utf-8-sig")
+        before = _rule_repair_before(str(event.get("tool_name")), tool_input,
+                                     event.get("tool_response"), current)
+        outcome = rule_repair.repair(target, before_texts=before, session=event.get("session_id"),
+                                     seconds=attribution_seconds(started_at))
+        return rule_repair.notice(target, outcome)
+    except Exception as exc:
+        if config_path().exists():
+            print(memspec.GATE_DEGRADED_NOTICE.format(
+                gate="rule self-repair", reason=type(exc).__name__), file=sys.stderr)
+        return None
+
+
 def _best_effort_record(event):
     """附記這次呼叫碰到的檔名。壞了就算了：這是紀錄，不是關卡，不能讓它擋住工作。"""
     try:
@@ -4366,6 +4813,14 @@ def main():
         if event.get("hook_event_name") == "PostToolUse":
             from epitype import action_receipts
             action_receipts.finish(event, action_receipts.database_path(config_path()))
+            if str(event.get("tool_name") or "").casefold() in memspec.WRITE_GATE_TOOL_NAMES:
+                note = _rule_self_repair(event, _STARTED_AT)
+                if note:
+                    emit({"hookSpecificOutput": {
+                        "hookEventName": "PostToolUse",
+                        "additionalContext": note,
+                    }})
+                return 0
             # 截圖、點擊這類每步都觸發的操控改不了帳本：在讀設定、開 SQLite 之前就回去，
             # 否則每個瀏覽器動作都白付一次設定載入。
             if not control_lifecycle.is_tracked_tool(event.get("tool_name")):

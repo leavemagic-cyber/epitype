@@ -401,6 +401,23 @@ class RecallRankRegression(unittest.TestCase):
         self.assertEqual(self.recall('what is the')['results'], [])
 
 
+    def test_latin_letter_joined_to_cjk_is_one_term(self):
+        # 2026-11-12: 「為什麼c槽又被你塞滿」 searched only 緊急/處理 and missed the
+        # C-drive lesson; the lone letter and the particle bigrams were all dropped.
+        for index in range(6):
+            self.card(f'urgent-{index}', '緊急狀況立刻處理的通用做法', '緊急 立刻 處理 ' * 5)
+        self.card('c-drive', 'C槽又快速被占：worktree 只開不收', extra='aliases: [C槽又被占]\n')
+        self.card('spaced', '注意 C 槽空間，不要留垃圾檔')
+        self.card('abc', 'abc槽位設定')
+        terms = [term.casefold() for term in memsearch._recall_terms('緊急！為什麼c槽又被你塞滿，立刻處理')]
+        self.assertIn('c槽', terms)
+        self.assertNotIn('c槽', [t.casefold() for t in memsearch._recall_terms('abc槽')])
+        names = [item['name'] for item in self.recall('緊急！為什麼c槽又被你塞滿，立刻處理')['results']]
+        self.assertEqual(names[:1], ['c-drive'])
+        self.assertIn('spaced', [item['name'] for item in self.recall('C槽空間又不夠')['results']])
+        self.assertNotIn('abc', names)
+
+
 class RecallTextRegression(unittest.TestCase):
     def test_benchmark_does_not_count_body_mentions_or_pointers_as_card_delivery(self):
         vault = (ROOT / 'synthetic-vault').resolve()

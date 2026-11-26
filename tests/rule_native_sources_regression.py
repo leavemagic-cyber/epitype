@@ -826,6 +826,40 @@ class NativeSourceConsumers(unittest.TestCase):
         self.assertEqual(self.call()[0], (0, 0))
 
 
+class BatchSyncIsUnbounded(unittest.TestCase):
+    """Manual `epitype sync` and the nightly step have no hook deadline (2026-11-17: the
+    whole native card scan measured 4-15 s, so the 5 s budget refused native settings at
+    random). Hooks keep their bound; only these batch entry points lift it."""
+
+    def seen(self, run):
+        flags = []
+        def record(*_args, **_kwargs):
+            flags.append(rule_provenance._UNBOUNDED)
+            return host_sync.EXIT_OK
+        with patch.object(host_sync, 'check', record), patch.object(host_sync, 'apply', record):
+            run()
+        self.assertFalse(rule_provenance._UNBOUNDED)
+        return flags
+
+    def test_manual_check_and_apply_run_unbounded(self):
+        self.assertEqual(self.seen(lambda: host_sync.main(['x'], output=io.StringIO())), [True])
+        self.assertEqual(self.seen(lambda: host_sync.main(['x', '--apply'], output=io.StringIO())), [True])
+
+    def test_nightly_check_and_apply_run_unbounded(self):
+        from epitype import dream
+        def run():
+            with patch.object(host_sync, 'check', side_effect=lambda *a, **k: (
+                    self.flags.append(rule_provenance._UNBOUNDED), host_sync.EXIT_DRIFT)[1]):
+                dream._section_host_sync([], None, None, {}, {'write_hosts': True})
+        self.flags = []
+        applied = self.seen(run)
+        self.assertEqual(self.flags + applied, [True, True])
+
+    def test_bounded_native_collect_still_refuses_outside_batch(self):
+        self.assertFalse(rule_provenance._UNBOUNDED)
+        self.assertNotEqual(rule_provenance.verification_deadline(0.0), float('inf'))
+
+
 if __name__ == '__main__':
     if '--selftest' in sys.argv:
         sys.argv.remove('--selftest')

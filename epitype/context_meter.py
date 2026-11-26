@@ -635,9 +635,20 @@ def _handoff_size_notice(path):
         size = Path(path).stat().st_size
     except OSError:
         return ""
-    if size <= memspec.CONTEXT_METER_HANDOFF_SIZE_BYTES:
-        return ""
-    return " " + memspec.CONTEXT_METER_HANDOFF_SIZE_NOTICE.format(size=size)
+    note = ""
+    if size > memspec.CONTEXT_METER_HANDOFF_SIZE_BYTES:
+        note = " " + memspec.CONTEXT_METER_HANDOFF_SIZE_NOTICE.format(size=size)
+    try:
+        try:
+            from . import compact_map
+        except ImportError:
+            import compact_map
+        with Path(path).open("rb") as stream:
+            head = stream.read(memspec.COMPACT_RESUME_MAX_BYTES * 2)
+        problem = compact_map.resume_problem(head.decode("utf-8", errors="ignore"))
+    except (OSError, ValueError):
+        problem = None
+    return (" " + problem if problem else "") + note
 
 
 # ---------------------------------------------------------------- Codex 壓縮點
@@ -788,6 +799,8 @@ def rotation_notice(reading, limit, vault, session_id, transcript, directory, op
     path = _handoff(vault, session_id, transcript)
     line = (f"目前約 {_k(reading.tokens)}k token；到有界檢查點時將 {path} 整份覆寫成短狀態："
             "仍有效的使用者要求、決定與理由、進度、下一步、未完成、已排除的路、確切路徑或指令。"
+            "短狀態放在 <!-- EPITYPE RESUME BEGIN --> 與 <!-- EPITYPE RESUME END --> 之間（各自一行、放檔頭），"
+            "連標頭限 8192 位元組（約 2700 個中文字），超過或缺標記，壓縮後只帶回路徑。"
             "不要保留舊內容再追加；仍需的舊流水搬到同目錄另一檔。"
             "只供同一 task 壓縮後續跑。寫完由原 task 繼續；不要要求 owner 開新 task、不要貼接手 prompt、"
             "不要宣稱已交接或因 context 壓力停止。")
@@ -1716,14 +1729,27 @@ def _selftest():
                            and len(kept) == memspec.CONTEXT_METER_STATE_KEEP
                            and not list(state.parent.glob(".*.tmp-*"))))
 
-            # 9b. 兩個行程同時記錄：讀–追加–換名在同一把鎖裡，每一筆都留下。
+            # 9a. 拿不到鎖就放棄這一筆：等滿正式預算後回 None，檔案不動。
+            held_vault = root / "held-vault"
+            held_state = state_path(held_vault)
+            held_state.parent.mkdir(parents=True)
+            with memspec.file_lock(held_state, 0) as holding:
+                dropped = record_autocompact(held_vault, transcript, environ=env92, clock=frozen_clock)
+            checks.append(("a recording that cannot get the lock within the budget gives up and writes nothing",
+                           holding is True and dropped is None and not held_state.exists()))
+
+            # 9b. 兩個行程同時記錄：讀–追加–換名在同一把鎖裡，每一筆都留下。這題驗的是
+            # 鎖內的完整性，不是 0.5 秒的放棄預算（9a 驗）：滿載的機器上一次持鎖（建鎖的
+            # fsync 加上換名）實測會超過 0.5 秒，另一個行程照設計放棄一筆，題目就假紅
+            # （8 路併行 200 次紅 8 次，紅的每一次都是等滿 0.5 秒後放棄）。
             race_vault = root / "race-vault"
             race_dir = root / "race"
             race_dir.mkdir()
             child = (
                 "import sys, time, pathlib\n"
                 "sys.path.insert(0, sys.argv[1])\n"
-                "from epitype import context_meter\n"
+                "from epitype import context_meter, memspec\n"
+                "memspec.CONTEXT_METER_LOCK_SECONDS = 60\n"
                 "ready = pathlib.Path(sys.argv[4]) / ('ready-' + sys.argv[5])\n"
                 "go = pathlib.Path(sys.argv[4]) / 'go'\n"
                 "ready.write_text('1')\n"
@@ -2165,7 +2191,7 @@ def _selftest():
     except Exception as exc:
         print(f"SELFTEST ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
     passed = sum(bool(ok) for _, ok in checks)
-    total = 38
+    total = 39
     status_word = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status_word} {passed}/{total}")
     if status_word != "PASS":

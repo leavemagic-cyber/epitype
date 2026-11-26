@@ -17,6 +17,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from epitype import dream, memspec
 
 TODAY = date(2026, 9, 18)
+# 檢討包的擋下窗：夜報要能清空，一週沒再擋就退出。
+WINDOW_DAYS = 7
 
 
 def _vault(root):
@@ -26,10 +28,10 @@ def _vault(root):
     return vault
 
 
-def _block(card, session, digest, day="2026-09-17"):
+def _block(card, session, digest, day="2026-09-17", kind=memspec.STOP_GATE_LOG_KIND):
     return json.dumps({
         "timestamp": f"{day}T02:00:00+00:00",
-        "kind": memspec.STOP_GATE_LOG_KIND,
+        "kind": kind,
         "rule": "forbidden",
         "card": card,
         "session_id": session,
@@ -85,6 +87,51 @@ def main():
             and result["counts"]["cards"] == 3,
         ))
 
+    # 檢討包只數真的擋下、且在最近一週內的列：stop_note 不擋，舊的擋下要能退出。
+    with tempfile.TemporaryDirectory(prefix="epitype-review-window-") as temp_dir:
+        vault = _vault(Path(temp_dir).resolve())
+        _gate_log(vault, [
+            _block("noted", "s1", "n1", kind=memspec.STOP_NOTE_LOG_KIND),
+            _block("noted", "s2", "n2", kind=memspec.STOP_NOTE_LOG_KIND),
+        ])
+        result = _pack(vault)
+        checks.append((
+            "stop_note 兩場也不成待判列（提醒不擋，談不上擋錯）",
+            "noted" not in _rows(result)
+            and result["counts"]["review_items"] == 0
+            and result["counts"]["blocks"] == 0,
+        ))
+    with tempfile.TemporaryDirectory(prefix="epitype-review-window-") as temp_dir:
+        vault = _vault(Path(temp_dir).resolve())
+        inside = (TODAY - timedelta(days=WINDOW_DAYS - 1)).isoformat()
+        _gate_log(vault, [
+            _block("recent", "s1", "r1", day=inside),
+            _block("recent", "s2", "r2", day=inside),
+        ])
+        result = _pack(vault)
+        rows = _rows(result)
+        checks.append((
+            "窗內兩場 stop_block＝待判，counts 與備註寫明只算最近 7 天",
+            rows.get("recent", {}).get("judge") is True
+            and result["counts"]["review_items"] == 1
+            and result["counts"].get("window_days") == 7
+            and "最近 7 天" in result["note"],
+        ))
+    with tempfile.TemporaryDirectory(prefix="epitype-review-window-") as temp_dir:
+        vault = _vault(Path(temp_dir).resolve())
+        outside = (TODAY - timedelta(days=WINDOW_DAYS)).isoformat()  # 窗的起點那天本身不算窗內
+        _gate_log(vault, [
+            _block("stale", "s1", "o1", day=outside),
+            _block("stale", "s2", "o2", day="2026-06-01"),
+        ])
+        result = _pack(vault)
+        checks.append((
+            "同樣兩場 stop_block 落在窗外＝不成待判列（一週沒再擋就退出）",
+            "stale" not in _rows(result)
+            and result["counts"]["review_items"] == 0
+            and result["counts"]["blocks"] == 0,
+        ))
+
     # 事件：卡上掛著 owner 原話但什麼都沒發生 → 背景，不是待判。
     with tempfile.TemporaryDirectory(prefix="epitype-review-events-") as temp_dir:
         vault = _vault(Path(temp_dir).resolve())
@@ -124,7 +171,6 @@ def main():
             os.utime(path, (stamp, stamp))
         waiting, judged = dream._drafts_of(vault)
         section = dream._section_drafts([vault], TODAY, TODAY, {}, context={"home": None})
-        aging = dream._section_draft_aging([vault], TODAY, TODAY, {})
         checks.append((
             "判過的草稿不算待審，檔案照留，數字另外報",
             len(waiting) == 2 and judged == 1
@@ -134,7 +180,7 @@ def main():
         ))
         checks.append((
             "草稿老化也只看待審的那些",
-            aging["counts"]["total_drafts"] == 2 and aging["counts"]["over_7_days"] == 2,
+            section["counts"]["total_drafts"] == 2 and section["counts"]["over_7_days"] == 2,
         ))
 
     # 拆卡候選：規範型卡才列，紀錄型不列。
@@ -159,7 +205,7 @@ def main():
         ))
 
     passed = sum(bool(ok) for _, ok in checks)
-    total = 7
+    total = 10
     status = "PASS" if passed == total and len(checks) == total else "FAIL"
     print(f"SELFTEST {status} {passed}/{total}")
     for name, ok in checks:

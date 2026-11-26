@@ -286,15 +286,19 @@ def _source(row, policy):
         findings.append({"code": "PLACEMENT_REVIEW", "path": str(path),
                          "actual": len(distinct), "target": minimum, "unit": "distinct_projects"})
     if kind == "index":
-        count = stat.st_size
-        if count > policy["index_cap_bytes"]:
+        # Every MEMORY.md: the host load limit (memory_index.limit_of), not a policy number.
+        from . import memory_index
+        limit = memory_index.limit_of()
+        raw = path.read_bytes()
+        lines = memory_index.line_count(raw)
+        if len(raw) > limit.max_bytes:
             findings.append({"code": "INDEX_OVER_BUDGET", "path": str(path),
-                             "actual": count, "target": policy["index_cap_bytes"], "unit": "bytes"})
-    if kind == "instruction":
-        match = re.search(r"<!-- EPITYPE RULES BEGIN[^\n]*\n(.*?)<!-- EPITYPE RULES END -->", text, re.S)
-        if match and len(match[1].encode("utf-8")) > policy["core_cap_bytes"]:
-            findings.append({"code": "CORE_OVER_BUDGET_PRESERVE_REQUIRED_RULES", "path": str(path),
-                             "actual": len(match[1].encode("utf-8")), "target": policy["core_cap_bytes"], "unit": "bytes"})
+                             "actual": len(raw), "target": limit.max_bytes, "unit": "bytes"})
+        elif lines > limit.max_lines:
+            findings.append({"code": "INDEX_OVER_BUDGET", "path": str(path),
+                             "actual": lines, "target": limit.max_lines, "unit": "lines"})
+    # The resident rules block has no absolute byte budget here: its growth is judged
+    # against the accepted baseline (core_baseline, owner 2026-11-17).
     if row.get("move_to"):
         out["move_obligations"] = ["preserve redirect", "update reverse links and shared quota references",
                                    "update generated views, recall router and search index",

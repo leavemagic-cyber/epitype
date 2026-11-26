@@ -368,6 +368,34 @@ def _selftest():
     checks = []
     with tempfile.TemporaryDirectory(prefix="decision-lint-") as temp_dir:
         root = Path(temp_dir).resolve()
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
+        from rule_source_fixtures import source_bound_card
+
+        def _lint_bound(vault, **options):
+            # 來源未驗證的規則卡只會報來源問題、不進後面的規則（62b654b）；先綁來源再 lint。
+            cards = sorted(Path(vault).rglob("*.md"))
+            # 接任卡的來源要明列它取代的那張（rule_pipeline 的取代鏈驗證）。
+            priors = {}
+            for card in cards:
+                fields, _problem = _memspec.frontmatter_text(card.read_text(encoding="utf-8"))
+                pointer = (fields or {}).get(SUPERSEDED_BY_FIELD)
+                if pointer:
+                    successor = (card.parent / pointer).resolve()
+                    priors.setdefault(successor, []).append(
+                        posixpath.relpath(card.as_posix(), successor.parent.as_posix()))
+            for card in cards:
+                text = card.read_text(encoding="utf-8")
+                if "rule_provenance:" in text:
+                    continue
+                try:
+                    bound = source_bound_card(text, card, source_root=root / "_sources",
+                                              case_id="decision-lint-" + Path(vault).name,
+                                              supersedes=priors.get(card.resolve(), ()))
+                except ValueError:
+                    continue  # 壞 frontmatter 的卡本來就是要測的壞卡
+                card.write_text(bound, encoding="utf-8")
+            return lint_vault(vault, **options)
+
 
         duplicate = root / "duplicate"
         duplicate.mkdir()
@@ -382,7 +410,7 @@ def _selftest():
                 ),
                 encoding="utf-8",
             )
-        result = lint_vault(duplicate)
+        result = _lint_bound(duplicate)
         duplicate_failure = next(
             (item for item in result.failures if item.rule == "1" and "2 張現行卡" in item.reason),
             None,
@@ -408,7 +436,7 @@ def _selftest():
             ),
             encoding="utf-8",
         )
-        result = lint_vault(broken)
+        result = _lint_bound(broken)
         checks.append(("斷鏈 superseded_by", any(item.rule == "2" for item in result.failures)))
 
         missing_quote = root / "missing_quote"
@@ -422,7 +450,7 @@ def _selftest():
             ),
             encoding="utf-8",
         )
-        result = lint_vault(missing_quote)
+        result = _lint_bound(missing_quote)
         checks.append(
             (
                 "owner-explicit 缺 owner_quote",
@@ -442,7 +470,7 @@ def _selftest():
             ),
             encoding="utf-8",
         )
-        result = lint_vault(bad_date)
+        result = _lint_bound(bad_date)
         checks.append(("壞日期", any(item.rule == "4" for item in result.failures)))
 
         good = root / "good"
@@ -467,7 +495,7 @@ def _selftest():
             ),
             encoding="utf-8",
         )
-        result = lint_vault(good)
+        result = _lint_bound(good)
         checks.append(("全好卡組 exit 0", result.exit_code == 0))
 
         audit_vault = root / "audit"
@@ -481,7 +509,7 @@ def _selftest():
             ),
             encoding="utf-8",
         )
-        result = lint_vault(audit_vault, audit=True)
+        result = _lint_bound(audit_vault, audit=True)
         output = render_report(result, audit=True)
         checks.append(
             (
@@ -499,7 +527,7 @@ def _selftest():
             "---\ndecision_key: yaml\n這行壞掉\n---\n",
             encoding="utf-8",
         )
-        result = lint_vault(bad_yaml)
+        result = _lint_bound(bad_yaml)
         checks.append(("壞 YAML 警告後續掃", len(result.cards) == 1 and len(result.warnings) >= 1))
 
         no_current = root / "no_current"
@@ -524,7 +552,7 @@ def _selftest():
             ),
             encoding="utf-8",
         )
-        result = lint_vault(no_current)
+        result = _lint_bound(no_current)
         checks.append(
             (
                 "零現行卡只警告，跨 key replacement 失敗",
@@ -572,7 +600,7 @@ def _selftest():
             ),
             encoding="utf-8",
         )
-        result = lint_vault(stale_target)
+        result = _lint_bound(stale_target)
         checks.append((
             "old→middle→current 的歷史鏈是合法的",
             result.exit_code == 0 and not any(item.rule == "2" for item in result.failures),
@@ -587,7 +615,7 @@ def _selftest():
             ),
             encoding="utf-8",
         )
-        result = lint_vault(stale_target)
+        result = _lint_bound(stale_target)
         checks.append((
             "superseded_by 鏈形成循環時失敗",
             result.exit_code == 1
@@ -626,7 +654,7 @@ def _selftest():
             ),
             encoding="utf-8",
         )
-        result = lint_vault(exact_path)
+        result = _lint_bound(exact_path)
         checks.append(("精確相對路徑優先", result.exit_code == 0))
 
         self_link = root / "self_link"
@@ -641,7 +669,7 @@ def _selftest():
             ),
             encoding="utf-8",
         )
-        result = lint_vault(self_link)
+        result = _lint_bound(self_link)
         checks.append(
             (
                 "拒絕 superseded_by 自指",

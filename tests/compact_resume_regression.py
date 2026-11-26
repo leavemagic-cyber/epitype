@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / 'adapters' / 'claude')]
-from epitype import compact_map, fixed_load
+from epitype import compact_map, fixed_load, memspec
 import _hook_common as common
 import sessionstart_hook
 
@@ -33,6 +33,59 @@ class CompactResumeTests(unittest.TestCase):
     def write_state(self, state='目前只改續行，其他設定保留。'):
         self.path.write_text(compact_map.RESUME_BEGIN + '\n' + state + '\n' +
                              compact_map.RESUME_END + '\n歷史原話不應整份載回。', encoding='utf-8')
+
+    def test_both_host_notices_teach_exact_resume_markers(self):
+        from epitype import memspec
+        for template in (memspec.CONTEXT_METER_NOTICE, memspec.CONTEXT_METER_CODEX_NOTICE):
+            notice = template.format(cur=190, left=10, mark='', path=str(self.path))
+            self.assertEqual(notice.count(compact_map.RESUME_BEGIN), 1)
+            self.assertEqual(notice.count(compact_map.RESUME_END), 1)
+            self.assertIn('各自獨立一行', notice)
+            self.assertIn(str(self.path), notice)
+
+    def test_two_host_compact_events_keep_valid_blocks_and_reject_broken_or_oversized(self):
+        for host in ('claude', 'codex'):
+            self.transcript = (self.root / '.claude' / 'projects' / 'synthetic' / 'session.jsonl'
+                               if host == 'claude' else self.root / '.codex' / 'synthetic' / 'rollout-synthetic.jsonl')
+            self.transcript.parent.mkdir(parents=True, exist_ok=True)
+            # Real Claude SessionStart(compact) runs before the summary row reaches disk
+            # (a project lead and the Epitype lead, 2026-11-13): recovery must not need that row.
+            self.transcript.write_text('{}\n', encoding='utf-8')
+            self.event = dict(self.event, session_id=host + '-synthetic',
+                              transcript_path=str(self.transcript), host=host)
+            from epitype.capture import event_host
+            self.assertEqual(event_host(self.event), host)
+            self.path = compact_map.handoff_destination(self.root, self.event['session_id'], self.transcript)
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.write_state('synthetic current scope; preserve exception')
+            text, trace, _ = self.actual_context(8192)
+            self.assertIn('synthetic current scope; preserve exception', text)
+            self.assertTrue(trace['resume'])
+            for content in (compact_map.RESUME_BEGIN + '\nbroken state',
+                            compact_map.RESUME_BEGIN + '\n' + 'x' * (memspec.COMPACT_RESUME_MAX_BYTES + 100) + '\n' + compact_map.RESUME_END):
+                self.path.write_text(content, encoding='utf-8')
+                text, trace, _ = self.actual_context(8192)
+                self.assertFalse(trace['resume'])
+                self.assertNotIn('broken state', text)
+                self.assertNotIn('x' * 50, text)
+                self.assertIn(str(self.path), text)
+                # The path-only line says why, so the model reads the file and the
+                # writer knows what to fix (2026-11-12, a project session: it came back silently).
+                self.assertIn(memspec.COMPACT_RESUME_PATH_ONLY.split('{', 1)[0], text)
+                self.assertIn(compact_map.resume_problem(content), text)
+
+    def test_unchanged_handoff_without_block_still_returns_its_path_after_compaction(self):
+        # 2026-11-12, a project session: an unchanged handoff with no usable block came back as nothing.
+        self.path.write_text('narrative handoff, no markers', encoding='utf-8')
+        record = compact_map.handoff_delivered_path(self.path)
+        record.write_text(str(self.path.stat().st_mtime_ns), encoding='ascii')
+        line = sessionstart_hook._handoff_line(self.event, self.root)
+        self.assertIsNotNone(line)
+        self.assertIn(str(self.path), line[0])
+        self.assertIn(memspec.COMPACT_HANDOFF_STALE, line[0])
+        self.assertIsNone(sessionstart_hook._handoff_line(dict(self.event, source='startup'), self.root))
+        self.path.write_text('rewritten narrative', encoding='utf-8')
+        self.assertNotIn(memspec.COMPACT_HANDOFF_STALE, sessionstart_hook._handoff_line(self.event, self.root)[0])
 
     def test_complete_state_excludes_history(self):
         self.write_state()
@@ -61,7 +114,7 @@ class CompactResumeTests(unittest.TestCase):
     def test_incomplete_and_oversized_state_never_loses_a_boundary_by_truncation(self):
         self.path.write_text(compact_map.RESUME_BEGIN+'\n禁止修改其他設定',encoding='utf-8')
         self.assertIsNone(compact_map.handoff_resume(self.path))
-        self.write_state('keep scope\n'+'x'*2100+'\ncritical exception')
+        self.write_state('keep scope\n'+'x' * (memspec.COMPACT_RESUME_MAX_BYTES + 100)+'\ncritical exception')
         self.assertIsNone(compact_map.handoff_resume(self.path))
         self.assertIsNotNone(sessionstart_hook._handoff_line(self.event, self.root))
 
@@ -81,7 +134,10 @@ class CompactResumeTests(unittest.TestCase):
         self.path.write_text('legacy next step',encoding='utf-8')
         claim = sessionstart_hook._handoff_line(self.event, self.root)
         sessionstart_hook._record_deliveries([claim[1:]])
-        self.assertIsNone(sessionstart_hook._handoff_line(self.event, self.root))
+        # After compaction an unchanged legacy handoff now returns its path marked as
+        # possibly stale instead of nothing (2026-11-12, a project session); other starts still dedupe.
+        self.assertIn(memspec.COMPACT_HANDOFF_STALE, sessionstart_hook._handoff_line(self.event, self.root)[0])
+        self.assertIsNone(sessionstart_hook._handoff_line(dict(self.event, source='resume'), self.root))
         other = dict(self.event, session_id='other-task')
         self.assertIsNone(sessionstart_hook._handoff_line(other, self.root))
 

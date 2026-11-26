@@ -18,11 +18,11 @@ def verify(vault):
         raise AssertionError(errors)
     selected = [rule for rule in rules if rule['layer'] in memspec.RULE_GENERATED_LAYERS]
     expected = {re.match(r'CORE-\d+', rule['text']).group(): rule for rule in selected}
-    assert len(expected) == 26, f'Expected 26 effective rules, got {len(expected)}'
-    config = memspec.config_options()
-    cap = config['core_cap_bytes']
-    index_cap = config['shared_index_cap_bytes']
-    assert cap == 14523 and index_cap == 1526, 'Configured caps changed'
+    # The count follows the vault (26 in 2026-10, 18 after later merges); growth is judged by
+    # the accepted core baseline, not a number pinned here. Each rule's text is compared below.
+    assert len(expected) == len(selected), 'duplicate CORE numbers in the vault'
+    # No configured byte caps any more (owner 2026-11-17): host_sync judges the whole host
+    # file by host facts, and core growth is compared with the accepted baseline.
     snapshots, summary, union = {}, {}, set()
     for host in ('claude', 'codex'):
         path = host_sync.host_path(host)
@@ -42,24 +42,22 @@ def verify(vault):
         entries = host_sync._previous_rules(new, host, recovery=recovery)
         assert len(entries) == len(required)
         old_bytes, new_bytes = (len((text + '\n').encode('utf-8')) for text in (old, new))
-        assert new_bytes <= cap
         plan = host_sync.plan_for(host, [vault])
         assert not plan.problems, plan.problems
         index = next(region for region in plan.regions if region.name == 'index')
-        assert len(index.text.encode('utf-8')) <= index_cap
         summary[host] = {'old_bytes': old_bytes, 'new_bytes': new_bytes,
                          'saved_bytes': old_bytes - new_bytes, 'exact_rules': len(required),
                          'index_bytes': len(index.text.encode('utf-8')),
                          'host_sha256': hashlib.sha256(snapshots[path]).hexdigest()}
-    assert len(union) == 26
+    assert len(union) == len(expected)
     # Same entrypoint as `python -m epitype sync <vault>`; no --apply.
     output = io.StringIO()
     sync_code = host_sync.main([str(vault)], output=output)
     assert sync_code in (host_sync.EXIT_OK, host_sync.EXIT_DRIFT), output.getvalue()
     for path, before in snapshots.items():
         assert path.read_bytes() == before, f'Host file changed: {path}'
-    summary.update(unique_rules=26, sync_exit=sync_code, sync_output=output.getvalue(),
-                   limits={'core_cap_bytes': cap, 'shared_index_cap_bytes': index_cap})
+    summary.update(unique_rules=len(expected), sync_exit=sync_code, sync_output=output.getvalue(),
+                   limits='host facts + core baseline')
     return summary
 
 

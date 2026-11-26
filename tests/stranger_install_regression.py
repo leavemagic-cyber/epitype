@@ -127,6 +127,23 @@ class AStrangerInstall(unittest.TestCase):
         text = (done.stdout + done.stderr).decode("utf-8", "replace")
         self.assertIn("PASS", text, msg=text[-600:])
 
+    def test_the_doctor_runs_in_the_documented_script_form(self):
+        # 文件與安裝器印出來的是 `python install/graft.py doctor`（腳本形式），不是
+        # `-m`。腳本形式下 sys.path[0] 是 install\；這裡刻意拿掉 PYTHONPATH，否則
+        # 環境變數會替程式把 repo 根塞進路徑，正好遮掉 doctor 匯不進 epitype 的那個洞。
+        self.assertEqual(self.epitype("install", "--home", str(self.home)).returncode, 0)
+        env = dict(self.env)
+        env.pop("PYTHONPATH", None)
+        done = subprocess.run(
+            [sys.executable, str(ROOT / "install" / "graft.py"), "doctor", "--home", str(self.home)],
+            cwd=str(ROOT), env=env, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=180)
+        text = (done.stdout + done.stderr).decode("utf-8", "replace")
+        self.assertNotIn("No module named", text, msg=text[-600:])
+        self.assertNotIn("DOCTOR FAIL", text, msg=text[-600:])
+        self.assertEqual(done.returncode, 0, msg=text[-600:])
+        self.assertIn("SHIM RESOLUTION: PASS", text, msg=text[-600:])
+
     def test_a_registration_that_fell_behind_is_noticed_without_running_the_doctor(self):
         # 程式與登記是兩半：直接跑原始碼的機器不會經過「升級後重裝」，多了一個時機點之後
         # 登記落後沒有徵兆。2026-09-20 owner 的機器就是這樣缺了一筆，手動跑健康檢查才發現。

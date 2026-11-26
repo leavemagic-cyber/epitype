@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 1.12.0 (2026-11-26)
+
+- Add `bind_only_core_rules` so only core-rule cards bind Stop and PreToolUse triggers, with `bind_also_cards` for named exceptions. Misnamed or ambiguous entries are reported once at startup and never widen matching.
+- Let a requirement card with a reviewed blocking basis block a delivery claim that lacks its required text, once per delivery. Conditional future steps are no longer read as delivery claims.
+- Remind the agent to answer an owner message sent mid-turn (`advise_on_midturn`, `advise_midturn_text`), with an optional block-once mode (`advise_midturn_on_hit: block`).
+- Let one advice card bind a second trigger with `advise_also_tool` and `advise_also_any_of`.
+- Rebind a rule card after an agent edit that changed only the body or unrelated fields. Edits touching owner wording or rule fields are reported to the editing agent and not rebound.
+- Judge memory indexes and host files by real host load limits. Replace `core_cap_bytes` with a ratchet against the accepted core baseline (`epitype core-baseline`).
+- Turn recurrence review on behavior cards into a reminder instead of a refusal.
+- Use an 8 KB compaction resume block, return an unchanged handoff as a path marked possibly stale, and keep subagent compaction separate from the parent.
+- Defer the nightly dream while the machine is busy, record per-section time, shape over-limit `MEMORY.md` files and resync host files afterward. Leave Codex-generated memory files alone.
+- Bind recall to the session's own project and match a Latin letter joined to a CJK word as one term.
+
 ## 1.11.0 (2026-11-11)
 
 - Turn automatic prompt matching off by default to reduce unrelated memory injection. Opt in with `proactive_recall: true`; explicit search, event capture, pending notices and compaction recovery remain available independently.

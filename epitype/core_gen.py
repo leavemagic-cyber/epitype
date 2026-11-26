@@ -564,19 +564,6 @@ def _sha256(payload):
     return hashlib.sha256(payload).hexdigest()
 
 
-def _cap_of(cap_bytes, config):
-    """`--cap-bytes` 優先，其次設定的 `core_cap_bytes`；都沒有就不擋。
-
-    產品不猜上限（FAILURE_MODES §36）：沒設就是沒設，不套一個內建數字再說它超標。
-    """
-    if cap_bytes is not None:
-        return int(cap_bytes)
-    value = (config or {}).get(memspec.CONFIG_CORE_CAP_BYTES_FIELD)
-    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-        return None
-    return value
-
-
 def _longest(rules, limit=memspec.CORE_GEN_LONGEST_LISTED):
     ranked = sorted(
         (rule for rule in rules if rule["layer"] in memspec.RULE_GENERATED_LAYERS),
@@ -653,7 +640,9 @@ def generate(vaults, out, cap_bytes=None, dry_run=False, config=None):
     from epitype import core_qualification
     options = config if config is not None else memspec.config_options()
     rules, errors = collect_rules(vaults, minimum_projects=core_qualification.minimum(options))
-    cap = _cap_of(cap_bytes, options)
+    # 絕對上限已退役（owner 2026-11-17）：`--cap-bytes` 與 `core_cap_bytes` 只換來提醒，
+    # 變大改跟確認過的基準比（core_baseline）。
+    cap = None
     recovery = {}
     text = assemble(rules, recovery=recovery)
     payload = text.encode("utf-8")
@@ -695,10 +684,16 @@ def generate(vaults, out, cap_bytes=None, dry_run=False, config=None):
             for rule in missing
         ]
         return result
-    if cap is not None and result["measured"] > cap:
-        result["offenders"] = _longest(rules)
+    from epitype import core_baseline
+    legacy = core_baseline.legacy_notice(options) or (
+        core_baseline.LEGACY_CORE_CAP_NOTICE if cap_bytes is not None else None)
+    result["notices"] = [legacy] if legacy else []
     if dry_run:
         result["status"] = STATUS_DRY_RUN
+        # 量的是治理庫自己的規則，跟 sync／夢／accept 同一個視角；不是這次命令列上全部的庫。
+        result["baseline"] = core_baseline.check_vaults(vaults, write=False, config=options)
+        if result["baseline"] and result["baseline"]["notice"]:
+            result["notices"].append(result["baseline"]["notice"])
         return result
 
     try:
@@ -708,6 +703,13 @@ def generate(vaults, out, cap_bytes=None, dry_run=False, config=None):
     if not unchanged:
         _write(out_path, payload)
     result["status"] = STATUS_UNCHANGED if unchanged else STATUS_WRITTEN
+    # 規則已寫完才比基準：變大只提醒、寫待處理檔，絕不擋寫入（CORE-25）。
+    try:
+        result["baseline"] = core_baseline.check_vaults(vaults, write=True, config=options)
+        if result["baseline"] and result["baseline"]["notice"]:
+            result["notices"].append(result["baseline"]["notice"])
+    except OSError as exc:
+        result["errors"] = list(result["errors"]) + [f"core baseline: {type(exc).__name__}: {exc}"]
 
     pack = _pack(rules, out_path, payload, cap, text, recovery)
     target = pack_path(Path(vaults[0]).expanduser().resolve())
@@ -768,9 +770,8 @@ def drifted(vaults, out):
 
 
 def _print(result, output):
-    if result.get("over_cap"):
-        print(f"NOTE core budget: loaded={result['measured']} cap={result['cap']}; "
-              "complete current rules retained", file=output)
+    for notice in result.get("notices") or ():
+        print(f"NOTE {notice}", file=output)
     for error in result.get("errors") or ():
         print(f"（略過：{error}）", file=output)
     status = result["status"]
@@ -1012,18 +1013,18 @@ def _selftest():
 
             capped = generate([vault], out, cap_bytes=len(before) - 1, config={})
             checks.append((
-                "自訂預算超限仍寫完整規則，保留容量與最長卡片提醒",
-                capped["status"] == STATUS_UNCHANGED and capped["over_cap"]
-                and capped["cap"] == len(before) - 1
-                and 0 < len(capped["offenders"]) <= memspec.CORE_GEN_LONGEST_LISTED
-                and capped["offenders"][0]["bytes"]
-                >= capped["offenders"][-1]["bytes"]
+                "舊的 --cap-bytes 照收但不再當上限：完整規則照寫，只出一行「已不再使用」",
+                capped["status"] == STATUS_UNCHANGED and not capped["over_cap"]
+                and capped["cap"] is None and not capped["offenders"]
+                and any("已不再使用" in notice for notice in capped["notices"])
                 and out.read_bytes() == before,
             ))
             checks.append((
-                "設定的 core_cap_bytes 供給提醒；沒設沒有超限提醒",
-                generate([vault], out, config={memspec.CONFIG_CORE_CAP_BYTES_FIELD: 10},
-                         dry_run=True)["over_cap"]
+                "設定的 core_cap_bytes 只換來「已不再使用」提醒；大小改跟確認過的基準比",
+                not generate([vault], out, config={memspec.CONFIG_CORE_CAP_BYTES_FIELD: 10},
+                             dry_run=True)["over_cap"]
+                and any("已不再使用" in notice for notice in generate(
+                    [vault], out, config={memspec.CONFIG_CORE_CAP_BYTES_FIELD: 10}, dry_run=True)["notices"])
                 and generate([vault], out, config={}, dry_run=True)["cap"] is None,
             ))
 
@@ -1087,10 +1088,10 @@ def _selftest():
                 and generate([vault], root / "isolated.md", dry_run=True)["cap"] is None,
             ))
             checks.append((
-                "CLI 超自訂預算仍寫出完整規則且保留提醒",
+                "CLI 收舊的 --cap-bytes：照寫完整規則，只說已不再使用",
                 code == EXIT_OK
                 and (root / "capped.md").read_text(encoding="utf-8") == text
-                and "NOTE core budget" in output.getvalue(),
+                and "已不再使用" in output.getvalue(),
             ))
 
             # ── 宿主區（U-R3）─────────────────────────────────────────────
@@ -1169,9 +1170,7 @@ def _selftest():
                 and hosted_result["measured"] == biggest
                 and hosted_result["loaded"] == loaded
                 and generate([hosted], hosted_out, cap_bytes=biggest, dry_run=True,
-                             config={})["status"] == STATUS_DRY_RUN
-                and generate([hosted], hosted_out, cap_bytes=biggest - 1, dry_run=True,
-                             config={})["over_cap"],
+                             config={})["status"] == STATUS_DRY_RUN,
             ))
 
             hosted_pack = json.loads(pack_path(hosted).read_text(encoding="utf-8"))
@@ -1235,7 +1234,7 @@ def main(argv=None, output=sys.stdout):
     parser.add_argument("vaults", nargs="+", type=Path)
     parser.add_argument("--out", required=True, type=Path, help="file to assemble the core block into")
     parser.add_argument("--cap-bytes", type=int, default=None,
-                        help="warn past this size while keeping all rules (default: config core_cap_bytes; unset means no warning)")
+                        help="ignored (retired 2026-11-17); growth is compared with the accepted baseline, see epitype core-baseline")
     parser.add_argument("--dry-run", action="store_true", help="print the assembly, write nothing")
     parser.add_argument("--check", action="store_true",
                         help="compare the assembly with --out byte for byte; exit non-zero when they differ")

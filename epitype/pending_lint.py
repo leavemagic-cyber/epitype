@@ -69,6 +69,47 @@ def _is_pending(line):
     )
 
 
+def _is_rule_card_entry(line):
+    """規範卡上的一行要算待辦，標記必須開頭，或是一個沒打勾的核取方塊。
+
+    規範卡（規則、裁定、行為回饋…）的條文常常「談到」待辦：「做不了時才留待辦」
+    「未完成與待 owner 決定的事要列出」。照寬鬆判準，這些條文會被當成過期待辦每晚
+    點名，催人去「收掉」一條還在生效的規則。"""
+    if memspec.PENDING_LIST_ENTRY_REGEX.match(line) is None:
+        return False
+    if memspec.PENDING_UNCHECKED_BOX_REGEX.match(line) is not None:
+        return True
+    body = memspec.PENDING_LIST_ENTRY_REGEX.sub("", memspec.pending_line_body(line), count=1)
+    # 「- 2026-07-22 未辦：…」是記帳式的待辦，日期在前不改變它是一件事。
+    dated = memspec.PENDING_DATE_REGEX.match(body)
+    if dated is not None:
+        body = body[dated.end():].lstrip()
+    leading = memspec.PENDING_LEADING_MARKER_REGEX.match(body)
+    # 標記後面直接接字（「待辦清單要帶出口」「待決事項」）是名詞，條文在談待辦這個東西；
+    # 標記後面是標點、空白或行尾（「待辦：補例句」「⏳ 還沒做」）才是一件事。
+    return leading is not None and (
+        leading.end() == len(body) or not body[leading.end()].isalnum())
+
+
+def _card_standing(path, vault, text):
+    """(已停用, 規範卡)。型別一律走 card_lint.card_type_of，不在這裡另立一套判法。
+
+    已停用（superseded／closed／retired）的卡不再生效，上面的待辦字樣是歷史，不是
+    該追的事；繼續點名只會催人去處理一件已被取代的事。"""
+    try:
+        from . import card_lint
+    except ImportError:  # Direct script execution keeps the CLI contract.
+        import card_lint
+    card_type, fields = card_lint.card_type_of(path.relative_to(vault).as_posix(), text, path)
+    status = str(fields.get(memspec.DECISION_STATUS_FIELD) or "").strip().casefold()
+    # 舊式頂層 `type:` 不是 card_lint 讀的欄位，沒有型別的卡會退回預設的 feedback。
+    # 自己寫明是 project／reference 的卡照舊寬鬆判，免得把真的進度清單藏掉。
+    legacy = str(fields.get("type") or "").strip().casefold()
+    normative = card_type in memspec.MIXED_CARD_TYPES and (
+        not legacy or legacy in memspec.MIXED_CARD_TYPES)
+    return status in memspec.STOP_GATE_SILENT_STATUSES, normative
+
+
 def scan_vault(vault, max_age_days=memspec.PENDING_MAX_AGE_DAYS, today=None, deadline=None):
     """唯讀掃描一個 vault；deadline 是 time.monotonic() 上限，逾時就標記並停手。
 
@@ -100,16 +141,31 @@ def scan_vault(vault, max_age_days=memspec.PENDING_MAX_AGE_DAYS, today=None, dea
         frontmatter, closing = memspec.split_frontmatter(text)
         body_start = 0 if frontmatter is None else (len(lines) if closing is None else closing + 1)
         card_owner = _declared_owner(text)
+        standing = None
         for number, line in enumerate(lines[body_start:], body_start + 1):
+            orphan = _is_orphan_candidate(line)
+            pending = _is_pending(line)
+            if not (orphan or pending):
+                continue
+            # 判型別要再剖一次 frontmatter；只對有候選行的卡做，hook 的時間預算才撐得住。
+            if standing is None:
+                standing = _card_standing(path, vault, text)
+            retired, normative = standing
+            # 已停用的卡連孤兒也不報：孤兒的處置是「補掛名」，替一張不再生效的卡補負責人
+            # 沒有意義；真的還要做的事應該寫在取代它的那張卡上。
+            if retired:
+                break
+            if normative and not _is_rule_card_entry(line):
+                orphan = pending = False
             if (
                 not card_owner
-                and _is_orphan_candidate(line)
+                and orphan
                 and not memspec.PENDING_OWNER_INLINE_REGEX.search(
                     memspec.pending_line_body(line))
             ):
                 # 孤兒不看年齡：一條沒人負責的待辦從寫下那一刻就是孤兒。
                 strays.append({"line": number, "text": line.strip()[:160]})
-            if not _is_pending(line):
+            if not pending:
                 continue
             age, source = _line_age_days(line, stat.st_mtime, today)
             if age >= max_age_days:

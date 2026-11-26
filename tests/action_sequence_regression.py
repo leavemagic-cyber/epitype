@@ -60,6 +60,40 @@ class Sequence(unittest.TestCase):
         self.assertEqual(len(inventory),2)
         self.assertIn('a b',inventory[1])
 
+    def test_many_cards_share_one_index_and_never_rescan_history(self):
+        # The Stop gate checks every card against one session's facts; a long session
+        # has tens of thousands. Rescanning them per card outran the 10 s hook limit.
+        class Walks(tuple):
+            count=0
+            def __iter__(self):
+                Walks.count+=1
+                return super().__iter__()
+        history=[fact(str(i),'file.read',str(i),i*2+1,i*2+2) for i in range(5000)]
+        facts=Walks(history+[fact('action','file.change','4000',20000,20001),
+                             fact('blind','file.change','unread',20002,20003)])
+        rule='@file.read => @file.change'
+        self.assertEqual(action_sequence.check(['Read => Edit'],facts,{'action'}),[])
+        self.assertEqual(Walks.count,0,'a card without an @-rule needs no index')
+        prepared=action_sequence.prepare(facts)
+        self.assertEqual(Walks.count,1)
+        for _ in range(50):
+            verdicts=[(j.call_id,j.verdict) for j in
+                      action_sequence.check([rule],facts,{'action','blind'},prepared=prepared)]
+            self.assertEqual(verdicts,[('action','allow'),('blind','block')])
+        self.assertEqual(Walks.count,1,'50 cards must not walk the history again')
+        self.assertEqual(action_sequence.check([rule],facts,{'action','blind'}),
+                         action_sequence.check([rule],facts,{'action','blind'},prepared=prepared))
+
+    def test_index_built_from_other_facts_is_rebuilt_not_trusted(self):
+        rule='@file.read => @file.change'
+        change=fact('action','file.change','file',3,4)
+        with_read=[fact('read','file.read','file',1,2),change]
+        without_read=[change]
+        stale=action_sequence.prepare(with_read)
+        self.assertEqual(action_sequence.check([rule],without_read,prepared=stale)[0].verdict,'block')
+        stale=action_sequence.prepare(without_read)
+        self.assertEqual(action_sequence.check([rule],with_read,prepared=stale)[0].verdict,'allow')
+
     def test_self_authored_draft_and_possible_host_loaded_source_are_unverified(self):
         draft=fact('create','file.create','new.md',1,2)
         edited=fact('edit','file.change','new.md',3,4)

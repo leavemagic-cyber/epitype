@@ -185,6 +185,53 @@ def _normalised_event(value):
     return value
 
 
+def core_only_binding():
+    """True when the config limits card triggers to core rules (memspec.CONFIG_CORE_ONLY_BINDING_FIELD).
+
+    Read from the file each call: a hook process lives for one event, and a stale
+    answer here would keep retired triggers firing. An unreadable config means the
+    setting is absent; the gate's own config read reports that failure."""
+    try:
+        value = json.loads(config_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(value, dict) and value.get(memspec.CONFIG_CORE_ONLY_BINDING_FIELD) is True
+
+
+def core_only_extra_cards():
+    """Card stems that keep their triggers under core-only binding
+    (memspec.CONFIG_BIND_ALSO_CARDS_FIELD). Read fresh each call, like core_only_binding;
+    anything but a list of nonblank strings names no card. Wrong entries are reported by
+    the session start (epitype.bind_also), never by walking vaults on this hot path."""
+    from epitype import bind_also
+
+    return bind_also.parse(bind_also.read_config(config_path()))[0]
+
+
+def binds_under_core_only(card_path, is_core, extra):
+    """Under core-only binding: a core rule, or a card named in bind_also_cards.
+    Exact stem only: no case folding, no `.md` stripping, so a card cannot opt itself
+    in with a look-alike name; misnamed entries are reported at session start instead."""
+    return is_core is True or Path(str(card_path)).stem in extra
+
+
+def rule_drop_notice(path, reason):
+    """The line telling the lead an armed rule card stopped binding, or None when
+    core-only binding would not bind this card anyway."""
+    path = Path(path)
+    if core_only_binding():
+        try:
+            fields, _problem = memspec.frontmatter_text(path.read_text(encoding="utf-8-sig"))
+        except (OSError, UnicodeError):
+            return None
+        if not memspec.is_core_rule(fields) and path.stem not in core_only_extra_cards():
+            return None
+    text = " ".join(str(reason).split())
+    cut = max(text.rfind("INVALID"), text.rfind("UNVERIFIED"))
+    why = text[cut:] if cut >= 0 else "INVALID: " + text
+    return memspec.RULE_DROP_NOTICE.format(card=path.name, why=why[:60])
+
+
 def config_path():
     """設定檔該在哪。用來分辨「沒裝 Epitype」與「裝了但壞了」——前者安靜是對的，
     後者安靜就是本專案最不能容忍的那種壞掉。"""
@@ -238,6 +285,7 @@ def load_config(started_at):
     return {
         memspec.CONFIG_VAULTS_FIELD: vaults,
         "_unavailable_vaults": unavailable,
+        "project_roots": value.get("project_roots", {}),
         memspec.CONFIG_PROACTIVE_RECALL_FIELD: value.get(memspec.CONFIG_PROACTIVE_RECALL_FIELD) is True,
         memspec.CONFIG_BUDGET_BYTES_FIELD: min(
             budget,
@@ -279,7 +327,8 @@ def resolve_vaults(config, event, home=None):
     for vault in config[memspec.CONFIG_VAULTS_FIELD]:
         if vault not in config.get("_unavailable_vaults", ()) and vault not in vaults:
             vaults.append(vault)
-    return vaults
+    from epitype import session_scope
+    return session_scope.candidates(vaults, event, config, home)
 
 
 def scoped_vaults(config, event, home=None):
@@ -293,7 +342,8 @@ def scoped_vaults(config, event, home=None):
     governance = governance_vault(config)
     if governance not in vaults:
         vaults.append(governance)
-    return vaults
+    from epitype import session_scope
+    return session_scope.candidates(vaults, event, config, home)
 
 
 def governance_vault(config, *, for_write=False):
@@ -317,7 +367,7 @@ def capture_vault(config, event, home=None):
     """
     return capture_route.capture_vault(
         event.get("cwd") if isinstance(event, dict) else None,
-        governance_vault(config, for_write=True), home
+        governance_vault(config, for_write=True), home, config=config, event=event
     )
 
 
@@ -587,21 +637,26 @@ def _notes_path(config, session_id):
 
 
 def leave_note(config, session_id, text):
-    """回合閘留給下一則提問的一行提醒。超過上限就不再疊——提醒本身不能變成負擔。"""
+    """回合閘留給下一則提問的一行提醒。超過上限就不再疊——提醒本身不能變成負擔。
+
+    回傳這一行是否已在佇列裡（新排入或本來就在）；沒排進去時呼叫端不能當它已經說過。"""
     path = _notes_path(config, session_id)
     line = " ".join(str(text).split())[: memspec.STOP_NOTE_MAX_CHARS]
     if path is None or not line:
-        return
+        return False
     path.parent.mkdir(parents=True, exist_ok=True)
     with memspec.file_lock(path, 0.1) as held:
         if not held:
             print("Epitype pending note UNVERIFIED: write lock unavailable; reminder not stored.", file=sys.stderr)
-            return
+            return False
         existing = path.read_text(encoding="utf-8").splitlines() if path.is_file() else []
-        if line not in existing and len(existing) < memspec.STOP_NOTE_MAX_PENDING:
+        if line in existing:
+            return True
+        if len(existing) < memspec.STOP_NOTE_MAX_PENDING:
             path.write_text("\n".join([*existing, line]) + "\n", encoding="utf-8")
-        elif line not in existing:
-            print("Epitype pending note omitted: pending reminder limit reached.", file=sys.stderr)
+            return True
+        print("Epitype pending note omitted: pending reminder limit reached.", file=sys.stderr)
+        return False
 
 
 def peek_notes(config, session_id):

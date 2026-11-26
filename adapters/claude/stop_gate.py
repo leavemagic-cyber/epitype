@@ -23,6 +23,10 @@ from _hook_common import (
     append_gate_log,
     clear_recall_markers,
     compile_bounded_regex,
+    binds_under_core_only,
+    core_only_binding,
+    core_only_extra_cards,
+    rule_drop_notice,
     compile_pattern_or_literal,
     declared_frontmatter,
     emit,
@@ -81,11 +85,12 @@ _Decision = namedtuple(
     "_Decision",
     "key decided_at quote forbidden aliases path decided_by require_when require_text advice"
     " applies_to turn_check turn_check_limit on_hit fence_shell fence_langs turn_check_target require_tool_before pair_tools audience require_on_hit"
-    " source_status source_scope source_author source_kind source_original_quote",
+    " source_status source_scope source_author source_kind source_original_quote"
+    " source_blocking_basis",
     # 只有最後幾欄有預設值：沒標處置的卡就是「照擋」，沒宣告殼層的卡不查圍籬區塊，
     # 沒寫目標語言的 owner_language 卡用預設語言；既有的建構處不必跟著改。
     defaults=("", "", (), "", (), (), "", "", "UNVERIFIED", None,
-              "UNVERIFIED", "legacy-unverified", ""),
+              "UNVERIFIED", "legacy-unverified", "", False),
 )
 
 
@@ -129,8 +134,10 @@ def _decision_frontmatter(path):
     return None
 
 
-def _read_decision(path):
+def _read_decision(path, problems=None):
     """The active ruling one card carries, as plain JSON values, or None.
+
+    problems: a list that receives why a rule card's projection failed.
 
     Status is re-read from the card, never from the index: a stale index would pin a
     ruling the owner has already superseded, and this gate blocks on what it reads.
@@ -155,7 +162,9 @@ def _read_decision(path):
             checked_projection = rule_pipeline.projection(fields, path, card_text=card_text)
             if rule_provenance.usable(checked_projection['provenance']['status']):
                 projected = checked_projection
-        except (ValueError, OSError):
+        except (ValueError, OSError) as exc:
+            if problems is not None:
+                problems.append(str(exc))
             return None
         if projected is not None and projected['expired']:
             return None
@@ -202,6 +211,7 @@ def _read_decision(path):
         "pair_tools": sequences["pair_tools"],
         "audience": _one_line(fields.get("audience")).casefold(),
         "require_on_hit": _one_line(fields.get("require_on_hit")).casefold(),
+        "core": memspec.is_core_rule(fields),
         memspec.FENCE_SHELL_FIELD: _one_line(fields.get(memspec.FENCE_SHELL_FIELD)).casefold(),
         memspec.FENCE_LANGS_FIELD: [
             _one_line(item).casefold() for item in sequences[memspec.FENCE_LANGS_FIELD]
@@ -212,7 +222,8 @@ def _read_decision(path):
         ruling.update(source_status=projected['provenance']['status'],
                       source_scope=document['scope'], source_author=document['author'],
                       source_kind=document['kind'], source_original_quote=(document.get('quote', '')
-                          if projected['provenance']['status'] == 'VERIFIED' else ''))
+                          if projected['provenance']['status'] == 'VERIFIED' else ''),
+                      source_blocking_basis=bool(projected['provenance'].get('blocking_basis', False)))
         if projected['provenance']['status'] == 'REVIEWED':
             ruling[_QUOTE] = document['text'][:memspec.STOP_GATE_QUOTE_MAX_CHARS]
         # A description and an AI interpretation may be approved by the Owner,
@@ -221,7 +232,7 @@ def _read_decision(path):
     else:
         ruling.update(source_status='UNVERIFIED', source_scope=None,
                       source_author='UNVERIFIED', source_kind='legacy-unverified',
-                      source_original_quote='')
+                      source_original_quote='', source_blocking_basis=False)
     return ruling
 
 
@@ -248,7 +259,7 @@ def _decision_from_ruling(vault, card_path, ruling, *, fresh=False, event=None, 
         scope = ruling.get('source_scope')
         if not isinstance(scope, dict) or rule_pipeline.expired({'scope': scope}):
             return None
-        state, reason = rule_context.applicability(scope, event)
+        state, reason = rule_context.applicability(scope, event, card=path)
         if state != 'APPLICABLE':
             if state != 'ADVISORY':
                 return None
@@ -291,6 +302,7 @@ def _decision_from_ruling(vault, card_path, ruling, *, fresh=False, event=None, 
         source_author=ruling.get('source_author', 'UNVERIFIED'),
         source_kind=ruling.get('source_kind', 'legacy-unverified'),
         source_original_quote=ruling.get('source_original_quote', ''),
+        source_blocking_basis=ruling.get('source_blocking_basis') is True,
     )
     if reference is not None:
         advisory.append((decision, reference))
@@ -298,8 +310,10 @@ def _decision_from_ruling(vault, card_path, ruling, *, fresh=False, event=None, 
     return decision
 
 
-def _checked_read(path, defects=None):
-    ruling = _read_decision(path)
+def _checked_read(path, defects=None, drops=None):
+    """drops: a list that receives (path, reason) for an armed card whose projection failed."""
+    problems = []
+    ruling = _read_decision(path, problems)
     if ruling is None and defects is not None:
         # The reader already validated the original; this bounded header read
         # identifies an omitted source-bound card without rereading its source.
@@ -310,6 +324,8 @@ def _checked_read(path, defects=None):
                     and fields.get(memspec.DECISION_STATUS_FIELD, '') not in memspec.STOP_GATE_SILENT_STATUSES):
                 defects.append(f"[{Path(path).name}] 來源裁定未採用：原始來源／正文未通過驗證或範圍已到期；"
                                '可用 python -m epitype.rule_pipeline 核對此卡')
+                if drops is not None and problems:
+                    drops.append((Path(path), problems[0]))
     return ruling
 
 
@@ -358,7 +374,7 @@ def _write_cache(cache_path, manifest, rulings, cursor=""):
         pass
 
 
-def _decisions(vault, started_at, defects=None, *, event=None, advisory=None, unadopted=None):
+def _decisions(vault, started_at, defects=None, *, event=None, advisory=None, unadopted=None, drops=None):
     """Cache discovery only; every returned authority comes from this turn's bytes.
 
     Refresh at most one cap of discovery cards and one cap of known decisions.
@@ -415,7 +431,8 @@ def _decisions(vault, started_at, defects=None, *, event=None, advisory=None, un
                 skipped=len(scanning) - position, vault=vault.name))
             break
         try:
-            rulings[card_path] = _checked_read(paths[card_path], defects if unadopted is None else unadopted)
+            rulings[card_path] = _checked_read(paths[card_path], defects if unadopted is None else unadopted,
+                                                 drops)
         except Exception:
             rulings[card_path] = None
         refreshed.add(card_path)
@@ -424,6 +441,8 @@ def _decisions(vault, started_at, defects=None, *, event=None, advisory=None, un
             cursor = card_path
 
     found = []
+    core_only = core_only_binding()
+    extra = core_only_extra_cards() if core_only else frozenset()
     candidates = [key for key in sorted(rulings) if isinstance(rulings[key], dict) and rulings[key].get(_KEY)]
     # 上限只管「找」，不管「擋」。貴的是掃整個庫去分辨哪些卡帶著裁定——那件事有快取，
     # 找過就不必再找；已經找出來的卡再讀一次 frontmatter 很便宜。以前連執行都砍到上限，
@@ -443,7 +462,8 @@ def _decisions(vault, started_at, defects=None, *, event=None, advisory=None, un
         # 能從這裡省——2026-09-19 試過信清單，那份測試當場擋下來。
         if card_path not in refreshed:
             try:
-                rulings[card_path] = _checked_read(paths[card_path], defects if unadopted is None else unadopted)
+                rulings[card_path] = _checked_read(paths[card_path], defects if unadopted is None else unadopted,
+                                                 drops)
             except Exception:
                 rulings[card_path] = None
             verified[card_path] = manifest[card_path]
@@ -455,6 +475,11 @@ def _decisions(vault, started_at, defects=None, *, event=None, advisory=None, un
             defects.append(memspec.STOP_GATE_INCOMPLETE_DEFECT.format(
                 checked=index, total=len(candidates), vault=vault.name))
             break
+        if core_only and not (isinstance(ruling, dict) and binds_under_core_only(
+                card_path, ruling.get("core"), extra)):
+            # Owner 2026-11-13: only core rules bind; other cards stay memory —
+            # except the few the owner names in bind_also_cards (2026-11-25).
+            continue
         decision = _decision_from_ruling(vault, card_path, ruling,
                                          fresh=True, event=event, defects=defects,
                                          advisory=advisory, unadopted=unadopted)
@@ -612,6 +637,20 @@ def _claim_is_asserted(message, found):
         return False
     sentence, before = _claim_sentence(message, found.start(), found.end())
     if re.search(r"如果|假設|假如|若是|只有|\bif\b|\bsuppos(?:e|ing)\b", before, re.I):
+        return False
+    # 「通過才讓它上線」「沒問題就批准讓他上線」是條件下的將來動作，不是宣稱做完；
+    # 2026-11-13 重放真實回覆時這兩句被當成交付擋下。後面接「了」仍是宣稱（修好就上線了）。
+    if (re.search(r"[才就][^。！？!?；;\n，,]{0,8}$", before)
+            and not found.group(0).endswith("了")
+            and not message[found.end():found.end() + 1] == "了"):
+        return False
+    # 「上面幾件修正會合併成一次上線」是預告，不是宣稱做完；2026-11-13 這句被當成交付擋下。
+    # 同上：同一子句裡交付詞前有「會」、後面沒有「了」才算。「會議／開會」的會不是助動詞，
+    # 中間或交付詞本身帶「已」（會議上已經上線）仍是宣稱。
+    if (re.search(r"(?<![開機社學工協大])會(?![議計員談面場長])(?:(?!已)[^。！？!?；;\n，,]){0,8}$", before)
+            and not found.group(0).startswith("已")
+            and not found.group(0).endswith("了")
+            and not message[found.end():found.end() + 1] == "了"):
         return False
     if re.search(r"(?:不會|不能|不應|不該|不是|沒有|尚未|還沒|並未|未曾|拒絕|不准|不要|不得)"
                  r"[^。！？!?；;\n]{0,55}$|(?:\bnot\b|\bnever\b|\bhaven't\b)[^.!?\n]{0,55}$",
@@ -1222,7 +1261,8 @@ def _vaults(config, event):
     governance = governance_vault(config)
     if governance not in vaults:
         vaults.append(governance)
-    return vaults
+    from epitype import session_scope
+    return session_scope.candidates(vaults, event, config)
 
 
 def _turn_texts(transcript_path):
@@ -1362,7 +1402,7 @@ def _leave_context_note(config, event, line):
     if event.get("hook_event_name") == memspec.SUBAGENT_STOP_EVENT:
         agent = _one_line(event.get("agent_id") or event.get("agentId") or "unknown")[:36]
         line = _clip("子代理 " + agent + " 結束檢查：" + line, memspec.STOP_NOTE_MAX_CHARS)
-    leave_note(config, recipient, line)
+    return leave_note(config, recipient, line)
 
 
 def _source_notice(event, message, started_at, defects):
@@ -1387,15 +1427,39 @@ def _source_notice(event, message, started_at, defects):
             _best_effort_audit(_leave_context_note, config, event, line)
 
 
+def _tell_drops(config, event, drops):
+    """An armed card that stopped binding is said once per card per session in the
+    next prompt's context; its defect line alone goes to stderr, which the model
+    never reads. The marker is the one PreToolUse claims for the same card; a note
+    the queue did not take gives the marker back, or that card is never said."""
+    recipient = hook_context.notification_identity(event)
+    if not drops or not recipient:
+        return
+    from pretooluse_gate import _notice_marker, _release_notice_marker
+
+    for path, reason in drops:
+        line = rule_drop_notice(path, reason)
+        key = "rule-drop:" + str(Path(path).resolve())
+        if line and _notice_marker(recipient, key):
+            try:
+                stored = _leave_context_note(config, event, line)
+            except Exception:
+                stored = False
+            if not stored:
+                _release_notice_marker(recipient, key)
+
+
 def _verdict(event, message, config, started_at, defects, turn=None):
     decisions = []
+    drops = []
     vaults = _vaults(config, event)
     for index, vault in enumerate(vaults):
         if expired(started_at):
             defects.append(memspec.STOP_GATE_INCOMPLETE_DEFECT.format(
                 checked=index, total=len(vaults), vault=memspec.VAULT_WORD))
             break
-        decisions.extend(_decisions(vault, started_at, defects, event=event))
+        decisions.extend(_decisions(vault, started_at, defects, event=event, drops=drops))
+    _tell_drops(config, event, drops)
     if not decisions:
         return None
 
@@ -1424,6 +1488,12 @@ def _verdict(event, message, config, started_at, defects, turn=None):
     ]
     session_id = event.get("session_id", event.get("sessionId"))
     context_id = hook_context.identity(event)
+    # The delivery is the turn's final message; mid-turn progress lines must not excuse it.
+    final = event.get("last_assistant_message")
+    blocked = _delivery_block(decisions, event, final if isinstance(final, str) else message,
+                              config, started_at, defects, turn)
+    if blocked is not None:
+        return blocked
     verdict = _first_violation(decisions, event, message, config, started_at, defects, turn,
                                require_notes=True)
     if verdict is None:
@@ -1435,6 +1505,39 @@ def _verdict(event, message, config, started_at, defects, turn=None):
            kind=memspec.STOP_NOTE_LOG_KIND, card_path=decision.path)
     # 舊理由含「請改寫」等字眼；只把現行卡片建議送到下一則提問。
     _best_effort_audit(_leave_context_note, config, event, _stop_note(decision, rule, fragment))
+    return None
+
+
+def _delivery_block(decisions, event, message, config, started_at, defects, turn):
+    """The one Stop veto left: a delivery that owes its required text, before the owner reads it.
+
+    Every other Stop finding stays a next-prompt note (owner 2026-10-03). A note
+    reaches the model only at the next prompt, after the owner has already read the
+    delivery, so a card whose whole point is what the delivery says must act now.
+    Only a requirement card that declares require_on_hit: block and whose reviewed
+    source carries a blocking basis qualifies; anything less stays a note. The
+    host marks the rewrite with stop_hook_active, which _handle returns on, so one
+    message is blocked at most once."""
+    if _is_subagent_stop(event):
+        return None
+    for decision in decisions:
+        if not (decision.require_on_hit == memspec.ON_HIT_BLOCK
+                and decision.source_status in ("VERIFIED", "REVIEWED")
+                and decision.source_blocking_basis):
+            continue
+        # Pasted commands and prompts are what the owner asked for, not a claim of mine.
+        trigger = _requirement_gap(decision, _turn_body(message), defects, turn)
+        if trigger is None:
+            continue
+        # The same delivery text is blocked once per context, even if the host re-fires Stop.
+        if not _claim_marker(hook_context.identity(event), decision.key, message):
+            return None
+        _audit(config, decision.key, _REQUIRE_RULE, started_at,
+               event.get("session_id", event.get("sessionId")), _message_digest(message),
+               card_path=decision.path)
+        return {"decision": "block", "reason": memspec.STOP_GATE_DELIVERY_BLOCK_REASON.format(
+            trigger=trigger, decision=_one_line(decision.key),
+            rule=_one_line(decision.quote) or _one_line(decision.advice))}
     return None
 
 
@@ -1660,15 +1763,19 @@ def _first_violation(decisions, event, message, config, started_at, defects, tur
         from epitype import tool_sequence, action_receipts, action_sequence
         semantic = any(any(item.strip().startswith('@') for item in d.require_tool_before) for d in decisions)
         if semantic: action_receipts.refresh(event,action_receipts.database_path(config_path()))
-        facts = action_receipts.read(event, action_receipts.database_path(config_path())) if semantic else ()
+        # 只撈本回合的呼叫和它們目標相關的紀錄；費時不隨對話長度增加。
+        facts = action_receipts.read_relevant(event, action_receipts.database_path(config_path()),
+            turn=event.get('turn_id') or '', call_ids=() if event.get('turn_id') else tuple(turn.call_ids)) if semantic else ()
         covered = action_receipts.coverage(event, action_receipts.database_path(config_path())) if semantic else False
+        # 一場長對話的回條可上萬筆：索引與本回合的呼叫集合只建一次，不能每張卡各掃一遍。
+        prepared = action_sequence.prepare(facts)
+        active = ({f.call_id for f in facts if f.turn == event["turn_id"]} if event.get("turn_id") else set(turn.call_ids))
         for decision in decisions:
             try:
                 reason = tool_sequence.gap(decision.require_tool_before, decision.pair_tools, turn.tools)
                 if not reason:
-                    active = ({f.call_id for f in facts if f.turn == event["turn_id"]} if event.get("turn_id") else set(turn.call_ids))
                     judgments = action_sequence.check(decision.require_tool_before, facts, active,
-                                                       covered=covered)
+                                                       covered=covered, prepared=prepared)
                     if any(item.strip().startswith("@") for item in decision.require_tool_before) and turn.tools and not judgments:
                         defects.append(f"[{decision.key}] UNVERIFIED: 此回合沒有可判讀的目標／完成回條")
                     blocked = next((j for j in judgments if j.verdict == 'block'), None)
@@ -2618,9 +2725,10 @@ def _selftest():
 
             blown = time.monotonic() - memspec.HOOK_TIMEOUT_SECONDS - 1
             checks.append((
-                "Stop 永遠不送出 block：期限前後都不送；其他值期限內才送",
+                # owner 2026-11-13：交付檢查（_delivery_block）是唯一會送出的 block。
+                "Stop 只在期限內送出（含交付檢查的 block）；期限過了一律不送",
                 not _emits({"decision": "block", "reason": "x"}, blown)
-                and not _emits({"decision": "block", "reason": "x"}, time.monotonic())
+                and _emits({"decision": "block", "reason": "x"}, time.monotonic())
                 and not _emits(None, time.monotonic())
                 and not _emits({"decision": "approve"}, blown)
                 and _emits({"decision": "approve"}, time.monotonic()),
@@ -2643,9 +2751,8 @@ def _selftest():
 
 
 def _emits(value, started_at):
-    """A Stop adapter must never emit a veto, including after its deadline."""
-    return (value is not None and value.get("decision") != "block"
-            and not expired(started_at))
+    """Only a delivery block (see _delivery_block) may veto, and never after the deadline."""
+    return value is not None and not expired(started_at)
 
 
 def main():

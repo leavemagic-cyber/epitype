@@ -55,7 +55,48 @@ def _db(path):
         for name in ('source_id','source_signature'):
             if name not in columns: db.execute('ALTER TABLE facts ADD COLUMN '+name+' TEXT DEFAULT ""')
         db.execute('CREATE INDEX IF NOT EXISTS facts_source ON facts(actor,source_id)')
+        # Lookup by concrete target, so a check reads only the history that can
+        # decide it instead of the whole session (2026-11-12: 51,499 rows per call).
+        # The actor is ~160 bytes of JSON; key rows carry an 8-byte hash of it instead
+        # (a turn index keyed on the full actor added ~100 MB, so it is not kept).
+        db.execute('DROP INDEX IF EXISTS facts_turn')
+        db.execute('DROP TABLE IF EXISTS fact_keys')
+        db.execute('DROP TABLE IF EXISTS keyed_actors')
+        db.execute('CREATE TABLE IF NOT EXISTS receipt_keys (owner INTEGER, key TEXT, started INTEGER, fact INTEGER)')
+        db.execute('CREATE INDEX IF NOT EXISTS receipt_keys_lookup ON receipt_keys(owner,key,started)')
+        db.execute('CREATE TABLE IF NOT EXISTS keyed_owners (owner INTEGER PRIMARY KEY)')
         with db: yield db
+
+
+OPAQUE_KEY='\x00evidence.opaque'
+
+
+def _keys(actions):
+    """Index keys of one fact's actions: each concrete target, plus a marker for opaque evidence."""
+    keys=set()
+    for kind,target,*_ in actions:
+        if kind=='evidence.opaque': keys.add(OPAQUE_KEY)
+        elif target: keys.add(target)
+    return keys
+
+
+def _owner(who):
+    return int.from_bytes(hashlib.sha256(who.encode('utf-8')).digest()[:8],'big',signed=True)
+
+
+def _ensure_keys(db,who):
+    """Key an actor's older facts once; facts written since are keyed by begin()."""
+    owner=_owner(who)
+    if db.execute('SELECT 1 FROM keyed_owners WHERE owner=?',(owner,)).fetchone(): return
+    rows=db.execute('SELECT id,started,actions FROM facts WHERE actor=?',(who,)).fetchall()
+    decoded={}
+    entries=[]
+    for identity,started,text in rows:
+        if text not in decoded: decoded[text]=_keys(json.loads(text))
+        entries.extend((owner,key,started,identity) for key in decoded[text])
+    db.execute('DELETE FROM receipt_keys WHERE owner=?',(owner,))
+    db.executemany('INSERT INTO receipt_keys VALUES(?,?,?,?)',entries)
+    db.execute('INSERT OR IGNORE INTO keyed_owners VALUES(?)',(owner,))
 
 
 def _tick(db):
@@ -100,8 +141,11 @@ def begin(event,path):
         source=event.get('_epitype_source') or ('','')
         if source[0] and db.execute('SELECT 1 FROM facts WHERE actor=? AND source_id=?',(actor(event),source[0])).fetchone():
             source=('','')
-        db.execute('INSERT INTO facts(actor,call_id,turn,started,actions,signature,seen,source_id,source_signature) VALUES(?,?,?,?,?,?,?,?,?)',
-                   (actor(event),identity,event.get('turn_id',''),_tick(db),encoded,signature(event),time.time(),*source))
+        started=_tick(db)
+        row=db.execute('INSERT INTO facts(actor,call_id,turn,started,actions,signature,seen,source_id,source_signature) VALUES(?,?,?,?,?,?,?,?,?)',
+                   (actor(event),identity,event.get('turn_id',''),started,encoded,signature(event),time.time(),*source)).lastrowid
+        db.executemany('INSERT INTO receipt_keys VALUES(?,?,?,?)',
+                       [(_owner(actor(event)),key,started,row) for key in _keys(json.loads(encoded))])
     return True
 
 
@@ -177,8 +221,56 @@ def read(event,path):
     if not Path(path).exists(): return ()
     with _db(path) as db:
         rows=db.execute('SELECT call_id,started,finished,success,actions,turn,inventory FROM facts WHERE actor=? ORDER BY started',(actor(event),)).fetchall()
-    return tuple(Fact(i,s,f,None if ok is None else bool(ok),
-                      tuple(action_targets.Action(*a) for a in json.loads(actions)),turn,tuple(json.loads(scopes)))
+    return _facts(rows)
+
+
+_COLUMNS='call_id,started,finished,success,actions,turn,inventory'
+
+
+def read_relevant(event,path,*,call_ids=(),turn='',actions=()):
+    """The facts that can decide `action_sequence.check` for these calls or proposed actions.
+
+    check() looks history up only by the concrete target or repository of each judged
+    action, plus whether any opaque evidence started earlier. So this returns the
+    judged calls (by id or turn), every fact touching those targets, and the earliest
+    opaque fact: the same judgments as read(), at a cost that does not grow with
+    the session's length."""
+    if not Path(path).exists(): return ()
+    who=actor(event)
+    with _db(path) as db:
+        _ensure_keys(db,who)
+        ids=set()
+        if turn:
+            ids.update(row[0] for row in db.execute('SELECT id FROM facts WHERE actor=? AND turn=?',(who,turn)))
+        for call_id in set(call_ids):
+            ids.update(row[0] for row in db.execute('SELECT id FROM facts WHERE actor=? AND call_id=?',(who,call_id)))
+        keys=set()
+        for (text,) in (db.execute('SELECT actions FROM facts WHERE id=?',(identity,)).fetchone() for identity in ids):
+            keys.update(value for kind,target,repository,*_ in json.loads(text) for value in (target,repository) if value)
+        keys.update(value for action in actions for value in (action.target,action.repository) if value)
+        for key in keys:
+            ids.update(row[0] for row in db.execute('SELECT fact FROM receipt_keys WHERE owner=? AND key=?',(_owner(who),key)))
+        first=db.execute('SELECT fact FROM receipt_keys WHERE owner=? AND key=? ORDER BY started LIMIT 1',(_owner(who),OPAQUE_KEY)).fetchone()
+        if first: ids.add(first[0])
+        # actor=? also drops any fact of another actor whose hash collides.
+        rows=[db.execute('SELECT '+_COLUMNS+' FROM facts WHERE id=? AND actor=?',(identity,who)).fetchone() for identity in ids]
+    return _facts(sorted((row for row in rows if row),key=lambda row:row[1]))
+
+
+def _facts(rows):
+    # A long session repeats the same few thousand action lists across tens of
+    # thousands of rows; decode each distinct text once (Action is frozen).
+    decoded={}
+    def actions_of(text):
+        if text not in decoded:
+            decoded[text]=tuple(action_targets.Action(*a) for a in json.loads(text))
+        return decoded[text]
+    scopes_of={}
+    def scope_of(text):
+        if text not in scopes_of:
+            scopes_of[text]=tuple(json.loads(text))
+        return scopes_of[text]
+    return tuple(Fact(i,s,f,None if ok is None else bool(ok),actions_of(actions),turn,scope_of(scopes))
                  for i,s,f,ok,actions,turn,scopes in rows)
 
 

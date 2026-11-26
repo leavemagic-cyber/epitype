@@ -253,17 +253,21 @@ class WiringIntoTheGate(unittest.TestCase):
         # 整份丟掉又會讓大庫升級後排在上限之後的規則暫時失效（2026-09-25 Codex 審查）。
         # 所以舊版只留正例當「去哪裡找」的提示：負例不信，正例每回合從卡片重讀。
         from epitype import cardscan
+        from rule_source_fixtures import owner_bound_card
 
         with tempfile.TemporaryDirectory() as temporary:
-            vault = Path(temporary).resolve()
-            (vault / "a.md").write_text(
-                "---\nname: 舊卡\ndescription: 2026-09-19 舊快取裡的正例\n"
-                f"{memspec.TURN_CHECK_FIELD}: {memspec.TURN_CHECK_LENGTH}\n---\nbody\n",
-                encoding="utf-8")
-            (vault / "b.md").write_text(
-                "---\nname: 新武裝\ndescription: 2026-09-25 舊快取把它記成負例\n"
-                f"{memspec.TURN_CHECK_FIELD}: {memspec.TURN_CHECK_LENGTH}\n---\nbody\n",
-                encoding="utf-8")
+            vault = Path(temporary).resolve() / "vault"
+            vault.mkdir()
+            sources = vault.parent / "sources"
+            # 沒有已驗證來源的卡不會被採用（62b654b）；兩張都要綁來源，測的才是快取。
+            for name, card_name, description in (
+                    ("a.md", "舊卡", "2026-09-19 舊快取裡的正例"),
+                    ("b.md", "新武裝", "2026-09-25 舊快取把它記成負例")):
+                card = vault / name
+                card.write_text(owner_bound_card(
+                    f"---\nname: {card_name}\ndescription: {description}\n"
+                    f"{memspec.TURN_CHECK_FIELD}: {memspec.TURN_CHECK_LENGTH}\n---\nbody\n",
+                    card, source_root=sources, case_id="turn-check-old-cache"), encoding="utf-8")
             stamps = {card: [mtime, size, ctime] for card, _path, mtime, size, ctime
                       in cardscan.scan_vault(vault)}
             cache = vault / memspec.FTS_INDEX_DIRECTORY / "stop_decisions.json"

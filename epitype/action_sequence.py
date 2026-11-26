@@ -27,12 +27,31 @@ def rule(item):
     return pair
 
 
-def check(items,facts,active_ids=None, *, covered=True):
-    from bisect import bisect_left
-    # Index completed facts once. A long session must not cost a full scan for
-    # every modification, and a pending result must retain its causal boundary.
+@dataclass(frozen=True)
+class Index:
+    facts: object
+    completed: dict
+    unknown: dict
+    updates: dict
+    opaque: dict
+    inventories: dict
+    created: dict
+    uncertain_updates: dict
+    ordered: tuple
+    positions: dict
+
+
+def prepare(facts):
+    """Index completed facts once for every rule checked against the same facts.
+
+    A long session holds tens of thousands of facts; rebuilding this per card made
+    one Stop pass scale with cards x session history and outrun the hook deadline.
+    A pending result must retain its causal boundary. `facts` must not change
+    while the index is in use."""
     completed={}; unknown={}; updates={}; opaque={}; inventories={}; created={};uncertain_updates={}
-    for fact in facts:
+    ordered=tuple(facts); positions={}
+    for position,fact in enumerate(ordered):
+        positions.setdefault(fact.call_id,[]).append(position)
         for action in fact.actions:
             key=(action.kind,action.target,fact.actor)
             if action.kind=='file.create' and fact.success is True and fact.finished>0:
@@ -52,13 +71,31 @@ def check(items,facts,active_ids=None, *, covered=True):
                 if action.kind=='git.main_update':
                     uncertain_updates.setdefault((action.target,fact.actor),[]).append((fact.started,fact.finished))
     for values in (*completed.values(),*updates.values(),*opaque.values(),*inventories.values()): values.sort()
+    return Index(facts,completed,unknown,updates,opaque,inventories,created,uncertain_updates,ordered,positions)
+
+
+def check(items,facts,active_ids=None, *, covered=True, prepared=None):
+    """Judge each @-rule in `items`; `prepared` is `prepare(facts)` reused across calls.
+
+    An index built from other facts is never trusted: it is rebuilt from `facts`."""
+    from bisect import bisect_left
+    pairs=[(item,pair) for item,pair in ((item,rule(item)) for item in items) if pair is not None]
+    if not pairs: return []
+    if prepared is None or prepared.facts is not facts:
+        prepared=prepare(facts)
+    facts=prepared.ordered
+    if active_ids is not None:
+        # Only this turn's calls are judged; find them by id instead of walking the
+        # whole history once per rule. Fact order is kept.
+        facts=[facts[position] for position in sorted(
+            position for call_id in set(active_ids) for position in prepared.positions.get(call_id,()))]
+    completed=prepared.completed; unknown=prepared.unknown; updates=prepared.updates
+    opaque=prepared.opaque; inventories=prepared.inventories; created=prepared.created
+    uncertain_updates=prepared.uncertain_updates
     judgments=[]
-    for item in items:
-        pair=rule(item)
-        if pair is None: continue
+    for item,pair in pairs:
         prerequisite,mutation=pair
         for current in facts:
-            if active_ids is not None and current.call_id not in active_ids: continue
             if current.success is False or current.finished<0: continue
             for action in current.actions:
                 if action.kind!=mutation: continue

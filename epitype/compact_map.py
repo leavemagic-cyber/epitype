@@ -134,31 +134,68 @@ def handoff_notice(destination):
     return line
 
 
-def handoff_resume(destination, budget_bytes=COMPACT_MAP_DEFAULT_BUDGET_BYTES):
+RESUME_HEADER = '同一任務短狀態（AI整理；原話按需查證）：\n'
+
+
+def _resume_rendered(prefix):
+    """(rendered block, problem) from the first bytes of a handoff file."""
+    begin, end = RESUME_BEGIN.encode('ascii'), RESUME_END.encode('ascii')
+    if prefix.count(begin) != 1 or prefix.count(end) != 1:
+        return None, 'markers'
+    start = prefix.index(begin) + len(begin)
+    stop = prefix.index(end)
+    if stop <= start:
+        return None, 'markers'
+    try:
+        body = prefix[start:stop].decode('utf-8').strip()
+    except UnicodeError:
+        return None, 'markers'
+    if not body:
+        return None, 'empty'
+    return RESUME_HEADER + body, None
+
+
+def handoff_resume(destination, budget_bytes=None):
     """Read one complete, explicitly maintained working-state block, never history.
 
     A missing, malformed or oversized block falls back to the existing source
     pointer. This does not summarize prose or turn an AI note into user authority.
     """
+    budget_bytes = _memspec.COMPACT_RESUME_MAX_BYTES if budget_bytes is None else budget_bytes
     if isinstance(budget_bytes, bool) or not isinstance(budget_bytes, int) or budget_bytes <= 0:
         return None
     try:
         with Path(destination).open('rb') as stream:
-            prefix = stream.read(COMPACT_MAP_DEFAULT_BUDGET_BYTES * 2)
-        begin, end = RESUME_BEGIN.encode('ascii'), RESUME_END.encode('ascii')
-        if prefix.count(begin) != 1 or prefix.count(end) != 1:
-            return None
-        start = prefix.index(begin) + len(begin)
-        stop = prefix.index(end)
-        if stop <= start:
-            return None
-        body = prefix[start:stop].decode('utf-8').strip()
-    except (OSError, ValueError, UnicodeError):
+            prefix = stream.read(_memspec.COMPACT_RESUME_MAX_BYTES * 2)
+    except OSError:
         return None
-    if not body:
+    rendered, _problem = _resume_rendered(prefix)
+    if rendered is None:
         return None
-    rendered = '同一任務短狀態（AI整理；原話按需查證）：\n' + body
     return rendered if len(rendered.encode('utf-8')) <= budget_bytes else None
+
+
+def resume_problem(text, budget_bytes=None):
+    """Why this handoff text would come back after compaction as a path only, or None.
+
+    Same rules as handoff_resume, applied to text about to be written, so the writer
+    hears it while it can still fix it (2026-11-12: a project handoff over the cap came
+    back as a bare path, and nothing had said there was a cap).
+    """
+    budget_bytes = _memspec.COMPACT_RESUME_MAX_BYTES if budget_bytes is None else budget_bytes
+    data = str(text).encode('utf-8')
+    prefix = data[:_memspec.COMPACT_RESUME_MAX_BYTES * 2]
+    rendered, problem = _resume_rendered(prefix)
+    if rendered is None:
+        if problem == 'markers' and data.count(RESUME_BEGIN.encode('ascii')) == 1 \
+                and data.count(RESUME_END.encode('ascii')) == 1:
+            problem = 'late'
+        return _memspec.COMPACT_RESUME_PROBLEMS[problem].format(
+            begin=RESUME_BEGIN, end=RESUME_END, cap=budget_bytes, window=len(prefix))
+    size = len(rendered.encode('utf-8'))
+    if size > budget_bytes:
+        return _memspec.COMPACT_RESUME_PROBLEMS['size'].format(size=size, cap=budget_bytes)
+    return None
 
 
 def resume_notice(destination):

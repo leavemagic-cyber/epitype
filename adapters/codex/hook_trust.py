@@ -26,8 +26,6 @@ except ImportError:
     from _native_hooks import hook_states as _native_hook_states
 
 
-MARKER_VALUE = "epitype"
-MARKER_FIELDS = ("id", "comment")
 SEEN_FILENAME = "codex_hook_trust_seen.json"
 TRUSTED = "TRUSTED"
 UNTRUSTED = "UNTRUSTED"
@@ -47,6 +45,9 @@ if str(_REPO_ROOT) not in sys.path:
 # 常安裝的機器都被這支報成 unexpected。安裝器不能 import memspec（它要在 epitype 套件
 # 還不能 import 的機器上跑），所以共用常數搬不進 memspec；由查核端去讀正本才是單一來源。
 from install.graft import EVENTS as REQUIRED_EVENTS
+# 認領也用安裝器那一份：Codex 改寫 hooks.json 時可能丟掉不認得的 id／comment 鍵，只靠
+# 標記認的話，標記一掉這裡就報「沒有 epitype 登記」——跟 Claude 端 2026-11-12 同一種誤報。
+from install.graft import CONFIG_DIRECTORY, HOOK_DIRECTORY, MARKER_VALUE, _ours
 
 
 def _snake(event):
@@ -59,11 +60,11 @@ def _hook_digest(hook):
     ).hexdigest()
 
 
-def _is_marked(group):
-    return any(group.get(field) == MARKER_VALUE for field in MARKER_FIELDS)
+def _hooks_root(home):
+    return home / CONFIG_DIRECTORY / HOOK_DIRECTORY
 
 
-def _epitype_positions(hooks_path):
+def _epitype_positions(hooks_path, hooks_root):
     value = json.loads(hooks_path.read_text(encoding="utf-8-sig"))
     events = value.get("hooks") if isinstance(value, dict) else None
     if not isinstance(events, dict):
@@ -73,7 +74,7 @@ def _epitype_positions(hooks_path):
         if not isinstance(groups, list):
             continue
         for group_index, group in enumerate(groups):
-            if not isinstance(group, dict) or not _is_marked(group):
+            if not isinstance(group, dict) or not _ours(group, hooks_root):
                 continue
             hooks = group.get("hooks")
             if not isinstance(hooks, list):
@@ -122,7 +123,7 @@ def run_check(home, output=sys.stdout, seen_path=None):
     if not hooks_path.is_file() or not config_path.is_file():
         print("CODEX TRUST: UNVERIFIED no codex hooks.json/config.toml", file=output)
         return 1
-    positions = _epitype_positions(hooks_path)
+    positions = _epitype_positions(hooks_path, _hooks_root(home))
     if not positions:
         print("CODEX TRUST: UNVERIFIED no epitype registrations", file=output)
         return 1
@@ -232,7 +233,7 @@ def _selftest():
         states = _trust_states(home / ".codex" / "config.toml")
         return {key: {"trustStatus": "trusted", "enabled": True,
                       "currentHash": states.get(key, {}).get("trusted_hash")}
-                for _event, key, _digest in _epitype_positions(home / ".codex" / "hooks.json")}
+                for _event, key, _digest in _epitype_positions(home / ".codex" / "hooks.json", _hooks_root(home))}
 
     checks = []
     try:
@@ -259,7 +260,7 @@ def _selftest():
             ))
             checks.append((
                 "key follows codex <path>:<snake_event>:<group>:<index> layout",
-                {item[1] for item in _epitype_positions(hooks_path)}
+                {item[1] for item in _epitype_positions(hooks_path, _hooks_root(home))}
                 == {_fixture_key(hooks_path, event) for event in REQUIRED_EVENTS},
             ))
             from install import graft as _graft
@@ -291,7 +292,7 @@ def _selftest():
                 ("", "", UNVERIFIED),
             ):
                 report = {key: {"trustStatus": status, "enabled": True, "currentHash": native_hash}
-                          for _event, key, _digest in _epitype_positions(home / ".codex" / "hooks.json")}
+                          for _event, key, _digest in _epitype_positions(home / ".codex" / "hooks.json", _hooks_root(home))}
                 out = io.StringIO()
                 with patch(__name__ + "._native_hook_states", return_value=report):
                     code = run_check(home, out)

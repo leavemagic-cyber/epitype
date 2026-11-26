@@ -40,8 +40,10 @@ Total 49,999 versus the lead's supplied 82,559. These are engineering targets,
 not measured savings or new owner restrictions. A full 18,743 MCP browser profile
 instead gives a conditional 64,742 target. Preserve required capabilities and
 approved core even when over budget. Source targets: agent description 35,
-skill description 40, index 1,000 estimated tokens; existing raw index 1,526
-bytes and generated core 14,523 bytes remain independent. Agent catalog target
+skill description 40, index 1,000 estimated tokens; raw `MEMORY.md` files are judged against the host
+load limit (200 lines or 25,000 bytes, [memory-index](memory-index.md)), not a
+policy number, and generated core is compared with its last accepted baseline
+(`epitype core-baseline`), not a byte cap. Agent catalog target
 315 assumes the current nine roles, not a limit on the number of agents.
 
 ## Measurement and privacy
@@ -51,8 +53,8 @@ and skill bodies are conditional invoked cost. A hidden automatic skill
 description has zero startup-description estimate and its body remains available.
 Canonical paths deduplicate aliases. Child descriptions are never added to host
 category totals. Static candidates are **partial**, not proof of actual loading.
-Raw index byte budgets use the file's original size, including CRLF and BOM,
-matching `memory-index`; text normalization is only for token estimation.
+Raw index limits use the file's original size, including CRLF and BOM, and its
+line count, matching `memory-index`; text normalization is only for token estimation.
 Imports, host/synced catalogs, launch definitions, exact settings precedence and
 retained context need a sanitized host export. A missing/partial scan is explicit.
 ToolSearch denial reports a possible upfront MCP cost, never a saving.

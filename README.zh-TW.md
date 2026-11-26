@@ -16,8 +16,8 @@ Epitype 就是為了這件事做的一層小東西。它接 Claude Code 和 Code
 
 只用 Python 標準函式庫。不必註冊服務，自己不呼叫模型，也不用付錢。
 
-[`epitype memory-index`](docs/memory-index.md) 讓每個 vault 的常駐索引使用同一個可設定的大小目標，
-可先預覽，再把超量內容逐字保留到完整索引。
+[`epitype memory-index`](docs/memory-index.md) 讓每個 vault 的常駐索引守住 Claude Code 實際的載入上限
+（前 200 行或 25KB），可先預覽，再把超量內容逐字保留到完整索引。
 
 ## 先查看起手範本
 
@@ -207,12 +207,12 @@ epitype search recall "自然語言提示" --vault C:\path\to\vault
 | 指令 | 做什麼 |
 |---|---|
 | `epitype doctor [--home HOME] [--dry-run] [--clear-shim-status]` | 對已安裝的 hook 註冊與 shim 執行做合成體檢；安裝後或懷疑哪裡壞了時執行。 |
-| `epitype dream [vaults...] [--since SINCE] [--dry-run] [--scheduled] [--json]` | 唯讀離線整理盤點（缺別名、卡片 lint 結果、殭屍待辦、待審草稿、老化事件卡，以及未登記的口袋庫、草稿老化、混雜卡拆卡候選、超過設定上限的檔案、沒有決策卡承接的 owner 原話、與規則卡重組結果不一致的生成塊，以及把 owner 事件、閘門擋下與考題失敗對齊到卡上的檢討包），整理成一份編號審核包；本身不套用任何建議。排程模式是 config 的 `dream.mode`——`piggyback`（預設：開場時起一個脫鉤背景程序）、`nightly`（系統排程）、`off`；用 `epitype install --dream {piggyback,nightly,off} [--at HH:MM]` 切換（nightly 預設 `03:30`）。 |
+| `epitype dream [vaults...] [--since SINCE] [--dry-run] [--scheduled] [--json]` | 唯讀離線整理盤點（缺別名、卡片 lint 結果、殭屍待辦、待審草稿（含草稿老化）、老化事件卡，以及未登記的口袋庫、混雜卡拆卡候選、超過設定上限的檔案、沒有決策卡承接的 owner 原話、與規則卡重組結果不一致的生成塊，以及把 owner 事件、閘門擋下與考題失敗對齊到卡上的檢討包），整理成一份編號審核包；本身不套用任何建議。排程模式是 config 的 `dream.mode`——`piggyback`（預設：開場時起一個脫鉤背景程序）、`nightly`（系統排程）、`off`；用 `epitype install --dream {piggyback,nightly,off} [--at HH:MM]` 切換（nightly 預設 `03:30`）。 |
 | `epitype gates <vault> [--since Nd\|YYYY-MM-DD] [--json] [--by kind\|decision\|session\|day]` | 把 `_GATE_LOG.jsonl` 整理成閘門實際擋下什麼的報告，例如 `epitype gates C:\path\to\vault --since 2d`。 |
 | `epitype cards <vault> [--strict] [--verbose] [--deep] [--json] [--refresh-cache] [--fix-dates [--dry-run]]` | 依必填欄位檢查記憶卡。`--deep` 另加庫層級檢查：同一個 `decision_key` 只有一張現行卡、取代鏈完整、每張納管卡都在生成目錄與搜尋索引裡。`--refresh-cache` 完整執行逐卡與範例檢查，寫入 `<vault>/.epitype/card-lint-result.json`；不能搭配 `--deep` 或 `--fix-dates`。開場只讀這份狀態；輸入、驗證版本或 UTC 日期改變（最長 24 小時）即失效，不在工作對話派修卡或補別名任務。規則實際使用端仍驗證現行卡片。`--fix-dates` 把推得的日期補成一行 `last_verified_at:`；先用 `--fix-dates --dry-run` 預覽會寫什麼。 |
 | `epitype dupes [vaults...] [--json] [--threshold N]` | 用字元片段與欄位偵測跨庫近重複候選；預設採共用的設定庫清單、門檻 0.35。每次寫入治理庫 `_drafts/duplicates/YYYYMMDD.md` 和同名 JSON；`--json` 另讓標準輸出採 JSON。夢在目錄重生後寫相同報告（`--dry-run` 不寫）。列出機器檢查欄位、owner 引文、成對相似度及建議保留卡；主導 AI 依 owner 規則處理，Epitype 不改卡或退役卡。語意改寫仍易漏抓，校準結果見 `docs/dupes-calibration.md`。 |
 | `epitype views <vaults...> [--force] [--json]` | 依卡片欄位重生可瀏覽的目錄：`_views/current.md`（現用卡，含完整現行決策清單）與 `_views/history/closed.md`（已結案專案與已取代決策）。永遠不寫 `MEMORY.md`；輸入指紋沒變就不重寫；同庫並行有鎖。說明見 [四個閱讀層級](docs/ARCHITECTURE.md#four-reading-levels)。 |
-| `epitype core-gen <vaults...> --out FILE [--cap-bytes N] [--dry-run] [--check] [--json]` | 由 `type: rule` 卡組裝常駐核心塊：`floor` 依 `order` 編號、`resident` 依 `section` 分小節、單一宿主的卡另立宿主區，核准的 `text` 逐位元組照抄，另寫核准包。超過大小目標會提醒並保留完整規則；生成層的卡缺 `approved_by`／`approved_at` 仍拒寫。`--check` 只比對不寫檔。說明見 [核心生成](docs/ARCHITECTURE.md#core-generation-rule-cards--the-resident-block)。 |
+| `epitype core-gen <vaults...> --out FILE [--dry-run] [--check] [--json]` | 由 `type: rule` 卡組裝常駐核心塊：`floor` 依 `order` 編號、`resident` 依 `section` 分小節、單一宿主的卡另立宿主區，核准的 `text` 逐位元組照抄，另寫核准包。治理庫的核心比上次確認變大時，逐張列出變大的卡並保留完整規則（接受要寫理由：`epitype core-baseline --accept --reason …`；舊的 `--cap-bytes` 不再使用）；生成層的卡缺 `approved_by`／`approved_at` 仍拒寫。`--check` 只比對不寫檔。說明見 [核心生成](docs/ARCHITECTURE.md#core-generation-rule-cards--the-resident-block)。 |
 | `epitype aliases {export,apply}` | `export` 把缺別名的卡片列成 JSON 工作清單；`apply` 把審核過的 `suggested` 別名寫回卡片，只新增不刪改。 |
 | `epitype search {build,query,recall}` | 建立本機 FTS 索引，並用關鍵詞或自然語言查詢；詳見上方〈搜尋本機 vault〉。 |
 

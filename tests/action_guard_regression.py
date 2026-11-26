@@ -1188,35 +1188,23 @@ class GuardCardLint(unittest.TestCase):
             + "metadata:\n  type: feedback\n---\nbody\n",
         )
 
-    def test_a_behaviour_card_written_now_must_arm_or_say_it_cannot(self):
-        # The choice of card shape used to be the writer's alone, and 170 times the
-        # writer picked the shape that binds nobody. It is no longer a silent choice.
-        rules, _ = self.behaviour_card("feedback-unarmed.md")
-        self.assertIn(("FAIL", "unarmed"), rules)
-
-    def test_each_arming_field_satisfies_the_rule(self):
-        for extra in (
-            'forbidden:\n  - 再提議把這件事推回 owner\n',
-            'guard_tool: Bash\nguard_all_of:\n  - "<<"\n  - "\\\\"\n',
-            "require_when: (已完成)\nrequire_text: (實測)\n",
-            "unenforceable: 判斷型，訊息裡沒有可比對的字面訊號\n",
+    def test_no_behaviour_card_is_required_to_arm(self):
+        # owner 2026-11-13：核心規則綁動作只做派工跟交付。其他行為卡不帶武裝欄位是
+        # 正常狀態，新卡、舊卡、只剩退役 trigger 的卡都不該被點名。
+        for filename, extra, stamp in (
+            ("feedback-new.md", "", "2026-11-13"),
+            ("feedback-old.md", "", "2026-08-01"),
+            ("feedback-trigger.md", 'trigger: {tool: "^(Bash)$", input: "rm -rf"}\n', "2026-11-13"),
         ):
-            rules, _ = self.behaviour_card("feedback-armed.md", extra)
-            self.assertNotIn(("FAIL", "unarmed"), rules, extra)
-            self.assertNotIn(("WARN", "unarmed"), rules, extra)
+            with self.subTest(filename=filename):
+                rules, _ = self.behaviour_card(filename, extra, stamp=stamp)
+                self.assertFalse([rule for rule in rules if rule[1] == "unarmed"], rules)
+                self.assertNotIn("FAIL", {level for level, _rule in rules}, rules)
 
-    def test_an_older_behaviour_card_is_a_warning_not_a_failure(self):
-        # A rule change does not retroactively fail a year of cards; it makes the
-        # backlog countable. 2026-09-16 that count was 194.
-        rules, _ = self.behaviour_card("feedback-old.md", stamp="2026-08-01")
-        self.assertIn(("WARN", "unarmed"), rules)
-        self.assertNotIn(("FAIL", "unarmed"), rules)
-
-    def test_the_retired_trigger_field_does_not_count_as_armed(self):
+    def test_a_card_that_still_declares_unenforceable_does_not_start_failing(self):
         rules, _ = self.behaviour_card(
-            "feedback-trigger.md", 'trigger: {tool: "^(Bash)$", input: "rm -rf"}\n'
-        )
-        self.assertIn(("FAIL", "unarmed"), rules)
+            "feedback-memory-only.md", "unenforceable: 判斷型，訊息裡沒有可比對的字面訊號\n")
+        self.assertNotIn("FAIL", {level for level, _rule in rules}, rules)
 
     def test_a_requirement_with_only_one_half_fails_the_lint(self):
         for text, name in (

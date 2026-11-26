@@ -48,6 +48,25 @@ class BodyNoise(unittest.TestCase):
         self.assertEqual(self.noise(card('project', record)), [])
         self.assertEqual(self.noise(card('feedback', record, status='superseded')), [])
 
+    def test_locations_links_and_content_hashes_are_not_work_records(self):
+        for fragment in ('另見 [[project-beer-verify-20260826b]]',
+                         '系統暫存 AppData/Local/Temp（8.4 GB）、AppData' + '\\' + 'Local' + '\\' + 'Temp 都要清',
+                         'EXPECTED_MODEL_HASH：`' + 'ab12' * 16 + '`'):
+            with self.subTest(fragment=fragment):
+                self.assertEqual(self.noise(card('feedback', '做法：先查來源。' + fragment)), [])
+
+    def test_records_beside_those_shapes_still_fail(self):
+        for fragment, shown in (
+                ('完整提交 ' + 'ab12' * 10, 'ab12' * 10),
+                ('另見 [[project-x]]，提交 9f56943f', '9f56943f'),
+                ('`rulings/ruling-20260903-244294c607e8.md`', '244294c607e8'),
+                ('暫存 AppData/Local/Temp/claude/a/out.txt（舊）', 'AppData/Local/Temp/claude/a/out.txt'),
+                ('第五版（FULLPLAN1/scratchpad/finish_docs.py）', 'scratchpad/finish_docs.py')):
+            with self.subTest(fragment=fragment):
+                reasons = self.noise(card('feedback', '做法：先查來源。' + fragment))
+                self.assertEqual(len(reasons), 1)
+                self.assertIn(shown, reasons[0])
+
     def test_date_joined_to_id_is_not_read_as_hash(self):
         reasons = self.noise(card('decision', '來源 20260907-9f156894953d'))
         self.assertEqual(len(reasons), 1)

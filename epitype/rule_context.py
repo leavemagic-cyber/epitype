@@ -18,8 +18,11 @@ def _git_location(directory):
     path = Path(directory)
     if not any((parent / '.git').exists() for parent in (path, *path.parents)):
         return None
-    remaining = min(0.3, rule_provenance.verification_deadline(0.3) - time.monotonic())
-    if remaining <= 0:
+    # 平常最多 0.3 秒（掛鉤的時限）；明確的不限時稽核（unbounded_verification）才不設上限——
+    # 以前寫成 min(0.3, …)，連不限時也被截在 0.3 秒，滿載時 git 一慢就退成 ADVISORY。
+    deadline = rule_provenance.verification_deadline(0.3)
+    remaining = None if deadline == float('inf') else deadline - time.monotonic()
+    if remaining is not None and remaining <= 0:
         raise _GitLookupBudgetExpired
     try:
         result = subprocess.run(
@@ -35,7 +38,10 @@ def _git_location(directory):
     return False  # A failed Git lookup cannot prove a different project.
 
 
-def _path_applicability(project, actual):
+def _path_applicability(project, actual, *, card=None, event=None):
+    from . import session_scope
+    if session_scope.card_in_project(card, event):
+        return "APPLICABLE", "session project"
     try:
         source, current = Path(project).resolve(), Path(actual).resolve()
         if current.is_relative_to(source):
@@ -54,7 +60,7 @@ def _path_applicability(project, actual):
         return 'ADVISORY', 'project context is unavailable'
 
 
-def applicability(scope, event=None):
+def applicability(scope, event=None, *, card=None):
     """Match explicit source scope; missing machine context is advisory, not global."""
     event = event if isinstance(event, dict) else {}
     context = event.get('rule_context')
@@ -65,7 +71,7 @@ def applicability(scope, event=None):
         cwd = event.get('cwd')
         if explicit:
             if Path(str(project)).is_absolute() and Path(str(explicit)).is_absolute():
-                state, reason = _path_applicability(project, explicit)
+                state, reason = _path_applicability(project, explicit, card=card, event=event)
                 if state != 'APPLICABLE':
                     return state, reason
             elif str(explicit).casefold() != str(project).casefold():
@@ -73,7 +79,7 @@ def applicability(scope, event=None):
         elif cwd and Path(project).is_absolute():
             if not Path(str(cwd)).is_absolute():
                 return 'ADVISORY', 'project context is unavailable'
-            state, reason = _path_applicability(project, cwd)
+            state, reason = _path_applicability(project, cwd, card=card, event=event)
             if state != 'APPLICABLE':
                 return state, reason
         else:
@@ -99,8 +105,12 @@ def reference_applicability(fields, card, event=None, *, card_text=None):
     event = event if isinstance(event, dict) else {}
     # Captures/task references bind to their exact cwd, never another worktree's
     # task or account merely because it shares a Git common directory.
+    from . import session_scope
+    session_member = session_scope.card_in_project(card, event)
     origin = fields.get('cwd')
     if origin and event.get('cwd'):
+        if session_member:
+            return 'APPLICABLE', 'session project'
         try:
             if not Path(event['cwd']).resolve().is_relative_to(Path(origin).resolve()):
                 return 'OUTSIDE', 'cwd differs from captured task origin'
@@ -108,7 +118,7 @@ def reference_applicability(fields, card, event=None, *, card_text=None):
         except (OSError, ValueError):
             return 'ADVISORY', 'captured cwd is unavailable'
     state, reason = _declared_reference_applicability(fields, card, event, card_text=card_text)
-    if state == 'ADVISORY' and str(fields.get('scope', '')).casefold() != 'global':
+    if state == 'ADVISORY' and not session_member and str(fields.get('scope', '')).casefold() != 'global':
         from . import capture_route
         path = Path(card).resolve()
         vault = next((parent for parent in path.parents if parent.name == 'memory'), path.parent)
@@ -162,7 +172,7 @@ def _declared_reference_applicability(fields, card, event=None, *, card_text=Non
                 return 'ADVISORY', 'lookup project path is not absolute'
         except (OSError, UnicodeError, ValueError):
             return 'ADVISORY', 'lookup project context is unavailable'
-    return applicability({'project': project, 'actions': ['*']}, event)
+    return applicability({'project': project, 'actions': ['*']}, event, card=card)
 
 
 def state_path(vault, session):
@@ -267,7 +277,7 @@ def restore(destination, allowed_vaults, budget=1800, *, event=None, diagnostics
                 projected = rule_pipeline.projection(fields, target, card_text=card_text, allow_deferred=True)
                 if projected['expired']:
                     continue
-                state, reason = applicability(projected['document']['scope'], event)
+                state, reason = applicability(projected['document']['scope'], event, card=target)
                 if state == 'OUTSIDE':
                     continue
                 line = rule_pipeline.render_projection(projected)

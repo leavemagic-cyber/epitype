@@ -755,7 +755,6 @@ def capture_transcript(vault, event, started_at):
         return False
     if is_codex_exec_transcript(event["transcript_path"]):
         return False
-    deadline = time.monotonic() + 0.1 if started_at is not None else float("inf")
     path = Path(event["transcript_path"])
     if not path.exists():
         # Hosts can submit the first prompt before creating the transcript.
@@ -793,8 +792,15 @@ def capture_transcript(vault, event, started_at):
                     line_number = None
                 skipping = state.get("skip_long_line", False)
                 read_until = offset + memspec.COMPACT_MAP_MAX_LINE_BYTES
+                # 0.1 秒只算掃描本身，而且每一次至少前進一筆。以前從進函式就起算：滿載的
+                # 機器上光是建游標鎖（含 fsync）、開檔就吃完 0.1 秒，迴圈一行都沒讀就存回
+                # 原游標——每一次呼叫都這樣，這段轉錄就永遠補不進來。整體期限仍由
+                # expired(started_at) 管。
+                deadline = time.monotonic() + 0.1 if started_at is not None else float("inf")
+                scanned = False
                 while (stream.tell() < read_until and not expired(started_at)
-                       and time.monotonic() < deadline):
+                       and (not scanned or time.monotonic() < deadline)):
+                    scanned = True
                     position = stream.tell()
                     raw = stream.readline(memspec.COMPACT_MAP_MAX_LINE_BYTES + 1)
                     if not raw:

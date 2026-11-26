@@ -113,6 +113,12 @@ def check_card(path, front_lines=None, fields=None):
                                       (decision.require_when and decision.require_text)))
     armed_guard = bool(guard and (guard.get("substrings") or ()))
     if not armed_speech and not armed_guard:
+        # 宣告了 unenforceable 的卡本來就只作記憶、不綁動作；它的例句是給人讀的範例，
+        # 沒有武裝可測不算錯。
+        if fields is None:
+            fields, _problem = memspec.frontmatter_fields(path)
+        if (fields.get(memspec.UNENFORCEABLE_FIELD) or "").strip():
+            return []
         findings.append((
             memspec.EXAMPLE_LEVEL_FAIL, "example",
             f"寫了例句，但這張卡沒有可以用例句測的武裝"
@@ -150,16 +156,23 @@ def _selftest():
 
     checks = []
 
+    # 當腳本跑時 epitype 套件不在路徑上，而來源夾具要 `from epitype import ...`。
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
+    from rule_source_fixtures import owner_bound_card
+
     def card(name, body):
+        # 閘門只讀來源已驗證的卡（62b654b）：要測例句兩向，卡得先綁來源。
         directory = Path(tempfile.mkdtemp(prefix="epitype-examples-"))
         target = directory / (name + ".md")
+        body = owner_bound_card(body, target, source_root=directory / "sources",
+                                case_id="rule-examples-" + name)
         target.write_text(body, encoding="utf-8")
         return target
 
     good = card("good", (
         "---\nname: 測試通過不等於上線\ndescription: 說明\n"
-        "decision_key: t1\nstatus: active\ncurrent_decision_at: 2026-09-19\n"
-        "decided_by: owner-explicit\nowner_quote: x\n"
+        "decision_key: synthetic-good\nstatus: active\ncurrent_decision_at: 2026-09-19\n"
         "forbidden:\n  - 測試過了所以沒問題\n"
         "example_blocks:\n  - 測試過了所以沒問題，可以上線\n"
         "example_allows:\n  - 測試過了，但還沒接上，所以不算上線\n---\nbody\n"
@@ -169,8 +182,7 @@ def _selftest():
 
     loose = card("loose", (
         "---\nname: 太鬆\ndescription: 說明\n"
-        "decision_key: t2\nstatus: active\ncurrent_decision_at: 2026-09-19\n"
-        "decided_by: owner-explicit\nowner_quote: x\n"
+        "decision_key: synthetic-loose\nstatus: active\ncurrent_decision_at: 2026-09-19\n"
         "forbidden:\n  - 這句話根本不會出現\n"
         "example_blocks:\n  - 測試過了所以沒問題\n---\nbody\n"
     ))
@@ -180,8 +192,7 @@ def _selftest():
 
     wide = card("wide", (
         "---\nname: 太寬\ndescription: 說明\n"
-        "decision_key: t3\nstatus: active\ncurrent_decision_at: 2026-09-19\n"
-        "decided_by: owner-explicit\nowner_quote: x\n"
+        "decision_key: synthetic-wide\nstatus: active\ncurrent_decision_at: 2026-09-19\n"
         "forbidden:\n  - 測試\n"
         "example_allows:\n  - 我把測試跑完了，62/62\n---\nbody\n"
     ))
@@ -197,10 +208,27 @@ def _selftest():
     checks.append(("沒武裝卻寫例句要 FAIL",
                    any("測不到任何東西" in item[2] for item in findings), findings))
 
+    memory_only = card("memory-only", (
+        "---\nname: 只作記憶\ndescription: 說明\n"
+        "unenforceable: 只作記憶，不綁動作\n"
+        "example_blocks:\n  - 任何一句話\n---\nbody\n"
+    ))
+    findings = check_card(memory_only)
+    checks.append(("宣告 unenforceable 又沒武裝的卡，例句不判 FAIL", findings == [], findings))
+
+    blank_reason = card("blank-reason", (
+        "---\nname: 理由空白\ndescription: 說明\n"
+        "unenforceable: \"\"\n"
+        "example_blocks:\n  - 任何一句話\n---\nbody\n"
+    ))
+    findings = check_card(blank_reason)
+    checks.append(("unenforceable 空白不算宣告，照樣 FAIL",
+                   any("測不到任何東西" in item[2] for item in findings), findings))
+
     none = card("none", (
         "---\nname: 沒例句\ndescription: 說明\n"
-        "decision_key: t4\nstatus: active\ncurrent_decision_at: 2026-09-19\n"
-        "decided_by: owner-explicit\nowner_quote: x\nforbidden:\n  - 隨便\n---\nbody\n"
+        "decision_key: synthetic-none\nstatus: active\ncurrent_decision_at: 2026-09-19\n"
+        "forbidden:\n  - 隨便\n---\nbody\n"
     ))
     checks.append(("沒寫例句就不管它", check_card(none) == [], None))
 

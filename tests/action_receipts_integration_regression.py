@@ -59,6 +59,31 @@ class Integration(unittest.TestCase):
                 path.write_text('\n'.join(json.dumps(r) for r in rows),encoding='utf-8')
                 self.assertEqual(self.noted({**meta,'last_assistant_message':'next'}),[],(host,allowed))
 
+    def test_stop_indexes_session_receipts_once_for_all_cards(self):
+        # Per-card indexing scaled with cards x session history: a 51k-receipt session
+        # with 67 cards took longer than the host's 10 s Stop limit every turn.
+        from epitype import action_sequence
+        for index in range(4):
+            self.write_card(f'read{index}.md',name=f'read-first-{index}',
+                            require_tool_before=['@file.read => @file.change'],audience='root')
+        file=self.root/'old.md'; file.write_text('old')
+        session='many-'+self.root.name
+        path=self.root/'.claude'/f'{session}.jsonl'; path.parent.mkdir(exist_ok=True)
+        meta={'session_id':session,'cwd':str(self.root),'transcript_path':str(path)}
+        rows=[{'type':'user','message':{'content':'do it'}},
+              {'type':'assistant','message':{'content':[{'type':'tool_use','id':'edit','name':'Edit','input':{'file_path':str(file)}}]}}]
+        path.write_text('\n'.join(json.dumps(r) for r in rows),encoding='utf-8')
+        action_receipts.initialize({**meta,'source':'startup'},action_receipts.database_path(self.config))
+        event={**meta,'tool_use_id':'edit','tool_name':'Edit','tool_input':{'file_path':str(file)},'hook_event_name':'PreToolUse'}
+        self.invoke(event)
+        self.invoke({**event,'hook_event_name':'PostToolUse','tool_response':{'exit_code':0}})
+        with patch.object(action_sequence,'prepare',wraps=action_sequence.prepare) as prepare:
+            noted=self.noted({**meta,'last_assistant_message':'done'})
+        self.assertEqual(prepare.call_count,1)
+        self.assertEqual(len(noted),1)
+        self.assertEqual(noted[0][1],'tool_sequence')
+        self.assertTrue(noted[0][0].startswith('read-first-'))
+
     def test_screenshot_fast_path_and_missing_result_are_explicit(self):
         with patch.object(pretool,'read_event',return_value={'hook_event_name':'PostToolUse','tool_name':'screenshot'}),patch.object(pretool,'load_config') as config:
             self.assertEqual(pretool.main(),0);config.assert_not_called()

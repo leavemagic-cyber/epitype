@@ -28,6 +28,8 @@ _EXECUTION_FIELDS = {"forbidden", "require_when", "require_text", "require_tool_
                      "on_hit", "require_on_hit", "guard_tool", "guard_all_of",
                      "guard_requires", "guard_unless", "fence_shell", "fence_langs"}
 _EXECUTION_FIELDS.update({'write_check', 'advise_tool', 'advise_all_of', 'advise_text',
+                          'advise_also_tool', 'advise_also_any_of',
+                          'advise_on_midturn', 'advise_midturn_text', 'advise_midturn_on_hit',
                           'guard_when', 'audience', 'require_on_hit'})
 _EXECUTION_FIELDS.update(memspec.HOST_NATIVE_FIELDS)
 _STOP_DISCOVERY_FIELDS = {"decision_key", "forbidden", "require_when", "turn_check",
@@ -128,6 +130,62 @@ def _digest(meaning):
     return hashlib.sha256(meaning.encode()).hexdigest()
 
 
+# 整份綁定對不上的說法；寫卡閘門靠它認出「只有綁定失效」的那一條（見 pretooluse_gate）。
+PAYLOAD_UNBOUND_ISSUE = "complete rule body and execution fields are not bound to this source review"
+PARTS_VERSION = 1
+PART_BODY = "@body"
+PART_QUOTED = "@quoted"
+PART_DOCUMENT = "@document"
+# 審查紀錄本身不是規則內容：重綁一定會換掉它們，比對 rule_provenance 時要排除。
+REVIEW_RECORD_KEYS = ("payload_binding", "current_review")
+# owner 原話、決策、狀態與執行欄位：AI 改到其中任何一欄，Epitype 就不自動重綁（rule_repair）。
+# 名稱比對補上沒列到的同類欄位；寧可多判成「要人看」，也不讓改原話的編輯被靜靜綁回去。
+RULE_DEFINING_FIELDS = frozenset(
+    {memspec.OWNER_QUOTE_FIELD, memspec.DECIDED_BY_FIELD, memspec.DECISION_KEY_FIELD,
+     memspec.CURRENT_DECISION_AT_FIELD, memspec.DECISION_STATUS_FIELD, memspec.SUPERSEDED_BY_FIELD,
+     memspec.ALIASES_FIELD, memspec.RULE_HOSTS_FIELD, "text", "layer", "valid_until", "handoff_rule",
+     "auto", "guard_advice"}
+    | _EXECUTION_FIELDS | set(rule_provenance.SCOPE_KEYS))
+_RULE_DEFINING_NAME = re.compile(
+    r"quote|owner|approv|decid|decision|forbid|supersed|guard_|require_|advise_|on_hit|scope|expir",
+    re.IGNORECASE)
+
+
+def _part_digest(value):
+    # 只用來偵測「哪一欄變了」，不是內容證明；整份的證明仍是 sha256。
+    raw = json.dumps(value, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()[:16]
+
+
+def reviewed_content(document):
+    """rule_provenance minus its review records: quote, text, key, scope, kind, author, links."""
+    return {key: value for key, value in (document or {}).items() if key not in REVIEW_RECORD_KEYS}
+
+
+def rule_defining(name):
+    """True for a field that states what the owner said or what the rule enforces."""
+    return name in RULE_DEFINING_FIELDS or bool(_RULE_DEFINING_NAME.search(name))
+
+
+def payload_parts(card_text, document=None):
+    """Per-field digests of the same blocks the payload hash reads, plus the body,
+    the quoted spans outside rule-defining fields, and the reviewed provenance content.
+
+    The single payload hash cannot say which field an edit touched; these digests,
+    stored next to it at review time, can. Changing them is change detection only."""
+    blocks, body = json.loads(_meaning(card_text, include_source=False))
+    parts = {name: _part_digest(lines) for name, lines in blocks.items()}
+    parts[PART_BODY] = _part_digest(body)
+    quoted_pattern = memspec.GRANT_QUOTED_TEXT_REGEX
+    spans = [match.group(0) for name in sorted(blocks) if not rule_defining(name)
+             for line in blocks[name] for match in quoted_pattern.finditer(line)]
+    spans.extend(match.group(0) for match in quoted_pattern.finditer(body))
+    parts[PART_QUOTED] = _part_digest(spans)
+    if document is not None:
+        parts[PART_DOCUMENT] = _part_digest(reviewed_content(document))
+    return parts
+
+
 def bind_payload(document, card_text, *, reviewer, reviewed_at=None,
                  rationale="Reviewed the complete interpretation and execution fields."):
     """Freeze the exact reviewed interpretation; this hash is not semantic proof."""
@@ -137,7 +195,9 @@ def bind_payload(document, card_text, *, reviewer, reviewed_at=None,
         "sha256": _digest(_payload_meaning(card_text, document)),
         "reviewed_by": reviewer,
         "reviewed_at": reviewed_at or datetime.now(timezone.utc).isoformat(),
-        "rationale": rationale}
+        "rationale": rationale,
+        "parts_version": PARTS_VERSION,
+        "parts": payload_parts(card_text, document)}
     return bound
 
 
@@ -156,9 +216,9 @@ def payload_issues(document, card_text):
         if old == _digest(_meaning(card_text, include_source=False)):
             rule_binding.remember("payload", identity, expected)
         elif not rule_binding.matches("payload", identity, expected):
-            return ["complete rule body and execution fields are not bound to this source review"]
+            return [PAYLOAD_UNBOUND_ISSUE]
     elif binding.get("version") != 2 or old != expected:
-        return ["complete rule body and execution fields are not bound to this source review"]
+        return [PAYLOAD_UNBOUND_ISSUE]
     return []
 
 

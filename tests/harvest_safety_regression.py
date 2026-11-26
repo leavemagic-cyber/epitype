@@ -50,6 +50,33 @@ class MutationTests(unittest.TestCase):
         self.assertEqual(target.read_bytes(), b"earlier history")
         self.assertEqual(self.card.read_bytes(), CARD.encode())
 
+    def test_unreadable_transcript_is_not_recorded_as_harvested(self):
+        home = self.root / "home"
+        (home / ".epitype").mkdir(parents=True)
+        (self.vault / memspec.WORK_LEDGER_FILENAME).write_text("# ledger\n", encoding="utf-8")
+        (home / ".epitype" / "config.json").write_text(
+            json.dumps({memspec.CONFIG_VAULTS_FIELD: [str(self.vault)]}), encoding="utf-8")
+        transcript = home / ".claude" / "projects" / "C--Sample" / "session-one.jsonl"
+        transcript.parent.mkdir(parents=True)
+        transcript.write_text(json.dumps({
+            "type": "user", "timestamp": "2026-11-01T10:00:00.000Z", "sessionId": "s1",
+            "cwd": str(self.root), "message": {"role": "user", "content": "你可以直接改那個測試檔"},
+        }, ensure_ascii=False) + "\n", encoding="utf-8")
+        real_open = Path.open
+
+        def locked(path, *args, **kwargs):
+            if path.name == transcript.name:
+                raise PermissionError("locked (synthetic)")
+            return real_open(path, *args, **kwargs)
+
+        with patch.object(Path, "open", locked), contextlib.redirect_stdout(io.StringIO()):
+            first, *_ = harvest.harvest(home, [self.vault])
+        self.assertEqual(first["utterances"], 0)
+        self.assertNotIn(str(transcript), harvest.load_manifest(self.vault))
+        with contextlib.redirect_stdout(io.StringIO()):
+            second, *_ = harvest.harvest(home, [self.vault])
+        self.assertEqual((second["files"], second["utterances"]), (1, 1))
+        self.assertIn(str(transcript), harvest.load_manifest(self.vault))
 
 
 if __name__ == "__main__":

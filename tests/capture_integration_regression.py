@@ -1,6 +1,7 @@
 import sys; sys.dont_write_bytecode = True
 """Synthetic live/replay capture parity, provenance and compatibility checks."""
 
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -260,6 +261,30 @@ class CaptureIntegrationRegression(unittest.TestCase):
         self.assertEqual(len(cards), 1)
         self.assertIn('captured_pending', cards[0].parts)
         self.assertFalse(list((vault / memspec.CORRECTION_DIRECTORY).glob('*.md')))
+
+    def test_slow_cursor_setup_does_not_starve_the_transcript_scan(self):
+        # 滿載的機器上建游標鎖（含 fsync）實測超過 0.1 秒；掃描預算若從進函式就起算，
+        # 迴圈一行都沒讀就收工，上一題在套件併行時就這樣假紅（0 != 1）。
+        vault = self.root / 'slow-setup'
+        vault.mkdir()
+        prompt = '不要再亂改介面'
+        event = self.event('slow-setup', prompt, None)
+        with Path(event['transcript_path']).open('a', encoding='utf-8') as stream:
+            stream.write(json.dumps({'type': 'user', 'uuid': 'synthetic-slow-setup',
+                'message': {'content': prompt}}, ensure_ascii=False) + '\n')
+        real_lock = memspec.file_lock
+
+        @contextlib.contextmanager
+        def slow_lock(target, timeout):
+            time.sleep(0.15)  # 模擬滿載時的建鎖成本，大於 0.1 秒的掃描預算
+            with real_lock(target, timeout) as held:
+                yield held
+
+        with patch.object(memspec, 'file_lock', slow_lock):
+            capture.capture_transcript(vault, event, time.monotonic())
+        cards = list(vault.rglob('*.md'))
+        self.assertEqual(len(cards), 1)
+        self.assertIn('captured_pending', cards[0].parts)
 
 
 if __name__ == "__main__":

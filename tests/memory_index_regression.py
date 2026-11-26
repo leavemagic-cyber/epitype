@@ -24,7 +24,11 @@ class IndexTests(unittest.TestCase):
         self.addCleanup(temp.cleanup)
         self.vault = Path(temp.name)
         self.memory = self.vault / "MEMORY.md"
-        self.config = {"index_cap_bytes": 240}
+        self.config = {}
+        # 小庫模擬宿主上限，才能用十幾行驗搬移；真實數字見 HostLoadLimit。
+        limit = patch.object(index, "HOST_INDEX_MAX_BYTES", 240)
+        limit.start()
+        self.addCleanup(limit.stop)
         self.header = "# My handwritten index\r\nIntro kept verbatim.\r\n\r\n".encode()
         self.raw = self.header
         for n in range(12):
@@ -36,12 +40,13 @@ class IndexTests(unittest.TestCase):
     def plan(self):
         return index.plan(self.vault, self.config)
 
-    def test_cap_header_priority_and_original_partition(self):
+    def test_cap_keeps_header_moves_from_the_bottom_and_partitions_original(self):
         proposed = self.plan()
         self.assertLessEqual(len(proposed.short), 240)
         self.assertTrue(proposed.short.startswith(self.header))
-        self.assertIn("⚠".encode(), proposed.short)
-        self.assertIn(b"2026-11-12", proposed.short)
+        self.assertIn(b"(card%200.md)", proposed.short)
+        self.assertNotIn(b"- duplicate", proposed.short)
+        self.assertNotIn(b"(card%2011.md)", proposed.short)
         lines = self.raw.splitlines(keepends=True)
         self.assertEqual(sorted(proposed.kept + proposed.moved), list(range(len(lines))))
         self.assertFalse(set(proposed.kept) & set(proposed.moved))
@@ -75,7 +80,7 @@ class IndexTests(unittest.TestCase):
 
     def test_small_append_updates_existing_full_index(self):
         index.apply_plan(self.plan())
-        self.config["index_cap_bytes"] = 1000
+        index.HOST_INDEX_MAX_BYTES = 1000
         self.memory.write_bytes(self.memory.read_bytes() + b"- added\n")
         index.apply_plan(self.plan())
         self.assertIn(b"- added\n", (self.vault / index.FULL_FILENAME).read_bytes())
@@ -168,14 +173,6 @@ class IndexTests(unittest.TestCase):
         memory.mkdir(parents=True)
         self.assertEqual(index.discover(projects), [memory])
 
-    def test_cap_default_alias_override_and_invalid_values(self):
-        self.assertEqual(index.cap_of({}), 1526)
-        self.assertEqual(index.cap_of({"shared_index_cap_bytes": 300}), 300)
-        self.assertEqual(index.cap_of({"shared_index_cap_bytes": 300, "index_cap_bytes": 500}), 500)
-        for value in (True, 0, -1, "500", None):
-            with self.assertRaises(ValueError):
-                index.cap_of({"index_cap_bytes": value})
-
     def test_check_and_dry_run_do_not_write_and_missing_input_is_error(self):
         with patch.object(memspec, "config_options", return_value=self.config):
             out = io.StringIO()
@@ -235,6 +232,122 @@ class IndexTests(unittest.TestCase):
             self.assertEqual(made.returncode, 0, made.stdout.decode(errors="replace"))
             self.addCleanup(os.rmdir, link)
         self.assertEqual(index.discover(projects), [memory])
+
+
+class HostLoadLimit(unittest.TestCase):
+    """MEMORY.md 上限＝Claude Code 載入上限（200 行或 25,000 B），不是自訂數字。"""
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory(prefix="epitype-host-limit-")
+        self.addCleanup(temp.cleanup)
+        self.vault = Path(temp.name)
+        self.memory = self.vault / "MEMORY.md"
+
+    def card(self, name, extra=""):
+        (self.vault / f"{name}.md").write_text(
+            f"---\nname: {name}\ndescription: d\n{extra}---\nbody\n", encoding="utf-8")
+
+    def test_limit_is_the_documented_host_limit(self):
+        self.assertEqual((index.HOST_INDEX_MAX_LINES, index.HOST_INDEX_MAX_BYTES), (200, 25_000))
+        limit = index.limit_of(self.vault, {"index_cap_bytes": 10, "shared_index_cap_bytes": 10})
+        self.assertEqual((limit.max_lines, limit.max_bytes), (200, 25_000))
+        self.assertIn("index_cap_bytes", limit.notice)
+        self.assertIn("shared_index_cap_bytes", limit.notice)
+        self.assertIsNone(index.limit_of(self.vault, {}).notice)
+        # 舊鍵是壞值也照樣讀得進來，不讓舊設定把工具弄壞。
+        self.assertEqual(index.limit_of(self.vault, {"index_cap_bytes": "x"}).max_bytes, 25_000)
+
+    def test_1600_bytes_50_lines_is_not_slimmed_in_any_vault(self):
+        raw = b"# Index\n" + b"".join(b"- [entry %02d](c.md) " % n + b"y" * 12 + b"\n" for n in range(48))
+        raw += b"z" * (1600 - len(raw) - 1) + b"\n"
+        self.assertEqual((len(raw), len(raw.splitlines())), (1600, 50))
+        self.memory.write_bytes(raw)
+        for config in ({}, {"index_cap_bytes": 1526},
+                       {"vaults": [str(self.vault)], "shared_index_cap_bytes": 1526}):
+            proposed = index.plan(self.vault, config)
+            self.assertEqual(proposed.short, raw)
+            self.assertEqual(proposed.moved, [])
+            self.assertEqual(index.lint(self.vault, config)["status"], "unchanged")
+            report = dream._section_caps([self.vault], date.today(), None, config)
+            self.assertFalse([e for e in report["examples"] if e["kind"] == "index-file"])
+            if config:
+                self.assertIn("已不再使用", proposed.summary()["notice"])
+                self.assertIn("已不再使用", report["note"])
+        self.assertEqual(index.apply_plan(index.plan(self.vault, {})), None)
+        self.assertEqual(self.memory.read_bytes(), raw)
+        self.assertFalse((self.vault / index.FULL_FILENAME).exists())
+
+    def assert_lossless(self, raw):
+        index.apply_plan(index.plan(self.vault, {}))
+        short = self.memory.read_bytes()
+        full = (self.vault / index.FULL_FILENAME).read_bytes()
+        self.assertEqual(full, index.FULL_HEADER + raw)
+        self.assertLessEqual(len(short), 25_000)
+        self.assertLessEqual(len(short.decode().splitlines()), 200)
+        return short
+
+    def test_over_200_lines_moves_superseded_card_lines_first(self):
+        self.card("old", "status: superseded\nsuperseded_by: new.md\n")
+        self.card("new")
+        self.card("pointed", "superseded_by: new.md\n")
+        lines = [b"# Index\n"]
+        for n in range(206):
+            target = b"old" if n in (10, 20) else b"pointed" if n == 30 else b"new"
+            lines.append(b"- [item %03d](%s.md)\n" % (n, target))
+        raw = b"".join(lines)
+        self.memory.write_bytes(raw)
+        proposed = index.plan(self.vault, {})
+        moved = [raw.splitlines(keepends=True)[i] for i in proposed.moved]
+        # 207 lines + 3 pointer lines → 10 must go: the 3 stale ones, then 7 from the bottom.
+        self.assertEqual(len(moved), 10)
+        for n in (10, 20, 30):
+            self.assertIn(lines[n + 1], moved)
+        self.assertEqual(set(moved) - {lines[11], lines[21], lines[31]}, set(lines[-7:]))
+        short = self.assert_lossless(raw)
+        self.assertEqual(len(short.decode().splitlines()), 200)
+
+    def test_stale_link_forms_subfolder_wikilink_md_wikilink_angle_and_encoded(self):
+        stale = "---" + chr(10) + "name: x" + chr(10) + "status: superseded" + chr(10) + "---" + chr(10) + "body" + chr(10)
+        live = stale.replace("superseded", "active")
+        (self.vault / "sub").mkdir()
+        for name, text in (("old.md", stale), ("sub/deep.md", stale), ("old card.md", stale),
+                           ("live.md", live), ("a/twin.md", stale), ("b/twin.md", stale)):
+            (self.vault / name).parent.mkdir(parents=True, exist_ok=True)
+            (self.vault / name).write_text(text, encoding="utf-8")
+        cases = {
+            "- [a](old.md)": True, "- [a](./old.md#x)": True, "- [[old]]": True, "- [[old|alias]]": True,
+            "- [[old.md]]": True, "- [[deep]]": True, "- [[deep.md|d]]": True,
+            "- [a](<old card.md>)": True, "- [a](old%20card.md)": True, "- [a](sub/deep.md \"t\")": True,
+            "- [a](live.md)": False, "- [[live]]": False, "- [[missing]]": False,
+            "- [[twin]]": False,  # two cards share the name: ambiguous, not guessed
+            "- [a](../outside.md)": False,
+        }
+        names = {}
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                self.assertIs(index._stale_card(self.vault.resolve(), text.encode(), names), expected)
+                self.assertIs(index._stale_card(self.vault.resolve(), text.encode()), expected)
+
+    def test_over_25000_bytes_moves_closed_and_expired_card_lines_first(self):
+        self.card("closed", "status: closed\n")
+        self.card("expired", "valid_until: 2020-01-01\n")
+        self.card("live")
+        lines = [b"# Index\n"]
+        for n in range(130):
+            target = b"closed" if n == 5 else b"expired" if n == 6 else b"live"
+            lines.append(b"- [item %03d](%s.md) " % (n, target) + b"w" * 180 + b"\n")
+        raw = b"".join(lines)
+        self.assertGreater(len(raw), 25_000)
+        self.assertLess(len(raw.splitlines()), 200)
+        self.memory.write_bytes(raw)
+        proposed = index.plan(self.vault, {})
+        moved = {raw.splitlines(keepends=True)[i] for i in proposed.moved}
+        self.assertIn(lines[6], moved)
+        self.assertIn(lines[7], moved)
+        self.assertTrue(set(lines[1:6]) | set(lines[8:20]) <= set(raw.splitlines(keepends=True)[i]
+                                                               for i in proposed.kept))
+        self.assertIn(lines[-1], moved)
+        self.assert_lossless(raw)
 
 
 if __name__ == "__main__":

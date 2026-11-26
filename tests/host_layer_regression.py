@@ -86,9 +86,6 @@ class HostFieldLint(_TempVault):
         )
         host, everything = self._host_findings(extra)
         self.assertEqual(host, [])
-        rules = {rule for _level, rule, _reason in everything}
-        # 宿主原生欄位就是一種擋得住的欄位：不該再被要求補閘欄位或 unenforceable。
-        self.assertNotIn("unarmed", rules)
 
     def test_host_fields_need_an_official_source(self):
         extra = "host_claude_env:\n  CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS: \"4\"\n"
@@ -249,16 +246,16 @@ class EnforceTiers(_TempVault):
             {"path": "rule-none.md", "type": "rule"},
         ])
 
-    def test_unclassified_rule_cards_warn_and_feedback_keeps_its_one_finding(self):
+    def test_unclassified_rule_cards_warn_and_feedback_is_not_asked(self):
         report = card_lint.scan_vault(self._vault(), TODAY)
         by_path = {card["path"]: card for card in report["cards"]}
         rule_findings = [(item["level"], item["rule"]) for item in by_path["rule-none.md"]["findings"]]
         self.assertIn((card_lint.WARN, "unclassified"), rule_findings)
         self.assertNotIn(card_lint.FAIL, [level for level, _rule in rule_findings
                                           if _rule == "unclassified"])
-        # 行為糾正卡已經有「沒武裝」那一條，同一件事不重複講兩次。
-        feedback = [item["rule"] for item in by_path["fb-none.md"]["findings"]]
-        self.assertIn("unarmed", feedback)
+        # owner 2026-11-13：只有核心規則綁動作，行為卡沒有執行層不是缺失，不點名。
+        feedback = [item["rule"] for item in by_path.get("fb-none.md", {}).get("findings", ())]
+        self.assertNotIn("unarmed", feedback)
         self.assertNotIn("unclassified", feedback)
         # 寫了 unenforceable 的規則卡已經有執行層（text），不再被點名未分類。
         self.assertNotIn("unclassified", [
